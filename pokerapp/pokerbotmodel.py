@@ -91,14 +91,14 @@ class PokerBotModel:
             self._view.send_message_reply(
                 chat_id=chat_id,
                 message_id=update.effective_message.message_id,
-                text="The game is already started. Wait!"
+                text="بازی از قبل شروع شده! ⏳ لطفاً تا پایان این دست صبر کنید."
             )
             return
 
         if len(game.players) > MAX_PLAYERS:
             self._view.send_message_reply(
                 chat_id=chat_id,
-                text="The room is full",
+                text="ظرفیت اتاق تکمیل است! 🈵",
                 message_id=update.effective_message.message_id,
             )
             return
@@ -109,7 +109,7 @@ class PokerBotModel:
             self._view.send_message_reply(
                 chat_id=chat_id,
                 message_id=update.effective_message.message_id,
-                text="You are already ready",
+                text="شما قبلاً اعلام آمادگی کرده‌اید. ✅",
             )
             return
 
@@ -124,7 +124,7 @@ class PokerBotModel:
             return self._view.send_message_reply(
                 chat_id=chat_id,
                 message_id=update.effective_message.message_id,
-                text="You don't have enough money",
+                text="متاسفانه موجودی شما برای شروع بازی کافی نیست. 💰😕",
             )
 
         game.ready_users.add(user.id)
@@ -149,14 +149,14 @@ class PokerBotModel:
         if game.state not in (GameState.INITIAL, GameState.FINISHED):
             self._view.send_message(
                 chat_id=chat_id,
-                text="The game is already in progress"
+                text="بازی در حال انجام است. 🎲"
             )
             return
 
         # One is the bot.
         members_count = self._bot.get_chat_member_count(chat_id) - 1
         if members_count == 1:
-            with open(DESCRIPTION_FILE, 'r') as f:
+            with open(DESCRIPTION_FILE, 'r', encoding='utf-8') as f:
                 text = f.read()
 
             chat_id = update.effective_message.chat_id
@@ -178,7 +178,7 @@ class PokerBotModel:
         else:
             self._view.send_message(
                 chat_id=chat_id,
-                text="Not enough player"
+                text="تعداد بازیکنان برای شروع بازی کافی نیست. 👥"
             )
         return
 
@@ -188,13 +188,13 @@ class PokerBotModel:
         game: Game,
         chat_id: ChatId
     ) -> None:
-        print(f"new game: {game.id}, players count: {len(game.players)}")
+        print(f"بازی جدید: {game.id}, تعداد بازیکنان: {len(game.players)}")
 
         self._view.send_message(
             chat_id=chat_id,
-            text='The game is started! 🃏',
+            text='بازی شروع شد! 🃏',
             reply_markup=ReplyKeyboardMarkup(
-                keyboard=[["poker"]],
+                keyboard=[["پوکر"]],  # دکمه کیبورد فارسی شد
                 resize_keyboard=True,
             ),
         )
@@ -234,7 +234,7 @@ class PokerBotModel:
             return self._view.send_message_reply(
                 chat_id=chat_id,
                 message_id=update.effective_message.message_id,
-                text=f"Your money: *{money}$*\n",
+                text=f"💰 موجودی شما: *{money}$* \n",
             )
 
         icon: str
@@ -265,8 +265,8 @@ class PokerBotModel:
             self._view.send_message_reply(
                 chat_id=chat_id,
                 message_id=message_id,
-                text=f"Bonus: *{bonus}$* {icon}\n" +
-                f"Your money: *{money}$*\n",
+                text=f"🎁 پاداش شما: *{bonus}$* {icon} \n" +
+                f"💰 موجودی کل: *{money}$* \n",
             )
 
         Timer(DICE_DELAY_SEC, print_bonus).start()
@@ -308,14 +308,14 @@ class PokerBotModel:
         private_chat_id = user_chat_model.get_chat_id()
 
         if private_chat_id is None:
-            raise ValueError("private chat not found")
+            raise ValueError("چت خصوصی پیدا نشد")
 
         private_chat_id = private_chat_id.decode('utf-8')
 
         message_id = self._view.send_desk_cards_img(
             chat_id=private_chat_id,
             cards=cards,
-            caption="Your cards",
+            caption="کارت‌های شما",
             disable_notification=False,
         ).message_id
 
@@ -329,13 +329,13 @@ class PokerBotModel:
                         message_id=rm_msg_id,
                     )
                 except Exception as ex:
-                    print("remove_message", ex)
+                    print("خطا در حذف پیام:", ex)
                     traceback.print_exc()
                 rm_msg_id = user_chat_model.pop_message()
 
             user_chat_model.push_message(message_id=message_id)
         except Exception as ex:
-            print("bulk_remove_message", ex)
+            print("خطا در حذف گروهی پیام‌ها:", ex)
             traceback.print_exc()
 
     def _divide_cards(self, game: Game, chat_id: ChatId) -> None:
@@ -419,7 +419,7 @@ class PokerBotModel:
         self._view.send_desk_cards_img(
             chat_id=chat_id,
             cards=game.cards_table,
-            caption=f"Current pot: {game.pot}$",
+            caption=f"💰 پات فعلی: {game.pot}$",
         )
 
     def _finish(
@@ -430,9 +430,9 @@ class PokerBotModel:
         self._round_rate.to_pot(game)
 
         print(
-            f"game finished: {game.id}, " +
-            f"players count: {len(game.players)}, " +
-            f"pot: {game.pot}"
+            f"بازی تمام شد: {game.id}, " +
+            f"تعداد بازیکنان: {len(game.players)}, " +
+            f"پات: {game.pot}"
         )
 
         active_players = game.players_by(
@@ -450,19 +450,19 @@ class PokerBotModel:
         )
 
         only_one_player = len(active_players) == 1
-        text = "Game is finished with result:\n\n"
+        text = "بازی با نتایج زیر به پایان رسید: 🏆\n"
         for (player, best_hand, money) in winners_hand_money:
             win_hand = " ".join(best_hand)
             text += (
                 f"{player.mention_markdown}:\n" +
-                f"GOT: *{money} $*\n"
+                f"برنده: *{money} $* 💰\n"
             )
             if not only_one_player:
                 text += (
-                    "With combination of cards:\n" +
-                    f"{win_hand}\n\n"
+                    "با ترکیب کارت‌های:\n" +
+                    f"{win_hand}\n"
                 )
-        text += "/ready to continue"
+        text += "برای شروع دست بعدی /ready را بزنید"
         self._view.send_message(chat_id=chat_id, text=text)
 
         for player in game.players:
@@ -508,7 +508,7 @@ class PokerBotModel:
         }
 
         if game.state not in state_transitions:
-            raise Exception("unexpected state: " + game.state.value)
+            raise Exception("وضعیت غیرمنتظره: " + game.state.value)
 
         transation = state_transitions[game.state]
         game.state = transation["next_state"]
@@ -544,13 +544,13 @@ class PokerBotModel:
         if diff < MAX_TIME_FOR_TURN:
             self._view.send_message(
                 chat_id=chat_id,
-                text="You can't ban. Max turn time is 2 minutes",
+                text="زمان نوبت بازیکن هنوز تمام نشده. ⏳ حداکثر زمان برای هر نوبت ۲ دقیقه است.",
             )
             return
 
         self._view.send_message(
             chat_id=chat_id,
-            text="Time is over!",
+            text="زمان شما به پایان رسید! ⌛️",
         )
         self.fold(update, context)
 
@@ -678,8 +678,9 @@ class WalletManagerModel(Wallet):
     def add_daily(self, amount: Money) -> Money:
         if self.has_daily_bonus():
             raise UserException(
-                "You have already received the bonus today\n"
-                f"Your money: {self.value()}$"
+                f"شما امروز پاداش روزانه خود را دریافت کرده‌اید. 🎁 \n"
+                f"فردا دوباره امتحان کنید! \n"
+                f"💰 موجودی شما: {self.value()}$"
             )
 
         key = self._prefix(self.user_id)
@@ -694,7 +695,7 @@ class WalletManagerModel(Wallet):
         wallet = int(self._kv.get(self._prefix(self.user_id)))
 
         if wallet + amount < 0:
-            raise UserException("not enough money")
+            raise UserException("خطا: موجودی کافی نیست. 😕")
 
         self._kv.incrby(self._prefix(self.user_id), amount)
 
