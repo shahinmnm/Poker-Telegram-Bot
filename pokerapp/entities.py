@@ -99,20 +99,21 @@ class Game:
 
 class GameState(enum.Enum):
     INITIAL = 0
-    ROUND_PRE_FLOP = 1  # No cards on the table.
-    ROUND_FLOP = 2  # Three cards.
-    ROUND_TURN = 3  # Four cards.
-    ROUND_RIVER = 4  # Five cards.
-    FINISHED = 5  # The end.
+    ROUND_PRE_FLOP = 1  # کارتی روی میز نیست (دور پری-فلاپ)
+    ROUND_FLOP = 2      # سه کارت روی میز (دور فلاپ)
+    ROUND_TURN = 3      # چهار کارت روی میز (دور ترن)
+    ROUND_RIVER = 4     # پنج کارت روی میز (دور ریور)
+    FINISHED = 5        # پایان بازی
 
 
+# این قسمت مهمترین بخش فارسی سازی رابط کاربری (دکمه ها) است
 class PlayerAction(enum.Enum):
-    CHECK = "check"
-    CALL = "call"
-    FOLD = "fold"
-    RAISE_RATE = "raise rate"
-    BET = "bet"
-    ALL_IN = "all in"
+    CHECK = "✅ چک"
+    CALL = "💰 کال"
+    FOLD = "🏳️ فولد"
+    RAISE_RATE = "⏫ افزایش"
+    BET = "🪙 بت"
+    ALL_IN = "💥 آل این"
     SMALL = 10
     NORMAL = 25
     BIG = 50
@@ -120,3 +121,4 @@ class PlayerAction(enum.Enum):
 
 class UserException(Exception):
     pass
+
