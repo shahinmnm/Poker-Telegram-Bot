@@ -1,44 +1,46 @@
-Welcome to Bot - "Texas Poker"
-It is open-source: https://github.com/thaithimyduyen/Poker-Telegram-Bot
+به ربات خوش آمدید - "تگزاس پوکر" 🎲♠️♦️
 
-*How*:
-1. Add this bot to your telegram group.
-2. Each member of the group should send the command /ready in order to start the game.
-3. Everyone can see only his cards in the inline menu.
-4. Enjoy the time with the Bot!
+*چطور بازی کنیم*:
+1. این ربات را به گروه تلگرام خود اضافه کنید. ➕
+2. هر عضو گروه باید دستور `/ready` را ارسال کند تا بازی شروع شود. ✅
+3. هر فرد فقط کارت‌های خود را در منوی اینلاین مشاهده خواهد کرد. 🃏
+4. از بازی لذت ببرید! 🎉
 
-*Commands*:
-- /start - start the game without waiting for all users to be ready.
-- /ready - mark yourself ready, when all players are ready, the game will be started.
-- /money - get daily money bonus.
-- /ban   - ban a current player if he didn't make a move in 2 minutes.
-- /cards - show your cards to you.
+*دستورات*:
+- `/start` - بازی را بدون انتظار برای آماده شدن تمام بازیکنان شروع کنید. 🏁
+- `/ready` - خود را آماده کنید، زمانی که تمام بازیکنان آماده شوند، بازی شروع خواهد شد. 🏆
+- `/money` - پاداش روزانه پول خود را دریافت کنید. 💰
+- `/ban` - یک بازیکن را که به مدت ۲ دقیقه حرکتی نکرده است، مسدود کنید. 🚫
+- `/cards` - کارت‌های خود را مشاهده کنید. 🃏
 
-*Here is the brief instruction of Texas Poker*:
-Every player has two private cards and on the table has five community cards which are dealt face up in the three stages.
-On the beginning of game, two people which are selected for big and small blinds. This means the blinds are forced to bet, the small blind bet 5$ and the big blind bet 10$.
-when cards are divied to every member, the stages will be started.
+*این هم دستورالعمل خلاصه‌ای از تگزاس پوکر*:
+هر بازیکن دو کارت خصوصی دارد و پنج کارت عمومی روی میز به صورت رو به بالا در سه مرحله توزیع می‌شوند. ♠️♦️
+در ابتدای بازی، دو نفر برای شرط‌های بزرگ و کوچک انتخاب می‌شوند. این به این معناست که شرط‌ها مجبور به شرط‌بندی هستند، شرط کوچک ۵$ و شرط بزرگ ۱۰$ است. 💵
+زمانی که کارت‌ها به هر عضو داده شد، مراحل بازی شروع می‌شود. 🎮
 
-There are 4 stages in every game:
-- The pre-flop: There is no card on the table
-- The flop: Add three cards on the table
-- The turn: Add to table one card 
-- The river: Add to table the last card
+بازی دارای ۴ مرحله است:
+- **پری-فلوپ (Pre-Flop)**: هیچ کارتی روی میز وجود ندارد. ❌
+- **فلوپ (Flop)**: سه کارت روی میز قرار می‌گیرد. ♠️♦️♣️
+- **ترن (Turn)**: یک کارت به میز اضافه می‌شود. 🔄
+- **ریور (River)**: آخرین کارت به میز اضافه می‌شود. 🌊
 
-In every stage, every member will be betting with actions:
-- bet: putting into the pot the chips
-- call: putting into the pot the same number of chips
-- check: skipping your turn and putting no chips into pot
-- raise: putting into the pot more than enough chips to call 
-- all-in: putting into the pot all chips that you have
-- fold: putting no chips into the pot and is out of the game.
-A betting interval ends when the bets have been equalized and the new stage will be started.
+در هر مرحله، هر بازیکن با انجام اقدامات مختلف شرط‌بندی می‌کند:
+- **bet**: قرار دادن چیپ در پات. 💰
+- **call**: قرار دادن همان مقدار چیپ که سایر بازیکنان شرط بسته‌اند. 🗣️
+- **check**: عبور از نوبت و قرار ندادن چیپ در پات. ⏸️
+- **raise**: قرار دادن چیپ بیشتر از مقدار مورد نیاز برای کال. 🔼
+- **all-in**: قرار دادن تمام چیپ‌های خود در پات. 💥
+- **fold**: قرار ندادن چیپ و خروج از بازی. 🚪
 
-The game can end any time if there is only one players in the game and of course when the winner is defined.
-After four stages, every member will be show their best hand (five cards from seven cards) to determinate the winner.
-The winner is determinated by various combinations of Poker hands rank from five of a kind (the highest) to no pair or nothing (the lowest) 
+یک بازه شرط‌بندی زمانی به پایان می‌رسد که تمام شرط‌ها برابر شوند و مرحله جدید شروع شود. ⏳
 
-*You will receive game cards to this chat.*
-To stop it, run /stop.
+بازی می‌تواند هر زمان به پایان برسد اگر تنها یک بازیکن در بازی باقی بماند و البته زمانی که برنده مشخص شود. 🏅
+بعد از چهار مرحله، هر بازیکن بهترین دست خود را (پنج کارت از هفت کارت) نشان می‌دهد تا برنده مشخص شود. 🎖️
+برنده بر اساس ترکیب‌های مختلف از رتبه‌بندی دست‌های پوکر از پنج کارت مشابه (بالا‌ترین) تا هیچ ترکیب (پایین‌ترین) تعیین می‌شود. 🏆
 
-Have the problem? Create an issue: https://github.com/thaithimyduyen/Poker-Telegram-Bot/issues/new
+*شما کارت‌های بازی خود را به این چت دریافت خواهید کرد.* 📲
+برای توقف بازی، دستور `/stop` را اجرا کنید. ❌
+
+---
+
+اموجی‌ها به متن اضافه شدند تا جذابیت بصری آن بیشتر شود. امیدوارم این نسخه مورد پسند شما باشد!
