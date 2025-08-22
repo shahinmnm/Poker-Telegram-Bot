@@ -45,7 +45,7 @@ class PokerBotViewer:
         )
 
     def send_photo(self, chat_id: ChatId) -> None:
-        # TODO: photo to args.
+        # TODO: آیا می‌خواهیم مسیر عکس را به‌عنوان پارامتر دریافت کنیم؟
         self._bot.send_photo(
             chat_id=chat_id,
             photo=open("./assets/poker_hand.jpg", 'rb'),
@@ -103,7 +103,7 @@ class PokerBotViewer:
             disable_notification=disable_notification,
         )[0]
 
-    @ staticmethod
+    @staticmethod
     def _get_cards_markup(cards: Cards) -> ReplyKeyboardMarkup:
         return ReplyKeyboardMarkup(
             keyboard=[cards],
@@ -111,7 +111,7 @@ class PokerBotViewer:
             resize_keyboard=True,
         )
 
-    @ staticmethod
+    @staticmethod
     def _get_turns_markup(
         check_call_action: PlayerAction
     ) -> InlineKeyboardMarkup:
@@ -148,23 +148,23 @@ class PokerBotViewer:
         )
 
     def send_cards(
-            self,
-            chat_id: ChatId,
-            cards: Cards,
-            mention_markdown: Mention,
-            ready_message_id: str,
+        self,
+        chat_id: ChatId,
+        cards: Cards,
+        mention_markdown: Mention,
+        ready_message_id: str,
     ) -> None:
         markup = PokerBotViewer._get_cards_markup(cards)
         self._bot.send_message(
             chat_id=chat_id,
-            text="Showing cards to " + mention_markdown,
+            text=f"🃏 ارسال کارت‌ها برای {mention_markdown}",
             reply_markup=markup,
             reply_to_message_id=ready_message_id,
             parse_mode=ParseMode.MARKDOWN,
             disable_notification=True,
         )
 
-    @ staticmethod
+    @staticmethod
     def define_check_call_action(
         game: Game,
         player: Player,
@@ -174,27 +174,29 @@ class PokerBotViewer:
         return PlayerAction.CALL
 
     def send_turn_actions(
-            self,
-            chat_id: ChatId,
-            game: Game,
-            player: Player,
-            money: Money,
+        self,
+        chat_id: ChatId,
+        game: Game,
+        player: Player,
+        money: Money,
     ) -> None:
         if len(game.cards_table) == 0:
-            cards_table = "no cards"
+            cards_table = "❓ کارت روی میز وجود ندارد"
         else:
             cards_table = " ".join(game.cards_table)
+
         text = (
-            "Turn of {}\n" +
-            "{}\n" +
-            "Money: *{}$*\n" +
-            "Max round rate: *{}$*"
+            "🎲 نوبت برای {} \n"
+            "💠 کارت‌های روی میز: {} \n"
+            "💰 موجودی: *{}$* \n"
+            "🔼 بیشترین شرط: *{}$*"
         ).format(
             player.mention_markdown,
             cards_table,
             money,
             game.max_round_rate,
         )
+
         check_call_action = PokerBotViewer.define_check_call_action(
             game, player
         )
