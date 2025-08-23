@@ -183,19 +183,23 @@ class PokerBotModel:
             )
         return
 
-    def _start_game(
-        # Announce game start in group chat (no static keyboard any more)
+    def _start_game(self, context: CallbackContext, game: Game, chat_id: ChatId) -> None:
+        # شروع یک دست جدید
+        print(f"بازی جدید: {game.id}, تعداد بازیکنان: {len(game.players)}")
+
+        # اعلان شروع بازی در گروه
         self._view.send_message(
             chat_id=chat_id,
             text='بازی شروع شد! 🃏',
         )
-        # For each player, send a selective group‐chat keyboard with their two cards
+
+        # برای هر بازیکن، در همان گروه ولی به صورت Selective،
+        # دو کارت خصوصی‌ش را نمایش بده
         for player in game.players:
             self._view.send_dynamic_card_keyboard(
                 chat_id=chat_id,
                 player=player,
             )
-
         old_players_ids = context.chat_data.get(KEY_OLD_PLAYERS, [])
         old_players_ids = old_players_ids[-1:] + old_players_ids[:-1]
 
@@ -419,11 +423,7 @@ class PokerBotModel:
             caption=f"💰 پات فعلی: {game.pot}$",
         )
 
-    def _finish(
-        self,
-        game: Game,
-        chat_id: ChatId,
-    ) -> None:
+    def _finish(self, game: Game, chat_id: ChatId) -> None:
         self._round_rate.to_pot(game)
 
         print(
@@ -449,7 +449,7 @@ class PokerBotModel:
         only_one_player = len(active_players) == 1
         text = "بازی با نتایج زیر به پایان رسید: 🏆\n"
         for (player, best_hand, money) in winners_hand_money:
-            # determine the hand‐type from the 5‐card best_hand
+            # — determine the hand‐type name in Persian
             score     = self._winner_determine._check_hand_get_score(best_hand)
             hand_type = get_hand_type_by_score(score)
             win_hand  = " ".join(best_hand)
