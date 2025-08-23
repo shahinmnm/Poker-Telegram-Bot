@@ -12,6 +12,7 @@ from telegram.ext import Handler, CallbackContext
 from pokerapp.config import Config
 from pokerapp.privatechatmodel import UserPrivateChatModel
 from pokerapp.winnerdetermination import WinnerDetermination
+from pokerapp.hand_types import get_hand_type_by_score
 from pokerapp.cards import Cards
 from pokerapp.entities import (
     Game,
@@ -183,21 +184,17 @@ class PokerBotModel:
         return
 
     def _start_game(
-        self,
-        context: CallbackContext,
-        game: Game,
-        chat_id: ChatId
-    ) -> None:
-        print(f"بازی جدید: {game.id}, تعداد بازیکنان: {len(game.players)}")
-
+        # Announce game start in group chat (no static keyboard any more)
         self._view.send_message(
             chat_id=chat_id,
             text='بازی شروع شد! 🃏',
-            reply_markup=ReplyKeyboardMarkup(
-                keyboard=[["پوکر"]],  # دکمه کیبورد فارسی شد
-                resize_keyboard=True,
-            ),
         )
+        # For each player, send a selective group‐chat keyboard with their two cards
+        for player in game.players:
+            self._view.send_dynamic_card_keyboard(
+                chat_id=chat_id,
+                player=player,
+            )
 
         old_players_ids = context.chat_data.get(KEY_OLD_PLAYERS, [])
         old_players_ids = old_players_ids[-1:] + old_players_ids[:-1]
@@ -452,14 +449,19 @@ class PokerBotModel:
         only_one_player = len(active_players) == 1
         text = "بازی با نتایج زیر به پایان رسید: 🏆\n"
         for (player, best_hand, money) in winners_hand_money:
-            win_hand = " ".join(best_hand)
+            # determine the hand‐type from the 5‐card best_hand
+            score     = self._winner_determine._check_hand_get_score(best_hand)
+            hand_type = get_hand_type_by_score(score)
+            win_hand  = " ".join(best_hand)
+
             text += (
-                f"{player.mention_markdown}:\n" +
+                f"{player.mention_markdown}:\n"
                 f"برنده: *{money} $* 💰\n"
             )
             if not only_one_player:
                 text += (
-                    "با ترکیب کارت‌های:\n" +
+                    f"دلیل پیروزی: {hand_type}\n"
+                    f"با ترکیب کارت‌های:\n"
                     f"{win_hand}\n"
                 )
         text += "برای شروع دست بعدی /ready را بزنید"
