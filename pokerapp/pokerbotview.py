@@ -146,31 +146,26 @@ class PokerBotViewer:
             inline_keyboard=keyboard
         )
 
-    def send_cards(
-        self,
-        chat_id: ChatId,
-        cards: Cards,
-        mention_markdown: Mention,
-        ready_message_id: str,
-    ) -> None:
-        # ایجاد دکمه‌های اینلاین برای نمایش کارت‌ها به صورت متنی
-        inline_buttons = [
-            [
-                InlineKeyboardButton(text=f"{card.suit} {card.rank}", callback_data=f"card_{card}")
-                for card in cards
-            ]
-        ]
-        markup = InlineKeyboardMarkup(inline_buttons)
+def send_cards(
+    self,
+    chat_id: ChatId,
+    cards: Cards,
+    mention_markdown: Mention,
+    ready_message_id: str,
+) -> None:
+    inline_buttons = [
+        [InlineKeyboardButton(text=f"{card.suit} {card.rank}", callback_data=f"card_{card}") for card in cards]
+    ]
+    markup = InlineKeyboardMarkup(inline_buttons)
 
-        # ارسال کارت‌ها به صورت اینلاین بدون متن اضافی
-        self._bot.send_message(
-            chat_id=chat_id,
-            text=f"کارت‌های شما:",
-            reply_markup=markup,
-            reply_to_message_id=ready_message_id,
-            parse_mode=ParseMode.MARKDOWN,
-            disable_notification=True,
-        )
+    self._bot.send_message(
+        chat_id=chat_id,
+        text=f"کارت‌های شما:",
+        reply_markup=markup,
+        reply_to_message_id=ready_message_id,
+        parse_mode=ParseMode.MARKDOWN,
+        disable_notification=True,
+    )
 
     @staticmethod
     def define_check_call_action(
