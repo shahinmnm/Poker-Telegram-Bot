@@ -182,22 +182,24 @@ class PokerBotModel:
             )
         return
 
-    def _start_game(
-        self,
-        context: CallbackContext,
-        game: Game,
-        chat_id: ChatId
-    ) -> None:
-        print(f"بازی جدید: {game.id}, تعداد بازیکنان: {len(game.players)}")
 
-        self._view.send_message(
-            chat_id=chat_id,
-            text='بازی شروع شد! 🃏',
-            reply_markup=ReplyKeyboardMarkup(
-                keyboard=[["پوکر"]],  # دکمه کیبورد فارسی شد
-                resize_keyboard=True,
-            ),
-        )
+def _start_game(
+self,
+context: CallbackContext,
+game: Game,
+chat_id: ChatId
+) -> None:
+print(f"بازی جدید: {game.id}, تعداد بازیکنان: {len(game.players)}")
+
+self._view.send_message(
+    chat_id=chat_id,
+    text='بازی شروع شد! 🃏',
+)
+
+# ... بقیه کد
+
+
+
 
         old_players_ids = context.chat_data.get(KEY_OLD_PLAYERS, [])
         old_players_ids = old_players_ids[-1:] + old_players_ids[:-1]
