@@ -141,48 +141,44 @@ class PokerBotModel:
     def stop(self, user_id: UserId) -> None:
         UserPrivateChatModel(user_id=user_id, kv=self._kv).delete()
 
-    def start(self, update: Update, context: CallbackContext) -> None:
-        game = self._game_from_context(context)
-        chat_id = update.effective_message.chat_id
-        user_id = update.effective_message.from_user.id
+def start(self, update: Update, context: CallbackContext) -> None:
+    game = self._game_from_context(context)
+    chat_id = update.effective_message.chat_id
+    user_id = update.effective_message.from_user.id
 
-        if game.state not in (GameState.INITIAL, GameState.FINISHED):
-            self._view.send_message(
-                chat_id=chat_id,
-                text="بازی در حال انجام است. 🎲"
-            )
-            return
-
-        # One is the bot.
-        members_count = self._bot.get_chat_member_count(chat_id) - 1
-        if members_count == 1:
-            with open(DESCRIPTION_FILE, 'r', encoding='utf-8') as f:
-                text = f.read()
-
-            chat_id = update.effective_message.chat_id
-            self._view.send_message(
-                chat_id=chat_id,
-                text=text,
-            )
-            self._view.send_photo(chat_id=chat_id)
-
-            if update.effective_chat.type == 'private':
-                UserPrivateChatModel(user_id=user_id, kv=self._kv) \
-                    .set_chat_id(chat_id=chat_id)
-
-            return
-
-        players_active = len(game.players)
-        if players_active >= self._min_players:
-            self._start_game(context=context, game=game, chat_id=chat_id)
-        else:
-            self._view.send_message(
-                chat_id=chat_id,
-                text="تعداد بازیکنان برای شروع بازی کافی نیست. 👥"
-            )
+    if game.state not in (GameState.INITIAL, GameState.FINISHED):
+        self._view.send_message(
+            chat_id=chat_id,
+            text="بازی در حال انجام است. 🎲"
+        )
         return
 
+    # One is the bot.
+    members_count = self._bot.get_chat_member_count(chat_id) - 1
+    if members_count == 1:
+        with open(DESCRIPTION_FILE, 'r', encoding='utf-8') as f:
+            text = f.read()
 
+        self._view.send_message(
+            chat_id=chat_id,
+            text=text,
+        )
+        self._view.send_photo(chat_id=chat_id)
+
+        if update.effective_chat.type == 'private':
+            UserPrivateChatModel(user_id=user_id, kv=self._kv) \
+                .set_chat_id(chat_id=chat_id)
+
+        return
+
+    players_active = len(game.players)
+    if players_active >= self._min_players:
+        self._start_game(context=context, game=game, chat_id=chat_id)
+    else:
+        self._view.send_message(
+            chat_id=chat_id,
+            text="تعداد بازیکنان برای شروع بازی کافی نیست. 👥"
+        )
     def _start_game(
         self,
         context: CallbackContext,
