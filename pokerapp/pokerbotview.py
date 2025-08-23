@@ -102,7 +102,40 @@ class PokerBotViewer:
             ],
             disable_notification=disable_notification,
         )[0]
+    @staticmethod
+    def _card_display(card):
+        """
+        Map a Card object to a Persian suit+rank string, e.g. '♠️A' or '♦️9'.
+        """
+        suit_symbols = {'S': '♠️', 'H': '♥️', 'D': '♦️', 'C': '♣️'}
+        rank_names = {
+            14: 'A', 13: 'K', 12: 'Q', 11: 'J',
+            10: '10', 9: '9', 8: '8', 7: '7',
+            6: '6', 5: '5', 4: '4', 3: '3', 2: '2',
+        }
+        suit = suit_symbols.get(card.suit, card.suit)
+        rank = rank_names.get(card.value, str(card.value))
+        return f"{suit}{rank}"
 
+    def send_dynamic_card_keyboard(self, chat_id, player):
+        """
+        In the group chat, mention @player and show a two‐button keyboard
+        of their private cards.  selective=True ensures only the mentioned
+        player sees these buttons.
+        """
+        cards_display = [self._card_display(c) for c in player.cards]
+        markup = ReplyKeyboardMarkup(
+            keyboard=[cards_display],
+            selective=True,
+            resize_keyboard=True,
+        )
+        self._bot.send_message(
+            chat_id=chat_id,
+            text=f"{player.mention_markdown} کارت‌های شما:",
+            reply_markup=markup,
+            parse_mode=ParseMode.MARKDOWN,
+            disable_notification=True,
+        )
     @staticmethod
     def _get_cards_markup(cards: Cards) -> ReplyKeyboardMarkup:
         return ReplyKeyboardMarkup(
