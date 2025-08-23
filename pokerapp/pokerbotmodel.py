@@ -12,7 +12,6 @@ from telegram.ext import Handler, CallbackContext
 from pokerapp.config import Config
 from pokerapp.privatechatmodel import UserPrivateChatModel
 from pokerapp.winnerdetermination import WinnerDetermination
-from pokerapp.hand_types import get_hand_type_by_score
 from pokerapp.cards import Cards
 from pokerapp.entities import (
     Game,
@@ -183,23 +182,23 @@ class PokerBotModel:
             )
         return
 
-    def _start_game(self, context: CallbackContext, game: Game, chat_id: ChatId) -> None:
-        # شروع یک دست جدید
+    def _start_game(
+        self,
+        context: CallbackContext,
+        game: Game,
+        chat_id: ChatId
+    ) -> None:
         print(f"بازی جدید: {game.id}, تعداد بازیکنان: {len(game.players)}")
 
-        # اعلان شروع بازی در گروه
         self._view.send_message(
             chat_id=chat_id,
             text='بازی شروع شد! 🃏',
+            reply_markup=ReplyKeyboardMarkup(
+                keyboard=[["پوکر"]],  # دکمه کیبورد فارسی شد
+                resize_keyboard=True,
+            ),
         )
 
-        # برای هر بازیکن، در همان گروه ولی به صورت Selective،
-        # دو کارت خصوصی‌ش را نمایش بده
-        for player in game.players:
-            self._view.send_dynamic_card_keyboard(
-                chat_id=chat_id,
-                player=player,
-            )
         old_players_ids = context.chat_data.get(KEY_OLD_PLAYERS, [])
         old_players_ids = old_players_ids[-1:] + old_players_ids[:-1]
 
@@ -423,7 +422,11 @@ class PokerBotModel:
             caption=f"💰 پات فعلی: {game.pot}$",
         )
 
-    def _finish(self, game: Game, chat_id: ChatId) -> None:
+    def _finish(
+        self,
+        game: Game,
+        chat_id: ChatId,
+    ) -> None:
         self._round_rate.to_pot(game)
 
         print(
@@ -449,19 +452,14 @@ class PokerBotModel:
         only_one_player = len(active_players) == 1
         text = "بازی با نتایج زیر به پایان رسید: 🏆\n"
         for (player, best_hand, money) in winners_hand_money:
-            # — determine the hand‐type name in Persian
-            score     = self._winner_determine._check_hand_get_score(best_hand)
-            hand_type = get_hand_type_by_score(score)
-            win_hand  = " ".join(best_hand)
-
+            win_hand = " ".join(best_hand)
             text += (
-                f"{player.mention_markdown}:\n"
+                f"{player.mention_markdown}:\n" +
                 f"برنده: *{money} $* 💰\n"
             )
             if not only_one_player:
                 text += (
-                    f"دلیل پیروزی: {hand_type}\n"
-                    f"با ترکیب کارت‌های:\n"
+                    "با ترکیب کارت‌های:\n" +
                     f"{win_hand}\n"
                 )
         text += "برای شروع دست بعدی /ready را بزنید"
