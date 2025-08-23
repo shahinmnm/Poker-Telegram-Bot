@@ -509,23 +509,46 @@ def start(self, update: Update, context: CallbackContext) -> None:
         transation["processor"]()
 
 def middleware_user_turn(self, fn: Handler) -> Handler:
-    def m(update, context):
+    """
+    فقط اجازه می‌دهد کسی که نوبتش است دکمهٔ اینلاین را کلیک کند؛
+    سپس مارک‌آپ پیام را پاک می‌کند تا دوباره کلیک نشود.
+    """
+    def wrapper(update: Update, context: CallbackContext, *args, **kwargs):
+        # ایمنی: فقط به کلیک‌های اینلاین واکنش بده
+        cq = getattr(update, "callback_query", None)
+        if cq is None:
+            return
+
         game = self._game_from_context(context)
-        if game.state == GameState.INITIAL:
+        # اگر بازی تازه شروع نشده/تمام شده، کلیک بی‌اثر باشد
+        if game.state in (GameState.INITIAL, GameState.FINISHED):
             return
 
-        current_player = self._current_turn_player(game)
-        current_user_id = update.callback_query.from_user.id
-        if current_user_id != current_player.user_id:
+        # فقط بازیکن نوبتی حق کلیک دارد
+        try:
+            current_player = self._current_turn_player(game)
+        except Exception:
             return
 
-        fn(update, context)
-        self._view.remove_markup(
-            chat_id=update.effective_message.chat_id,
-            message_id=update.effective_message.message_id,
-        )
+        if cq.from_user.id != current_player.user_id:
+            # می‌توانید در صورت تمایل یک نوتیف سبک هم بفرستید: cq.answer("الان نوبت شما نیست", show_alert=False)
+            return
 
-    return m
+        # اجرای هندلر اصلی
+        fn(update, context, *args, **kwargs)
+
+        # پاک کردن کیبورد اینلاین همین پیام برای جلوگیری از کلیک دوباره
+        try:
+            self._bot.edit_message_reply_markup(
+                chat_id=update.effective_message.chat_id,
+                message_id=update.effective_message.message_id,
+                reply_markup=None
+            )
+        except Exception:
+            # اگر ادیت موفق نشد، نادیده بگیر
+            pass
+
+    return wrapper
 
 
     def ban_player(self, update: Update, context: CallbackContext) -> None:
