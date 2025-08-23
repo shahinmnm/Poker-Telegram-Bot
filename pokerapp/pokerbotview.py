@@ -23,7 +23,6 @@ from pokerapp.entities import (
     Money,
 )
 
-
 class PokerBotViewer:
     def __init__(self, bot: Bot):
         self._bot = bot
@@ -154,10 +153,19 @@ class PokerBotViewer:
         mention_markdown: Mention,
         ready_message_id: str,
     ) -> None:
-        markup = PokerBotViewer._get_cards_markup(cards)
+        # ایجاد دکمه‌های اینلاین برای نمایش کارت‌ها به صورت متنی
+        inline_buttons = [
+            [
+                InlineKeyboardButton(text=f"{card.suit} {card.rank}", callback_data=f"card_{card}")
+                for card in cards
+            ]
+        ]
+        markup = InlineKeyboardMarkup(inline_buttons)
+
+        # ارسال کارت‌ها به صورت اینلاین بدون متن اضافی
         self._bot.send_message(
             chat_id=chat_id,
-            text=f"🃏 ارسال کارت‌ها برای {mention_markdown}",
+            text=f"کارت‌های شما:",
             reply_markup=markup,
             reply_to_message_id=ready_message_id,
             parse_mode=ParseMode.MARKDOWN,
@@ -186,9 +194,12 @@ class PokerBotViewer:
             cards_table = " ".join(game.cards_table)
 
         text = (
-            "🎲 نوبت برای {}\n"
-            "💠 کارت‌های روی میز: {}\n"
-            "💰 موجودی: *{}$*\n"
+            "🎲 نوبت برای {}
+"
+            "💠 کارت‌های روی میز: {}
+"
+            "💰 موجودی: *{}$*
+"
             "🔼 بیشترین شرط: *{}$*"
         ).format(
             player.mention_markdown,
