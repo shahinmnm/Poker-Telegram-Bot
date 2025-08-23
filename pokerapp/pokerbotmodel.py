@@ -508,24 +508,25 @@ def start(self, update: Update, context: CallbackContext) -> None:
         game.state = transation["next_state"]
         transation["processor"]()
 
-    def middleware_user_turn(self, fn: Handler) -> Handler:
-        def m(update, context):
-            game = self._game_from_context(context)
-            if game.state == GameState.INITIAL:
-                return
+def middleware_user_turn(self, fn: Handler) -> Handler:
+    def m(update, context):
+        game = self._game_from_context(context)
+        if game.state == GameState.INITIAL:
+            return
 
-            current_player = self._current_turn_player(game)
-            current_user_id = update.callback_query.from_user.id
-            if current_user_id != current_player.user_id:
-                return
+        current_player = self._current_turn_player(game)
+        current_user_id = update.callback_query.from_user.id
+        if current_user_id != current_player.user_id:
+            return
 
-            fn(update, context)
-            self._view.remove_markup(
-                chat_id=update.effective_message.chat_id,
-                message_id=update.effective_message.message_id,
-            )
+        fn(update, context)
+        self._view.remove_markup(
+            chat_id=update.effective_message.chat_id,
+            message_id=update.effective_message.message_id,
+        )
 
-        return m
+    return m
+
 
     def ban_player(self, update: Update, context: CallbackContext) -> None:
         game = self._game_from_context(context)
