@@ -73,10 +73,13 @@ class PlayerState(enum.Enum):
     ALL_IN = 10
 
 
-class Game:
     def __init__(self):
+        # ...
+        self.message_ids_to_delete: List[MessageId] = []
+        self.turn_message_id: Optional[MessageId] = None # <<<< این خط را اضافه کنید
+        self.last_turn_time: Optional[datetime] = None
         self.reset()
-
+        
     def reset(self):
         self.id = str(uuid4())
         self.pot = 0
