@@ -102,7 +102,6 @@ class PokerBotViewer:
             caption=caption,
             disable_notification=disable_notification,
         )
-        return message.message_id
 
 
     @staticmethod
