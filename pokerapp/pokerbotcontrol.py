@@ -6,16 +6,25 @@ from telegram.ext import (
     CallbackQueryHandler,
     CallbackContext,
     Updater,
+    MessageHandler,
+    Filters
 )
 
 from pokerapp.entities import PlayerAction
 from pokerapp.pokerbotmodel import PokerBotModel
 
-
 class PokerBotCotroller:
     def __init__(self, model: PokerBotModel, updater: Updater):
         self._model = model
 
+        # Handler برای پیام‌های متنی (دکمه‌های کیبورد سفارشی)
+        updater.dispatcher.add_handler(
+            MessageHandler(
+                Filters.text & (~Filters.command), self._handle_text_message
+            )
+        )
+
+        # Handler برای دستورات
         updater.dispatcher.add_handler(
             CommandHandler('ready', self._handle_ready)
         )
@@ -31,9 +40,8 @@ class PokerBotCotroller:
         updater.dispatcher.add_handler(
             CommandHandler('ban', self._handle_ban)
         )
-        updater.dispatcher.add_handler(
-            CommandHandler('cards', self._handle_cards)
-        )
+        
+        # Handler برای دکمه‌های شیشه‌ای (Inline Keyboard)
         updater.dispatcher.add_handler(
             CallbackQueryHandler(
                 self._model.middleware_user_turn(
@@ -41,6 +49,15 @@ class PokerBotCotroller:
                 ),
             )
         )
+
+    def _handle_text_message(self, update: Update, context: CallbackContext) -> None:
+        """Handles regular text messages, specifically for our custom keyboard."""
+        text = update.message.text
+        # نام دکمه‌ها از pokerbotview.py گرفته شده است
+        if text == "🃏 نمایش میز 🃏":
+            self._model.show_table(update, context)
+        elif text == "🙈 پنهان کردن کارت‌ها 🙈":
+            self._model.hide_cards(update, context)
 
     def _handle_ready(self, update: Update, context: CallbackContext) -> None:
         self._model.ready(update, context)
@@ -50,9 +67,6 @@ class PokerBotCotroller:
 
     def _handle_stop(self, update: Update, context: CallbackContext) -> None:
         self._model.stop(user_id=update.effective_message.from_user.id)
-
-    def _handle_cards(self, update: Update, context: CallbackContext) -> None:
-        self._model.send_cards_to_user(update, context)
 
     def _handle_ban(self, update: Update, context: CallbackContext) -> None:
         self._model.ban_player(update, context)
