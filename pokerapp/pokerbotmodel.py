@@ -171,58 +171,73 @@ class PokerBotModel:
                 game.message_ids_to_delete.append(msg_id)
         return
 
-    def _start_game(self, context: CallbackContext, game: Game, chat_id: ChatId) -> None:
-        # <<<< شروع تغییر: پاکسازی پیام های قبلی >>>>
-        if game.message_ids_to_delete:
-            self._view.remove_game_messages(chat_id, game.message_ids_to_delete)
-            game.message_ids_to_delete.clear()
-        # <<<< پایان تغییر >>>>
-
+    def _start_game(
+        self,
+        context: CallbackContext,
+        game: Game,
+        chat_id: ChatId
+    ) -> None:
         print(f"new game: {game.id}, players count: {len(game.players)}")
-        msg_id = self._view.send_message_return_id(
+
+        self._view.send_message(
             chat_id=chat_id,
             text='🚀 !بازی شروع شد!',
-            reply_markup=ReplyKeyboardRemove()
+            reply_markup=ReplyKeyboardMarkup(
+                keyboard=[["poker"]],
+                resize_keyboard=True,
+            ),
         )
-        if msg_id:
-            game.message_ids_to_delete.append(msg_id)
 
         old_players_ids = context.chat_data.get(KEY_OLD_PLAYERS, [])
         old_players_ids = old_players_ids[-1:] + old_players_ids[:-1]
+
         def index(ln: List, obj) -> int:
-            try: return ln.index(obj)
-            except ValueError: return -1
+            try:
+                return ln.index(obj)
+            except ValueError:
+                return -1
+
         game.players.sort(key=lambda p: index(old_players_ids, p.user_id))
 
         game.state = GameState.ROUND_PRE_FLOP
         self._divide_cards(game=game, chat_id=chat_id)
 
-# 1. بلایندها را بر اساس تعداد بازیکنان پرداخت کن
+        # 1. بلایندها را پرداخت کن (این متد trading_end_user_id را هم تنظیم می‌کند)
         self._round_rate.round_pre_flop_rate_before_first_turn(game)
-
-# 2. نفر اول برای بازی را به صورت دینامیک مشخص کن
+        
+        # 2. نفر اول برای بازی را مشخص کن
         num_players = len(game.players)
         if num_players == 2:
-    # در بازی دو نفره، دیلر/اسمال بلایند (اندیس 0) اول حرکت می‌کند
-            start_index = 0
+            # در بازی دو نفره (Heads-Up)، دیلر/اسمال بلایند (اندیس 0) اول حرکت می‌کند
+            game.current_player_index = 0
         else:
-    # در بازی با 3+ بازیکن، نفر بعد از بیگ بلایند (اندیس 2) اول حرکت می‌کند
-            start_index = 2
+            # در بازی با 3+ بازیکن، نفر بعد از بیگ بلایند (Under the Gun) اول حرکت می‌کند
+            # SB اندیس 0، BB اندیس 1، پس UTG اندیس 2 است.
+            game.current_player_index = 2
 
-# 3. اندیس را روی نفر "قبل" از بازیکن شروع کننده تنظیم کن
-# چون _process_playing در ابتدا یک واحد به آن اضافه می‌کند.
-        game.current_player_index = start_index - 1
+        # 3. به صورت دستی نوبت را برای بازیکن اول ارسال کن
+        # به جای فراخوانی _process_playing که همه چیز را به هم می‌ریخت
+        current_player = self._current_turn_player(game)
+        
+        # اطمینان حاصل کن که بازیکن فعال است
+        if current_player.state != PlayerState.ACTIVE:
+            # اگر به هر دلیلی بازیکن اول فعال نبود، حلقه را برای پیدا کردن نفر بعدی اجرا کن
+            return self._process_playing(chat_id=chat_id, game=game)
 
-# 4. حلقه اصلی بازی را شروع کن
-        self._process_playing(chat_id=chat_id, game=game)
+        # زمان نوبت را ثبت کن
+        game.last_turn_time = datetime.datetime.now()
 
-# این خط دیگر اینجا لازم نیست و باعث مشکل می‌شود
-# self._round_rate.round_pre_flop_rate_after_first_turn(game)
+        # دکمه‌های نوبت را برای بازیکن صحیح نمایش بده
+        self._view.send_turn_actions(
+            chat_id=chat_id,
+            game=game,
+            player=current_player,
+            money=current_player.wallet.value(),
+        )
 
         context.chat_data[KEY_OLD_PLAYERS] = list(
             map(lambda p: p.user_id, game.players),
         )
-
     # ... (متد bonus بدون تغییر) ...
     def bonus(self, update: Update, context: CallbackContext) -> None:
         wallet = WalletManagerModel(
