@@ -6,6 +6,7 @@ from telegram import (
     InlineKeyboardButton,
     InlineKeyboardMarkup,
     ReplyKeyboardMarkup,
+    ReplyKeyboardRemove,
     Bot,
     InputMediaPhoto,
 )
@@ -92,23 +93,33 @@ class PokerBotViewer:
         bio.name = 'desk.png'
         im_cards.save(bio, 'PNG')
         bio.seek(0)
-        return self._bot.send_media_group(
+        
+        # در کد اصلی از send_media_group استفاده شده که یک لیست برمی‌گرداند
+        # ما فقط به message_id اولین آیتم نیاز داریم
+        message = self._bot.send_photo(
             chat_id=chat_id,
-            media=[
-                InputMediaPhoto(
-                    media=bio,
-                    caption=caption,
-                ),
-            ],
+            photo=bio,
+            caption=caption,
             disable_notification=disable_notification,
-        )[0]
+        )
+        return message.message_id
 
-    @ staticmethod
+
+    @staticmethod
     def _get_cards_markup(cards: Cards) -> ReplyKeyboardMarkup:
+        # ساخت یک کیبورد جذاب‌تر
+        # هر کارت را به همراه یک ایموجی نمایش می‌دهیم
+        card_buttons = [f"🃏 {card}" for card in cards]
+        keyboard = [
+            card_buttons,
+            ["Show Table / نمایش میز"], # دکمه‌ای برای نمایش مجدد وضعیت میز
+            ["Hide Cards / پنهان کردن کارت‌ها"], # دکمه‌ای برای بستن کیبورد
+        ]
         return ReplyKeyboardMarkup(
-            keyboard=[cards],
-            selective=True,
+            keyboard=keyboard,
+            selective=True,       # <<<< این مهم‌ترین بخش است! کیبورد فقط برای کاربر منشن شده نمایش داده می‌شود
             resize_keyboard=True,
+            one_time_keyboard=False # کیبورد تا زمانی که کاربر آن را نبندد باقی می‌ماند
         )
 
     @ staticmethod
@@ -149,19 +160,37 @@ class PokerBotViewer:
 
     def send_cards(
             self,
-            chat_id: ChatId,
+            group_chat_id: ChatId, # حالا ID گروه را می‌گیریم
             cards: Cards,
             mention_markdown: Mention,
-            ready_message_id: str,
+            player_id: int, # به ID بازیکن برای selective نیاز داریم
     ) -> None:
+        """
+        Sends a message to the group, mentioning the player and showing them a custom keyboard with their cards.
+        """
         markup = PokerBotViewer._get_cards_markup(cards)
+        text = f"کارت‌های شما نمایش داده شد {mention_markdown}!\n" \
+               f"کارت‌هایتان در منوی پایین صفحه (کیبورد) قابل مشاهده است. این منو فقط برای شما نمایش داده می‌شود."
+
+        # ارسال پیام در گروه، اما کیبورد فقط برای بازیکن هدف نمایش داده می‌شود
         self._bot.send_message(
-            chat_id=chat_id,
-            text="Showing cards to " + mention_markdown,
+            chat_id=group_chat_id,
+            text=text,
             reply_markup=markup,
-            reply_to_message_id=ready_message_id,
             parse_mode=ParseMode.MARKDOWN,
             disable_notification=True,
+            # selective=True در ReplyKeyboardMarkup مدیریت می‌شود
+        )
+    def hide_cards_keyboard(self, chat_id: ChatId, player_mention: Mention) -> None:
+        """
+        Removes the custom reply keyboard for a player.
+        """
+        self._bot.send_message(
+            chat_id=chat_id,
+            text=f"منوی کارت‌ها برای {player_mention} بسته شد.",
+            reply_markup=ReplyKeyboardRemove(selective=True),
+            parse_mode=ParseMode.MARKDOWN,
+            disable_notification=True
         )
 
     @ staticmethod
