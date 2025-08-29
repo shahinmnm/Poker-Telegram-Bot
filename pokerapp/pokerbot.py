@@ -86,7 +86,7 @@ class MessageDelayBot(Bot):
             target=self._tasks_manager_loop,
             args=(self._stop_chat_tasks, ),
         )
-        # TODO: آیا می‌خواهیم از دکوریتورها برای توابع view استفاده کنیم؟
+        # TODO: Add @decorator to functions in view?
 
     def run_tasks_manager(self) -> None:
         self._chat_tasks_thread.start()
@@ -122,7 +122,7 @@ class MessageDelayBot(Bot):
                 TelegramError,
                 Unauthorized,
             ) as e:
-                logging.error(f"خطا در ارتباط با تلگرام: {e}")  # ارورهای تلگرام به فارسی
+                logging.error(e)
             finally:
                 self._chat_tasks[chat_id]["last_time"] = now
 
@@ -140,7 +140,7 @@ class MessageDelayBot(Bot):
             self._stop_chat_tasks.set()
             self._chat_tasks_thread.join()
         except Exception as e:
-            logging.error(f"خطای در هنگام خاتمه ربات: {e}")  # ارور در هنگام متوقف کردن ربات
+            logging.error(e)
 
     def _add_task(self, chat_id: ChatId, task: Callable) -> None:
         self._chat_tasks_lock.acquire()
@@ -191,4 +191,4 @@ class MessageDelayBot(Bot):
             TelegramError,
             Unauthorized,
         ) as e:
-            logging.error(f"خطای تلگرام: {e}")  # نمایش خطا به زبان فارسی
+            logging.error(e)
