@@ -345,6 +345,16 @@ class PokerBotModel:
             game.message_ids_to_delete.append(msg_id)
             
     def _process_playing(self, chat_id: ChatId, game: Game) -> None:
+        # <<<< شروع بلوک جدید >>>>
+        # حذف پیام‌های اعلام وضعیت از دور قبلی
+        for msg_id in game.message_ids_to_delete:
+            try:
+                self._view.remove_message(chat_id=chat_id, message_id=msg_id)
+            except Exception as e:
+                print(f"Could not delete status message {msg_id}: {e}")
+        game.message_ids_to_delete.clear()  # لیست را برای دور بعد خالی می‌کنیم
+        # <<<< پایان بلوک جدید >>>>
+
         game.current_player_index += 1
         game.current_player_index %= len(game.players)
 
@@ -496,76 +506,125 @@ class PokerBotModel:
     def fold(self, update: Update, context: CallbackContext) -> None:
         game = self._game_from_context(context)
         player = self._current_turn_player(game)
+
         player.state = PlayerState.FOLD
-        # <<<< شروع تغییر: ذخیره ID پیام >>>>
-        msg_id = self._view.send_message_return_id(
+
+        # <<<< شروع بلوک اصلاح شده >>>>
+        msg_id = self._view.send_message(
             chat_id=update.effective_message.chat_id,
             text=f"{player.mention_markdown} {PlayerAction.FOLD.value}"
         )
-        game.message_ids_to_delete.append(msg_id)
-        # <<<< پایان تغییر >>>>
-        self._process_playing(chat_id=update.effective_message.chat_id, game=game)
+        if msg_id:
+            game.message_ids_to_delete.append(msg_id)
+        # <<<< پایان بلوک اصلاح شده >>>>
 
-    def call_check(self, update: Update, context: CallbackContext) -> None:
+        self._process_playing(
+            chat_id=update.effective_message.chat_id,
+            game=game,
+        )
+    def call_check(
+        self,
+        update: Update,
+        context: CallbackContext,
+    ) -> None:
         game = self._game_from_context(context)
         chat_id = update.effective_message.chat_id
         player = self._current_turn_player(game)
+
         action = PlayerAction.CALL.value
-        if player.round_rate == game.max_round_rate: action = PlayerAction.CHECK.value
+        if player.round_rate == game.max_round_rate:
+            action = PlayerAction.CHECK.value
+
         try:
             amount = game.max_round_rate - player.round_rate
-            if player.wallet.value() <= amount: return self.all_in(update=update, context=context)
-            # <<<< شروع تغییر: ذخیره ID پیام >>>>
-            msg_id = self._view.send_message_return_id(
-                chat_id=chat_id, text=f"{player.mention_markdown} {action}"
+            if player.wallet.value() <= amount:
+                return self.all_in(update=update, context=context)
+
+            mention_markdown = self._current_turn_player(game).mention_markdown
+
+            # <<<< شروع بلوک اصلاح شده >>>>
+            msg_id = self._view.send_message(
+                chat_id=chat_id,
+                text=f"{mention_markdown} {action}"
             )
-            game.message_ids_to_delete.append(msg_id)
-            # <<<< پایان تغییر >>>>
+            if msg_id:
+                game.message_ids_to_delete.append(msg_id)
+            # <<<< پایان بلوک اصلاح شده >>>>
+
             self._round_rate.call_check(game, player)
         except UserException as e:
-            msg_id = self._view.send_message_return_id(chat_id=chat_id, text=str(e))
-            game.message_ids_to_delete.append(msg_id)
+            self._view.send_message(chat_id=chat_id, text=str(e))
             return
-        self._process_playing(chat_id=chat_id, game=game)
 
-    def raise_rate_bet(self, update: Update, context: CallbackContext, raise_bet_rate: PlayerAction) -> None:
+        self._process_playing(
+            chat_id=chat_id,
+            game=game,
+        )
+
+    def raise_rate_bet(
+        self,
+        update: Update,
+        context: CallbackContext,
+        raise_bet_rate: PlayerAction
+    ) -> None:
         game = self._game_from_context(context)
         chat_id = update.effective_message.chat_id
         player = self._current_turn_player(game)
+
         try:
             action = PlayerAction.RAISE_RATE
-            if player.round_rate == game.max_round_rate: action = PlayerAction.BET
-            amount = self._round_rate.raise_bet(game, player, raise_bet_rate)
-            # <<<< شروع تغییر: ذخیره ID پیام >>>>
-            msg_id = self._view.send_message_return_id(
-                chat_id=chat_id,
-                text=f"{player.mention_markdown} {action.value} {amount}$"
+            if player.round_rate == game.max_round_rate:
+                action = PlayerAction.BET
+
+            # <<<< این بلوک را اصلاح کنید >>>>
+            amount, mention_markdown = self._round_rate.raise_bet(
+                game,
+                player,
+                raise_bet_rate.value,
             )
-            game.message_ids_to_delete.append(msg_id)
-            # <<<< پایان تغییر >>>>
+
+            msg_id = self._view.send_message(
+                chat_id=chat_id,
+                text=f"{mention_markdown} {action.value} {amount}$"
+            )
+            if msg_id:
+                game.message_ids_to_delete.append(msg_id)
+            # <<<< پایان اصلاح >>>>
+
         except UserException as e:
-            msg_id = self._view.send_message_return_id(chat_id=chat_id, text=str(e))
-            game.message_ids_to_delete.append(msg_id)
+            self._view.send_message(chat_id=chat_id, text=str(e))
             return
-        self._process_playing(chat_id=chat_id, game=game)
+
+        self._process_playing(
+            chat_id=chat_id,
+            game=game,
+        )
 
     def all_in(self, update: Update, context: CallbackContext) -> None:
         game = self._game_from_context(context)
         chat_id = update.effective_message.chat_id
         player = self._current_turn_player(game)
+
         try:
-            self._round_rate.all_in(game, player)
-            # <<<< شروع تغییر: ذخیره ID پیام >>>>
-            msg_id = self._view.send_message_return_id(
-                chat_id=chat_id, text=f"{player.mention_markdown} {PlayerAction.ALL_IN.value}"
+            amount, mention_markdown = self._round_rate.all_in(game, player)
+
+            # <<<< این بلوک را اصلاح کنید >>>>
+            msg_id = self._view.send_message(
+                chat_id=chat_id,
+                text=f"{mention_markdown} {PlayerAction.ALL_IN.value} {amount}$"
             )
-            game.message_ids_to_delete.append(msg_id)
-            # <<<< پایان تغییر >>>>
+            if msg_id:
+                game.message_ids_to_delete.append(msg_id)
+            # <<<< پایان اصلاح >>>>
+
         except UserException as e:
-            msg_id = self._view.send_message_return_id(chat_id=chat_id, text=str(e))
-            game.message_ids_to_delete.append(msg_id)
+            self._view.send_message(chat_id=chat_id, text=str(e))
             return
-        self._process_playing(chat_id=chat_id, game=game)
+
+        self._process_playing(
+            chat_id=chat_id,
+            game=game,
+        )
 
     # <<<< شروع متدهای جدید: Show/Hide Cards >>>>
     def hide_cards(self, update: Update, context: CallbackContext) -> None:
