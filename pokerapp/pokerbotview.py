@@ -87,18 +87,15 @@ class PokerBotViewer:
         cards: Cards,
         caption: str = "",
         disable_notification: bool = True,
-    ) -> MessageId:
+    ) -> None: # مقدار بازگشتی را به None تغییر می‌دهیم
         im_cards = self._desk_generator.generate_desk(cards)
         bio = BytesIO()
         bio.name = 'desk.png'
         im_cards.save(bio, 'PNG')
         bio.seek(0)
-        
-        # در کد اصلی از send_media_group استفاده شده که یک لیست برمی‌گرداند
-        # ما فقط به message_id اولین آیتم نیاز داریم
-        message = self._bot.send_photo(
+        self._bot.send_photo(
             chat_id=chat_id,
-            photo=bio,
+            photo=bio,  # photo=bio به جای media=bio
             caption=caption,
             disable_notification=disable_notification,
         )
