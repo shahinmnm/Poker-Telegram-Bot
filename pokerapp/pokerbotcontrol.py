@@ -50,13 +50,15 @@ class PokerBotCotroller:
             )
         )
 
+# در فایل pokerapp/pokerbotcontrol.py
+
     def _handle_text_message(self, update: Update, context: CallbackContext) -> None:
         """Handles regular text messages, specifically for our custom keyboard."""
         text = update.message.text
-        # نام دکمه‌ها از pokerbotview.py گرفته شده است
-        if text == "🃏 نمایش میز 🃏":
+        # نام دکمه‌ها باید دقیقاً با آنچه در pokerbotview.py تعریف شده، یکسان باشد
+        if text == "👁️ نمایش میز":
             self._model.show_table(update, context)
-        elif text == "🙈 پنهان کردن کارت‌ها 🙈":
+        elif text == "🙈 پنهان کردن":
             self._model.hide_cards(update, context)
 
     def _handle_ready(self, update: Update, context: CallbackContext) -> None:
