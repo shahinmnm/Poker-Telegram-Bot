@@ -210,8 +210,7 @@ class PokerBotModel:
             return self._view.send_message_reply(
                 chat_id=chat_id,
                 message_id=update.effective_message.message_id,
-                text=f"💰 موجودی شما: *{money}$*
-",
+                text=f"💰 موجودی شما: *{money}$*",
             )
 
         icon: str
@@ -235,10 +234,8 @@ class PokerBotModel:
             self._view.send_message_reply(
                 chat_id=chat_id,
                 message_id=message_id,
-                text=f"🎁 جایزه: *{bonus}$* {icon}
-" +
-                     f"💰 موجودی شما: *{money}$*
-",
+                text=f"🎁 جایزه: *{bonus}$* {icon}" +
+                     f"💰 موجودی شما: *{money}$*",
             )
 
         Timer(DICE_DELAY_SEC, print_bonus).start()
@@ -280,19 +277,12 @@ class PokerBotModel:
         winners_hand_money = self._round_rate.finish_rate(game=game, player_scores=player_scores)
         only_one_player = len(active_players) == 1
 
-        text = "🏁 **بازی به پایان رسید!**
-
-"
+        text = "🏁 **بازی به پایان رسید!**"
         for (player, best_hand, money) in winners_hand_money:
             win_hand = " ".join(best_hand)
-            text += f"{player.mention_markdown}:
-💰 برنده: *{money}$*
-"
+            text += f"{player.mention_markdown}:💰 برنده: *{money}$*"
             if not only_one_player:
-                text += f"با ترکیب کارت‌ها:
-{win_hand}
-
-"
+                text += f"با ترکیب کارت‌ها:{win_hand}"
         text += "برای ادامه `/ready` را بزنید"
         self._view.send_message(chat_id=chat_id, text=text)
 
