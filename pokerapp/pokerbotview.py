@@ -168,24 +168,21 @@ class PokerBotViewer:
         return InlineKeyboardMarkup(inline_keyboard=keyboard)
 
     def send_cards(
-        self,
-        chat_id: ChatId,
-        cards: Cards,
-        mention_markdown: Mention,
-        ready_message_id: str,
-    ) -> MessageId:
-        """Sends cards to a player with the custom keyboard."""
+            self,
+            chat_id: ChatId,
+            cards: Cards,
+            mention_markdown: Mention,
+            ready_message_id: str,
+    ) -> None: # <<<< تغییر نوع بازگشتی از MessageId به None
         markup = PokerBotViewer._get_cards_markup(cards)
-        message = self._bot.send_message(
+        self._bot.send_message( # <<<< حذف 'message ='
             chat_id=chat_id,
-            text="کارت‌های شما " + mention_markdown,
+            text="Showing cards to " + mention_markdown,
             reply_markup=markup,
             reply_to_message_id=ready_message_id,
             parse_mode=ParseMode.MARKDOWN,
             disable_notification=True,
         )
-        return message.message_id
-
     @staticmethod
     def define_check_call_action(game: Game, player: Player) -> PlayerAction:
         if player.round_rate == game.max_round_rate:
