@@ -3,10 +3,9 @@
 from abc import abstractmethod
 import enum
 import datetime
-from typing import Tuple, List
-from uuid import uuid4
-from pokerapp.cards import get_cards
+from typing import Tuple, List, Optional # <<<< Optional را اضافه کنید
 
+from pokerapp.cards import get_cards
 
 MessageId = str
 ChatId = str
@@ -15,9 +14,9 @@ Mention = str
 Score = int
 Money = int
 
-
 @abstractmethod
 class Wallet:
+    # ... (این کلاس بدون تغییر باقی می‌ماند)
     @staticmethod
     def _prefix(id: int, suffix: str = ""):
         pass
@@ -46,7 +45,6 @@ class Wallet:
     def approve(self, game_id: str) -> None:
         pass
 
-
 class Player:
     def __init__(
         self,
@@ -66,20 +64,29 @@ class Player:
     def __repr__(self):
         return "{}({!r})".format(self.__class__.__name__, self.__dict__)
 
-
 class PlayerState(enum.Enum):
     ACTIVE = 1
     FOLD = 0
     ALL_IN = 10
 
-
+class Game:
     def __init__(self):
-        # ...
+        self.id = str(uuid4())
+        self.pot = 0
+        self.max_round_rate = 0
+        self.state = GameState.INITIAL
+        self.players: List[Player] = []
+        self.cards_table = []
+        self.current_player_index = -1
+        self.remain_cards = get_cards()
+        self.trading_end_user_id = 0
+        self.ready_users = set()
         self.message_ids_to_delete: List[MessageId] = []
-        self.turn_message_id: Optional[MessageId] = None # <<<< این خط را اضافه کنید
-        self.last_turn_time: Optional[datetime] = None
+        self.turn_message_id: Optional[MessageId] = None
+        self.last_turn_time: Optional[datetime.datetime] = None
         self.reset()
-        
+
+
     def reset(self):
         self.id = str(uuid4())
         self.pot = 0
@@ -91,14 +98,18 @@ class PlayerState(enum.Enum):
         self.remain_cards = get_cards()
         self.trading_end_user_id = 0
         self.ready_users = set()
+        self.message_ids_to_delete = []
+        self.turn_message_id = None
         self.last_turn_time = datetime.datetime.now()
 
+    # <<<< شروع بلوک اصلاح شده >>>>
+    # متد players_by باید اینجا، داخل کلاس Game باشد
     def players_by(self, states: Tuple[PlayerState]) -> List[Player]:
         return list(filter(lambda p: p.state in states, self.players))
+    # <<<< پایان بلوک اصلاح شده >>>>
 
     def __repr__(self):
         return "{}({!r})".format(self.__class__.__name__, self.__dict__)
-
 
 class GameState(enum.Enum):
     INITIAL = 0
@@ -107,7 +118,6 @@ class GameState(enum.Enum):
     ROUND_TURN = 3  # Four cards.
     ROUND_RIVER = 4  # Five cards.
     FINISHED = 5  # The end.
-
 
 class PlayerAction(enum.Enum):
     CHECK = "✋ چک"
@@ -119,7 +129,6 @@ class PlayerAction(enum.Enum):
     SMALL = 10
     NORMAL = 25
     BIG = 50
-
 
 class UserException(Exception):
     pass
