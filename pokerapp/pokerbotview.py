@@ -57,8 +57,18 @@ class PokerBotViewer:
         chat_id: ChatId,
         text: str,
         reply_markup: ReplyKeyboardMarkup = None,
-    ) -> None:
-        self.send_message_return_id(chat_id, text, reply_markup)
+    ) -> Optional[MessageId]:
+        message = self._bot.send_message(
+            chat_id=chat_id,
+            parse_mode=ParseMode.MARKDOWN,
+            text=text,
+            reply_markup=reply_markup,
+            disable_notification=True,
+            disable_web_page_preview=True,
+        )
+        if isinstance(message, Message):
+            return message.message_id
+        return None
 
     def send_photo(self, chat_id: ChatId) -> None:
         self._bot.send_photo(
