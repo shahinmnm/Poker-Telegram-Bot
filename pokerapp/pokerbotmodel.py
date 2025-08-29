@@ -188,20 +188,16 @@ class PokerBotModel:
             ),
         )
 
-        old_players_ids = context.chat_data.get(KEY_OLD_PLAYERS)
-        
-        # فقط در صورتی که بازی قبلی وجود داشته باشد، ترتیب بازیکنان را بچرخان
-        if old_players_ids:
-            # دیلر را به نفر بعدی منتقل کن
-            old_players_ids = old_players_ids[1:] + old_players_ids[:1]
+        old_players_ids = context.chat_data.get(KEY_OLD_PLAYERS, [])
+        old_players_ids = old_players_ids[-1:] + old_players_ids[:-1]
 
-            def index(ln: List, obj) -> int:
-                try:
-                    return ln.index(obj)
-                except ValueError:
-                    return -1 # بازیکنان جدید در انتهای لیست قرار می‌گیرند
+        def index(ln: List, obj) -> int:
+            try:
+                return ln.index(obj)
+            except ValueError:
+                return -1
 
-            game.players.sort(key=lambda p: index(old_players_ids, p.user_id))
+        game.players.sort(key=lambda p: index(old_players_ids, p.user_id))
 
         game.state = GameState.ROUND_PRE_FLOP
         self._divide_cards(game=game, chat_id=chat_id)
