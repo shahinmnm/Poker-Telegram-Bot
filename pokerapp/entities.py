@@ -4,7 +4,7 @@ from abc import abstractmethod
 import enum
 import datetime
 from typing import Tuple, List, Optional # <<<< Optional را اضافه کنید
-
+from uuid import uuid4  # <<<< این خط را اضافه کنید
 from pokerapp.cards import get_cards
 
 MessageId = str
