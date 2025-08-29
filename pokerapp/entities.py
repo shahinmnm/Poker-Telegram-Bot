@@ -107,12 +107,12 @@ class GameState(enum.Enum):
 
 
 class PlayerAction(enum.Enum):
-    CHECK = "check"
-    CALL = "call"
-    FOLD = "fold"
-    RAISE_RATE = "raise rate"
-    BET = "bet"
-    ALL_IN = "all in"
+    CHECK = "✋ چک"
+    CALL = "🎯 کال "
+    FOLD = "🏳️ فولد "
+    RAISE_RATE = "💹 رِیز"
+    BET = "💰 بِت"
+    ALL_IN = "🀄 آل‑این"
     SMALL = 10
     NORMAL = 25
     BIG = 50
