@@ -466,15 +466,18 @@ class PokerBotModel:
             if current_user_id != current_player.user_id: return
             fn(update, context)
             
-            if game.turn_message_id:
-                try:
-                    self._view.remove_markup(
-                        chat_id=update.effective_message.chat_id,
-                        message_id=game.turn_message_id,
-                    )
-                except Exception as e:
-                    print(f"Could not remove markup for message {game.turn_message_id}: {e}")
-            # <<<< پایان تغییر >>>>
+            # <<<< شروع بلوک اصلاح شده >>>>
+            # به جای حذف دکمه‌ها، کل پیام را حذف می‌کنیم
+            try:
+                self._view.remove_message(
+                    chat_id=update.effective_message.chat_id,
+                    message_id=update.effective_message.message_id,
+                )
+            except Exception as e:
+                # اگر پیام قبلاً توسط کاربر یا ادمین حذف شده باشد، تلگرام خطا می‌دهد.
+                # این خطا را نادیده می‌گیریم تا ربات کرش نکند.
+                print(f"Could not delete turn message: {e}")
+            # <<<< پایان بلوک اصلاح شده >>>>
         return m
 
     def ban_player(self, update: Update, context: CallbackContext) -> None:
