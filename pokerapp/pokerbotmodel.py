@@ -9,6 +9,7 @@ import redis
 from telegram import Message, ReplyKeyboardMarkup, Update, Bot
 from telegram.ext import Handler, CallbackContext
 
+from telegram.ext import Handler, CallbackContext, MessageHandler # <--- MessageHandler را اضافه کنید
 from pokerapp.config import Config
 from pokerapp.privatechatmodel import UserPrivateChatModel
 from pokerapp.winnerdetermination import WinnerDetermination
@@ -271,27 +272,6 @@ class PokerBotModel:
 
         Timer(DICE_DELAY_SEC, print_bonus).start()
 
-    def send_cards_to_user(
-        self,
-        update: Update,
-        context: CallbackContext,
-    ) -> None:
-        game = self._game_from_context(context)
-
-        for player in game.players:
-            if player.user_id == update.effective_user.id:
-                current_player = player
-                break
-
-        if current_player is None or not current_player.cards:
-            return
-
-        self._view.send_cards(
-            chat_id=update.effective_message.chat_id,
-            cards=current_player.cards,
-            mention_markdown=current_player.mention_markdown,
-            ready_message_id=update.effective_message.message_id,
-        )
 
     def _check_access(self, chat_id: ChatId, user_id: UserId) -> bool:
         chat_admins = self._bot.get_chat_administrators(chat_id)
@@ -300,66 +280,25 @@ class PokerBotModel:
                 return True
         return False
 
-    def _send_cards_private(self, player: Player, cards: Cards) -> None:
-        user_chat_model = UserPrivateChatModel(
-            user_id=player.user_id,
-            kv=self._kv,
-        )
-        private_chat_id = user_chat_model.get_chat_id()
-
-        if private_chat_id is None:
-            raise ValueError("private chat not found")
-
-        private_chat_id = private_chat_id.decode('utf-8')
-
-        message_id = self._view.send_desk_cards_img(
-            chat_id=private_chat_id,
-            cards=cards,
-            caption="Your cards",
-            disable_notification=False,
-        ).message_id
-
-        try:
-            rm_msg_id = user_chat_model.pop_message()
-            while rm_msg_id is not None:
-                try:
-                    rm_msg_id = rm_msg_id.decode('utf-8')
-                    self._view.remove_message(
-                        chat_id=private_chat_id,
-                        message_id=rm_msg_id,
-                    )
-                except Exception as ex:
-                    print("remove_message", ex)
-                    traceback.print_exc()
-                rm_msg_id = user_chat_model.pop_message()
-
-            user_chat_model.push_message(message_id=message_id)
-        except Exception as ex:
-            print("bulk_remove_message", ex)
-            traceback.print_exc()
 
     def _divide_cards(self, game: Game, chat_id: ChatId) -> None:
+        """
+        Deals two cards to each player and shows them via a custom reply keyboard.
+        """
         for player in game.players:
+            # کارت‌ها را به بازیکن اختصاص بده
             cards = player.cards = [
                 game.remain_cards.pop(),
                 game.remain_cards.pop(),
             ]
 
-            try:
-                self._send_cards_private(player=player, cards=cards)
-
-                continue
-            except Exception as ex:
-                print(ex)
-                pass
-
+            # از متد جدید View برای ارسال کیبورد سفارشی در گروه استفاده کن
             self._view.send_cards(
-                chat_id=chat_id,
+                group_chat_id=chat_id,
                 cards=cards,
                 mention_markdown=player.mention_markdown,
-                ready_message_id=player.ready_message_id,
+                player_id=player.user_id, # این پارامتر در view جدید نیاز است
             )
-
     def _process_playing(self, chat_id: ChatId, game: Game) -> None:
         game.current_player_index += 1
         game.current_player_index %= len(game.players)
@@ -732,7 +671,46 @@ class WalletManagerModel(Wallet):
         key_authorized_money = self._prefix(self.user_id, ":" + game_id)
         self._kv.delete(key_authorized_money)
 
+# این دو متد جدید را به انتهای کلاس PokerBotModel اضافه کنید
 
+    def hide_cards(self, update: Update, context: CallbackContext) -> None:
+        """
+        Handles the 'Hide Cards' button press from the custom keyboard.
+        """
+        user = update.effective_user
+        chat_id = update.effective_chat.id
+        game = self._game_from_context(context)
+
+        # اطمینان از اینکه بازی در حال اجراست و فرد درخواست دهنده بازیکن است
+        if game.state == GameState.INITIAL or not any(p.user_id == user.id for p in game.players):
+            return
+
+        self._view.hide_cards_keyboard(
+            chat_id=chat_id,
+            player_mention=user.mention_markdown()
+        )
+
+    def show_table(self, update: Update, context: CallbackContext) -> None:
+        """
+        Handles the 'Show Table' button press, re-sending the table image.
+        """
+        chat_id = update.effective_chat.id
+        user_id = update.effective_user.id
+        game = self._game_from_context(context)
+
+        # اطمینان از اینکه بازی در حال اجراست و فرد درخواست دهنده بازیکن است
+        if game.state == GameState.INITIAL or not any(p.user_id == user_id for p in game.players):
+            return
+
+        caption = f"میز بازی 🃏\n" \
+                  f"موجودی پات (Pot): *{game.pot} $*"
+        
+        self._view.send_desk_cards_img(
+            chat_id=chat_id,
+            cards=game.cards_table,
+            caption=caption
+        )
+        
 class RoundRateModel:
 
     def round_pre_flop_rate_before_first_turn(self, game: Game) -> None:
