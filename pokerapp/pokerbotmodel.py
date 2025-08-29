@@ -7,7 +7,6 @@ from typing import List, Tuple, Dict
 
 import redis
 from telegram import Message, ReplyKeyboardMarkup, Update, Bot
-from telegram.ext import Handler, CallbackContext
 
 from telegram.ext import Handler, CallbackContext, MessageHandler # <--- MessageHandler را اضافه کنید
 from pokerapp.config import Config
@@ -283,21 +282,21 @@ class PokerBotModel:
 
     def _divide_cards(self, game: Game, chat_id: ChatId) -> None:
         """
-        Deals two cards to each player and shows them via a custom reply keyboard.
+        Distributes two cards to each player and displays them via a selective custom keyboard in the group chat.
         """
         for player in game.players:
-            # کارت‌ها را به بازیکن اختصاص بده
-            cards = player.cards = [
+            cards = [
                 game.remain_cards.pop(),
                 game.remain_cards.pop(),
             ]
+            player.cards = cards
 
-            # از متد جدید View برای ارسال کیبورد سفارشی در گروه استفاده کن
+            # از متد جدید در View برای ارسال کیبورد سفارشی در گروه استفاده می‌کنیم
             self._view.send_cards(
                 group_chat_id=chat_id,
-                cards=cards,
+                cards=player.cards,
                 mention_markdown=player.mention_markdown,
-                player_id=player.user_id, # این پارامتر در view جدید نیاز است
+                player_id=player.user_id # player_id برای selective بودن کیبورد لازم است
             )
     def _process_playing(self, chat_id: ChatId, game: Game) -> None:
         game.current_player_index += 1
@@ -586,7 +585,41 @@ class PokerBotModel:
         )
         player.state = PlayerState.ALL_IN
         self._process_playing(chat_id=chat_id, game=game)
+    def hide_cards(self, update: Update, context: CallbackContext) -> None:
+        """
+        Handles the 'Hide Cards' button click.
+        Calls the view to remove the custom keyboard for the user.
+        """
+        user = update.effective_user
+        chat_id = update.effective_chat.id
+        
+        # از متد جدید در View برای حذف کیبورد استفاده می‌کنیم
+        self._view.hide_cards_keyboard(
+            chat_id=chat_id,
+            player_mention=user.mention_markdown()
+        )
 
+    def show_table(self, update: Update, context: CallbackContext) -> None:
+        """
+        Handles the 'Show Table' button click.
+        Resends the current table state (cards and pot) to the chat.
+        """
+        game = self._game_from_context(context)
+        chat_id = update.effective_chat.id
+
+        if not game.cards_table:
+            self._view.send_message(
+                chat_id=chat_id,
+                text="هنوز کارتی روی میز قرار نگرفته است."
+            )
+            return
+
+        # از متد موجود برای نمایش مجدد تصویر میز استفاده می‌کنیم
+        self._view.send_desk_cards_img(
+            chat_id=chat_id,
+            cards=game.cards_table,
+            caption=f"میز بازی\nظرف فعلی (Pot): {game.pot}$",
+        )
 
 class WalletManagerModel(Wallet):
     def __init__(self, user_id: UserId, kv: redis.Redis):
@@ -671,45 +704,6 @@ class WalletManagerModel(Wallet):
         key_authorized_money = self._prefix(self.user_id, ":" + game_id)
         self._kv.delete(key_authorized_money)
 
-# این دو متد جدید را به انتهای کلاس PokerBotModel اضافه کنید
-
-    def hide_cards(self, update: Update, context: CallbackContext) -> None:
-        """
-        Handles the 'Hide Cards' button press from the custom keyboard.
-        """
-        user = update.effective_user
-        chat_id = update.effective_chat.id
-        game = self._game_from_context(context)
-
-        # اطمینان از اینکه بازی در حال اجراست و فرد درخواست دهنده بازیکن است
-        if game.state == GameState.INITIAL or not any(p.user_id == user.id for p in game.players):
-            return
-
-        self._view.hide_cards_keyboard(
-            chat_id=chat_id,
-            player_mention=user.mention_markdown()
-        )
-
-    def show_table(self, update: Update, context: CallbackContext) -> None:
-        """
-        Handles the 'Show Table' button press, re-sending the table image.
-        """
-        chat_id = update.effective_chat.id
-        user_id = update.effective_user.id
-        game = self._game_from_context(context)
-
-        # اطمینان از اینکه بازی در حال اجراست و فرد درخواست دهنده بازیکن است
-        if game.state == GameState.INITIAL or not any(p.user_id == user_id for p in game.players):
-            return
-
-        caption = f"میز بازی 🃏\n" \
-                  f"موجودی پات (Pot): *{game.pot} $*"
-        
-        self._view.send_desk_cards_img(
-            chat_id=chat_id,
-            cards=game.cards_table,
-            caption=caption
-        )
         
 class RoundRateModel:
 
