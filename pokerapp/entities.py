@@ -102,11 +102,8 @@ class Game:
         self.turn_message_id = None
         self.last_turn_time = datetime.datetime.now()
 
-    # <<<< شروع بلوک اصلاح شده >>>>
-    # متد players_by باید اینجا، داخل کلاس Game باشد
     def players_by(self, states: Tuple[PlayerState]) -> List[Player]:
         return list(filter(lambda p: p.state in states, self.players))
-    # <<<< پایان بلوک اصلاح شده >>>>
 
     def __repr__(self):
         return "{}({!r})".format(self.__class__.__name__, self.__dict__)
