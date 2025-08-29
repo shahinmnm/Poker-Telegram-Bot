@@ -181,7 +181,7 @@ class PokerBotViewer:
             money: Money,
     ) -> None:
         if len(game.cards_table) == 0:
-            cards_table = "no cards"
+            cards_table = "🚫 کارتی نیست."
         else:
             cards_table = " ".join(game.cards_table)
         text = (
