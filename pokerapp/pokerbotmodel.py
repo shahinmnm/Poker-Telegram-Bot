@@ -157,7 +157,8 @@ class PokerBotModel:
 
         if game.state not in (GameState.INITIAL, GameState.FINISHED):
             msg_id = self._view.send_message_return_id(chat_id=chat_id, text="🎮 بازی الان داره اجرا میشه")
-            game.message_ids_to_delete.append(msg_id)
+            if msg_id: # <<<< شرط اضافه شود
+                game.message_ids_to_delete.append(msg_id)
             return
 
         members_count = self._bot.get_chat_member_count(chat_id) - 1
@@ -175,7 +176,8 @@ class PokerBotModel:
             self._start_game(context=context, game=game, chat_id=chat_id)
         else:
             msg_id = self._view.send_message_return_id(chat_id=chat_id, text="👤 بازیکن کافی نیست")
-            game.message_ids_to_delete.append(msg_id)
+            if msg_id: # <<<< شرط اضافه شود
+                game.message_ids_to_delete.append(msg_id)
         return
 
     def _start_game(self, context: CallbackContext, game: Game, chat_id: ChatId) -> None:
@@ -191,7 +193,8 @@ class PokerBotModel:
             text='🚀 !بازی شروع شد!',
             reply_markup=ReplyKeyboardRemove()
         )
-        game.message_ids_to_delete.append(msg_id)
+        if msg_id:
+            game.message_ids_to_delete.append(msg_id)
 
         old_players_ids = context.chat_data.get(KEY_OLD_PLAYERS, [])
         old_players_ids = old_players_ids[-1:] + old_players_ids[:-1]
@@ -399,7 +402,6 @@ class PokerBotModel:
                 text += f"🃏 با ترکیب این کارتا:\n{win_hand}\n\n"
         text += "\n/ready برای ادامه"
         self._view.send_message(chat_id=chat_id, text=text, reply_markup=ReplyKeyboardRemove())
-
         for player in game.players:
             player.wallet.approve(game.id)
             
