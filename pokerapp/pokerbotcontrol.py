@@ -17,22 +17,22 @@ class PokerBotController:
 
         # 🎯 ثبت فرمان‌ها با معادل فارسی
         updater.dispatcher.add_handler(
-            CommandHandler(['ready', 'آماده'], self._handle_ready)
+            CommandHandler(['ready'], self._handle_ready)
         )
         updater.dispatcher.add_handler(
-            CommandHandler(['start', 'شروع'], self._handle_start)
+            CommandHandler(['start'], self._handle_start)
         )
         updater.dispatcher.add_handler(
-            CommandHandler(['stop', 'خروج'], self._handle_stop)
+            CommandHandler(['stop'], self._handle_stop)
         )
         updater.dispatcher.add_handler(
-            CommandHandler(['money', 'پول'], self._handle_money)
+            CommandHandler(['money'], self._handle_money)
         )
         updater.dispatcher.add_handler(
-            CommandHandler(['ban', 'حذف'], self._handle_ban)
+            CommandHandler(['ban'], self._handle_ban)
         )
         updater.dispatcher.add_handler(
-            CommandHandler(['cards', 'کارت'], self._handle_cards)
+            CommandHandler(['cards'], self._handle_cards)
         )
         updater.dispatcher.add_handler(
             CallbackQueryHandler(
