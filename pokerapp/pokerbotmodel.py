@@ -194,13 +194,34 @@ class PokerBotModel:
             except ValueError: return -1
         game.players.sort(key=lambda p: index(old_players_ids, p.user_id))
 
-        game.state = GameState.ROUND_PRE_FLOP
-        self._divide_cards(game=game, chat_id=chat_id)
-        game.current_player_index = 1
-        self._round_rate.round_pre_flop_rate_before_first_turn(game)
-        self._process_playing(chat_id=chat_id, game=game)
-        self._round_rate.round_pre_flop_rate_after_first_turn(game)
-        context.chat_data[KEY_OLD_PLAYERS] = list(map(lambda p: p.user_id, game.players))
+game.state = GameState.ROUND_PRE_FLOP
+self._divide_cards(game=game, chat_id=chat_id)
+
+# 1. بلایندها را بر اساس تعداد بازیکنان پرداخت کن
+self._round_rate.round_pre_flop_rate_before_first_turn(game)
+
+# 2. نفر اول برای بازی را به صورت دینامیک مشخص کن
+num_players = len(game.players)
+if num_players == 2:
+    # در بازی دو نفره، دیلر/اسمال بلایند (اندیس 0) اول حرکت می‌کند
+    start_index = 0
+else:
+    # در بازی با 3+ بازیکن، نفر بعد از بیگ بلایند (اندیس 2) اول حرکت می‌کند
+    start_index = 2
+
+# 3. اندیس را روی نفر "قبل" از بازیکن شروع کننده تنظیم کن
+# چون _process_playing در ابتدا یک واحد به آن اضافه می‌کند.
+game.current_player_index = start_index - 1
+
+# 4. حلقه اصلی بازی را شروع کن
+self._process_playing(chat_id=chat_id, game=game)
+
+# این خط دیگر اینجا لازم نیست و باعث مشکل می‌شود
+# self._round_rate.round_pre_flop_rate_after_first_turn(game)
+
+context.chat_data[KEY_OLD_PLAYERS] = list(
+    map(lambda p: p.user_id, game.players),
+)
 
     # ... (متد bonus بدون تغییر) ...
     def bonus(self, update: Update, context: CallbackContext) -> None:
