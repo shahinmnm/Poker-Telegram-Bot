@@ -11,28 +11,28 @@ from telegram.ext import (
 from pokerapp.entities import PlayerAction
 from pokerapp.pokerbotmodel import PokerBotModel
 
-class PokerBotController:
+
+class PokerBotCotroller:
     def __init__(self, model: PokerBotModel, updater: Updater):
         self._model = model
 
-        # 🎯 ثبت فرمان‌ها با معادل فارسی
         updater.dispatcher.add_handler(
-            CommandHandler(['ready'], self._handle_ready)
+            CommandHandler('ready', self._handle_ready)
         )
         updater.dispatcher.add_handler(
-            CommandHandler(['start'], self._handle_start)
+            CommandHandler('start', self._handle_start)
         )
         updater.dispatcher.add_handler(
-            CommandHandler(['stop'], self._handle_stop)
+            CommandHandler('stop', self._handle_stop)
         )
         updater.dispatcher.add_handler(
-            CommandHandler(['money'], self._handle_money)
+            CommandHandler('money', self._handle_money)
         )
         updater.dispatcher.add_handler(
-            CommandHandler(['ban'], self._handle_ban)
+            CommandHandler('ban', self._handle_ban)
         )
         updater.dispatcher.add_handler(
-            CommandHandler(['cards'], self._handle_cards)
+            CommandHandler('cards', self._handle_cards)
         )
         updater.dispatcher.add_handler(
             CallbackQueryHandler(
@@ -42,35 +42,27 @@ class PokerBotController:
             )
         )
 
-    # 🎯 وقتی کاربر آماده شدن را اعلام می‌کند
     def _handle_ready(self, update: Update, context: CallbackContext) -> None:
         self._model.ready(update, context)
 
-    # 🚀 شروع بازی یا نمایش راهنما
     def _handle_start(self, update: Update, context: CallbackContext) -> None:
         self._model.start(update, context)
 
-    # ⏹ خروج کاربر از بازی
     def _handle_stop(self, update: Update, context: CallbackContext) -> None:
         self._model.stop(user_id=update.effective_message.from_user.id)
 
-    # 🎴 ارسال کارت‌ها
     def _handle_cards(self, update: Update, context: CallbackContext) -> None:
         self._model.send_cards_to_user(update, context)
 
-    # 🚫 حذف بازیکن به دلیل اتمام وقت
     def _handle_ban(self, update: Update, context: CallbackContext) -> None:
         self._model.ban_player(update, context)
 
-    # ✅ اجرای دستور Check
     def _handle_check(self, update: Update, context: CallbackContext) -> None:
         self._model.check(update, context)
 
-    # 💰 درخواست پول/بونوس
     def _handle_money(self, update: Update, context: CallbackContext) -> None:
         self._model.bonus(update, context)
 
-    # 🎮 کنترل دکمه‌های Inline بازی
     def _handle_button_clicked(
         self,
         update: Update,
@@ -84,9 +76,13 @@ class PokerBotController:
         elif query_data == PlayerAction.FOLD.value:
             self._model.fold(update, context)
         elif query_data == str(PlayerAction.SMALL.value):
-            self._model.raise_rate_bet(update, context, PlayerAction.SMALL)
+            self._model.raise_rate_bet(
+                update, context, PlayerAction.SMALL
+            )
         elif query_data == str(PlayerAction.NORMAL.value):
-            self._model.raise_rate_bet(update, context, PlayerAction.NORMAL)
+            self._model.raise_rate_bet(
+                update, context, PlayerAction.NORMAL
+            )
         elif query_data == str(PlayerAction.BIG.value):
             self._model.raise_rate_bet(update, context, PlayerAction.BIG)
         elif query_data == PlayerAction.ALL_IN.value:
