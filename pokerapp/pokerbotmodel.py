@@ -261,25 +261,30 @@ class PokerBotModel:
 
         Timer(DICE_DELAY_SEC, print_bonus).start()
 
-    def send_cards_to_user(self, update: Update, context: CallbackContext) -> None:
+    def send_cards_to_user(
+        self,
+        update: Update,
+        context: CallbackContext,
+    ) -> None:
         game = self._game_from_context(context)
-        current_player = None
+        current_player = None # <<<< این را به None مقداردهی اولیه کنید
+
         for player in game.players:
             if player.user_id == update.effective_user.id:
                 current_player = player
                 break
+
         if current_player is None or not current_player.cards:
             return
-        
-        # <<<< شروع تغییر: ذخیره ID پیام کارت‌ها >>>>
-        msg_id = self._view.send_cards(
+
+        # <<<< شروع تغییر >>>>
+        # دیگر نیازی به دریافت message_id نیست
+        self._view.send_cards(
             chat_id=update.effective_message.chat_id,
             cards=current_player.cards,
             mention_markdown=current_player.mention_markdown,
             ready_message_id=update.effective_message.message_id,
         )
-        game.message_ids_to_delete.append(msg_id)
-        # <<<< پایان تغییر >>>>
 
     # ... (متدهای _check_access, _send_cards_private, _divide_cards بدون تغییر عمده) ...
     def _check_access(self, chat_id: ChatId, user_id: UserId) -> bool:
