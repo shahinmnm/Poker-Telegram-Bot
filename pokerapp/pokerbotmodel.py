@@ -48,15 +48,6 @@ DEFAULT_MONEY = 1000
 MAX_TIME_FOR_TURN = datetime.timedelta(minutes=2)
 DESCRIPTION_FILE = "assets/description_bot.md"
 
-# <<<< شروع تغییرات: اضافه کردن لیست IDها به Game >>>>
-# برای سادگی، این تغییر را مستقیماً در متد __init__ Game اعمال می‌کنیم.
-# اطمینان حاصل کنید که Game در entities.py هم این فیلد را داشته باشد یا در اینجا آن را اضافه کنید.
-_original_game_init = Game.__init__
-def new_game_init(self, *args, **kwargs):
-    _original_game_init(self, *args, **kwargs)
-    self.message_ids_to_delete: List[MessageId] = []
-Game.__init__ = new_game_init
-# <<<< پایان تغییرات >>>>
 
 
 class PokerBotModel:
