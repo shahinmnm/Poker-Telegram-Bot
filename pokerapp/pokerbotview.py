@@ -11,8 +11,7 @@ from telegram import (
     InputMediaPhoto,
 )
 from io import BytesIO
-from typing import List # <<<< جدید
-
+from typing import List, Optional # <<<< Optional را اضافه کنید
 from pokerapp.desk import DeskImageGenerator
 from pokerapp.cards import Cards
 from pokerapp.entities import (
@@ -35,8 +34,8 @@ class PokerBotViewer:
         chat_id: ChatId,
         text: str,
         reply_markup: ReplyKeyboardMarkup = None,
-    ) -> MessageId:
-        """Sends a message and returns its ID."""
+    ) -> Optional[MessageId]: # <<<< نوع بازگشتی را به Optional[MessageId] تغییر دهید
+        """Sends a message and returns its ID, or None if not applicable."""
         message = self._bot.send_message(
             chat_id=chat_id,
             parse_mode=ParseMode.MARKDOWN,
@@ -45,7 +44,13 @@ class PokerBotViewer:
             disable_notification=True,
             disable_web_page_preview=True,
         )
-        return message.message_id
+        # <<<< شروع بلوک اصلاح شده >>>>
+        # بررسی می‌کنیم که آیا message یک شی Message معتبر است یا خیر
+        if isinstance(message, Message):
+            return message.message_id
+        # در غیر این صورت (مثلا وقتی ReplyKeyboardRemove استفاده شده)، None برمی‌گردانیم
+        return None
+        # <<<< پایان بلوک اصلاح شده >>>>
     
     def send_message(
         self,
