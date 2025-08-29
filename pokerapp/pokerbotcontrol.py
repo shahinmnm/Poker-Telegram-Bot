@@ -6,8 +6,8 @@ from telegram.ext import (
     CallbackQueryHandler,
     CallbackContext,
     Updater,
-    MessageHandler,
-    Filters
+    MessageHandler,  # <<<< جدید
+    Filters,         # <<<< جدید
 )
 
 from pokerapp.entities import PlayerAction
@@ -17,14 +17,13 @@ class PokerBotCotroller:
     def __init__(self, model: PokerBotModel, updater: Updater):
         self._model = model
 
-        # Handler برای پیام‌های متنی (دکمه‌های کیبورد سفارشی)
-        updater.dispatcher.add_handler(
-            MessageHandler(
-                Filters.text & (~Filters.command), self._handle_text_message
-            )
-        )
+        # <<<< شروع بلوک جدید: تعریف متن دکمه ها و MessageHandler >>>>
+        # تعریف متون دکمه به عنوان متغیر برای جلوگیری از خطا
+        SHOW_CARDS_TEXT = "🃏 نمایش کارت‌ها"
+        HIDE_CARDS_TEXT = "🙈 پنهان کردن کارت‌ها"
+        SHOW_TABLE_TEXT = "👁️ نمایش میز"
+        # <<<< پایان بلوک جدید >>>>
 
-        # Handler برای دستورات
         updater.dispatcher.add_handler(
             CommandHandler('ready', self._handle_ready)
         )
@@ -40,8 +39,20 @@ class PokerBotCotroller:
         updater.dispatcher.add_handler(
             CommandHandler('ban', self._handle_ban)
         )
-        
-        # Handler برای دکمه‌های شیشه‌ای (Inline Keyboard)
+        updater.dispatcher.add_handler(
+            CommandHandler('cards', self._handle_cards)
+        )
+
+        # <<<< شروع بلوک جدید: اضافه کردن MessageHandler برای دکمه های متنی >>>>
+        # این Handler به پیام‌های متنی که با محتوای دکمه‌های ما مطابقت دارند، گوش می‌دهد
+        updater.dispatcher.add_handler(
+            MessageHandler(
+                Filters.text([SHOW_CARDS_TEXT, HIDE_CARDS_TEXT, SHOW_TABLE_TEXT]) & (~Filters.command),
+                self._handle_text_buttons
+            )
+        )
+        # <<<< پایان بلوک جدید >>>>
+
         updater.dispatcher.add_handler(
             CallbackQueryHandler(
                 self._model.middleware_user_turn(
@@ -50,16 +61,24 @@ class PokerBotCotroller:
             )
         )
 
-# در فایل pokerapp/pokerbotcontrol.py
-
-    def _handle_text_message(self, update: Update, context: CallbackContext) -> None:
-        """Handles regular text messages, specifically for our custom keyboard."""
+    # <<<< شروع متد جدید: متد برای پردازش دکمه های متنی >>>>
+    def _handle_text_buttons(self, update: Update, context: CallbackContext) -> None:
+        """Handles clicks on custom reply keyboard buttons."""
         text = update.message.text
-        # نام دکمه‌ها باید دقیقاً با آنچه در pokerbotview.py تعریف شده، یکسان باشد
-        if text == "👁️ نمایش میز":
-            self._model.show_table(update, context)
-        elif text == "🙈 پنهان کردن":
+        
+        # تعریف مجدد متون برای استفاده در این متد
+        SHOW_CARDS_TEXT = "🃏 نمایش کارت‌ها"
+        HIDE_CARDS_TEXT = "🙈 پنهان کردن کارت‌ها"
+        SHOW_TABLE_TEXT = "👁️ نمایش میز"
+
+        if text == HIDE_CARDS_TEXT:
             self._model.hide_cards(update, context)
+        elif text == SHOW_CARDS_TEXT:
+            # این همان کاری است که دستور /cards انجام می‌دهد
+            self._model.send_cards_to_user(update, context)
+        elif text == SHOW_TABLE_TEXT:
+            self._model.show_table(update, context)
+    # <<<< پایان متد جدید >>>>
 
     def _handle_ready(self, update: Update, context: CallbackContext) -> None:
         self._model.ready(update, context)
@@ -70,11 +89,11 @@ class PokerBotCotroller:
     def _handle_stop(self, update: Update, context: CallbackContext) -> None:
         self._model.stop(user_id=update.effective_message.from_user.id)
 
+    def _handle_cards(self, update: Update, context: CallbackContext) -> None:
+        self._model.send_cards_to_user(update, context)
+
     def _handle_ban(self, update: Update, context: CallbackContext) -> None:
         self._model.ban_player(update, context)
-
-    def _handle_check(self, update: Update, context: CallbackContext) -> None:
-        self._model.check(update, context)
 
     def _handle_money(self, update: Update, context: CallbackContext) -> None:
         self._model.bonus(update, context)
@@ -85,20 +104,14 @@ class PokerBotCotroller:
         context: CallbackContext,
     ) -> None:
         query_data = update.callback_query.data
-        if query_data == PlayerAction.CHECK.value:
-            self._model.call_check(update, context)
-        elif query_data == PlayerAction.CALL.value:
+        if query_data == PlayerAction.CHECK.value or query_data == PlayerAction.CALL.value:
             self._model.call_check(update, context)
         elif query_data == PlayerAction.FOLD.value:
             self._model.fold(update, context)
         elif query_data == str(PlayerAction.SMALL.value):
-            self._model.raise_rate_bet(
-                update, context, PlayerAction.SMALL
-            )
+            self._model.raise_rate_bet(update, context, PlayerAction.SMALL)
         elif query_data == str(PlayerAction.NORMAL.value):
-            self._model.raise_rate_bet(
-                update, context, PlayerAction.NORMAL
-            )
+            self._model.raise_rate_bet(update, context, PlayerAction.NORMAL)
         elif query_data == str(PlayerAction.BIG.value):
             self._model.raise_rate_bet(update, context, PlayerAction.BIG)
         elif query_data == PlayerAction.ALL_IN.value:
