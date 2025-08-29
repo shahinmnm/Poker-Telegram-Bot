@@ -370,26 +370,35 @@ class PokerBotModel:
             return
 
         game.last_turn_time = datetime.datetime.now()
-        # <<<< شروع تغییر: ذخیره ID پیام نوبت >>>>
         msg_id = self._view.send_turn_actions(
-            chat_id=chat_id, game=game, player=current_player, money=current_player_money
+            chat_id=chat_id,
+            game=game,
+            player=current_player,
+            money=current_player_money,
         )
-        game.message_ids_to_delete.append(msg_id)
+        if msg_id:
+            game.turn_message_id = msg_id # از این ID برای حذف markup استفاده می‌شود
         # <<<< پایان تغییر >>>>
 
-    def add_cards_to_table(self, count: int, game: Game, chat_id: ChatId) -> None:
+    def add_cards_to_table(
+        self,
+        count: int,
+        game: Game,
+        chat_id: ChatId,
+    ) -> None:
         for _ in range(count):
             game.cards_table.append(game.remain_cards.pop())
-        
-        # <<<< شروع تغییر: ذخیره ID پیام میز >>>>
+
+        # <<<< شروع تغییر >>>>
+        # چون به ID این پیام برای حذف نیاز داریم، آن را بررسی و اضافه می‌کنیم
         msg_id = self._view.send_desk_cards_img(
             chat_id=chat_id,
             cards=game.cards_table,
-            caption=f"ظرف فعلی (Pot): {game.pot}$",
+            caption=f"💰 پات فعلی: {game.pot}$",
         )
-        game.message_ids_to_delete.append(msg_id)
+        if msg_id:
+            game.message_ids_to_delete.append(msg_id)
         # <<<< پایان تغییر >>>>
-
     def _finish(self, game: Game, chat_id: ChatId) -> None:
         self._round_rate.to_pot(game)
         print(f"game finished: {game.id}, players count: {len(game.players)}, pot: {game.pot}")
@@ -457,15 +466,14 @@ class PokerBotModel:
             if current_user_id != current_player.user_id: return
             fn(update, context)
             
-            # <<<< شروع تغییر: حذف پیام اینلاین بعد از کلیک >>>>
-            # حذف پیام از لیست پیام های قابل حذف
-            msg_id_to_remove = update.effective_message.message_id
-            if msg_id_to_remove in game.message_ids_to_delete:
-                game.message_ids_to_delete.remove(msg_id_to_remove)
-            self._view.remove_message(
-                chat_id=update.effective_message.chat_id,
-                message_id=msg_id_to_remove,
-            )
+            if game.turn_message_id:
+                try:
+                    self._view.remove_markup(
+                        chat_id=update.effective_message.chat_id,
+                        message_id=game.turn_message_id,
+                    )
+                except Exception as e:
+                    print(f"Could not remove markup for message {game.turn_message_id}: {e}")
             # <<<< پایان تغییر >>>>
         return m
 
