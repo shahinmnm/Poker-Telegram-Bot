@@ -102,13 +102,20 @@ class PokerBotViewer:
         bio.name = 'desk.png'
         im_cards.save(bio, 'PNG')
         bio.seek(0)
-        message = self._bot.send_photo(
+        messages = self._bot.send_media_group(
             chat_id=chat_id,
-            photo=bio,
-            caption=caption,
+            media=[
+                InputMediaPhoto(
+                    media=bio,
+                    caption=caption,
+                ),
+            ],
             disable_notification=disable_notification,
         )
-        return message.message_id
+        # بررسی می‌کنیم که آیا لیستی معتبر و غیرخالی از پیام‌ها برگشته است
+        if messages and isinstance(messages, list) and len(messages) > 0:
+            return messages[0].message_id
+        return None
 
     @staticmethod
     def _get_cards_markup(cards: Cards) -> ReplyKeyboardMarkup:
@@ -190,30 +197,43 @@ class PokerBotViewer:
         return PlayerAction.CALL
 
     def send_turn_actions(
-        self, chat_id: ChatId, game: Game, player: Player, money: Money
-    ) -> MessageId:
-        """Sends the turn actions to the player and returns the message ID."""
-        if not game.cards_table:
-            cards_table = "🚫 کارتی روی میز نیست"
+            self,
+            chat_id: ChatId,
+            game: Game,
+            player: Player,
+            money: Money,
+    ) -> Optional[MessageId]: # <<<< تغییر نوع بازگشتی به Optional
+        if len(game.cards_table) == 0:
+            cards_table = "🚫 کارتی نیست."
         else:
             cards_table = " ".join(game.cards_table)
         text = (
-            "🔄 نوبت {}\n" +
+            "🔄 نوبت  {}\n" +
             "{}\n" +
             "پول: *{}$*\n" +
             "📊 حداکثر نرخ دور: *{}$*"
-        ).format(player.mention_markdown, cards_table, money, game.max_round_rate)
-        
-        check_call_action = PokerBotViewer.define_check_call_action(game, player)
+        ).format(
+            player.mention_markdown,
+            cards_table,
+            money,
+            game.max_round_rate,
+        )
+        check_call_action = PokerBotViewer.define_check_call_action(
+            game, player
+        )
         markup = PokerBotViewer._get_turns_markup(check_call_action)
+        
+        # <<<< شروع بلوک اصلاح شده >>>>
         message = self._bot.send_message(
             chat_id=chat_id,
             text=text,
             reply_markup=markup,
             parse_mode=ParseMode.MARKDOWN,
-            disable_notification=True,
+            disable_notification=False, # << برای اطمینان از دیده شدن نوبت، نوتیفیکیشن را فعال کنیم
         )
-        return message.message_id
+        if isinstance(message, Message):
+            return message.message_id
+        return None
 
     def remove_markup(self, chat_id: ChatId, message_id: MessageId) -> None:
         self._bot.edit_message_reply_markup(chat_id=chat_id, message_id=message_id)
