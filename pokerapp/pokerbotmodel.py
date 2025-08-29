@@ -122,8 +122,7 @@ class PokerBotModel:
             return self._view.send_message_reply(
                 chat_id=chat_id,
                 message_id=update.effective_message.message_id,
-                text="💸 موجودی شما کافی نیست.",
-            )
+                text="💸 موجودی شما کافی نیست.",)
 
         game.ready_users.add(user.id)
         game.players.append(player)
@@ -144,8 +143,7 @@ class PokerBotModel:
         if game.state not in (GameState.INITIAL, GameState.FINISHED):
             self._view.send_message(
                 chat_id=chat_id,
-                text="🎯 بازی در حال انجام است!"
-            )
+                text="🎯 بازی در حال انجام است!")
             return
 
         members_count = self._bot.get_chat_member_count(chat_id) - 1
@@ -166,8 +164,7 @@ class PokerBotModel:
         else:
             self._view.send_message(
                 chat_id=chat_id,
-                text="👥 تعداد بازیکنان کافی نیست!"
-            )
+                text="👥 تعداد بازیکنان کافی نیست!")
 
     def _start_game(self, context: CallbackContext, game: Game, chat_id: ChatId) -> None:
         print(f"new game: {game.id}, players count: {len(game.players)}")
@@ -210,8 +207,7 @@ class PokerBotModel:
             return self._view.send_message_reply(
                 chat_id=chat_id,
                 message_id=update.effective_message.message_id,
-                text=f"💰 موجودی شما: *{money}$*",
-            )
+                text=f"💰 موجودی شما: *{money}$*",)
 
         icon: str
         dice_msg: Message
@@ -235,8 +231,7 @@ class PokerBotModel:
                 chat_id=chat_id,
                 message_id=message_id,
                 text=f"🎁 جایزه: *{bonus}$* {icon}" +
-                     f"💰 موجودی شما: *{money}$*",
-            )
+                     f"💰 موجودی شما: *{money}$*",  )
 
         Timer(DICE_DELAY_SEC, print_bonus).start()
 
