@@ -274,11 +274,24 @@ class PokerBotModel:
             if current_player.state == PlayerState.ACTIVE:
                 break
             
-            # اگر همه به جز یک نفر Fold/All-in کرده باشند، بازی تمام می‌شود.
             active_players = game.players_by(states=(PlayerState.ACTIVE,))
             if len(active_players) <= 1:
                 self._finish(game, chat_id)
                 return
+
+            game.last_turn_time = datetime.datetime.now()
+    
+            # <<<< 1. شناسه پیام را از متد view دریافت کنید >>>>
+            msg_id = self._view.send_turn_actions(
+                chat_id=chat_id,
+                game=game,
+                player=current_player,
+                money=current_player.wallet.value(),
+            )
+    
+    # <<<< 2. شناسه را در آبجکت game ذخیره کنید >>>>
+    game.turn_message_id = msg_id
+
     def bonus(self, update: Update, context: CallbackContext) -> None:
         wallet = WalletManagerModel(
             update.effective_message.from_user.id, self._kv)
@@ -492,11 +505,16 @@ class PokerBotModel:
         def m(update, context):
             game = self._game_from_context(context)
             if game.state == GameState.INITIAL: return
+            
             current_player = self._current_turn_player(game)
             current_user_id = update.callback_query.from_user.id
             if current_user_id != current_player.user_id: return
-            fn(update, context)
             
+            # ابتدا فانکشن اصلی (مثل fold, call, raise) اجرا می‌شود
+            fn(update, context) 
+            
+            # <<<< این بخش اکنون به درستی کار خواهد کرد >>>>
+            # بعد از اجرای حرکت بازیکن، دکمه‌های پیام نوبت او را حذف می‌کنیم
             if game.turn_message_id:
                 try:
                     self._view.remove_markup(
@@ -504,8 +522,8 @@ class PokerBotModel:
                         message_id=game.turn_message_id,
                     )
                 except Exception as e:
+                    # لاگ کردن خطا برای دیباگ کردن در آینده خوب است
                     print(f"Could not remove markup for message {game.turn_message_id}: {e}")
-            # <<<< پایان تغییر >>>>
         return m
 
     def ban_player(self, update: Update, context: CallbackContext) -> None:
