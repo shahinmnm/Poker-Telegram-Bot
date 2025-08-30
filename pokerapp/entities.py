@@ -101,6 +101,10 @@ class Game:
         self.message_ids_to_delete = []
         self.turn_message_id = None
         self.last_turn_time = datetime.datetime.now()
+        # >>>>> خط جدید زیر را اضافه کنید <<<<<
+        self.turn_message_id: Optional[MessageId] = None  # برای پیگیری پیام نوبت فعلی
+        # >>>>> خط جدید برای پاک کردن لیست پیام ها <<<<<
+        self.message_ids_to_delete: List[MessageId] = [] # مطمئن شوید این خط هم هست
 
     def players_by(self, states: Tuple[PlayerState]) -> List[Player]:
         return list(filter(lambda p: p.state in states, self.players))
