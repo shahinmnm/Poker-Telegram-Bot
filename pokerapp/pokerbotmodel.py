@@ -227,70 +227,59 @@ class PokerBotModel:
             map(lambda p: p.user_id, game.players),
         )
 
+
     def _process_playing(self, chat_id: ChatId, game: Game) -> None:
-        # بررسی پایان دور باید *قبل* از رفتن به بازیکن بعدی انجام شود.
-        # ابتدا چک می‌کنیم آیا اصلاً بازی در جریان است (اندیس -1 نیست)
-        if game.current_player_index != -1:
-            player_who_just_acted = self._current_turn_player(game)
+        game.current_player_index += 1
+        game.current_player_index %= len(game.players)
 
-            # شرط پیشنهادی شما، اما با کمی بهبود:
-            # 1. آیا همه بازیکنان فعال شرطشان را با حداکثر شرط برابر کرده‌اند؟
-            all_players_matched = all(
-                p.round_rate == game.max_round_rate or p.state != PlayerState.ACTIVE
-                for p in game.players
-            )
-            # 2. آیا آخرین کسی که Raise کرده بود (trading_end_user_id) نیز حرکت خود را انجام داده است؟
-            #    این شرط برای وقتی است که کسی شرط را نبسته باشد (max_round_rate > 0)
-            is_betting_closed = (
-                player_who_just_acted.user_id == game.trading_end_user_id
-            )
-            
-            # در pre-flop، یک شرط دیگر هم هست: بیگ بلایند باید فرصت Raise داشته باشد (option).
-            # اگر همه فقط Call کرده‌اند و نوبت به BB رسیده، او می‌تواند Check کند و دور تمام شود.
-            is_bb_option_check = (
-                game.state == GameState.ROUND_PRE_FLOP and
-                player_who_just_acted.user_id == game.players[1].user_id and # بازیکن دوم BB است
-                game.max_round_rate == SMALL_BLIND * 2 # هیچکس raise نکرده
-            )
+        current_player = self._current_turn_player(game)
 
-            if all_players_matched and (is_betting_closed or is_bb_option_check):
-                self._round_rate.to_pot(game)
-                self._goto_next_round(game, chat_id)
+        # Process next round.
+        if current_player.user_id == game.trading_end_user_id:
+            self._round_rate.to_pot(game)
+            self._goto_next_round(game, chat_id)
 
-                if game.state == GameState.INITIAL: # بازی تمام شد
-                    return
-                
-                # برای دور جدید، نوبت از نفر اول بعد از دیلر شروع می‌شود.
-                # اندیس -1 باعث می‌شود در چرخش بعدی به اندیس 0 (SB/دیلر) برسیم.
-                game.current_player_index = -1
+            game.current_player_index = 0
 
-        # حلقه اصلی: به بازیکن بعدی برو
-        while True:
-            game.current_player_index += 1
-            game.current_player_index %= len(game.players)
-            current_player = self._current_turn_player(game)
-            
-            # از بازیکنان Fold یا All-in رد شو
-            if current_player.state == PlayerState.ACTIVE:
-                break
-            
-            active_players = game.players_by(states=(PlayerState.ACTIVE,))
-            if len(active_players) <= 1:
-                self._finish(game, chat_id)
-                return
+        # Game finished.
+        if game.state == GameState.INITIAL:
+            return
 
-            game.last_turn_time = datetime.datetime.now()
-    
-            # <<<< 1. شناسه پیام را از متد view دریافت کنید >>>>
-            msg_id = self._view.send_turn_actions(
-                chat_id=chat_id,
-                game=game,
-                player=current_player,
-                money=current_player.wallet.value(),
-            )
-    
-        # <<<< 2. شناسه را در آبجکت game ذخیره کنید >>>>
+        # Player could be changed.
+        current_player = self._current_turn_player(game)
+
+        current_player_money = current_player.wallet.value()
+
+        # Player do not have monery so make it ALL_IN.
+        if current_player_money <= 0:
+            current_player.state = PlayerState.ALL_IN
+
+        # Skip inactive players.
+        if current_player.state != PlayerState.ACTIVE:
+            self._process_playing(chat_id, game)
+            return
+
+        # All fold except one.
+        all_in_active_players = game.players_by(
+            states=(PlayerState.ACTIVE, PlayerState.ALL_IN)
+        )
+        if len(all_in_active_players) == 1:
+            self._finish(game, chat_id)
+            return
+
+        game.last_turn_time = datetime.datetime.now()
+        
+        # ===> شروع بلوک اصلاح شده <===
+        # ما شناسه پیام را دریافت می‌کنیم و بلافاصله آن را ذخیره می‌کنیم.
+        # این بلوک کد فقط برای بازیکنان فعال اجرا می‌شود.
+        msg_id = self._view.send_turn_actions(
+            chat_id=chat_id,
+            game=game,
+            player=current_player,
+            money=current_player_money,
+        )
         game.turn_message_id = msg_id
+        # ===> پایان بلوک اصلاح شده <===
 
     def bonus(self, update: Update, context: CallbackContext) -> None:
         wallet = WalletManagerModel(
