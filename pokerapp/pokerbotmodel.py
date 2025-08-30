@@ -196,29 +196,27 @@ class PokerBotModel:
         game.state = GameState.ROUND_PRE_FLOP
         self._divide_cards(game=game, chat_id=chat_id)
 
-         self._round_rate.round_pre_flop_rate_before_first_turn(game)
+        self._round_rate.round_pre_flop_rate_before_first_turn(game)
+
+        # در دور pre-flop، اولین حرکت با بازیکنی است که بلافاصله بعد از Big Blind قرار دارد.
+        # ایندکس Big Blind معمولا 1 است (0 = Dealer/Small Blind, 1 = Big Blind).
+        # پس اولین حرکت با بازیکن ایندکس 2 است.
+        # در بازی دو نفره (heads-up)، اولین حرکت با Dealer/Small Blind (ایندکس 0) است.
+
+        num_players = len(game.players)
+        if num_players == 2:
+            # در بازی دو نفره، نوبت اول با دیلر/اسمال بلایند است (ایندکس 0)
+            # ایندکس را -1 میگذاریم تا _process_playing با افزایش آن، به ایندکس 0 برسد.
+            game.current_player_index = -1
+        else:
+            # در بازی با بیش از 2 بازیکن، نوبت با نفر بعد از بیگ بلایند است (ایندکس 2)
+            # ایندکس را 1 میگذاریم تا _process_playing با افزایش آن، به ایندکس 2 برسد.
+            game.current_player_index = 1
         
-                # ==================== شروع بلوک جایگزینی ====================
-                # در دور pre-flop، اولین حرکت با بازیکنی است که بلافاصله بعد از Big Blind قرار دارد.
-                # ایندکس Big Blind معمولا 1 است (0 = Dealer/Small Blind, 1 = Big Blind).
-                # پس اولین حرکت با بازیکن ایندکس 2 است.
-                # در بازی دو نفره (heads-up)، اولین حرکت با Dealer/Small Blind (ایندکس 0) است.
-        
-                num_players = len(game.players)
-                if num_players == 2:
-                    # در بازی دو نفره، نوبت اول با دیلر/اسمال بلایند است (ایندکس 0)
-                    # ایندکس را -1 میگذاریم تا _process_playing با افزایش آن، به ایندکس 0 برسد.
-                    game.current_player_index = -1
-                else:
-                    # در بازی با بیش از 2 بازیکن، نوبت با نفر بعد از بیگ بلایند است (ایندکس 2)
-                    # ایندکس را 1 میگذاریم تا _process_playing با افزایش آن، به ایندکس 2 برسد.
-                    game.current_player_index = 1
-                
-                # فراخوانی برای شروع روند بازی و تعیین نوبت
-                self._process_playing(chat_id=chat_id, game=game)
-                # ===================== پایان بلوک جایگزینی =====================
-        
-                context.chat_data[KEY_OLD_PLAYERS] = [p.user_id for p in game.players]
+        # فراخوانی برای شروع روند بازی و تعیین نوبت
+        self._process_playing(chat_id=chat_id, game=game)
+
+        context.chat_data[KEY_OLD_PLAYERS] = [p.user_id for p in game.players]
         
     def _process_playing(self, chat_id: ChatId, game: Game) -> None:
         # اگر بازی تمام شده است، خارج شو
