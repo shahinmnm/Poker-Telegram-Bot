@@ -3,8 +3,8 @@
 from abc import abstractmethod
 import enum
 import datetime
-from typing import Tuple, List, Optional # <<<< Optional را اضافه کنید
-from uuid import uuid4  # <<<< این خط را اضافه کنید
+from typing import Tuple, List, Optional
+from uuid import uuid4
 from pokerapp.cards import get_cards
 
 MessageId = str
@@ -16,12 +16,14 @@ Money = int
 
 @abstractmethod
 class Wallet:
-    # ... (این کلاس بدون تغییر باقی می‌ماند)
     @staticmethod
     def _prefix(id: int, suffix: str = ""):
         pass
 
-    def add_daily(self) -> Money:
+    def add_daily(self, amount: Money) -> Money:
+        pass
+
+    def has_daily_bonus(self) -> bool:
         pass
 
     def inc(self, amount: Money = 0) -> None:
@@ -45,6 +47,9 @@ class Wallet:
     def approve(self, game_id: str) -> None:
         pass
 
+    def cancel(self, game_id: str) -> None:
+        pass
+
 class Player:
     def __init__(
         self,
@@ -60,6 +65,10 @@ class Player:
         self.cards = []
         self.round_rate = 0
         self.ready_message_id = ready_message_id
+        # --- ویژگی‌های اضافه شده ---
+        self.total_bet = 0  # کل مبلغ شرط‌بندی شده در یک دست
+        self.has_acted = False # آیا در راند فعلی نوبت خود را بازی کرده؟
+        # -------------------------
 
     def __repr__(self):
         return "{}({!r})".format(self.__class__.__name__, self.__dict__)
@@ -71,21 +80,7 @@ class PlayerState(enum.Enum):
 
 class Game:
     def __init__(self):
-        self.id = str(uuid4())
-        self.pot = 0
-        self.max_round_rate = 0
-        self.state = GameState.INITIAL
-        self.players: List[Player] = []
-        self.cards_table = []
-        self.current_player_index = -1
-        self.remain_cards = get_cards()
-        self.trading_end_user_id = 0
-        self.ready_users = set()
-        self.message_ids_to_delete: List[MessageId] = []
-        self.turn_message_id: Optional[MessageId] = None
-        self.last_turn_time: Optional[datetime.datetime] = None
         self.reset()
-
 
     def reset(self):
         self.id = str(uuid4())
@@ -98,16 +93,36 @@ class Game:
         self.remain_cards = get_cards()
         self.trading_end_user_id = 0
         self.ready_users = set()
-        self.message_ids_to_delete = []
-        self.turn_message_id = None
         self.last_turn_time = datetime.datetime.now()
-        # >>>>> خط جدید زیر را اضافه کنید <<<<<
-        self.turn_message_id: Optional[MessageId] = None  # برای پیگیری پیام نوبت فعلی
-        # >>>>> خط جدید برای پاک کردن لیست پیام ها <<<<<
-        self.message_ids_to_delete: List[MessageId] = [] # مطمئن شوید این خط هم هست
+        # --- ویژگی‌های اضافه شده ---
+        self.turn_message_id: Optional[MessageId] = None # برای حذف دکمه‌های نوبت
+        self.message_ids_to_delete: List[MessageId] = [] # برای پاک کردن پیام‌های بازی
+        # -------------------------
 
-    def players_by(self, states: Tuple[PlayerState]) -> List[Player]:
+    def players_by(self, states: Tuple[PlayerState, ...]) -> List[Player]:
         return list(filter(lambda p: p.state in states, self.players))
+        
+    def all_in_players_are_covered(self) -> bool:
+        """
+        Checks if all players who are all-in have put in less money than at least one active player.
+        This is to determine if betting can continue or if we should fast-forward.
+        """
+        active_players = self.players_by(states=(PlayerState.ACTIVE,))
+        if not active_players:
+            return True # No more betting possible
+            
+        max_active_bet = max(p.total_bet for p in active_players) if active_players else 0
+        all_in_players = self.players_by(states=(PlayerState.ALL_IN,))
+        
+        for p_all_in in all_in_players:
+            if p_all_in.total_bet >= max_active_bet:
+                # An all-in player has more or equal bet than any active player.
+                # Betting can only continue if there are at least two active players who can still bet.
+                if len(active_players) < 2:
+                    return True # Not enough players to continue betting
+                return False 
+                
+        return True
 
     def __repr__(self):
         return "{}({!r})".format(self.__class__.__name__, self.__dict__)
@@ -122,8 +137,8 @@ class GameState(enum.Enum):
 
 class PlayerAction(enum.Enum):
     CHECK = "✋ چک"
-    CALL = "🎯 کال "
-    FOLD = "🏳️ فولد "
+    CALL = "🎯 کال"
+    FOLD = "🏳️ فولد"
     RAISE_RATE = "💹 رِیز"
     BET = "💰 بِت"
     ALL_IN = "🀄 آل‑این"
@@ -133,3 +148,4 @@ class PlayerAction(enum.Enum):
 
 class UserException(Exception):
     pass
+
