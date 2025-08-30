@@ -215,18 +215,14 @@ class PokerBotViewer:
         markup = self._get_turns_markup(check_call_action)
 
         try:
-            message = self._bot.send_message(
-                chat_id=chat_id,
-                text=text,
-                reply_markup=markup,
-                parse_mode=ParseMode.MARKDOWN,
-                disable_notification=True,
-            )
+            message = self._bot.send_message(...)
             if isinstance(message, Message):
                 return message.message_id
-        except Exception as e:
-            print(f"ERROR sending turn actions: {e}")
-            traceback.print_exc()
+        except Exception as e: # <--- خطا اینجا گرفته می‌شود
+            # در صورت بروز خطا در ارسال پیام، آن را لاگ می‌کنیم
+            print(f"Error sending turn actions: {e}") # <--- و فقط این پیام چاپ می‌شود
+    
+        # در صورت خطا، None برمی‌گردانیم
         return None
 
     def remove_markup(self, chat_id: ChatId, message_id: MessageId) -> None:
