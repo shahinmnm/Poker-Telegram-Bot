@@ -196,15 +196,27 @@ class PokerBotModel:
         game.state = GameState.ROUND_PRE_FLOP
         self._divide_cards(game=game, chat_id=chat_id)
 
-        self._round_rate.round_pre_flop_rate_before_first_turn(game)
-        
+ self._round_rate.round_pre_flop_rate_before_first_turn(game)
+
+        # ==================== شروع بلوک جایگزینی ====================
+        # در دور pre-flop، اولین حرکت با بازیکنی است که بلافاصله بعد از Big Blind قرار دارد.
+        # ایندکس Big Blind معمولا 1 است (0 = Dealer/Small Blind, 1 = Big Blind).
+        # پس اولین حرکت با بازیکن ایندکس 2 است.
+        # در بازی دو نفره (heads-up)، اولین حرکت با Dealer/Small Blind (ایندکس 0) است.
+
         num_players = len(game.players)
-        start_index = 0
-        if game.state == GameState.ROUND_PRE_FLOP and num_players > 2:
-            start_index = 2
+        if num_players == 2:
+            # در بازی دو نفره، نوبت اول با دیلر/اسمال بلایند است (ایندکس 0)
+            # ایندکس را -1 میگذاریم تا _process_playing با افزایش آن، به ایندکس 0 برسد.
+            game.current_player_index = -1
+        else:
+            # در بازی با بیش از 2 بازیکن، نوبت با نفر بعد از بیگ بلایند است (ایندکس 2)
+            # ایندکس را 1 میگذاریم تا _process_playing با افزایش آن، به ایندکس 2 برسد.
+            game.current_player_index = 1
         
-        game.current_player_index = start_index - 1
+        # فراخوانی برای شروع روند بازی و تعیین نوبت
         self._process_playing(chat_id=chat_id, game=game)
+        # ===================== پایان بلوک جایگزینی =====================
 
         context.chat_data[KEY_OLD_PLAYERS] = [p.user_id for p in game.players]
         
@@ -222,29 +234,59 @@ class PokerBotModel:
                 self._finish(game, chat_id)
             return
 
-        all_players_acted = all(p.has_acted or p.state != PlayerState.ACTIVE for p in game.players)
-        rates_equalized = all(p.round_rate == game.max_round_rate or p.state != PlayerState.ACTIVE for p in game.players)
+        active_and_all_in_players = game.players_by(states=(PlayerState.ACTIVE, PlayerState.ALL_IN))
+        if len(active_and_all_in_players) <= 1:
+            active_players = game.players_by(states=(PlayerState.ACTIVE,))
+            if active_players and game.all_in_players_are_covered():
+                self._fast_forward_to_finish(game, chat_id)
+            else:
+                self._finish(game, chat_id)
+            return
+
+        # ==================== شروع بلوک جایگزینی ====================
+        # شرط جدید و دقیق‌تر برای تشخیص پایان دور شرط‌بندی
+        # یک دور زمانی تمام می‌شود که:
+        # 1. همه بازیکنان فعال (نه Fold و نه All-in) حداقل یک بار عمل کرده باشند.
+        # 2. مبلغ شرط همه بازیکنان فعال با بیشترین مبلغ شرط در آن دور (max_round_rate) برابر باشد.
         
-        # ===> شروع بلوک اصلاح شده برای رفتن به دور بعد <===
-        if all_players_acted and rates_equalized:
+        round_over = True
+        active_players = game.players_by(states=(PlayerState.ACTIVE,))
+
+        if not active_players: # اگر هیچ بازیکن فعالی نمانده
+             round_over = True
+        else:
+            for p in active_players:
+                # اگر بازیکنی پیدا شود که هنوز عمل نکرده یا شرطش با ماکزیمم برابر نیست، دور تمام نشده
+                if not p.has_acted or p.round_rate < game.max_round_rate:
+                    round_over = False
+                    break
+        
+        # حالت خاص برای Big Blind در Pre-flop
+        # اگر کسی Raise نکرده باشد و نوبت به Big Blind برسد، او حق انتخاب (check یا raise) دارد
+        # در این حالت has_acted او False است اما دور نباید تمام شود.
+        if len(game.players) > 1:
+            big_blind_player = game.players[1 % len(game.players)]
+            if (game.state == GameState.ROUND_PRE_FLOP and
+                    not big_blind_player.has_acted and
+                    game.max_round_rate == 2 * SMALL_BLIND):
+                round_over = False
+
+        if round_over:
             self._round_rate.to_pot(game)
-            # بازیکنانی که all-in نیستند باید has_acted آنها ریست شود
+            self._goto_next_round(game, chat_id)
+            if game.state == GameState.INITIAL:  # game has finished
+                return
+
+            # ریست کردن وضعیت has_acted برای دور جدید و تعیین نفر شروع کننده
+            game.current_player_index = -1
             for p in game.players:
                 if p.state == PlayerState.ACTIVE:
                     p.has_acted = False
-            
-            # انتقال به دور بعدی بازی
-            self._goto_next_round(game, chat_id)
-            
-            # اگر بازی بعد از goto_next_round تمام شد (مثلا در ریور بودیم)، خارج شو
-            if game.state == GameState.INITIAL:
-                return
 
-            # شروع دور جدید شرط‌بندی از اولین بازیکن فعال بعد از دیلر
-            game.current_player_index = -1 
-            self._process_playing(chat_id, game) # فراخوانی بازگشتی برای شروع دور جدید
+            # فراخوانی بازگشتی برای شروع دور جدید
+            self._process_playing(chat_id, game)
             return
-        # ===> پایان بلوک اصلاح شده <===
+        # ===================== پایان بلوک جایگزینی =====================
 
         # Find next active player
         while True:
