@@ -209,6 +209,10 @@ class PokerBotModel:
         context.chat_data[KEY_OLD_PLAYERS] = [p.user_id for p in game.players]
         
     def _process_playing(self, chat_id: ChatId, game: Game) -> None:
+        # اگر بازی تمام شده است، خارج شو
+        if game.state == GameState.INITIAL:
+            return
+
         active_and_all_in_players = game.players_by(states=(PlayerState.ACTIVE, PlayerState.ALL_IN))
         if len(active_and_all_in_players) <= 1:
             active_players = game.players_by(states=(PlayerState.ACTIVE,))
@@ -220,35 +224,64 @@ class PokerBotModel:
 
         all_players_acted = all(p.has_acted or p.state != PlayerState.ACTIVE for p in game.players)
         rates_equalized = all(p.round_rate == game.max_round_rate or p.state != PlayerState.ACTIVE for p in game.players)
-
+        
+        # ===> شروع بلوک اصلاح شده برای رفتن به دور بعد <===
         if all_players_acted and rates_equalized:
             self._round_rate.to_pot(game)
-            self._goto_next_round(game, chat_id)
-            if game.state == GameState.INITIAL: # game has finished
-                return
-            game.current_player_index = -1 # start from first player after dealer
+            # بازیکنانی که all-in نیستند باید has_acted آنها ریست شود
             for p in game.players:
-                p.has_acted = False
-            self._process_playing(chat_id, game)
+                if p.state == PlayerState.ACTIVE:
+                    p.has_acted = False
+            
+            # انتقال به دور بعدی بازی
+            self._goto_next_round(game, chat_id)
+            
+            # اگر بازی بعد از goto_next_round تمام شد (مثلا در ریور بودیم)، خارج شو
+            if game.state == GameState.INITIAL:
+                return
+
+            # شروع دور جدید شرط‌بندی از اولین بازیکن فعال بعد از دیلر
+            game.current_player_index = -1 
+            self._process_playing(chat_id, game) # فراخوانی بازگشتی برای شروع دور جدید
             return
-        
+        # ===> پایان بلوک اصلاح شده <===
+
         # Find next active player
         while True:
             game.current_player_index = (game.current_player_index + 1) % len(game.players)
             current_player = self._current_turn_player(game)
             if current_player.state == PlayerState.ACTIVE:
-                break
-        
+                # اگر بازیکنی که نوبت به او رسیده، قبلا حرکت کرده و شرطش با ماکزیمم برابر است
+                # یعنی دور کامل شده و باید از حلقه خارج شویم.
+                if current_player.has_acted and current_player.round_rate == game.max_round_rate:
+                    # این شرط جلوی حلقه‌های بی‌نهایت را می‌گیرد
+                    # و باعث می‌شود منطق به بلوک "رفتن به دور بعد" برسد.
+                    self._process_playing(chat_id, game) # یک فراخوانی بازگشتی برای ارزیابی مجدد وضعیت
+                    return
+                break # بازیکن فعال بعدی پیدا شد، از حلقه خارج شو
+
         game.last_turn_time = datetime.datetime.now()
         current_player_money = current_player.wallet.value()
-        
+
         msg_id = self._view.send_turn_actions(
             chat_id=chat_id,
             game=game,
             player=current_player,
             money=current_player_money,
         )
-        game.turn_message_id = msg_id
+        
+        # ===> شروع بلوک جدید برای مدیریت msg_id <===
+        # بررسی می‌کنیم که آیا msg_id معتبر است یا خیر
+        if msg_id:
+            game.turn_message_id = msg_id
+        else:
+            # اگر ارسال پیام نوبت با خطا مواجه شد، بازی را متوقف می‌کنیم تا از کرش جلوگیری شود
+            print(f"CRITICAL: Failed to send turn message for chat {chat_id}. Aborting turn processing.")
+            # می‌توانید یک پیام خطا برای ادمین یا در گروه ارسال کنید
+            self._view.send_message(chat_id, "خطای جدی در ارسال پیام نوبت رخ داد. بازی متوقف شد.")
+            # بازی را ریست کنید یا وضعیت را به حالت خطا تغییر دهید
+            game.reset()
+        # ===> پایان بلوک جدید <===
 
     def _fast_forward_to_finish(self, game: Game, chat_id: ChatId):
         """ When no more betting is possible, reveals all remaining cards """
@@ -496,7 +529,11 @@ class PokerBotModel:
         """A generic handler for player actions"""
         game = self._game_from_context(context)
         player = self._current_turn_player(game)
-        
+
+        # ===> اطمینان از اینکه بازیکن درست اقدام می‌کند <===
+        if not player or player.user_id != update.effective_user.id:
+            return # اگر نوبت این بازیکن نیست، هیچ کاری نکن
+            
         try:
             action_logic(game, player)
             player.has_acted = True
@@ -504,7 +541,13 @@ class PokerBotModel:
             msg_id = self._view.send_message_return_id(chat_id=update.effective_chat.id, text=str(e))
             if msg_id: game.message_ids_to_delete.append(msg_id)
             return
+        
+        # ===> حذف فراخوانی بازگشتی اضافه <===
+        # این فراخوانی باعث اجرای مجدد و نمایش دکمه check بعد از call می‌شد.
+        # self._process_playing(chat_id, game) <<<< این خط را حذف یا کامنت کنید
 
+        # به جای آن، اجازه دهید که middleware کار را تمام کند و ما فقط
+        # نوبت را پردازش کنیم.
         self._process_playing(
             chat_id=update.effective_message.chat_id,
             game=game,
