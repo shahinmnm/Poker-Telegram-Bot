@@ -35,6 +35,7 @@ PlayerAction,
 PlayerState,
 Score,
 Wallet,
+Mention,
 )
 
 from pokerapp.pokerbotview import PokerBotViewer
@@ -126,6 +127,7 @@ class WalletManagerModel:
         if game_id in self._authorized:
             self.set(self.value() + self._authorized[game_id])
             del self._authorized[game_id]
+            
 class RoundRateModel:
     
     def round_pre_flop_rate_before_first_turn(self, game: Game) -> None:
