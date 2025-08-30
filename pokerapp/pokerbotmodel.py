@@ -45,8 +45,7 @@ DICE_DELAY_SEC = 5
 
 BONUSES = (5, 20, 40, 80, 160, 320)
 
-DICES = “⚀⚁⚂⚃⚄⚅”
-
+DICES = "⚀⚁⚂⚃⚄⚅"
 KEY_CHAT_DATA_GAME = “game”
 
 KEY_OLD_PLAYERS = “old_players”
