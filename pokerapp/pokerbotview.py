@@ -195,35 +195,43 @@ class PokerBotViewer:
             game: Game,
             player: Player,
             money: Money,
-    ) -> Optional[MessageId]:
-        if not game.cards_table:
-            cards_table = "🚫 کارتی روی میز نیست."
+    ) -> Optional[MessageId]: # نوع بازگشتی را مشخص می‌کنیم
+        if len(game.cards_table) == 0:
+            cards_table = "🚫 کارتی نیست."
         else:
             cards_table = " ".join(game.cards_table)
         text = (
-            "🔄 نوبت {}\n"
-            "کارت‌های روی میز: {}\n"
-            "موجودی شما: *{}$*\n"
-            "حداکثر شرط در این دور: *{}$*"
+            "🔄 نوبت  {}\n" +
+            "{}\n" +
+            "پول: *{}$*\n" +
+            "📊 حداکثر نرخ دور: *{}$*"
         ).format(
             player.mention_markdown,
             cards_table,
             money,
             game.max_round_rate,
         )
-        check_call_action = self.define_check_call_action(game, player)
-        markup = self._get_turns_markup(check_call_action)
-
+        check_call_action = PokerBotViewer.define_check_call_action(
+            game, player
+        )
+        markup = PokerBotViewer._get_turns_markup(check_call_action)
+        
         try:
-            message = self._bot.send_message(...)
-            if isinstance(message, Message):
+            # از متد جدید و همزمان (sync) استفاده می‌کنیم
+            message = self._bot.send_message_sync(
+                chat_id=chat_id,
+                text=text,
+                reply_markup=markup,
+                parse_mode=ParseMode.MARKDOWN,
+                disable_notification=True,
+            )
+            if message:
                 return message.message_id
-        except Exception as e: # <--- خطا اینجا گرفته می‌شود
-            # در صورت بروز خطا در ارسال پیام، آن را لاگ می‌کنیم
-            print(f"Error sending turn actions: {e}") # <--- و فقط این پیام چاپ می‌شود
-    
-        # در صورت خطا، None برمی‌گردانیم
-        return None
+            return None
+        except Exception as e:
+            print(f"Error sending turn actions: {e}")
+            traceback.print_exc()
+            return None
 
     def remove_markup(
         self,
