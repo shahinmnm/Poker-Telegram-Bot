@@ -139,6 +139,19 @@ class MessageDelayBot(Bot):
                     logging.critical(f"FATAL ERROR in _tasks_manager_loop itself: {e}")
                     traceback.print_exc()
             time.sleep(0.1) # A slightly longer sleep can be better
+            
+    def send_message_sync(self, *args, **kwargs):
+        """
+        Sends a message immediately, bypassing the queue.
+        This should be used for critical messages that need a return value.
+        """
+        try:
+            # فراخوانی مستقیم متد از کلاس پدر (Bot)
+            return super(MessageDelayBot, self).send_message(*args, **kwargs)
+        except Exception as e:
+            logging.error(f"Error in send_message_sync: {e}")
+            traceback.print_exc()
+            return None
 
     def __del__(self):
         try:
