@@ -289,8 +289,8 @@ class PokerBotModel:
                 money=current_player.wallet.value(),
             )
     
-    # <<<< 2. شناسه را در آبجکت game ذخیره کنید >>>>
-    game.turn_message_id = msg_id
+        # <<<< 2. شناسه را در آبجکت game ذخیره کنید >>>>
+        game.turn_message_id = msg_id
 
     def bonus(self, update: Update, context: CallbackContext) -> None:
         wallet = WalletManagerModel(
