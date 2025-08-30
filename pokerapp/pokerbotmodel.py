@@ -28,6 +28,9 @@ from pokerapp.entities import (
     Mention,
 )
 from pokerapp.pokerbotview import PokerBotViewer
+# Assuming RoundRateModel and WalletManagerModel are in separate files as per the import structure
+from pokerapp.roundrate import RoundRateModel 
+from pokerapp.wallet import WalletManagerModel
 
 DICE_MULT = 10
 DICE_DELAY_SEC = 5
@@ -45,15 +48,13 @@ MAX_TIME_FOR_TURN = datetime.timedelta(minutes=2)
 DESCRIPTION_FILE = "assets/description_bot.md"
 
 class PokerBotModel:
-    
-    # --- ویژگی اضافه شده برای رفع خطا ---
+
     ACTIVE_GAME_STATES = {
         GameState.ROUND_PRE_FLOP,
         GameState.ROUND_FLOP,
         GameState.ROUND_TURN,
         GameState.ROUND_RIVER,
     }
-    # -----------------------------------
 
     def __init__(
         self,
@@ -135,7 +136,7 @@ class PokerBotModel:
 
         game.ready_users.add(user.id)
         game.players.append(player)
-        
+
         self._view.send_message(
             chat_id=chat_id,
             text=(f"{player.mention_markdown} اعلام آمادگی کرد. \n"
@@ -151,7 +152,6 @@ class PokerBotModel:
         except Exception as e:
             print(f"Error checking member count or starting game: {e}")
 
-
     def stop(self, user_id: UserId) -> None:
         UserPrivateChatModel(user_id=user_id, kv=self._kv).delete()
 
@@ -166,7 +166,7 @@ class PokerBotModel:
                 text="🎮 یک بازی در حال حاضر در جریان است."
             )
             return
-            
+
         if game.state == GameState.FINISHED:
             game.reset()
 
@@ -212,7 +212,7 @@ class PokerBotModel:
         old_players_ids = context.chat_data.get(KEY_OLD_PLAYERS, [])
         if old_players_ids:
             old_players_ids = old_players_ids[1:] + old_players_ids[:1]
-            
+
             def index(ln: List, user_id: UserId) -> int:
                 try:
                     return ln.index(user_id)
@@ -224,7 +224,7 @@ class PokerBotModel:
         self._divide_cards(game=game, chat_id=chat_id)
 
         self._round_rate.round_pre_flop_rate_before_first_turn(game)
-        
+
         num_players = len(game.players)
         # In Heads-Up (2 players), Small Blind acts first before the flop.
         # Dealer (button) is player 0, SB is player 0, BB is player 1. SB acts first.
@@ -362,14 +362,15 @@ class PokerBotModel:
             print(f"Error cleaning private messages: {ex}")
 
         # Send new cards
-        message_id = self._view.send_desk_cards_img(
+        message = self._view.send_desk_cards_img(
             chat_id=private_chat_id,
             cards=cards,
             caption="کارت‌های شما",
             disable_notification=True,
-        ).message_id
-        
-        user_chat_model.push_message(message_id=message_id)
+        )
+        if message:
+            user_chat_model.push_message(message_id=message.message_id)
+
 
     def _divide_cards(self, game: Game, chat_id: ChatId) -> None:
         for player in game.players:
@@ -398,67 +399,72 @@ class PokerBotModel:
                     ready_message_id=player.ready_message_id,
                 )
                 if msg_id: game.message_ids_to_delete.append(msg_id)
-
+    
+    # =====> START MODIFIED BLOCK <=====
     def _process_playing(self, chat_id: ChatId, game: Game) -> None:
         if game.state not in self.ACTIVE_GAME_STATES:
             return
 
+        # Condition 1: Only one or zero non-folded players left
         active_and_all_in_players = game.players_by(states=(PlayerState.ACTIVE, PlayerState.ALL_IN))
         if len(active_and_all_in_players) <= 1:
             self._finish(game, chat_id)
             return
 
-        active_players = game.players_by(states=(PlayerState.ACTIVE,))
-        
-        # Condition to end betting round
+        # Condition 2: Betting round is over
         round_over = False
+        active_players = game.players_by(states=(PlayerState.ACTIVE,))
+
+        # If there are active players, check if betting is complete
         if active_players:
-            # Check if all active players have acted and contributed the same amount.
+            # All active players must have acted AND have the same amount bet in this round
             all_acted = all(p.has_acted for p in active_players)
             all_matched = len(set(p.round_rate for p in active_players)) == 1
-            if all_acted and all_matched and game.max_round_rate > 0:
-                round_over = True
+
+            # The round is over if everyone has acted and matched the bet.
+            # The game.max_round_rate > 0 check ensures that a round of just checks pre-flop doesn't end prematurely.
+            if all_acted and all_matched:
+                # Special check for pre-flop big blind option
+                bb_player = game.players[1 % len(game.players)]
+                is_bb_option = (
+                    game.state == GameState.ROUND_PRE_FLOP and
+                    not bb_player.has_acted and
+                    game.max_round_rate == (2 * SMALL_BLIND)
+                )
+                if not is_bb_option:
+                    round_over = True
         else:
-            # No active players left, only ALL_IN players
+            # If no active players are left (all are ALL_IN or FOLD), the betting round is over.
             round_over = True
-        
-        # Special case for Pre-flop: Big Blind can still act if no one raised.
-        big_blind_player = game.players[1 % len(game.players)] if len(game.players) > 1 else None
-        if (game.state == GameState.ROUND_PRE_FLOP and
-            big_blind_player and
-            not big_blind_player.has_acted and
-            game.max_round_rate == 2 * SMALL_BLIND and
-            all(p.round_rate == game.max_round_rate for p in active_players if p.has_acted)):
-             round_over = False
 
         if round_over:
-            if game.all_in_players_are_covered() and len(active_players) > 0:
-                self._fast_forward_to_finish(game, chat_id)
+            self._round_rate.to_pot(game)
+            # Check for fast-forward scenario
+            active_players_after_pot = game.players_by(states=(PlayerState.ACTIVE,))
+            if len(active_players_after_pot) < 2:
+                 self._fast_forward_to_finish(game, chat_id)
             else:
-                self._round_rate.to_pot(game)
-                self._goto_next_round(game, chat_id)
-                if game.state in (GameState.INITIAL, GameState.FINISHED):
-                    return
-                # Start next round
-                game.current_player_index = -1 # Start from player after dealer (index 0)
-                for p in game.players:
-                    if p.state == PlayerState.ACTIVE:
-                        p.has_acted = False
-                self._process_playing(chat_id, game)
+                 self._goto_next_round(game, chat_id)
+                 if game.state in self.ACTIVE_GAME_STATES:
+                     self._process_playing(chat_id, game)
             return
 
-        # Find next active player
+        # Find the next player whose turn it is
         start_index = game.current_player_index
+        num_players = len(game.players)
         while True:
-            game.current_player_index = (game.current_player_index + 1) % len(game.players)
+            game.current_player_index = (game.current_player_index + 1) % num_players
             current_player = self._current_turn_player(game)
             if current_player.state == PlayerState.ACTIVE:
                 break
             if game.current_player_index == start_index:
-                # Full circle without finding an active player, should not happen if checked before
+                # We've looped through all players and found no one active.
+                # This should be caught by the checks above, but as a safeguard:
+                print("Error: Full circle without finding an active player in _process_playing.")
                 self._finish(game, chat_id)
                 return
 
+        # It's this player's turn.
         game.last_turn_time = datetime.datetime.now()
         current_player_money = current_player.wallet.value()
 
@@ -483,13 +489,13 @@ class PokerBotModel:
             if not game.remain_cards: break
             game.cards_table.append(game.remain_cards.pop())
 
-        msg_id = self._view.send_desk_cards_img(
+        message = self._view.send_desk_cards_img(
             chat_id=chat_id,
             cards=game.cards_table,
             caption=f"💰 پات فعلی: {game.pot}$",
         )
-        if msg_id:
-            game.message_ids_to_delete.append(msg_id)
+        if message:
+            game.message_ids_to_delete.append(message.message_id)
 
     def _finish(
         self,
@@ -504,15 +510,29 @@ class PokerBotModel:
             game.turn_message_id = None
 
         active_players = game.players_by(states=(PlayerState.ACTIVE, PlayerState.ALL_IN))
-        
+
         if not active_players:
-            # Should not happen, but handle it
             text = "بازی بدون برنده تمام شد."
         elif len(active_players) == 1:
             winner = active_players[0]
             winner.wallet.inc(game.pot)
             text = f"🏁 بازی تمام شد!\n\n{winner.mention_markdown} با فولد بقیه، برنده *{game.pot}$* شد!\n\n"
         else:
+            # If we reached here, it means a showdown is necessary.
+            # Ensure all community cards are dealt before determining the winner.
+            while len(game.cards_table) < 5 and game.remain_cards:
+                game.cards_table.append(game.remain_cards.pop())
+            
+            # Show the final board if it wasn't shown already
+            if game.state != GameState.ROUND_RIVER and game.state != GameState.FINISHED:
+                 message = self._view.send_desk_cards_img(
+                    chat_id=chat_id,
+                    cards=game.cards_table,
+                    caption=f"میز نهایی - پات: {game.pot}$",
+                )
+                 if message:
+                    game.message_ids_to_delete.append(message.message_id)
+
             player_scores = self._winner_determine.determinate_scores(active_players, game.cards_table)
             winners_hand_money = self._round_rate.finish_rate(game, player_scores)
             text = "🏁 بازی با این نتیجه تمام شد:\n\n"
@@ -520,7 +540,7 @@ class PokerBotModel:
                 win_hand = " ".join(map(str, best_hand))
                 text += f"{player.mention_markdown}:\n🏆 برنده *{money}$* شد\n"
                 text += f"🃏 با ترکیب: {win_hand}\n\n"
-        
+
         text += "برای شروع بازی جدید /ready را بزنید یا با /start همه را وادار به شروع کنید."
         self._view.send_message(chat_id=chat_id, text=text)
 
@@ -529,13 +549,7 @@ class PokerBotModel:
 
         game.state = GameState.FINISHED
 
-    def _goto_next_round(self, game: Game, chat_id: ChatId) -> bool:
-        active_players = game.players_by(states=(PlayerState.ACTIVE,))
-        if len(active_players) < 2 and len(game.players_by(states=(PlayerState.ALL_IN,))) > 0:
-            if game.all_in_players_are_covered():
-                 self._fast_forward_to_finish(game, chat_id)
-                 return False
-        
+    def _goto_next_round(self, game: Game, chat_id: ChatId) -> None:
         state_transitions = {
             GameState.ROUND_PRE_FLOP: {"next_state": GameState.ROUND_FLOP, "processor": lambda: self.add_cards_to_table(3, game, chat_id)},
             GameState.ROUND_FLOP: {"next_state": GameState.ROUND_TURN, "processor": lambda: self.add_cards_to_table(1, game, chat_id)},
@@ -548,15 +562,40 @@ class PokerBotModel:
 
         transition = state_transitions[game.state]
         game.state = transition["next_state"]
+        
+        # Execute the card dealing or finish logic
         transition["processor"]()
-        return game.state != GameState.FINISHED
+
+        # If we moved to a new betting round, reset player states for that round
+        if game.state in self.ACTIVE_GAME_STATES:
+            # Reset has_acted for all active players
+            for p in game.players_by(states=(PlayerState.ACTIVE,)):
+                p.has_acted = False
+            
+            # Find the first active player to start the new round (player after the button)
+            first_active_player_index = -1
+            num_players = len(game.players)
+            for i in range(num_players):
+                player = game.players[i]
+                if player.state == PlayerState.ACTIVE:
+                    first_active_player_index = i
+                    break
+            
+            if first_active_player_index != -1:
+                # Set index to before the first active player, so _process_playing starts correctly
+                game.current_player_index = first_active_player_index - 1
+            else:
+                # This should not happen if we have active players, but handle it
+                print("Error: No active players found to start the new round.")
+                self._fast_forward_to_finish(game, chat_id)
+    # =====> END MODIFIED BLOCK <=====
 
     def middleware_user_turn(self, fn: Handler) -> Handler:
         def m(update: Update, context: CallbackContext):
             query = update.callback_query
             user_id = query.from_user.id
             chat_id = query.message.chat_id
-            
+
             game = self._game_from_context(context)
             if game.state not in self.ACTIVE_GAME_STATES:
                 query.answer(text="بازی فعال نیست.", show_alert=True)
@@ -574,7 +613,7 @@ class PokerBotModel:
                     message_id=game.turn_message_id,
                 )
                 game.turn_message_id = None
-            
+
             query.answer() # Acknowledge the button press
             fn(update, context)
 
@@ -608,7 +647,7 @@ class PokerBotModel:
     def fold(self, update: Update, context: CallbackContext, is_ban: bool = False) -> None:
         game = self._game_from_context(context)
         player = self._current_turn_player(game)
-        
+
         if not player: return
 
         player.state = PlayerState.FOLD
@@ -668,12 +707,12 @@ class PokerBotModel:
         game = self._game_from_context(context)
         chat_id = update.effective_chat.id
         player = self._current_turn_player(game)
-        
+
         if not player: return
 
         try:
             action = PlayerAction.RAISE_RATE if game.max_round_rate > 0 else PlayerAction.BET
-            
+
             amount = self._round_rate.raise_rate_bet(
                 game, player, raise_bet_rate
             )
@@ -700,269 +739,25 @@ class PokerBotModel:
         player = self._current_turn_player(game)
 
         if not player: return
-        
-        try:
-            amount = self._round_rate.all_in(game, player)
-            mention_markdown = player.mention_markdown
-            self._view.send_message(
-                chat_id=chat_id,
-                text=f"{mention_markdown} {PlayerAction.ALL_IN.value} با {amount}$"
-            )
-        except UserException as e:
-            self._view.send_message(chat_id=chat_id, text=str(e))
-            return
 
+        amount = self._round_rate.all_in(game, player)
+
+        mention_markdown = player.mention_markdown
+        self._view.send_message(
+            chat_id=chat_id,
+            text=f"{mention_markdown} {PlayerAction.ALL_IN.value} ({amount}$)"
+        )
         self._process_playing(
             chat_id=chat_id,
             game=game,
         )
 
-class WalletManagerModel(Wallet):
-    _kv: redis.Redis
-    _user_id: UserId
-
-    def __init__(self, user_id, kv):
-        self._user_id = user_id
-        self._kv = kv
-
-        if not self._kv.exists(self._prefix(user_id)):
-            self._kv.set(self._prefix(user_id), DEFAULT_MONEY)
-
-    @staticmethod
-    def _prefix(user_id: int, suffix: str = ""):
-        return f"poker:wallet:{user_id}:{suffix}"
-
-    def add_daily(self, amount: Money) -> Money:
-        self._kv.set(
-            self._prefix(self._user_id, "last_time"),
-            datetime.datetime.now().timestamp(),
+    def money(self, update: Update, context: CallbackContext):
+        wallet = WalletManagerModel(
+            update.effective_message.from_user.id, self._kv)
+        money = wallet.value()
+        self._view.send_message_reply(
+            chat_id=update.effective_message.chat_id,
+            message_id=update.effective_message.message_id,
+            text=f"💰 موجودی فعلی شما: *{money}$*",
         )
-        self.inc(amount)
-        return self.value()
-
-    def has_daily_bonus(self):
-        last_time_b = self._kv.get(
-            self._prefix(self._user_id, "last_time"))
-        if last_time_b is None:
-            return False
-        last_time = datetime.datetime.fromtimestamp(float(last_time_b))
-        now_time = datetime.datetime.now()
-        return now_time.date() == last_time.date()
-
-    def inc(self, amount: Money = 0) -> None:
-        self._kv.incr(self._prefix(self._user_id), amount)
-
-    def inc_authorized_money(self, game_id: str, amount: Money) -> None:
-        self._kv.incr(
-            self._prefix(self._user_id, f"auth:{game_id}"),
-            amount,
-        )
-
-    def authorized_money(self, game_id: str) -> Money:
-        authorized_money = self._kv.get(
-            self._prefix(self._user_id, f"auth:{game_id}"))
-        if authorized_money is None:
-            return 0
-        return int(authorized_money)
-
-    def authorize(self, game_id: str, amount: Money) -> None:
-        authorized_money = self.authorized_money(game_id)
-        if amount + authorized_money > self.value():
-            raise UserException("Not enough money")
-
-        self.inc_authorized_money(game_id, amount)
-
-    def authorize_all(self, game_id: str) -> Money:
-        amount = self.value()
-        self.inc_authorized_money(game_id, amount)
-        return amount
-
-    def value(self) -> Money:
-        return int(self._kv.get(self._prefix(self._user_id)))
-
-    def approve(self, game_id: str) -> None:
-        # This function seems to be for reconciliation after a game
-        # It deducts the authorized money (total bet) from the wallet
-        authorized = self.authorized_money(game_id)
-        # self.inc(-authorized) # This seems wrong logic, money is already deducted
-        self._kv.delete(self._prefix(self._user_id, f"auth:{game_id}"))
-
-    def cancel(self, game_id: str) -> None:
-        self._kv.delete(self._prefix(self._user_id, f"auth:{game_id}"))
-
-class RoundRateModel:
-    def round_pre_flop_rate_before_first_turn(self, game: Game) -> None:
-        for p in game.players:
-            p.wallet.authorize(game.id, p.wallet.value())
-
-        num_players = len(game.players)
-        if num_players < 2: return
-
-        # Dealer is at index 0
-        sb_player = game.players[0]
-        bb_player = game.players[1]
-        
-        if num_players == 2: # Heads-up case
-             sb_player = game.players[0] # Dealer is SB
-             bb_player = game.players[1] # Other player is BB
-        else: # 3+ players
-             sb_player = game.players[1 % num_players] # Player after dealer
-             bb_player = game.players[2 % num_players] # Player after SB
-
-        sb_amount = min(SMALL_BLIND, sb_player.wallet.value())
-        sb_player.round_rate += sb_amount
-        sb_player.total_bet += sb_amount
-        sb_player.wallet.inc(-sb_amount)
-        print(f"{sb_player.mention_markdown} posts Small Blind: {sb_amount}")
-
-        bb_amount = min(2 * SMALL_BLIND, bb_player.wallet.value())
-        bb_player.round_rate += bb_amount
-        bb_player.total_bet += bb_amount
-        bb_player.wallet.inc(-bb_amount)
-        print(f"{bb_player.mention_markdown} posts Big Blind: {bb_amount}")
-
-        if sb_player.wallet.value() == 0: sb_player.state = PlayerState.ALL_IN
-        if bb_player.wallet.value() == 0: bb_player.state = PlayerState.ALL_IN
-        
-        sb_player.has_acted = False
-        bb_player.has_acted = False
-
-        game.max_round_rate = 2 * SMALL_BLIND
-
-    def call_check(self, game: Game, player: Player) -> None:
-        amount = game.max_round_rate - player.round_rate
-        if player.wallet.value() < amount:
-            raise UserException("Not enough money for call")
-
-        player.round_rate += amount
-        player.total_bet += amount
-        player.wallet.inc(-amount)
-        player.has_acted = True
-
-        if player.wallet.value() == 0:
-            player.state = PlayerState.ALL_IN
-    
-    def raise_rate_bet(
-        self, game: Game, player: Player, raise_bet_rate: PlayerAction
-    ) -> Money:
-        
-        last_raise_size = game.max_round_rate - (game.last_raiser_bet if hasattr(game, 'last_raiser_bet') else 0)
-        min_raise_amount = max(last_raise_size, 2*SMALL_BLIND)
-
-        raise_amount = 0
-        if raise_bet_rate == PlayerAction.SMALL:
-            raise_amount = min_raise_amount
-        elif raise_bet_rate == PlayerAction.NORMAL:
-            raise_amount = max(game.pot // 2, min_raise_amount)
-        elif raise_bet_rate == PlayerAction.BIG:
-            raise_amount = max(game.pot, min_raise_amount)
-        
-        raise_amount = min(raise_amount, player.wallet.value())
-
-        amount_to_call = game.max_round_rate - player.round_rate
-        total_bet_this_turn = amount_to_call + raise_amount
-
-        if player.wallet.value() < total_bet_this_turn:
-            raise UserException("Not enough money for this raise")
-
-        player.round_rate += total_bet_this_turn
-        player.total_bet += total_bet_this_turn
-        player.wallet.inc(-total_bet_this_turn)
-        player.has_acted = True
-        
-        game.last_raiser_bet = game.max_round_rate
-        game.max_round_rate = player.round_rate
-
-        for p in game.players:
-            if p.user_id != player.user_id and p.state == PlayerState.ACTIVE:
-                p.has_acted = False
-
-        if player.wallet.value() == 0:
-            player.state = PlayerState.ALL_IN
-        
-        return raise_amount
-
-    def all_in(self, game: Game, player: Player) -> Money:
-        amount = player.wallet.value()
-        player.round_rate += amount
-        player.total_bet += amount
-        player.wallet.inc(-amount)
-        player.state = PlayerState.ALL_IN
-        player.has_acted = True
-        
-        if player.total_bet > game.max_round_rate:
-             game.last_raiser_bet = game.max_round_rate
-             game.max_round_rate = player.total_bet
-             for p in game.players:
-                 if p.user_id != player.user_id and p.state == PlayerState.ACTIVE:
-                     p.has_acted = False
-        return amount
-
-    def finish_rate(
-        self,
-        game: Game,
-        player_scores: Dict[Score, List[Tuple[Player, Cards]]],
-    ) -> List[Tuple[Player, Cards, Money]]:
-        
-        all_players_in_hand = sorted([p for p in game.players if p.total_bet > 0], key=lambda p: p.total_bet)
-        pots = []
-
-        last_bet = 0
-        while any(p.total_bet > last_bet for p in all_players_in_hand):
-            active_players_in_pot = [p for p in all_players_in_hand if p.total_bet > last_bet]
-            if not active_players_in_pot: break
-
-            min_bet_this_pot = min(p.total_bet for p in active_players_in_pot)
-            pot_size = 0
-            eligible_player_ids = set()
-
-            for p in all_players_in_hand:
-                contribution = min(max(0, p.total_bet - last_bet), min_bet_this_pot - last_bet)
-                if contribution > 0:
-                    pot_size += contribution
-                    eligible_player_ids.add(p.user_id)
-            
-            if pot_size > 0:
-                pots.append({'size': pot_size, 'eligible': eligible_player_ids})
-            
-            last_bet = min_bet_this_pot
-        
-        winners_summary = {} # user_id -> {player, hand, money}
-        sorted_scores = sorted(player_scores.items(), key=lambda item: item[0], reverse=True)
-        
-        for pot in pots:
-            pot_size = pot['size']
-            eligible_ids = pot['eligible']
-            
-            for score, players_with_score in sorted_scores:
-                if pot_size <= 0: break
-                
-                pot_winners = [p for p, hand in players_with_score if p.user_id in eligible_ids]
-
-                if pot_winners:
-                    best_hand = next((hand for p, hand in players_with_score if p.user_id in eligible_ids), None)
-                    win_amount_per_player = pot_size // len(pot_winners)
-                    
-                    for winner in pot_winners:
-                        winner.wallet.inc(win_amount_per_player)
-                        
-                        if winner.user_id in winners_summary:
-                            winners_summary[winner.user_id]['money'] += win_amount_per_player
-                        else:
-                            winners_summary[winner.user_id] = {
-                                'player': winner,
-                                'hand': best_hand,
-                                'money': win_amount_per_player
-                            }
-                    pot_size = 0 # Pot distributed
-        
-        return [(d['player'], d['hand'], d['money']) for d in winners_summary.values()]
-
-    def to_pot(self, game: Game) -> None:
-        for p in game.players:
-            game.pot += p.round_rate
-            p.round_rate = 0
-        game.max_round_rate = 0
-        # Reset has_acted for all active players for the next round
-        for p in game.players_by(states=(PlayerState.ACTIVE,)):
-            p.has_acted = False
