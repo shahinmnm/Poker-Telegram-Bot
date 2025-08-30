@@ -46,13 +46,13 @@ DICE_DELAY_SEC = 5
 BONUSES = (5, 20, 40, 80, 160, 320)
 
 DICES = "⚀⚁⚂⚃⚄⚅"
-KEY_CHAT_DATA_GAME = “game”
+KEY_CHAT_DATA_GAME = "game"
 
-KEY_OLD_PLAYERS = “old_players”
+KEY_OLD_PLAYERS = "old_players"
 
-KEY_LAST_TIME_ADD_MONEY = “last_time”
+KEY_LAST_TIME_ADD_MONEY = "last_time"
 
-KEY_NOW_TIME_ADD_MONEY = “now_time”
+KEY_NOW_TIME_ADD_MONEY = "now_time"
 
 MAX_PLAYERS = 8
 
@@ -68,7 +68,7 @@ DEFAULT_MONEY = 1000
 
 MAX_TIME_FOR_TURN = datetime.timedelta(minutes=2)
 
-DESCRIPTION_FILE = “assets/description_bot.md”
+DESCRIPTION_FILE = "assets/description_bot.md"
 
 class WalletManagerModel:
 
