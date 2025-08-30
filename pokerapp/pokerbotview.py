@@ -214,16 +214,16 @@ class PokerBotViewer:
             game: Game,
             player: Player,
             money: Money,
-    ) -> MessageId: # <-- نوع خروجی را برای وضوح بیشتر مشخص می‌کنیم
+    ) -> Optional[MessageId]: # <-- نوع خروجی را به Optional تغییر می‌دهیم
         if len(game.cards_table) == 0:
-            cards_table = "🚫 کارتی نیست."
+            cards_table = "🚫 کارتی روی میز نیست."
         else:
             cards_table = " ".join(game.cards_table)
         text = (
-            "🔄 نوبت  {}\n" +
-            "{}\n" +
-            "پول: *{}$*\n" +
-            "📊 حداکثر نرخ دور: *{}$*"
+            "🔄 نوبت {}\n" +
+            "کارت‌های روی میز: {}\n" +
+            "موجودی شما: *{}$*\n" +
+            "حداکثر شرط در این دور: *{}$*"
         ).format(
             player.mention_markdown,
             cards_table,
@@ -234,19 +234,26 @@ class PokerBotViewer:
             game, player
         )
         markup = PokerBotViewer._get_turns_markup(check_call_action)
-        
+
         # ===> شروع اصلاح <===
-        # نتیجه فراخوانی را در متغیر message ذخیره می‌کنیم
-        message = self._bot.send_message(
-            chat_id=chat_id,
-            text=text,
-            reply_markup=markup,
-            parse_mode=ParseMode.MARKDOWN,
-            disable_notification=True,
-        )
-        # شناسه پیام را از آبجکت message برمی‌گردانیم
-        return message.message_id
-        # ===> پایان اصلاح <===
+        try:
+            # نتیجه فراخوانی را در متغیر message ذخیره می‌کنیم
+            message = self._bot.send_message(
+                chat_id=chat_id,
+                text=text,
+                reply_markup=markup,
+                parse_mode=ParseMode.MARKDOWN,
+                disable_notification=True,
+            )
+            # اگر message یک شی معتبر بود، شناسه آن را برمی‌گردانیم
+            if isinstance(message, Message):
+                return message.message_id
+        except Exception as e:
+            # در صورت بروز خطا در ارسال پیام، آن را لاگ می‌کنیم
+            print(f"Error sending turn actions: {e}")
+        
+        # در غیر این صورت (خطا یا پاسخ نامعتبر)، None برمی‌گردانیم
+        return None
 
     def remove_markup(self, chat_id: ChatId, message_id: MessageId) -> None:
         self._bot.edit_message_reply_markup(chat_id=chat_id, message_id=message_id)
