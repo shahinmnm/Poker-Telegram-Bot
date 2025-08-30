@@ -212,7 +212,7 @@ class PokerBotViewer:
             game: Game,
             player: Player,
             money: Money,
-    ) -> Optional[MessageId]: # <<<< تغییر نوع بازگشتی به Optional
+    ) -> MessageId:  # <<<< 1. نوع خروجی را مشخص کنید
         if len(game.cards_table) == 0:
             cards_table = "🚫 کارتی نیست."
         else:
@@ -233,17 +233,17 @@ class PokerBotViewer:
         )
         markup = PokerBotViewer._get_turns_markup(check_call_action)
         
-        # <<<< شروع بلوک اصلاح شده >>>>
+        # <<<< 2. پیام ارسالی را در یک متغیر ذخیره کنید >>>>
         message = self._bot.send_message(
             chat_id=chat_id,
             text=text,
             reply_markup=markup,
             parse_mode=ParseMode.MARKDOWN,
-            disable_notification=False, # << برای اطمینان از دیده شدن نوبت، نوتیفیکیشن را فعال کنیم
+            disable_notification=True,
         )
-        if isinstance(message, Message):
-            return message.message_id
-        return None
+        
+        # <<<< 3. شناسه پیام را برگردانید >>>>
+        return message.message_id
 
     def remove_markup(self, chat_id: ChatId, message_id: MessageId) -> None:
         self._bot.edit_message_reply_markup(chat_id=chat_id, message_id=message_id)
