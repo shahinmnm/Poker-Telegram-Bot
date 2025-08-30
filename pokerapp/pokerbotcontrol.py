@@ -108,14 +108,16 @@ class PokerBotCotroller:
             self._model.call_check(update, context)
         elif query_data == PlayerAction.FOLD.value:
             self._model.fold(update, context)
-        elif data == str(PlayerAction.SMALL.value):
+        # VVVV شروع اصلاح VVVV
+        elif query_data == str(PlayerAction.SMALL.value):
             # مقدار عددی را مستقیم پاس می‌دهیم
             self._model.raise_rate_bet(update, context, PlayerAction.SMALL.value)
-        elif data == str(PlayerAction.NORMAL.value):
+        elif query_data == str(PlayerAction.NORMAL.value):
             # مقدار عددی را مستقیم پاس می‌دهیم
             self._model.raise_rate_bet(update, context, PlayerAction.NORMAL.value)
-        elif data == str(PlayerAction.BIG.value):
+        elif query_data == str(PlayerAction.BIG.value):
             # مقدار عددی را مستقیم پاس می‌دهیم
             self._model.raise_rate_bet(update, context, PlayerAction.BIG.value)
+        # ^^^^ پایان اصلاح ^^^^
         elif query_data == PlayerAction.ALL_IN.value:
             self._model.all_in(update, context)
