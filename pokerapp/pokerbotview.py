@@ -6,7 +6,6 @@ from telegram import (
     InlineKeyboardButton,
     InlineKeyboardMarkup,
     ReplyKeyboardMarkup,
-    ReplyKeyboardRemove,
     Bot,
     InputMediaPhoto,
 )
@@ -23,7 +22,6 @@ from pokerapp.entities import (
     Mention,
     Money,
 )
-import traceback # <--- اضافه شده برای لاگ دقیق
 
 class PokerBotViewer:
     def __init__(self, bot: Bot):
@@ -31,6 +29,28 @@ class PokerBotViewer:
         self._desk_generator = DeskImageGenerator()
 
     def send_message_return_id(
+        self,
+        chat_id: ChatId,
+        text: str,
+        reply_markup: ReplyKeyboardMarkup = None,
+    ) -> Optional[MessageId]:
+        """Sends a message and returns its ID, or None if not applicable."""
+        try:
+            message = self._bot.send_message(
+                chat_id=chat_id,
+                parse_mode=ParseMode.MARKDOWN,
+                text=text,
+                reply_markup=reply_markup,
+                disable_notification=True,
+                disable_web_page_preview=True,
+            )
+            if isinstance(message, Message):
+                return message.message_id
+        except Exception as e:
+            print(f"Error sending message and returning ID: {e}")
+        return None
+
+    def send_message(
         self,
         chat_id: ChatId,
         text: str,
@@ -48,16 +68,8 @@ class PokerBotViewer:
             if isinstance(message, Message):
                 return message.message_id
         except Exception as e:
-            print(f"ERROR: Could not send message in send_message_return_id: {e}")
+            print(f"Error sending message: {e}")
         return None
-
-    def send_message(
-        self,
-        chat_id: ChatId,
-        text: str,
-        reply_markup: ReplyKeyboardMarkup = None,
-    ) -> Optional[MessageId]:
-        return self.send_message_return_id(chat_id, text, reply_markup)
 
     def send_photo(self, chat_id: ChatId) -> None:
         try:
@@ -68,17 +80,21 @@ class PokerBotViewer:
                 disable_notification=True,
             )
         except Exception as e:
-            print(f"ERROR: Could not send photo: {e}")
+            print(f"Error sending photo: {e}")
 
     def send_dice_reply(
         self, chat_id: ChatId, message_id: MessageId, emoji='🎲'
-    ) -> Message:
-        return self._bot.send_dice(
-            reply_to_message_id=message_id,
-            chat_id=chat_id,
-            disable_notification=True,
-            emoji=emoji,
-        )
+    ) -> Optional[Message]:
+        try:
+            return self._bot.send_dice(
+                reply_to_message_id=message_id,
+                chat_id=chat_id,
+                disable_notification=True,
+                emoji=emoji,
+            )
+        except Exception as e:
+            print(f"Error sending dice reply: {e}")
+            return None
 
     def send_message_reply(
         self, chat_id: ChatId, message_id: MessageId, text: str
@@ -92,7 +108,7 @@ class PokerBotViewer:
                 disable_notification=True,
             )
         except Exception as e:
-            print(f"ERROR: Could not send message reply: {e}")
+            print(f"Error sending message reply: {e}")
 
     def send_desk_cards_img(
         self,
@@ -100,7 +116,8 @@ class PokerBotViewer:
         cards: Cards,
         caption: str = "",
         disable_notification: bool = True,
-    ) -> Optional[MessageId]:
+    ) -> Optional[Message]:
+        """Sends desk cards image and returns the message object."""
         try:
             im_cards = self._desk_generator.generate_desk(cards)
             bio = BytesIO()
@@ -109,27 +126,37 @@ class PokerBotViewer:
             bio.seek(0)
             messages = self._bot.send_media_group(
                 chat_id=chat_id,
-                media=[InputMediaPhoto(media=bio, caption=caption)],
+                media=[
+                    InputMediaPhoto(
+                        media=bio,
+                        caption=caption,
+                    ),
+                ],
                 disable_notification=disable_notification,
             )
             if messages and isinstance(messages, list) and len(messages) > 0:
-                return messages[0].message_id
+                return messages[0]
         except Exception as e:
-            print(f"ERROR: Could not send desk cards image: {e}")
+            print(f"Error sending desk cards image: {e}")
         return None
 
     @staticmethod
     def _get_cards_markup(cards: Cards) -> ReplyKeyboardMarkup:
+        """Creates the keyboard for showing player cards and actions."""
         hide_cards_button_text = "🙈 پنهان کردن کارت‌ها"
         show_table_button_text = "👁️ نمایش میز"
         return ReplyKeyboardMarkup(
-            keyboard=[cards, [hide_cards_button_text, show_table_button_text]],
+            keyboard=[
+                cards,
+                [hide_cards_button_text, show_table_button_text]
+            ],
             selective=True,
             resize_keyboard=True,
             one_time_keyboard=False,
         )
 
     def show_reopen_keyboard(self, chat_id: ChatId, player_mention: Mention) -> None:
+        """Hides cards and shows a keyboard with a 'Show Cards' button."""
         show_cards_button_text = "🃏 نمایش کارت‌ها"
         show_table_button_text = "👁️ نمایش میز"
         reopen_keyboard = ReplyKeyboardMarkup(
@@ -138,33 +165,11 @@ class PokerBotViewer:
             resize_keyboard=True,
             one_time_keyboard=False
         )
-        self._bot.send_message(
+        self.send_message(
             chat_id=chat_id,
             text=f"کارت‌های {player_mention} پنهان شد. برای مشاهده دوباره از دکمه‌ها استفاده کن.",
             reply_markup=reopen_keyboard,
-            parse_mode=ParseMode.MARKDOWN,
-            disable_notification=True,
         )
-
-    def remove_game_messages(self, chat_id: ChatId, message_ids: List[MessageId]) -> None:
-        for msg_id in message_ids:
-            try:
-                self._bot.delete_message(chat_id=chat_id, message_id=msg_id)
-            except Exception:
-                pass
-
-    @staticmethod
-    def _get_turns_markup(check_call_action: PlayerAction) -> InlineKeyboardMarkup:
-        keyboard = [[
-            InlineKeyboardButton(text=PlayerAction.FOLD.value, callback_data=PlayerAction.FOLD.value),
-            InlineKeyboardButton(text=PlayerAction.ALL_IN.value, callback_data=PlayerAction.ALL_IN.value),
-            InlineKeyboardButton(text=check_call_action.value, callback_data=check_call_action.value),
-        ], [
-            InlineKeyboardButton(text=str(PlayerAction.SMALL.value) + "$", callback_data=str(PlayerAction.SMALL.value)),
-            InlineKeyboardButton(text=str(PlayerAction.NORMAL.value) + "$", callback_data=str(PlayerAction.NORMAL.value)),
-            InlineKeyboardButton(text=str(PlayerAction.BIG.value) + "$", callback_data=str(PlayerAction.BIG.value)),
-        ]]
-        return InlineKeyboardMarkup(inline_keyboard=keyboard)
 
     def send_cards(
             self,
@@ -172,20 +177,26 @@ class PokerBotViewer:
             cards: Cards,
             mention_markdown: Mention,
             ready_message_id: str,
-    ) -> None:
+    ) -> Optional[MessageId]:
         markup = self._get_cards_markup(cards)
-        self._bot.send_message(
-            chat_id=chat_id,
-            text="Showing cards to " + mention_markdown,
-            reply_markup=markup,
-            reply_to_message_id=ready_message_id,
-            parse_mode=ParseMode.MARKDOWN,
-            disable_notification=True,
-        )
+        try:
+            message = self._bot.send_message(
+                chat_id=chat_id,
+                text="کارت‌های شما " + mention_markdown,
+                reply_markup=markup,
+                reply_to_message_id=ready_message_id,
+                parse_mode=ParseMode.MARKDOWN,
+                disable_notification=True,
+            )
+            if isinstance(message, Message):
+                return message.message_id
+        except Exception as e:
+            print(f"Error sending cards: {e}")
+        return None
 
     @staticmethod
     def define_check_call_action(game: Game, player: Player) -> PlayerAction:
-        if player.round_rate == game.max_round_rate:
+        if player.round_rate >= game.max_round_rate:
             return PlayerAction.CHECK
         return PlayerAction.CALL
 
@@ -195,61 +206,71 @@ class PokerBotViewer:
             game: Game,
             player: Player,
             money: Money,
-    ) -> Optional[MessageId]: # نوع بازگشتی را مشخص می‌کنیم
-        if len(game.cards_table) == 0:
-            cards_table = "🚫 کارتی نیست."
+    ) -> Optional[MessageId]:
+        if not game.cards_table:
+            cards_table = "🚫 کارتی روی میز نیست."
         else:
             cards_table = " ".join(game.cards_table)
-        text = (
-            "🔄 نوبت  {}\n" +
-            "{}\n" +
-            "پول: *{}$*\n" +
-            "📊 حداکثر نرخ دور: *{}$*"
-        ).format(
-            player.mention_markdown,
-            cards_table,
-            money,
-            game.max_round_rate,
-        )
-        check_call_action = PokerBotViewer.define_check_call_action(
-            game, player
-        )
-        markup = PokerBotViewer._get_turns_markup(check_call_action)
         
+        call_amount = game.max_round_rate - player.round_rate
+        call_check_action = self.define_check_call_action(game, player)
+        call_check_text = f"{call_check_action.value} ({call_amount}$)" if call_check_action == PlayerAction.CALL else call_check_action.value
+
+        text = (
+            f"🔄 نوبت {player.mention_markdown}\n"
+            f"کارت‌های روی میز: {cards_table}\n"
+            f"💰 پات فعلی: *{game.pot}$*\n"
+            f"💵 موجودی شما: *{money}$*\n"
+            f" Бет فعلی شما در دور: *{player.round_rate}$*\n"
+            f"حداکثر شرط در این دور: *{game.max_round_rate}$*"
+        )
+        markup = self._get_turns_markup(call_check_text, call_check_action)
+
         try:
-            # از متد جدید و همزمان (sync) استفاده می‌کنیم
-            message = self._bot.send_message_sync(
+            message = self._bot.send_message(
                 chat_id=chat_id,
                 text=text,
                 reply_markup=markup,
                 parse_mode=ParseMode.MARKDOWN,
-                disable_notification=True,
+                disable_notification=False, # Notify the current player
             )
-            if message:
+            if isinstance(message, Message):
                 return message.message_id
-            return None
         except Exception as e:
             print(f"Error sending turn actions: {e}")
-            traceback.print_exc()
-            return None
+        return None
 
-    def remove_markup(
-        self,
-        chat_id: ChatId,
-        message_id: MessageId,
-    ) -> None:
-        # این متد باید edit_message_reply_markup را فراخوانی کند
-        # و reply_markup را خالی بگذارد تا دکمه‌ها حذف شوند.
+    @staticmethod
+    def _get_turns_markup(check_call_text: str, check_call_action: PlayerAction) -> InlineKeyboardMarkup:
+        keyboard = [[
+            InlineKeyboardButton(text=PlayerAction.FOLD.value, callback_data=PlayerAction.FOLD.value),
+            InlineKeyboardButton(text=PlayerAction.ALL_IN.value, callback_data=PlayerAction.ALL_IN.value),
+            InlineKeyboardButton(text=check_call_text, callback_data=check_call_action.value),
+        ], [
+            InlineKeyboardButton(text=str(PlayerAction.SMALL.value), callback_data=str(PlayerAction.SMALL.value)),
+            InlineKeyboardButton(text=str(PlayerAction.NORMAL.value), callback_data=str(PlayerAction.NORMAL.value)),
+            InlineKeyboardButton(text=str(PlayerAction.BIG.value), callback_data=str(PlayerAction.BIG.value)),
+        ]]
+        return InlineKeyboardMarkup(inline_keyboard=keyboard)
+
+
+    def remove_markup(self, chat_id: ChatId, message_id: MessageId) -> None:
+        if not message_id:
+            return
         try:
-            self._bot.edit_message_reply_markup(
-                chat_id=chat_id,
-                message_id=message_id,
-                reply_markup=None  # <--- ارسال مقدار None برای حذف دکمه‌ها
-            )
+            self._bot.edit_message_reply_markup(chat_id=chat_id, message_id=message_id)
         except Exception as e:
-            # لاگ کردن خطا در صورت عدم موفقیت در ویرایش
-            # این خطاها معمولا زمانی رخ می‌دهند که پیام خیلی قدیمی است یا حذف شده
-            print(f"INFO: Could not remove markup from message {message_id}. Reason: {e}")
+            print(f"Could not remove markup from message {message_id}: {e}")
 
+    # =====> بلوک اصلاح شده <=====
     def remove_message(self, chat_id: ChatId, message_id: MessageId) -> None:
-        self._bot.delete_message(chat_id=chat_id, message_id=message_id)
+        """Deletes a message from the chat, ignoring errors if it fails."""
+        if not message_id:
+            return
+        try:
+            self._bot.delete_message(chat_id=chat_id, message_id=message_id)
+        except Exception as e:
+            # Log the error but don't crash the bot.
+            # This can happen if the message is too old, already deleted, or bot lacks rights.
+            print(f"Could not delete message {message_id} in chat {chat_id}: {e}")
+
