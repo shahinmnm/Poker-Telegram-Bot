@@ -4,6 +4,7 @@ import logging
 import threading
 import time
 import redis
+import traceback  # <--- اضافه شد برای لاگ دقیق‌تر
 
 from typing import Callable
 from telegram import Bot
@@ -27,12 +28,10 @@ from pokerapp.pokerbotmodel import PokerBotModel
 from pokerapp.pokerbotview import PokerBotViewer
 from pokerapp.entities import ChatId
 
-
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     level=logging.INFO
 )
-
 
 class PokerBot:
     def __init__(
@@ -68,7 +67,6 @@ class PokerBot:
     def run(self) -> None:
         self._updater.start_polling()
 
-
 class MessageDelayBot(Bot):
     def __init__(
         self,
@@ -86,7 +84,6 @@ class MessageDelayBot(Bot):
             target=self._tasks_manager_loop,
             args=(self._stop_chat_tasks, ),
         )
-        # TODO: Add @decorator to functions in view?
 
     def run_tasks_manager(self) -> None:
         self._chat_tasks_thread.start()
@@ -94,101 +91,102 @@ class MessageDelayBot(Bot):
     def _process_chat_tasks(self) -> None:
         now = time.time()
 
-        for (chat_id, time_tasks) in self._chat_tasks.items():
+        # Iterate over a copy of items to allow modification during iteration
+        for chat_id, time_tasks in list(self._chat_tasks.items()):
             task_time = time_tasks.get("last_time", 0)
             tasks = time_tasks.get("tasks", [])
 
             if now - task_time < self._tasks_delay:
                 continue
 
-            if len(tasks) == 0:
+            if not tasks:
                 continue
 
-            task_callable = tasks.pop()
+            # Get the next task without removing it yet
+            task_callable, task_type = tasks[0]
 
             try:
                 task_callable()
-            except (
-                TimedOut,
-                NetworkError,
-                RetryAfter
-            ):
-                tasks.insert(0, task_callable)
-            except (
-                BadRequest,
-                ChatMigrated,
-                Conflict,
-                InvalidToken,
-                TelegramError,
-                Unauthorized,
-            ) as e:
-                logging.error(e)
+                # If successful, remove the task from the queue
+                tasks.pop(0)
+            except (TimedOut, NetworkError, RetryAfter) as e:
+                # If it's a network error, log it and keep it in the queue for the next try.
+                logging.warning(f"Network error on task for chat {chat_id}: {e}. Retrying later.")
+                # We don't remove it, so it will be retried.
+            except (BadRequest, Unauthorized, Conflict) as e:
+                # These are non-recoverable errors for this specific task.
+                # Log the error and remove the task to prevent infinite loops.
+                logging.error(f"Telegram API error for chat {chat_id}. Dropping task. Error: {e}")
+                traceback.print_exc()
+                tasks.pop(0)  # Remove the faulty task
+            except Exception as e:
+                # Catch any other unexpected errors
+                logging.error(f"Unexpected error processing task for chat {chat_id}. Dropping task. Error: {e}")
+                traceback.print_exc()
+                tasks.pop(0) # Remove the faulty task
             finally:
-                self._chat_tasks[chat_id]["last_time"] = now
+                # Update the last execution time for this chat_id
+                if chat_id in self._chat_tasks:
+                     self._chat_tasks[chat_id]["last_time"] = now
 
     def _tasks_manager_loop(self, stop_event: threading.Event) -> None:
         while not stop_event.is_set():
-            self._chat_tasks_lock.acquire()
-            try:
-                self._process_chat_tasks()
-            finally:
-                self._chat_tasks_lock.release()
-            time.sleep(0.05)
+            with self._chat_tasks_lock:
+                try:
+                    self._process_chat_tasks()
+                except Exception as e:
+                    # Prevent the manager loop from crashing
+                    logging.critical(f"FATAL ERROR in _tasks_manager_loop itself: {e}")
+                    traceback.print_exc()
+            time.sleep(0.1) # A slightly longer sleep can be better
 
     def __del__(self):
         try:
             self._stop_chat_tasks.set()
             self._chat_tasks_thread.join()
         except Exception as e:
-            logging.error(e)
+            logging.error(f"Error during MessageDelayBot destruction: {e}")
 
-    def _add_task(self, chat_id: ChatId, task: Callable) -> None:
-        self._chat_tasks_lock.acquire()
-        try:
+    def _add_task(self, chat_id: ChatId, task: Callable, task_type: str) -> None:
+        with self._chat_tasks_lock:
             if chat_id not in self._chat_tasks:
                 self._chat_tasks[chat_id] = {"last_time": 0, "tasks": []}
-            self._chat_tasks[chat_id]["tasks"].insert(0, task)
-        finally:
-            self._chat_tasks_lock.release()
+            # Append to the end, process from the beginning (FIFO)
+            self._chat_tasks[chat_id]["tasks"].append((task, task_type))
 
-    def send_photo(self, *args, **kwargs) -> None:
-        self._add_task(
-            chat_id=kwargs.get("chat_id", 0),
-            task=lambda:
-                super(MessageDelayBot, self).send_photo(*args, **kwargs),
-        )
+    # ==================== متدهای اصلاح شده ====================
 
     def send_message(self, *args, **kwargs) -> None:
-        self._add_task(
-            chat_id=kwargs.get("chat_id", 0),
-            task=lambda:
-                super(MessageDelayBot, self).send_message(*args, **kwargs),
-        )
+        # Ensure text is present before adding the task
+        if 'text' not in kwargs or kwargs['text'] is None:
+            logging.error("send_message called without 'text'. Ignoring.")
+            traceback.print_stack() # Print stack to find the caller
+            return
+
+        chat_id = kwargs.get("chat_id", 0)
+        task = lambda: super(MessageDelayBot, self).send_message(*args, **kwargs)
+        self._add_task(chat_id, task, "send")
+
+    def send_photo(self, *args, **kwargs) -> None:
+        chat_id = kwargs.get("chat_id", 0)
+        task = lambda: super(MessageDelayBot, self).send_photo(*args, **kwargs)
+        self._add_task(chat_id, task, "send")
 
     def edit_message_reply_markup(self, *args, **kwargs) -> None:
-        def task():
-            super(MessageDelayBot, self).edit_message_reply_markup(
-                *args,
-                **kwargs,
-            )
-
+        # This function should not be queued like send_message.
+        # It's for immediate interaction feedback.
+        # Queuing it can lead to editing a message that no longer exists or is irrelevant.
+        # We will try to execute it immediately.
         try:
-            task()
-        except (
-            TimedOut,
-            NetworkError,
-            RetryAfter
-        ):
-            self._add_task(
-                chat_id=kwargs.get("chat_id", 0),
-                task=task,
-            )
-        except (
-            BadRequest,
-            ChatMigrated,
-            Conflict,
-            InvalidToken,
-            TelegramError,
-            Unauthorized,
-        ) as e:
-            logging.error(e)
+            super(MessageDelayBot, self).edit_message_reply_markup(*args, **kwargs)
+        except (BadRequest, Conflict) as e:
+            # Common errors: message not found, or message not modified.
+            # These are safe to ignore in most cases (e.g., trying to remove markup twice).
+            logging.info(f"Could not edit reply markup: {e}")
+        except (TimedOut, NetworkError, RetryAfter) as e:
+            # If there's a network issue, we can log it. Retrying is complex for edits.
+            logging.warning(f"Network error on edit_message_reply_markup: {e}")
+        except Exception as e:
+            # Catch other potential errors
+            logging.error(f"Unexpected error on edit_message_reply_markup: {e}")
+            traceback.print_exc()
