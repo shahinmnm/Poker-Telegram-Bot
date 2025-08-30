@@ -48,7 +48,6 @@ DEFAULT_MONEY = 1000
 MAX_TIME_FOR_TURN = datetime.timedelta(minutes=2)
 DESCRIPTION_FILE = "assets/description_bot.md"
 
-
 class PokerBotModel:
     def __init__(
         self,
@@ -198,32 +197,20 @@ class PokerBotModel:
 
         self._round_rate.round_pre_flop_rate_before_first_turn(game)
 
-        # در دور pre-flop، اولین حرکت با بازیکنی است که بلافاصله بعد از Big Blind قرار دارد.
-        # ایندکس Big Blind معمولا 1 است (0 = Dealer/Small Blind, 1 = Big Blind).
-        # پس اولین حرکت با بازیکن ایندکس 2 است.
-        # در بازی دو نفره (heads-up)، اولین حرکت با Dealer/Small Blind (ایندکس 0) است.
-
         num_players = len(game.players)
         if num_players == 2:
-            # در بازی دو نفره، نوبت اول با دیلر/اسمال بلایند است (ایندکس 0)
-            # ایندکس را -1 میگذاریم تا _process_playing با افزایش آن، به ایندکس 0 برسد.
             game.current_player_index = -1
         else:
-            # در بازی با بیش از 2 بازیکن، نوبت با نفر بعد از بیگ بلایند است (ایندکس 2)
-            # ایندکس را 1 میگذاریم تا _process_playing با افزایش آن، به ایندکس 2 برسد.
             game.current_player_index = 1
-        
-        # فراخوانی برای شروع روند بازی و تعیین نوبت
+
         self._process_playing(chat_id=chat_id, game=game)
 
         context.chat_data[KEY_OLD_PLAYERS] = [p.user_id for p in game.players]
-        
+
     def _process_playing(self, chat_id: ChatId, game: Game) -> None:
-        # اگر بازی تمام شده است، خارج شو
         if game.state == GameState.INITIAL:
             return
 
-        # ... (بلوک if برای بررسی تعداد بازیکنان فعال را دست نخورده باقی بگذارید)
         active_and_all_in_players = game.players_by(states=(PlayerState.ACTIVE, PlayerState.ALL_IN))
         if len(active_and_all_in_players) <= 1:
             active_players = game.players_by(states=(PlayerState.ACTIVE,))
@@ -233,27 +220,17 @@ class PokerBotModel:
                 self._finish(game, chat_id)
             return
 
-        # ==================== شروع بلوک جایگزینی ====================
-        # شرط جدید و دقیق‌تر برای تشخیص پایان دور شرط‌بندی
-        # یک دور زمانی تمام می‌شود که:
-        # 1. همه بازیکنان فعال (نه Fold و نه All-in) حداقل یک بار عمل کرده باشند.
-        # 2. مبلغ شرط همه بازیکنان فعال با بیشترین مبلغ شرط در آن دور (max_round_rate) برابر باشد.
-        
         round_over = True
         active_players = game.players_by(states=(PlayerState.ACTIVE,))
 
-        if not active_players: # اگر هیچ بازیکن فعالی نمانده
+        if not active_players:
              round_over = True
         else:
             for p in active_players:
-                # اگر بازیکنی پیدا شود که هنوز عمل نکرده یا شرطش با ماکزیمم برابر نیست، دور تمام نشده
                 if not p.has_acted or p.round_rate < game.max_round_rate:
                     round_over = False
                     break
-        
-        # حالت خاص برای Big Blind در Pre-flop
-        # اگر کسی Raise نکرده باشد و نوبت به Big Blind برسد، او حق انتخاب (check یا raise) دارد
-        # در این حالت has_acted او False است اما دور نباید تمام شود.
+
         if len(game.players) > 1:
             big_blind_player = game.players[1 % len(game.players)]
             if (game.state == GameState.ROUND_PRE_FLOP and
@@ -264,55 +241,44 @@ class PokerBotModel:
         if round_over:
             self._round_rate.to_pot(game)
             self._goto_next_round(game, chat_id)
-            if game.state == GameState.INITIAL:  # game has finished
+            if game.state == GameState.INITIAL:
                 return
 
-            # ریست کردن وضعیت has_acted برای دور جدید و تعیین نفر شروع کننده
             game.current_player_index = -1
             for p in game.players:
                 if p.state == PlayerState.ACTIVE:
                     p.has_acted = False
 
-            # فراخوانی بازگشتی برای شروع دور جدید
             self._process_playing(chat_id, game)
             return
 
-        # Find next active player
         while True:
             game.current_player_index = (game.current_player_index + 1) % len(game.players)
             current_player = self._current_turn_player(game)
             if current_player.state == PlayerState.ACTIVE:
-                # اگر بازیکنی که نوبت به او رسیده، قبلا حرکت کرده و شرطش با ماکزیمم برابر است
-                # یعنی دور کامل شده و باید از حلقه خارج شویم.
                 if current_player.has_acted and current_player.round_rate == game.max_round_rate:
-                    # این شرط جلوی حلقه‌های بی‌نهایت را می‌گیرد
-                    # و باعث می‌شود منطق به بلوک "رفتن به دور بعد" برسد.
-                    self._process_playing(chat_id, game) # یک فراخوانی بازگشتی برای ارزیابی مجدد وضعیت
+                    self._process_playing(chat_id, game)
                     return
-                break # بازیکن فعال بعدی پیدا شد، از حلقه خارج شو
+                break
 
         game.last_turn_time = datetime.datetime.now()
         current_player_money = current_player.wallet.value()
 
+# ==================== شروع بلوک اصلاح شده ====================
         msg_id = self._view.send_turn_actions(
             chat_id=chat_id,
             game=game,
             player=current_player,
             money=current_player_money,
         )
-        
-        # ===> شروع بلوک جدید برای مدیریت msg_id <===
-        # بررسی می‌کنیم که آیا msg_id معتبر است یا خیر
+
         if msg_id:
             game.turn_message_id = msg_id
         else:
-            # اگر ارسال پیام نوبت با خطا مواجه شد، بازی را متوقف می‌کنیم تا از کرش جلوگیری شود
             print(f"CRITICAL: Failed to send turn message for chat {chat_id}. Aborting turn processing.")
-            # می‌توانید یک پیام خطا برای ادمین یا در گروه ارسال کنید
             self._view.send_message(chat_id, "خطای جدی در ارسال پیام نوبت رخ داد. بازی متوقف شد.")
-            # بازی را ریست کنید یا وضعیت را به حالت خطا تغییر دهید
             game.reset()
-        # ===> پایان بلوک جدید <===
+# ==================== پایان بلوک اصلاح شده ====================
 
     def _fast_forward_to_finish(self, game: Game, chat_id: ChatId):
         """ When no more betting is possible, reveals all remaining cards """
