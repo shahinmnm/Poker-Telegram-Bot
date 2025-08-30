@@ -206,13 +206,15 @@ class PokerBotViewer:
             return PlayerAction.CHECK
         return PlayerAction.CALL
 
+# pokerapp/pokerbotview.py
+
     def send_turn_actions(
             self,
             chat_id: ChatId,
             game: Game,
             player: Player,
             money: Money,
-    ) -> MessageId:  # <<<< 1. نوع خروجی را مشخص کنید
+    ) -> MessageId: # <-- نوع خروجی را برای وضوح بیشتر مشخص می‌کنیم
         if len(game.cards_table) == 0:
             cards_table = "🚫 کارتی نیست."
         else:
@@ -233,7 +235,8 @@ class PokerBotViewer:
         )
         markup = PokerBotViewer._get_turns_markup(check_call_action)
         
-        # <<<< 2. پیام ارسالی را در یک متغیر ذخیره کنید >>>>
+        # ===> شروع اصلاح <===
+        # نتیجه فراخوانی را در متغیر message ذخیره می‌کنیم
         message = self._bot.send_message(
             chat_id=chat_id,
             text=text,
@@ -241,9 +244,9 @@ class PokerBotViewer:
             parse_mode=ParseMode.MARKDOWN,
             disable_notification=True,
         )
-        
-        # <<<< 3. شناسه پیام را برگردانید >>>>
+        # شناسه پیام را از آبجکت message برمی‌گردانیم
         return message.message_id
+        # ===> پایان اصلاح <===
 
     def remove_markup(self, chat_id: ChatId, message_id: MessageId) -> None:
         self._bot.edit_message_reply_markup(chat_id=chat_id, message_id=message_id)
