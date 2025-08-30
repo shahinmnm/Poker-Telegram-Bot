@@ -51,7 +51,7 @@ class PokerBotViewer:
         # در غیر این صورت (مثلا وقتی ReplyKeyboardRemove استفاده شده)، None برمی‌گردانیم
         return None
         # <<<< پایان بلوک اصلاح شده >>>>
-    
+
     def send_message(
         self,
         chat_id: ChatId,
@@ -98,7 +98,7 @@ class PokerBotViewer:
             text=text,
             disable_notification=True,
         )
-    
+
     def send_desk_cards_img(
         self,
         chat_id: ChatId,
@@ -141,7 +141,7 @@ class PokerBotViewer:
             resize_keyboard=True,
             one_time_keyboard=False,
         )
-        
+
     def show_reopen_keyboard(self, chat_id: ChatId, player_mention: Mention) -> None:
         """Hides cards and shows a keyboard with a 'Show Cards' button."""
         show_cards_button_text = "🃏 نمایش کارت‌ها"
@@ -206,23 +206,23 @@ class PokerBotViewer:
             return PlayerAction.CHECK
         return PlayerAction.CALL
 
-# pokerapp/pokerbotview.py
-
+# ==================== شروع بلوک اصلاح شده ====================
     def send_turn_actions(
             self,
             chat_id: ChatId,
             game: Game,
             player: Player,
             money: Money,
-    ) -> Optional[MessageId]: # <-- نوع خروجی را به Optional تغییر می‌دهیم
-        if len(game.cards_table) == 0:
+    ) -> Optional[MessageId]:
+        if not game.cards_table:
             cards_table = "🚫 کارتی روی میز نیست."
         else:
             cards_table = " ".join(game.cards_table)
+            
         text = (
-            "🔄 نوبت {}\n" +
-            "کارت‌های روی میز: {}\n" +
-            "موجودی شما: *{}$*\n" +
+            "🔄 نوبت {}\n"
+            "کارت‌های روی میز: {}\n"
+            "موجودی شما: *{}$*\n"
             "حداکثر شرط در این دور: *{}$*"
         ).format(
             player.mention_markdown,
@@ -230,14 +230,11 @@ class PokerBotViewer:
             money,
             game.max_round_rate,
         )
-        check_call_action = PokerBotViewer.define_check_call_action(
-            game, player
-        )
-        markup = PokerBotViewer._get_turns_markup(check_call_action)
+        
+        check_call_action = self.define_check_call_action(game, player)
+        markup = self._get_turns_markup(check_call_action)
 
-        # ===> شروع اصلاح <===
         try:
-            # نتیجه فراخوانی را در متغیر message ذخیره می‌کنیم
             message = self._bot.send_message(
                 chat_id=chat_id,
                 text=text,
@@ -245,15 +242,13 @@ class PokerBotViewer:
                 parse_mode=ParseMode.MARKDOWN,
                 disable_notification=True,
             )
-            # اگر message یک شی معتبر بود، شناسه آن را برمی‌گردانیم
             if isinstance(message, Message):
                 return message.message_id
         except Exception as e:
-            # در صورت بروز خطا در ارسال پیام، آن را لاگ می‌کنیم
             print(f"Error sending turn actions: {e}")
-        
-        # در غیر این صورت (خطا یا پاسخ نامعتبر)، None برمی‌گردانیم
+
         return None
+# ==================== پایان بلوک اصلاح شده ====================
 
     def remove_markup(self, chat_id: ChatId, message_id: MessageId) -> None:
         self._bot.edit_message_reply_markup(chat_id=chat_id, message_id=message_id)
