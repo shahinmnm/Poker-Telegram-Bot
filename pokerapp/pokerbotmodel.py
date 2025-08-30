@@ -196,44 +196,36 @@ class PokerBotModel:
         game.state = GameState.ROUND_PRE_FLOP
         self._divide_cards(game=game, chat_id=chat_id)
 
- self._round_rate.round_pre_flop_rate_before_first_turn(game)
-
-        # ==================== شروع بلوک جایگزینی ====================
-        # در دور pre-flop، اولین حرکت با بازیکنی است که بلافاصله بعد از Big Blind قرار دارد.
-        # ایندکس Big Blind معمولا 1 است (0 = Dealer/Small Blind, 1 = Big Blind).
-        # پس اولین حرکت با بازیکن ایندکس 2 است.
-        # در بازی دو نفره (heads-up)، اولین حرکت با Dealer/Small Blind (ایندکس 0) است.
-
-        num_players = len(game.players)
-        if num_players == 2:
-            # در بازی دو نفره، نوبت اول با دیلر/اسمال بلایند است (ایندکس 0)
-            # ایندکس را -1 میگذاریم تا _process_playing با افزایش آن، به ایندکس 0 برسد.
-            game.current_player_index = -1
-        else:
-            # در بازی با بیش از 2 بازیکن، نوبت با نفر بعد از بیگ بلایند است (ایندکس 2)
-            # ایندکس را 1 میگذاریم تا _process_playing با افزایش آن، به ایندکس 2 برسد.
-            game.current_player_index = 1
-        
-        # فراخوانی برای شروع روند بازی و تعیین نوبت
-        self._process_playing(chat_id=chat_id, game=game)
-        # ===================== پایان بلوک جایگزینی =====================
-
-        context.chat_data[KEY_OLD_PLAYERS] = [p.user_id for p in game.players]
+     self._round_rate.round_pre_flop_rate_before_first_turn(game)
+    
+            # ==================== شروع بلوک جایگزینی ====================
+            # در دور pre-flop، اولین حرکت با بازیکنی است که بلافاصله بعد از Big Blind قرار دارد.
+            # ایندکس Big Blind معمولا 1 است (0 = Dealer/Small Blind, 1 = Big Blind).
+            # پس اولین حرکت با بازیکن ایندکس 2 است.
+            # در بازی دو نفره (heads-up)، اولین حرکت با Dealer/Small Blind (ایندکس 0) است.
+    
+            num_players = len(game.players)
+            if num_players == 2:
+                # در بازی دو نفره، نوبت اول با دیلر/اسمال بلایند است (ایندکس 0)
+                # ایندکس را -1 میگذاریم تا _process_playing با افزایش آن، به ایندکس 0 برسد.
+                game.current_player_index = -1
+            else:
+                # در بازی با بیش از 2 بازیکن، نوبت با نفر بعد از بیگ بلایند است (ایندکس 2)
+                # ایندکس را 1 میگذاریم تا _process_playing با افزایش آن، به ایندکس 2 برسد.
+                game.current_player_index = 1
+            
+            # فراخوانی برای شروع روند بازی و تعیین نوبت
+            self._process_playing(chat_id=chat_id, game=game)
+            # ===================== پایان بلوک جایگزینی =====================
+    
+            context.chat_data[KEY_OLD_PLAYERS] = [p.user_id for p in game.players]
         
     def _process_playing(self, chat_id: ChatId, game: Game) -> None:
         # اگر بازی تمام شده است، خارج شو
         if game.state == GameState.INITIAL:
             return
 
-        active_and_all_in_players = game.players_by(states=(PlayerState.ACTIVE, PlayerState.ALL_IN))
-        if len(active_and_all_in_players) <= 1:
-            active_players = game.players_by(states=(PlayerState.ACTIVE,))
-            if active_players and game.all_in_players_are_covered():
-                self._fast_forward_to_finish(game, chat_id)
-            else:
-                self._finish(game, chat_id)
-            return
-
+        # ... (بلوک if برای بررسی تعداد بازیکنان فعال را دست نخورده باقی بگذارید)
         active_and_all_in_players = game.players_by(states=(PlayerState.ACTIVE, PlayerState.ALL_IN))
         if len(active_and_all_in_players) <= 1:
             active_players = game.players_by(states=(PlayerState.ACTIVE,))
@@ -286,7 +278,6 @@ class PokerBotModel:
             # فراخوانی بازگشتی برای شروع دور جدید
             self._process_playing(chat_id, game)
             return
-        # ===================== پایان بلوک جایگزینی =====================
 
         # Find next active player
         while True:
