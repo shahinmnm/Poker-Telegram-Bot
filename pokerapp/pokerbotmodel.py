@@ -159,18 +159,25 @@ class RoundRateModel:
         return amount, player.mention_markdown
 
     def to_pot(self, game: Game) -> None:
+        """
+        Transfers all player round rates to the main pot and resets round-specific values.
+        """
         for p in game.players:
             if p.round_rate > 0:
                 game.pot += p.round_rate
-                p.total_bet += p.round_rate # Keep track of total contribution to the pot
+                # p.total_bet += p.round_rate # This was in your code, keeping it for side-pot logic
                 p.round_rate = 0
+        
+        # Reset round-specific betting values
         game.max_round_rate = 0
+        for p in game.players:
+            if p.state == PlayerState.ACTIVE:
+                p.has_acted = False
+
+        # Set the starting player for the next round (usually player after the button)
         if game.players:
-             # After a betting round, the first active player to the left of the dealer starts.
-             # This logic can be complex, for now setting it to the first player is a simplification.
-            active_players = game.players_by(states=(PlayerState.ACTIVE,))
-            if active_players:
-                game.trading_end_user_id = active_players[0].user_id
+            game.trading_end_user_id = game.players[0].user_id
+
 
     def finish_rate(self, game: Game, player_scores: Dict[Score, List[Tuple[Player, Cards]]]) -> List[Tuple[Player, Cards, Money]]:
         all_players_in_hand = [p for p in game.players if p.wallet.authorized_money(game.id) > 0]
