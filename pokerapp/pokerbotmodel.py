@@ -52,51 +52,136 @@ DESCRIPTION_FILE = "assets/description_bot.md"
 # I'm assuming they are present in your file. I will omit them for brevity
 # but you should ensure they remain in your final file.
 
-class WalletManagerModel:
-    # ... Your WalletManagerModel code ...
-    def __init__(self, user_id: UserId, kv):
+class WalletManagerModel(Wallet):
+    def __init__(self, user_id: UserId, kv: redis.Redis):
         self._user_id = user_id
         self._kv: redis.Redis = kv
-        self._key = f"u_money_{self._user_id}"
-        self._key_bonus_time = f"u_bonus_{self._user_id}"
-        if not self._kv.exists(self._key):
-            self._kv.set(self._key, DEFAULT_MONEY)
+        self._money_key = f"money:{self._user_id}"
+        self._daily_bonus_key = f"daily_bonus_time:{self._user_id}"
+        # Ensure user has default money if not set
+        if self._kv.get(self._money_key) is None:
+            self.set(DEFAULT_MONEY)
 
     def value(self) -> Money:
-        return int(self._kv.get(self._key))
+        money = self._kv.get(self._money_key)
+        return int(money)
 
-    def dec(self, amount: Money):
-        return self._kv.decr(self._key, amount)
+    def set(self, amount: Money) -> None:
+        self._kv.set(self._money_key, amount)
 
-    def inc(self, amount: Money):
-        return self._kv.incr(self._key, amount)
+    def inc(self, amount: Money) -> Money:
+        # Note: incrby can also handle negative values, so dec is not strictly needed
+        return self._kv.incrby(self._money_key, amount)
 
-    def has_daily_bonus(self) -> bool:
-        return self._kv.exists(self._key_bonus_time)
+    def authorized_money(self, game_id: str) -> Money:
+        auth_money = self._kv.get(f"auth:{game_id}:{self._user_id}")
+        return int(auth_money) if auth_money else 0
+
+    def authorize(self, game_id: str, amount: Money) -> None:
+        self._kv.set(f"auth:{game_id}:{self._user_id}", amount)
+
+    def approve(self, game_id: str) -> None:
+        self._kv.delete(f"auth:{game_id}:{self._user_id}")
 
     def add_daily(self, amount: Money) -> Money:
-        self._kv.set(self._key_bonus_time, "1", ex=ONE_DAY)
+        self._kv.set(self._daily_bonus_key, datetime.datetime.now().timestamp(), ex=ONE_DAY)
         return self.inc(amount)
+
+    def has_daily_bonus(self) -> bool:
+        return self._kv.exists(self._daily_bonus_key)
 
 
 class RoundRateModel:
-    # ... Your RoundRateModel code ...
     def round_pre_flop_rate_before_first_turn(self, game: Game):
-        game.max_round_rate = 2 * SMALL_BLIND
         if len(game.players) < 2: return
-        p1 = game.players[0]
-        p1.round_rate = SMALL_BLIND
-        p1.wallet.dec(p1.round_rate)
-        p2 = game.players[1]
-        p2.round_rate = 2 * SMALL_BLIND
-        p2.wallet.dec(p2.round_rate)
-        game.trading_end_user_id = p2.user_id
-    
-    def finish_rate(self, game: Game, player_scores: Dict[Score, List[Tuple[Player, Cards]]]) -> List:
-        all_players_in_hand = game.players_by(states=(PlayerState.ACTIVE, PlayerState.ALL_IN))
-        if not all_players_in_hand: return []
         
-        total_bets = {p.user_id: p.total_bet for p in all_players_in_hand}
+        for p in game.players:
+            p.wallet.authorize(game.id, p.wallet.value())
+
+        sb_player_index = 0
+        bb_player_index = 1
+        
+        sb_player = game.players[sb_player_index]
+        bb_player = game.players[bb_player_index]
+        
+        sb_amount = min(SMALL_BLIND, sb_player.wallet.value())
+        sb_player.round_rate += sb_amount
+        sb_player.wallet.inc(-sb_amount)
+
+        bb_amount = min(2 * SMALL_BLIND, bb_player.wallet.value())
+        bb_player.round_rate += bb_amount
+        bb_player.wallet.inc(-bb_amount)
+        
+        game.max_round_rate = bb_amount
+        game.trading_end_user_id = bb_player.user_id
+        
+        sb_player.has_acted = True
+        bb_player.has_acted = True
+
+    def call_check(self, game: Game, player: Player):
+        amount = game.max_round_rate - player.round_rate
+        if player.wallet.value() < amount:
+            raise UserException("پول کافی برای کال نداری. باید All-in کنی.")
+        player.round_rate += amount
+        player.wallet.inc(-amount)
+
+    def raise_bet(self, game: Game, player: Player, raise_bet_amount: Money) -> Tuple[Money, Mention]:
+        amount_to_call = game.max_round_rate - player.round_rate
+        total_bet_amount = amount_to_call + raise_bet_amount
+
+        if player.wallet.value() < total_bet_amount:
+            raise UserException("پول کافی برای این رِیز نداری.")
+
+        player.round_rate += total_bet_amount
+        player.wallet.inc(-total_bet_amount)
+        game.max_round_rate = player.round_rate
+        game.trading_end_user_id = player.user_id
+        
+        for p in game.players:
+            if p.user_id != player.user_id:
+                p.has_acted = False
+
+        return raise_bet_amount, player.mention_markdown
+
+    def all_in(self, game: Game, player: Player) -> Tuple[Money, Mention]:
+        amount = player.wallet.value()
+        player.round_rate += amount
+        player.wallet.set(0)
+        player.state = PlayerState.ALL_IN
+
+        if player.round_rate > game.max_round_rate:
+            game.max_round_rate = player.round_rate
+            game.trading_end_user_id = player.user_id
+            for p in game.players:
+                if p.user_id != player.user_id:
+                    p.has_acted = False
+
+        return amount, player.mention_markdown
+
+    def to_pot(self, game: Game) -> None:
+        for p in game.players:
+            if p.round_rate > 0:
+                game.pot += p.round_rate
+                p.total_bet += p.round_rate # Keep track of total contribution to the pot
+                p.round_rate = 0
+        game.max_round_rate = 0
+        if game.players:
+             # After a betting round, the first active player to the left of the dealer starts.
+             # This logic can be complex, for now setting it to the first player is a simplification.
+            active_players = game.players_by(states=(PlayerState.ACTIVE,))
+            if active_players:
+                game.trading_end_user_id = active_players[0].user_id
+
+    def finish_rate(self, game: Game, player_scores: Dict[Score, List[Tuple[Player, Cards]]]) -> List[Tuple[Player, Cards, Money]]:
+        all_players_in_hand = [p for p in game.players if p.wallet.authorized_money(game.id) > 0]
+        if not all_players_in_hand:
+            active_winners = game.players_by(states=(PlayerState.ACTIVE, PlayerState.ALL_IN))
+            if not active_winners: return []
+            winner = active_winners[0]
+            winner.wallet.inc(game.pot)
+            return [(winner, winner.cards, game.pot)]
+
+        total_bets = {p.user_id: p.wallet.authorized_money(game.id) - p.wallet.value() for p in all_players_in_hand}
         sorted_bets = sorted(list(set(total_bets.values())))
 
         pots = []
@@ -106,7 +191,8 @@ class RoundRateModel:
             eligible_players = []
 
             for player in all_players_in_hand:
-                contribution = min(total_bets[player.user_id], bet_level) - last_bet_level
+                player_bet = total_bets.get(player.user_id, 0)
+                contribution = min(player_bet, bet_level) - last_bet_level
                 if contribution > 0:
                     pot_amount += contribution
                     eligible_players.append(player)
@@ -115,13 +201,15 @@ class RoundRateModel:
                 pots.append({"amount": pot_amount, "eligible_players": eligible_players})
             
             last_bet_level = bet_level
-        
+
         final_winnings = {}
         for pot in pots:
             eligible_winners = []
-            best_score_in_pot = -1
+            best_score_in_pot = Score(-1)
 
-            for score, players_with_score in player_scores.items():
+            sorted_scores = sorted(player_scores.items(), key=lambda item: item[0], reverse=True)
+
+            for score, players_with_score in sorted_scores:
                 for player, hand in players_with_score:
                     if player in pot["eligible_players"]:
                         if score > best_score_in_pot:
@@ -129,34 +217,28 @@ class RoundRateModel:
                             eligible_winners = [(player, hand)]
                         elif score == best_score_in_pot:
                             eligible_winners.append((player, hand))
-            
+
             if not eligible_winners: continue
 
             win_share = round(pot["amount"] / len(eligible_winners))
             for winner, hand in eligible_winners:
                 winner.wallet.inc(win_share)
-
+                
                 if winner.user_id not in final_winnings:
                     final_winnings[winner.user_id] = {"player": winner, "hand": hand, "money": 0}
                 final_winnings[winner.user_id]["money"] += win_share
         
         return [(v["player"], v["hand"], v["money"]) for v in final_winnings.values()]
 
-    def to_pot(self, game) -> None:
-        for p in game.players:
-            game.pot += p.round_rate
-            p.round_rate = 0
-        game.max_round_rate = 0
-        if game.players:
-            game.trading_end_user_id = game.players[0].user_id
-
 class PokerBotModel:
-        ACTIVE_GAME_STATES = [
+    # ===== اصلاح تورفتگی در اینجا =====
+    ACTIVE_GAME_STATES = [
         GameState.ROUND_PRE_FLOP,
         GameState.ROUND_FLOP,
         GameState.ROUND_TURN,
         GameState.ROUND_RIVER,
     ]
+
     def __init__(
         self,
         view: PokerBotViewer,
@@ -170,6 +252,52 @@ class PokerBotModel:
         self._kv = kv
         self._cfg: Config = cfg
         self._round_rate: RoundRateModel = RoundRateModel()
+
+    def show_table(self, update: Update, context: CallbackContext) -> None:
+        chat_id = update.effective_chat.id
+        game = self._game_from_context(context)
+
+        if not game or game.state not in self.ACTIVE_GAME_STATES:
+            return
+
+        text = f"💰 پات فعلی: *{game.pot}$*"
+        self._view.send_message(chat_id=chat_id, text=text)
+
+        if game.cards_table:
+            self._view.send_desk_cards_img(
+                chat_id=chat_id,
+                cards=game.cards_table,
+                caption="کارت‌های روی میز"
+            )
+        else:
+            self._view.send_message(
+                chat_id=chat_id,
+                text="هنوز کارتی روی میز قرار نگرفته است."
+            )
+
+        current_player = self._current_turn_player(game)
+        if current_player and current_player.state == PlayerState.ACTIVE:
+            current_player_money = current_player.wallet.value()
+            # We are recreating the turn message, so we must store the new ID
+            msg_id = self._view.send_turn_actions(
+                chat_id=chat_id,
+                game=game,
+                player=current_player,
+                money=current_player_money,
+            )
+            if msg_id:
+                # Remove the old turn message if it exists
+                if game.turn_message_id:
+                    try:
+                        self._view.remove_markup(chat_id, game.turn_message_id)
+                    except Exception:
+                        pass # It might have already been removed
+                game.turn_message_id = msg_id
+            else:
+                self._view.send_message(
+                    chat_id,
+                    "خطا در نمایش مجدد نوبت. بازی ادامه دارد...",
+                )
 
     @property
     def _min_players(self):
@@ -199,8 +327,9 @@ class PokerBotModel:
                 chat_id=chat_id,
                 text="⚠️ بازی قبلاً شروع شده است، لطفاً صبر کنید!"
             )
-            if msg_id:
-                game.message_ids_to_delete.append(msg_id)
+            # You might want a mechanism to auto-delete these messages later
+            # if msg_id and hasattr(game, 'message_ids_to_delete'):
+            #     game.message_ids_to_delete.append(msg_id)
             return
 
         if len(game.players) >= MAX_PLAYERS:
@@ -237,10 +366,18 @@ class PokerBotModel:
         game.ready_users.add(user.id)
         game.players.append(player)
 
-        members_count = self._bot.get_chat_member_count(chat_id)
-        players_active = len(game.players)
-        if players_active >= self._min_players and (players_active == members_count - 1 or self._cfg.DEBUG):
-            self._start_game(context=context, game=game, chat_id=chat_id)
+        try:
+            members_count = self._bot.get_chat_member_count(chat_id)
+            players_active = len(game.players)
+            # One is the bot.
+            if players_active >= self._min_players and (players_active == members_count - 1 or self._cfg.DEBUG):
+                self._start_game(context=context, game=game, chat_id=chat_id)
+        except Exception as e:
+            print(f"Error getting member count or starting game: {e}")
+            if self._cfg.DEBUG and len(game.players) >= self._min_players:
+                print("DEBUG mode: Starting game without member count check.")
+                self._start_game(context=context, game=game, chat_id=chat_id)
+
 
     def stop(self, user_id: UserId) -> None:
         UserPrivateChatModel(user_id=user_id, kv=self._kv).delete()
@@ -252,32 +389,35 @@ class PokerBotModel:
 
         if game.state not in (GameState.INITIAL, GameState.FINISHED):
             msg_id = self._view.send_message_return_id(chat_id=chat_id, text="🎮 بازی الان داره اجرا میشه")
-            if msg_id:
-                game.message_ids_to_delete.append(msg_id)
+            # if msg_id and hasattr(game, 'message_ids_to_delete'):
+            #     game.message_ids_to_delete.append(msg_id)
             return
+        
+        try:
+            # One is the bot.
+            members_count = self._bot.get_chat_member_count(chat_id) - 1
+            if members_count == 1 and not self._cfg.DEBUG:
+                try:
+                    with open(DESCRIPTION_FILE, 'r') as f:
+                        text = f.read()
+                    self._view.send_message(chat_id=chat_id, text=text)
+                    self._view.send_photo(chat_id=chat_id)
+                except FileNotFoundError:
+                     self._view.send_message(chat_id=chat_id, text="Welcome to Poker Bot!")
 
-        members_count = self._bot.get_chat_member_count(chat_id) - 1
-        if members_count == 1 and not self._cfg.DEBUG:
-            try:
-                with open(DESCRIPTION_FILE, 'r') as f:
-                    text = f.read()
-                self._view.send_message(chat_id=chat_id, text=text)
-                self._view.send_photo(chat_id=chat_id)
-            except FileNotFoundError:
-                 self._view.send_message(chat_id=chat_id, text="Welcome to Poker Bot!")
-
-            if update.effective_chat.type == 'private':
-                UserPrivateChatModel(user_id=user_id, kv=self._kv).set_chat_id(chat_id=chat_id)
-            return
+                if update.effective_chat.type == 'private':
+                    UserPrivateChatModel(user_id=user_id, kv=self._kv).set_chat_id(chat_id=chat_id)
+                return
+        except Exception as e:
+            print(f"Could not get member count: {e}. Bot might not be admin.")
 
         players_active = len(game.players)
         if players_active >= self._min_players:
             self._start_game(context=context, game=game, chat_id=chat_id)
         else:
             msg_id = self._view.send_message_return_id(chat_id=chat_id, text="👤 بازیکن کافی نیست")
-            if msg_id:
-                game.message_ids_to_delete.append(msg_id)
-        return
+            # if msg_id and hasattr(game, 'message_ids_to_delete'):
+            #     game.message_ids_to_delete.append(msg_id)
 
     def _start_game(
         self,
@@ -296,12 +436,13 @@ class PokerBotModel:
 
         old_players_ids = context.chat_data.get(KEY_OLD_PLAYERS)
         if old_players_ids:
+            # Rotate dealer button
             old_players_ids = old_players_ids[1:] + old_players_ids[:1]
             def index(ln: List, user_id: UserId) -> int:
                 try:
                     return ln.index(user_id)
                 except ValueError:
-                    return len(ln)
+                    return len(ln) # New players go to the end
             game.players.sort(key=lambda p: index(old_players_ids, p.user_id))
 
         game.state = GameState.ROUND_PRE_FLOP
@@ -310,66 +451,80 @@ class PokerBotModel:
         
         num_players = len(game.players)
         if num_players == 2:
-            game.current_player_index = -1
+             # In heads-up, small blind (dealer) acts first before the flop.
+            game.current_player_index = -1 
         else:
-            game.current_player_index = 1
+             # In multi-way pots, player after big blind (UTG) acts first.
+            game.current_player_index = 1 
 
         self._process_playing(chat_id=chat_id, game=game)
         context.chat_data[KEY_OLD_PLAYERS] = [p.user_id for p in game.players]
 
     def _process_playing(self, chat_id: ChatId, game: Game) -> None:
-        print(f"DEBUG: Entering _process_playing. Game state: {game.state}")
+        print(f"DEBUG: Processing play. Current state: {game.state}")
+
         if game.state == GameState.INITIAL:
-            print("DEBUG: _process_playing exited because game state is INITIAL.")
+            print("DEBUG: Process playing exited, game state is INITIAL.")
             return
 
         active_and_all_in_players = game.players_by(states=(PlayerState.ACTIVE, PlayerState.ALL_IN))
         if len(active_and_all_in_players) <= 1:
-            print("DEBUG: Finishing game because <= 1 player is active/all-in.")
-            active_players = game.players_by(states=(PlayerState.ACTIVE,))
-            if active_players and game.all_in_players_are_covered():
-                self._fast_forward_to_finish(game, chat_id)
+            print(f"DEBUG: Finishing game. Active/All-in players: {len(active_and_all_in_players)}")
+            # If players are all-in, no more betting can occur, so show cards immediately.
+            if any(p.state == PlayerState.ALL_IN for p in game.players) and len(game.cards_table) < 5:
+                 self._fast_forward_to_finish(game, chat_id)
             else:
-                self._finish(game, chat_id)
+                 self._finish(game, chat_id)
             return
 
-        round_over = True
+        # Check if the betting round is over
+        round_over = False
         active_players = game.players_by(states=(PlayerState.ACTIVE,))
         if not active_players:
-             round_over = True
+            # All remaining players are All-In
+            round_over = True
         else:
-            for p in active_players:
-                if not p.has_acted or p.round_rate < game.max_round_rate:
-                    round_over = False
-                    break
+            # Round is over if all active players have acted and have put in the same amount of money.
+            all_acted = all(p.has_acted for p in active_players)
+            all_rates_equal = all(p.round_rate == game.max_round_rate for p in active_players)
+            if all_acted and all_rates_equal:
+                round_over = True
         
         if round_over:
-            print(f"DEBUG: Round is over. Moving to next round. Current state: {game.state}")
+            print(f"DEBUG: Round is over. Current state: {game.state}. Moving to next.")
             self._round_rate.to_pot(game)
             self._goto_next_round(game, chat_id)
-            if game.state == GameState.INITIAL:
-                print("DEBUG: Game finished after advancing round.")
+            if game.state == GameState.INITIAL: # Game finished
                 return
-
-            game.current_player_index = -1
+            
+            # Reset for next round
+            game.current_player_index = -1 # Start from player after dealer button
             for p in game.players:
                 if p.state == PlayerState.ACTIVE:
                     p.has_acted = False
             
+            # Recursively call to start the next round's action
             self._process_playing(chat_id, game)
             return
 
-        while True:
+        # Find the next player to act
+        tries = 0
+        while tries < len(game.players) * 2:
             game.current_player_index = (game.current_player_index + 1) % len(game.players)
             current_player = self._current_turn_player(game)
             if current_player.state == PlayerState.ACTIVE:
                 break
+            tries += 1
+        
+        if current_player.state != PlayerState.ACTIVE:
+            print("CRITICAL: No active player found to continue the game.")
+            game.reset()
+            return
         
         print(f"DEBUG: Next player is {current_player.user_id} at index {game.current_player_index}.")
         game.last_turn_time = datetime.datetime.now()
         current_player_money = current_player.wallet.value()
 
-        # ==================== شروع بلوک اصلاح شده ====================
         print(f"DEBUG: Sending turn actions to player {current_player.user_id}.")
         msg_id = self._view.send_turn_actions(
             chat_id=chat_id,
@@ -379,92 +534,69 @@ class PokerBotModel:
         )
 
         if msg_id:
+            if game.turn_message_id: # Remove previous turn message's keyboard
+                try:
+                    self._view.remove_markup(chat_id, game.turn_message_id)
+                except Exception: pass
             game.turn_message_id = msg_id
-            print(f"INFO: Turn message sent successfully. Message ID: {msg_id} stored in game object.")
+            print(f"INFO: Turn message sent. New ID: {msg_id}")
         else:
-            print(f"CRITICAL: Failed to send turn message for chat {chat_id}. Aborting turn processing.")
+            print(f"CRITICAL: Failed to send turn message for chat {chat_id}.")
             self._view.send_message(chat_id, "خطای جدی در ارسال پیام نوبت رخ داد. بازی متوقف شد.")
             game.reset()
 
     def _fast_forward_to_finish(self, game: Game, chat_id: ChatId):
-        """ When no more betting is possible, reveals all remaining cards """
+        """ When no more betting is possible, reveals all remaining cards and finishes. """
+        print("DEBUG: Fast-forwarding to finish.")
         self._round_rate.to_pot(game)
-        if game.state == GameState.ROUND_PRE_FLOP:
-            self.add_cards_to_table(3, game, chat_id)
-            game.state = GameState.ROUND_FLOP
-        if game.state == GameState.ROUND_FLOP:
-            self.add_cards_to_table(1, game, chat_id)
-            game.state = GameState.ROUND_TURN
-        if game.state == GameState.ROUND_TURN:
-            self.add_cards_to_table(1, game, chat_id)
-            game.state = GameState.ROUND_RIVER
+        
+        cards_to_deal = 5 - len(game.cards_table)
+        if cards_to_deal > 0:
+            self.add_cards_to_table(cards_to_deal, game, chat_id)
+
+        # Set game state to a "finished-like" state to prevent further actions
+        game.state = GameState.ROUND_RIVER 
         self._finish(game, chat_id)
 
     def bonus(self, update: Update, context: CallbackContext) -> None:
-        wallet = WalletManagerModel(
-            update.effective_message.from_user.id, self._kv)
+        wallet = WalletManagerModel(update.effective_message.from_user.id, self._kv)
         money = wallet.value()
-
         chat_id = update.effective_message.chat_id
         message_id = update.effective_message.message_id
 
         if wallet.has_daily_bonus():
             return self._view.send_message_reply(
                 chat_id=chat_id,
-                message_id=update.effective_message.message_id,
+                message_id=message_id,
                 text=f"💰 پولت: *{money}$*\n",
             )
 
-        icon: str
-        dice_msg: Message
-        bonus: Money
-
         SATURDAY = 5
         if datetime.datetime.today().weekday() == SATURDAY:
-            dice_msg = self._view.send_dice_reply(
-                chat_id=chat_id,
-                message_id=message_id,
-                emoji='🎰'
-            )
+            dice_msg = self._view.send_dice_reply(chat_id=chat_id, message_id=message_id, emoji='🎰')
             icon = '🎰'
             bonus = dice_msg.dice.value * 20
         else:
-            dice_msg = self._view.send_dice_reply(
-                chat_id=chat_id,
-                message_id=message_id,
-            )
-            icon = DICES[dice_msg.dice.value-1]
+            dice_msg = self._view.send_dice_reply(chat_id=chat_id, message_id=message_id)
+            icon = DICES[dice_msg.dice.value - 1]
             bonus = BONUSES[dice_msg.dice.value - 1]
 
-        message_id = dice_msg.message_id
-        money = wallet.add_daily(amount=bonus)
-
+        new_money = wallet.add_daily(amount=bonus)
+        
         def print_bonus() -> None:
             self._view.send_message_reply(
                 chat_id=chat_id,
-                message_id=message_id,
-                text=f"🎁 پاداش: *{bonus}$* {icon}\n" +
-                f"💰 پولت: *{money}$*\n",
+                message_id=dice_msg.message_id,
+                text=f"🎁 پاداش: *{bonus}$* {icon}\n💰 پولت: *{new_money}$*\n",
             )
-
         Timer(DICE_DELAY_SEC, print_bonus).start()
 
-    def send_cards_to_user(
-        self,
-        update: Update,
-        context: CallbackContext,
-    ) -> None:
+
+    def send_cards_to_user(self, update: Update, context: CallbackContext) -> None:
         game = self._game_from_context(context)
-
-        current_player = None
-        for player in game.players:
-            if player.user_id == update.effective_user.id:
-                current_player = player
-                break
-
-        if current_player is None or not current_player.cards:
+        current_player = next((p for p in game.players if p.user_id == update.effective_user.id), None)
+        if not current_player or not current_player.cards:
             return
-
         self._view.send_cards(
             chat_id=update.effective_message.chat_id,
             cards=current_player.cards,
@@ -472,147 +604,132 @@ class PokerBotModel:
             ready_message_id=update.effective_message.message_id,
         )
 
-    def _check_access(self, chat_id: ChatId, user_id: UserId) -> bool:
-        chat_admins = self._bot.get_chat_administrators(chat_id)
-        for m in chat_admins:
-            if m.user.id == user_id:
-                return True
-        return False
-
     def _send_cards_private(self, player: Player, cards: Cards) -> None:
-        user_chat_model = UserPrivateChatModel(
-            user_id=player.user_id,
-            kv=self._kv,
-        )
+        user_chat_model = UserPrivateChatModel(user_id=player.user_id, kv=self._kv)
         private_chat_id = user_chat_model.get_chat_id()
-
-        if private_chat_id is None:
+        if not private_chat_id:
             raise ValueError("private chat not found")
 
         private_chat_id = private_chat_id.decode('utf-8')
+        message = self._view.send_desk_cards_img(
+            chat_id=private_chat_id, cards=cards, caption="Your cards", disable_notification=False
+        )
+        if not message: return
 
-        message_id = self._view.send_desk_cards_img(
-            chat_id=private_chat_id,
-            cards=cards,
-            caption="Your cards",
-            disable_notification=False,
-        ).message_id
-
-        try:
+        # Clean up old card messages
+        while True:
             rm_msg_id = user_chat_model.pop_message()
-            while rm_msg_id is not None:
-                try:
-                    rm_msg_id = rm_msg_id.decode('utf-8')
-                    self._view.remove_message(
-                        chat_id=private_chat_id,
-                        message_id=rm_msg_id,
-                    )
-                except Exception as ex:
-                    print("remove_message", ex)
-                    traceback.print_exc()
-                rm_msg_id = user_chat_model.pop_message()
-
-            user_chat_model.push_message(message_id=message_id)
-        except Exception as ex:
-            print("bulk_remove_message", ex)
-            traceback.print_exc()
+            if rm_msg_id is None: break
+            try:
+                self._view.remove_message(chat_id=private_chat_id, message_id=rm_msg_id.decode('utf-8'))
+            except Exception as e:
+                print(f"Could not remove old private card message: {e}")
+        user_chat_model.push_message(message.message_id)
 
     def _divide_cards(self, game: Game, chat_id: ChatId) -> None:
         for player in game.players:
-            cards = player.cards = [
-                game.remain_cards.pop(), game.remain_cards.pop()
-            ]
+            if len(game.remain_cards) < 2: 
+                print("Error: Not enough cards to deal.")
+                return
+            cards = [game.remain_cards.pop(), game.remain_cards.pop()]
+            player.cards = cards
             try:
                 self._send_cards_private(player=player, cards=cards)
                 continue
-            except Exception as ex:
-                print(ex)
-                pass
+            except Exception as e:
+                print(f"Could not send private cards to {player.user_id}: {e}")
+
             msg_id = self._view.send_cards(
                 chat_id=chat_id,
                 cards=cards,
                 mention_markdown=player.mention_markdown,
                 ready_message_id=player.ready_message_id,
             )
-            if msg_id:
-                game.message_ids_to_delete.append(msg_id)
+            if msg_id: game.message_ids_to_delete.append(msg_id)
 
     def add_cards_to_table(self, count: int, game: Game, chat_id: ChatId) -> None:
         for _ in range(count):
             if not game.remain_cards: break
             game.cards_table.append(game.remain_cards.pop())
 
-        msg_id = self._view.send_desk_cards_img(
+        msg = self._view.send_desk_cards_img(
             chat_id=chat_id,
             cards=game.cards_table,
             caption=f"💰 پات فعلی: {game.pot}$",
         )
-        if msg_id:
-            game.message_ids_to_delete.append(msg_id)
+        if msg: game.message_ids_to_delete.append(msg.message_id)
 
     def _finish(self, game: Game, chat_id: ChatId) -> None:
-        if game.pot == 0:
-            self._round_rate.to_pot(game)
-        print(f"game finished: {game.id}, players count: {len(game.players)}, pot: {game.pot}")
+        # ===== اصلاح منطق to_pot =====
+        self._round_rate.to_pot(game)
+        print(f"INFO: Game finished: {game.id}, players count: {len(game.players)}, pot: {game.pot}")
 
         active_players = game.players_by(states=(PlayerState.ACTIVE, PlayerState.ALL_IN))
         player_scores = self._winner_determine.determinate_scores(active_players, game.cards_table)
         winners_hand_money = self._round_rate.finish_rate(game, player_scores)
         
-        only_one_player = len(active_players) == 1
         text = "🏁 بازی با این نتیجه تموم شد:\n\n"
-        for (player, best_hand, money) in winners_hand_money:
-            win_hand = " ".join(best_hand)
-            text += f"{player.mention_markdown}:\n🏆 گرفتی: *{money} $*\n"
-            if not only_one_player and best_hand:
-                text += f"🃏 با ترکیب این کارتا:\n{win_hand}\n\n"
+        if not winners_hand_money and len(active_players) == 1:
+            # Handle case where only one player is left (all others folded)
+            winner = active_players[0]
+            winner.wallet.inc(game.pot)
+            text += f"{winner.mention_markdown} برنده شد و *{game.pot}$* گرفت چون بقیه فولد دادند."
+        else:
+            for (player, best_hand, money) in winners_hand_money:
+                text += f"{player.mention_markdown}:\n🏆 گرفتی: *{money} $*\n"
+                if best_hand:
+                    win_hand = " ".join(best_hand)
+                    text += f"🃏 با ترکیب این کارتا:\n{win_hand}\n\n"
+        
         text += "\n/ready برای ادامه"
         self._view.send_message(chat_id=chat_id, text=text, reply_markup=ReplyKeyboardRemove())
+        
         for player in game.players:
             player.wallet.approve(game.id)
             
-        self._view.remove_game_messages(chat_id, game.message_ids_to_delete)
+        # ===== اصلاح منطق حذف پیام‌ها =====
+        if hasattr(game, 'message_ids_to_delete'):
+            for msg_id in game.message_ids_to_delete:
+                try:
+                    self._view.remove_message(chat_id, msg_id)
+                except Exception as e:
+                    print(f"Could not delete message {msg_id}: {e}")
+
         game.reset()
 
     def _goto_next_round(self, game: Game, chat_id: ChatId):
-        state_transitions = {
-            GameState.ROUND_PRE_FLOP: {"next_state": GameState.ROUND_FLOP, "processor": lambda: self.add_cards_to_table(3, game, chat_id)},
-            GameState.ROUND_FLOP: {"next_state": GameState.ROUND_TURN, "processor": lambda: self.add_cards_to_table(1, game, chat_id)},
-            GameState.ROUND_TURN: {"next_state": GameState.ROUND_RIVER, "processor": lambda: self.add_cards_to_table(1, game, chat_id)},
-            GameState.ROUND_RIVER: {"next_state": GameState.INITIAL, "processor": lambda: self._finish(game, chat_id)}
+        transitions = {
+            GameState.ROUND_PRE_FLOP: ("ROUND_FLOP", lambda: self.add_cards_to_table(3, game, chat_id)),
+            GameState.ROUND_FLOP: ("ROUND_TURN", lambda: self.add_cards_to_table(1, game, chat_id)),
+            GameState.ROUND_TURN: ("ROUND_RIVER", lambda: self.add_cards_to_table(1, game, chat_id)),
+            GameState.ROUND_RIVER: ("INITIAL", lambda: self._finish(game, chat_id))
         }
-        
-        transition = state_transitions.get(game.state)
-        if transition:
-            game.state = transition["next_state"]
-            transition["processor"]()
+        next_state_str, processor = transitions.get(game.state, (None, None))
+        if next_state_str:
+            game.state = GameState(next_state_str)
+            processor()
 
     def middleware_user_turn(self, fn: Handler) -> Handler:
         def m(update, context):
             game = self._game_from_context(context)
-            if game.state == GameState.INITIAL: return
+            if game.state not in self.ACTIVE_GAME_STATES: return
             
             current_player = self._current_turn_player(game)
             if not current_player or update.callback_query.from_user.id != current_player.user_id: return
             
             fn(update, context) 
             
-            if game.turn_message_id:
-                try:
-                    self._view.remove_markup(
-                        chat_id=update.effective_message.chat_id,
-                        message_id=game.turn_message_id,
-                    )
-                except Exception as e:
-                    print(f"Could not remove markup for message {game.turn_message_id}: {e}")
+            # Markup is now removed from within _process_playing or show_table
+            # to handle the most current turn_message_id
         return m
     
     def ban_player(self, update: Update, context: CallbackContext) -> None:
         game = self._game_from_context(context)
         chat_id = update.effective_message.chat_id
 
-        if game.state in (GameState.INITIAL, GameState.FINISHED):
-            return
+        if game.state not in self.ACTIVE_GAME_STATES: return
+
+        if not hasattr(game, 'last_turn_time'): return
 
         diff = datetime.datetime.now() - game.last_turn_time
         if diff < MAX_TIME_FOR_TURN:
@@ -622,35 +739,24 @@ class PokerBotModel:
             )
             return
 
-        self._view.send_message(
-            chat_id=chat_id,
-            text="⏰ وقت تموم شد!",
-        )
+        self._view.send_message(chat_id=chat_id, text="⏰ وقت تموم شد!")
         self.fold(update, context)
 
     def _action_handler(self, update: Update, context: CallbackContext, action_logic):
-        """A generic handler for player actions"""
         game = self._game_from_context(context)
         player = self._current_turn_player(game)
 
-        # ===> اطمینان از اینکه بازیکن درست اقدام می‌کند <===
         if not player or player.user_id != update.effective_user.id:
-            return # اگر نوبت این بازیکن نیست، هیچ کاری نکن
+            return
             
         try:
             action_logic(game, player)
             player.has_acted = True
         except UserException as e:
             msg_id = self._view.send_message_return_id(chat_id=update.effective_chat.id, text=str(e))
-            if msg_id: game.message_ids_to_delete.append(msg_id)
+            if msg_id and hasattr(game, 'message_ids_to_delete'): game.message_ids_to_delete.append(msg_id)
             return
         
-        # ===> حذف فراخوانی بازگشتی اضافه <===
-        # این فراخوانی باعث اجرای مجدد و نمایش دکمه check بعد از call می‌شد.
-        # self._process_playing(chat_id, game) <<<< این خط را حذف یا کامنت کنید
-
-        # به جای آن، اجازه دهید که middleware کار را تمام کند و ما فقط
-        # نوبت را پردازش کنیم.
         self._process_playing(
             chat_id=update.effective_message.chat_id,
             game=game,
@@ -663,7 +769,7 @@ class PokerBotModel:
                 chat_id=update.effective_message.chat_id,
                 text=f"{player.mention_markdown} {PlayerAction.FOLD.value}"
             )
-            if msg_id: game.message_ids_to_delete.append(msg_id)
+            if msg_id and hasattr(game, 'message_ids_to_delete'): game.message_ids_to_delete.append(msg_id)
         self._action_handler(update, context, logic)
 
     def call_check(self, update: Update, context: CallbackContext) -> None:
@@ -672,19 +778,16 @@ class PokerBotModel:
             
             amount_to_call = game.max_round_rate - player.round_rate
             if player.wallet.value() < amount_to_call:
+                # Force all-in if cannot call
                 all_in_amount, mention = self._round_rate.all_in(game, player)
-                msg_id = self._view.send_message_return_id(
-                    chat_id=update.effective_chat.id,
-                    text=f"{mention} {PlayerAction.ALL_IN.value} {all_in_amount}$ (به دلیل عدم توانایی در کال)"
-                )
+                msg_text = f"{mention} {PlayerAction.ALL_IN.value} {all_in_amount}$ (به دلیل عدم توانایی در کال)"
             else:
                 self._round_rate.call_check(game, player)
-                msg_id = self._view.send_message_return_id(
-                    chat_id=update.effective_chat.id,
-                    text=f"{player.mention_markdown} {action_str}"
-                )
+                msg_text = f"{player.mention_markdown} {action_str}"
             
-            if msg_id: game.message_ids_to_delete.append(msg_id)
+            msg_id = self._view.send_message_return_id(chat_id=update.effective_chat.id, text=msg_text)
+            if msg_id and hasattr(game, 'message_ids_to_delete'): game.message_ids_to_delete.append(msg_id)
+
         self._action_handler(update, context, logic)
 
     def raise_rate_bet(self, update: Update, context: CallbackContext, raise_bet_amount: Money) -> None:
@@ -695,7 +798,7 @@ class PokerBotModel:
                 chat_id=update.effective_chat.id,
                 text=f"{mention} {action.value} {amount}$"
             )
-            if msg_id: game.message_ids_to_delete.append(msg_id)
+            if msg_id and hasattr(game, 'message_ids_to_delete'): game.message_ids_to_delete.append(msg_id)
         self._action_handler(update, context, logic)
 
     def all_in(self, update: Update, context: CallbackContext) -> None:
@@ -705,7 +808,7 @@ class PokerBotModel:
                 chat_id=update.effective_chat.id,
                 text=f"{mention} {PlayerAction.ALL_IN.value} {amount}$"
             )
-            if msg_id: game.message_ids_to_delete.append(msg_id)
+            if msg_id and hasattr(game, 'message_ids_to_delete'): game.message_ids_to_delete.append(msg_id)
         self._action_handler(update, context, logic)
 
 class WalletManagerModel(Wallet):
@@ -879,11 +982,3 @@ class RoundRateModel:
         
         return [(v["player"], v["hand"], v["money"]) for v in final_winnings.values()]
 
-
-    def to_pot(self, game) -> None:
-        for p in game.players:
-            game.pot += p.round_rate
-            p.round_rate = 0
-        game.max_round_rate = 0
-        if game.players:
-            game.trading_end_user_id = game.players[0].user_id
