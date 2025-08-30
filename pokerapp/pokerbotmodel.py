@@ -151,6 +151,12 @@ class RoundRateModel:
             game.trading_end_user_id = game.players[0].user_id
 
 class PokerBotModel:
+        ACTIVE_GAME_STATES = [
+        GameState.ROUND_PRE_FLOP,
+        GameState.ROUND_FLOP,
+        GameState.ROUND_TURN,
+        GameState.ROUND_RIVER,
+    ]
     def __init__(
         self,
         view: PokerBotViewer,
