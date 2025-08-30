@@ -225,10 +225,23 @@ class PokerBotViewer:
         # در صورت خطا، None برمی‌گردانیم
         return None
 
-    def remove_markup(self, chat_id: ChatId, message_id: MessageId) -> None:
-        print(f"DEBUG VIEW: Attempting to edit reply markup for message {message_id}")
-        self._bot.edit_message_reply_markup(chat_id=chat_id, message_id=message_id)
-        print(f"DEBUG VIEW: Successfully edited reply markup for message {message_id}")
+    def remove_markup(
+        self,
+        chat_id: ChatId,
+        message_id: MessageId,
+    ) -> None:
+        # این متد باید edit_message_reply_markup را فراخوانی کند
+        # و reply_markup را خالی بگذارد تا دکمه‌ها حذف شوند.
+        try:
+            self._bot.edit_message_reply_markup(
+                chat_id=chat_id,
+                message_id=message_id,
+                reply_markup=None  # <--- ارسال مقدار None برای حذف دکمه‌ها
+            )
+        except Exception as e:
+            # لاگ کردن خطا در صورت عدم موفقیت در ویرایش
+            # این خطاها معمولا زمانی رخ می‌دهند که پیام خیلی قدیمی است یا حذف شده
+            print(f"INFO: Could not remove markup from message {message_id}. Reason: {e}")
 
     def remove_message(self, chat_id: ChatId, message_id: MessageId) -> None:
         self._bot.delete_message(chat_id=chat_id, message_id=message_id)
