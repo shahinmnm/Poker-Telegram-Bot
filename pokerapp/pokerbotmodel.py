@@ -525,57 +525,76 @@ class PokerBotModel:
         game: Game,
         chat_id: ChatId,
     ) -> None:
-        print(f"Game finishing: {game.id}, pot: {game.pot}")
+        print(f"🎯 پایان بازی: {game.id} | پات: {game.pot}$")
     
+        # حذف پیام نوبت جاری
         if game.turn_message_id:
             self._view.remove_message(chat_id, game.turn_message_id)
             game.turn_message_id = None
     
-        # انتقال شرط‌های بازیکنان به پات
+        # انتقال آخرین شرط‌ها به پات
         for p in game.players:
             p.total_bet += p.round_rate
             game.pot += p.round_rate
             p.round_rate = 0
     
-        print(f"Final pot: {game.pot}")
-        for p in game.players:
-            print(f"Player {p.user_id} final total_bet: {p.total_bet}")
-    
+        # تعیین برنده
         active_players = game.players_by(states=(PlayerState.ACTIVE, PlayerState.ALL_IN))
-    
-        if not active_players:
-            text = "بازی بدون برنده تمام شد."
-        elif len(active_players) == 1:
+        if len(active_players) == 1:
             winner = active_players[0]
-            winner.wallet.inc(game.pot)
-            text = f"🏁 بازی تمام شد!\n\n{winner.mention_markdown} با فولد بقیه، برنده *{game.pot}$* شد!\n\n"
+            winner.wallet.add(game.pot)
+            winner_line = f"🏆 {winner.mention_markdown}\n🏳️ با فولد بقیه، *برنده* پات {game.pot}$ شد."
         else:
-            # تکمیل کارت‌های روی میز
-            while len(game.cards_table) < 5 and game.remain_cards:
-                game.cards_table.append(game.remain_cards.pop())
+            scores = self._winner_determine.determinate_scores(active_players, game.cards_table)
+            best_score = max(scores.keys())
+            winners = scores[best_score]
+            share = game.pot // len(winners)
+            for pw, _ in winners:
+                pw.wallet.add(share)
+            winners_list = " و ".join(pw.mention_markdown for pw, _ in winners)
+            winner_line = (
+                f"🏆 {winners_list}\n"
+                f"با دست *{best_score.hand_name}*، هر کدام {share}$ از پات بردند."
+            )
     
-            if game.state != GameState.ROUND_RIVER and game.state != GameState.FINISHED:
-                message = self._view.send_desk_cards_img(
-                    chat_id=chat_id,
-                    cards=game.cards_table,
-                    caption=f"میز نهایی - پات: {game.pot}$",
-                )
-                if message:
-                    game.message_ids_to_delete.append(message.message_id)
+        # اعلام نتیجه نهایی (باقی می‌ماند)
+        self._view.send_message(
+            chat_id=chat_id,
+            text=f"🏁 *دست پایان یافت*\n\n{winner_line}"
+        )
     
-            player_scores = self._winner_determine.determinate_scores(active_players, game.cards_table)
-            winners_hand_money = self._round_rate.finish_rate(game, player_scores)
+        # حذف کل پیام‌های موقت بازی
+        for mid in getattr(game, "message_ids_to_delete", []):
+            self._view.remove_message(chat_id, mid)
+        game.message_ids_to_delete.clear()
     
-            text = "🏆 برندگان:\n"
-            for hand, data in winners_hand_money.items():
-                for player, money in data:
-                    text += f"{player.mention_markdown} {hand} ➡️ *{money}$*\n"
+        # پیام اصلی لیست آماده‌ها هم حذف شود
+        if getattr(game, "ready_message_main_id", None):
+            self._view.remove_message(chat_id, game.ready_message_main_id)
+            game.ready_message_main_id = None
     
-        # اعلام نتیجه
-        self._view.send_message(chat_id=chat_id, text=text)
-    
-        # **مهم**: پایان بازی و بازگشت به حالت FINISHED
+        # حالت پایان
         game.state = GameState.FINISHED
+    
+        # پیام موقت برای آماده شدن دور بعد
+        msg_id_tmp = self._view.send_message_return_id(
+            chat_id=chat_id,
+            text="♻️ *دور بعدی* تا چند لحظه دیگر آماده می‌شود..."
+        )
+        if msg_id_tmp:
+            Timer(2.5, lambda: self._view.remove_message(chat_id, msg_id_tmp)).start()
+    
+        # ریست بازی بعد از کمی تأخیر و پیام آماده‌سازی
+        def reset_game():
+            game.reset()
+            msg_id_ready = self._view.send_message_return_id(
+                chat_id=chat_id,
+                text="✅ با دستور /ready برای دست بعد آماده شوید."
+            )
+            if msg_id_ready:
+                Timer(4.0, lambda: self._view.remove_message(chat_id, msg_id_ready)).start()
+    
+        Timer(3.0, reset_game).start()
         
     def _goto_next_round(self, game: Game, chat_id: ChatId) -> None:
         state_transitions = {
