@@ -208,43 +208,32 @@ class PokerBotViewer:
             player: Player,
             money: Money,
     ) -> Optional[MessageId]:
-        """ارسال فوری پیام نوبت بازیکن با ظاهر زیباتر و بدون تأخیر صف."""
-        # نمایش کارت‌های میز
         if not game.cards_table:
-            cards_table = "🚫 کارتی روی میز نیست"
+            cards_table = "🚫 کارتی روی میز نیست."
         else:
             cards_table = " ".join(game.cards_table)
-    
-        # محاسبه مقدار CALL یا CHECK
+        
         call_amount = game.max_round_rate - player.round_rate
         call_check_action = self.define_check_call_action(game, player)
-        if call_check_action == PlayerAction.CALL:
-            call_check_text = f"{call_check_action.value} ({call_amount}$)"
-        else:
-            call_check_text = call_check_action.value
-    
-        # متن پیام با فرمت Markdown
+        call_check_text = f"{call_check_action.value} ({call_amount}$)" if call_check_action == PlayerAction.CALL else call_check_action.value
+
         text = (
-            f"🎯 **نوبت بازی {player.mention_markdown}**\n\n"
-            f"🃏 **کارت‌های روی میز:** {cards_table}\n"
-            f"💰 **پات فعلی:** `{game.pot}$`\n"
-            f"💵 **موجودی شما:** `{money}$`\n"
-            f"🎲 **بِت فعلی شما در این دور:** `{player.round_rate}$`\n"
-            f"📈 **حداکثر شرط در این دور:** `{game.max_round_rate}$`\n\n"
-            f"لطفاً حرکت خود را انتخاب کنید:"
+            f"🔥 *{player.mention_markdown}، وقت حرکتته!* 🔥\n\n"
+            f"🃏 *کارت‌های میز:* {cards_table}\n"
+            f"💰 *پات (Pot):* `{game.pot}$`\n"
+            f"💵 *موجودی شما:* `{money}$`\n"
+            f"🎯 *شرط شما (Bet) فعلی در این دور:* `{player.round_rate}$`\n"
+            f"📈 *بیشترین شرط فعلی (Max Bet):* `{game.max_round_rate}$`"
         )
-    
-        # ساخت کیبورد
         markup = self._get_turns_markup(call_check_text, call_check_action)
-    
+
         try:
-            # ارسال فوری با bypass صف
-            message = self._bot.send_message_sync(
+            message = self._bot.send_message(
                 chat_id=chat_id,
                 text=text,
                 reply_markup=markup,
                 parse_mode=ParseMode.MARKDOWN,
-                disable_notification=False,  # اطلاع‌رسانی به بازیکن
+                disable_notification=False, # Notify the current player
             )
             if isinstance(message, Message):
                 return message.message_id
