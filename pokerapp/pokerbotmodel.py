@@ -250,7 +250,7 @@ class PokerBotModel:
             self._divide_cards(game=game, chat_id=chat_id)
         except Exception as e:
             print(f"Error dividing cards: {e}")
-        self._process_playing(game=game, chat_id=chat_id, context=context)
+        self._process_playing(chat_id=chat_id, game=game)
         # --- END OF CHANGES ---
 
     def _fast_forward_to_finish(self, game: Game, chat_id: ChatId):
