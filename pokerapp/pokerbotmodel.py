@@ -237,7 +237,7 @@ class PokerBotModel:
             # Start the betting process.
             self._process_playing(chat_id=chat_id, game=game)
             
-            self._round_rate.round_pre_flop_rate_after_first_turn(game)
+            #self._round_rate.round_pre_flop_rate_after_first_turn(game)
 
             context.chat_data[KEY_OLD_PLAYERS] = list(
                 map(lambda p: p.user_id, game.players),
@@ -711,31 +711,70 @@ class PokerBotModel:
     def raise_rate_bet(
         self,
         update: Update,
-        context: CallbackContext
+        context: CallbackContext,
+        raise_bet_rate: PlayerAction
     ) -> None:
         game = self._game_from_context(context)
-        chat_id = update.effective_chat.id
+        chat_id = update.effective_message.chat_id
         player = self._current_turn_player(game)
-        raise_bet_rate = int(update.callback_query.data)
-
-        if not player: return
-
+        
+        # The actual integer value for the raise (e.g., 10, 25, 50)
+        amount_to_raise = raise_bet_rate.value
+    
         try:
-            action = PlayerAction.RAISE_RATE.value if game.max_round_rate > 0 else PlayerAction.BET.value
-            amount, is_all_in = self._round_rate.raise_rate_bet(game, player, raise_bet_rate)
-
-            text = f"{player.mention_markdown} {PlayerAction.ALL_IN.value} ({amount}$)" if is_all_in else f"{player.mention_markdown} {action} به {amount}$"
-            msg_id = self._view.send_message_return_id(
+            # --- START OF NEW, SELF-CONTAINED LOGIC ---
+    
+            # 1. Determine action name: "BET" if no previous bet, "RAISE" otherwise.
+            action = PlayerAction.BET if game.max_round_rate == 0 else PlayerAction.RAISE_RATE
+    
+            # 2. Calculate amount needed to call.
+            call_amount = game.max_round_rate - player.round_rate
+    
+            # 3. Calculate total amount to deduct from wallet (call + raise).
+            total_required_from_wallet = call_amount + amount_to_raise
+    
+            # 4. Check wallet balance.
+            if player.wallet.value() < total_required_from_wallet:
+                raise UserException("موجودی شما برای این حرکت کافی نیست.")
+    
+            # 5. Perform transactions.
+            player.wallet.dec(total_required_from_wallet)
+            player.round_rate += total_required_from_wallet
+            
+            # 6. Update game state.
+            game.max_round_rate = player.round_rate
+            game.last_raise = amount_to_raise
+    
+            # 7. Reset 'has_acted' for other active players for the next turn.
+            for p in game.players:
+                if p.state == PlayerState.ACTIVE and p.user_id != player.user_id:
+                    p.has_acted = False
+            
+            # --- END OF NEW LOGIC ---
+    
+            # Send confirmation message to the group
+            mention_markdown = player.mention_markdown
+            self._view.send_message(
                 chat_id=chat_id,
-                text=text
+                text=f"{mention_markdown} {action.value} به *{player.round_rate}$*"
             )
-            if msg_id: game.message_ids_to_delete.append(msg_id)
-
+    
         except UserException as e:
             self._view.send_message(chat_id=chat_id, text=str(e))
             return
-
-        self._process_playing(chat_id, game)
+        except Exception as e:
+            self._view.send_message(
+                chat_id=chat_id, text="یک خطای بحرانی در پردازش حرکت رخ داد. بازی ریست شد.")
+            print(f"FATAL: Unhandled exception in raise_rate_bet: {e}")
+            traceback.print_exc()
+            game.reset()
+            return
+    
+        # If successful, move to the next player.
+        self._process_playing(
+            chat_id=chat_id,
+            game=game,
+        )
 
     def all_in(self, update: Update, context: CallbackContext) -> None:
         game = self._game_from_context(context)
