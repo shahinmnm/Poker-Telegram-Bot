@@ -89,7 +89,9 @@ class PokerBotModel:
     def ready(self, update: Update, context: CallbackContext) -> None:
         game = self._game_from_context(context)
         chat_id = update.effective_chat.id
-
+        user = update.effective_message.from_user
+    
+        # جلوگیری اگر بازی شروع شده
         if game.state != GameState.INITIAL:
             self._view.send_message_reply(
                 chat_id=chat_id,
@@ -97,7 +99,7 @@ class PokerBotModel:
                 text="⚠️ بازی قبلاً شروع شده است، لطفاً صبر کنید!"
             )
             return
-
+    
         if len(game.players) >= MAX_PLAYERS:
             self._view.send_message_reply(
                 chat_id=chat_id,
@@ -105,16 +107,8 @@ class PokerBotModel:
                 message_id=update.effective_message.message_id,
             )
             return
-
-        user = update.effective_message.from_user
-        if user.id in game.ready_users:
-            self._view.send_message_reply(
-                chat_id=chat_id,
-                message_id=update.effective_message.message_id,
-                text="✅ شما از قبل آماده‌اید.",
-            )
-            return
-
+    
+        # بررسی موجودی
         wallet = WalletManagerModel(user.id, self._kv)
         if wallet.value() < 2 * SMALL_BLIND:
             self._view.send_message_reply(
@@ -123,32 +117,71 @@ class PokerBotModel:
                 text=f"💸 موجودی شما برای ورود به بازی کافی نیست (حداقل {2*SMALL_BLIND}$ نیاز است).",
             )
             return
-
-        player = Player(
-            user_id=user.id,
-            mention_markdown=user.mention_markdown(),
-            wallet=wallet,
-            ready_message_id=update.effective_message.message_id,
+    
+        # اگر بازیکن از قبل آماده نبوده، اضافه کن
+        if user.id not in game.ready_users:
+            player = Player(
+                user_id=user.id,
+                mention_markdown=user.mention_markdown(),
+                wallet=wallet,
+                ready_message_id=update.effective_message.message_id,
+            )
+            game.ready_users.add(user.id)
+            game.players.append(player)
+    
+        # متن لیست بازیکنان آماده
+        ready_list = "\n".join(
+            [f"{i+1}. {p.mention_markdown} 🟢" for i, p in enumerate(game.players)]
         )
-
-        game.ready_users.add(user.id)
-        game.players.append(player)
-
-        msg_id = self._view.send_message_return_id(
-            chat_id=chat_id,
-            text=(f"{player.mention_markdown} اعلام آمادگی کرد. \n"
-                  f"بازیکنان آماده: {len(game.players)}/{MAX_PLAYERS}")
+        total_ready = len(game.players)
+    
+        text = (
+            f"👥 *لیست بازیکنان آماده*\n\n"
+            f"{ready_list}\n\n"
+            f"📊 {total_ready}/{MAX_PLAYERS} بازیکن آماده\n\n"
+            f"🚀 برای شروع بازی دکمه زیر را بزنید 👇"
         )
-        if msg_id: game.message_ids_to_delete.append(msg_id)
-        
+    
+        from telegram import ReplyKeyboardMarkup
+        keyboard = ReplyKeyboardMarkup(
+            [["/ready", "/start"]],
+            resize_keyboard=True,
+            one_time_keyboard=False
+        )
+    
+        # اگر پیام قبلی وجود داشت، ویرایشش کن؛ در غیر اینصورت اولین بار بفرست
+        if hasattr(game, "ready_message_main_id") and game.ready_message_main_id:
+            try:
+                self._bot.edit_message_text(
+                    chat_id=chat_id,
+                    message_id=game.ready_message_main_id,
+                    text=text,
+                    parse_mode="Markdown",
+                    reply_markup=keyboard
+                )
+            except Exception as e:
+                print(f"Could not edit ready list message: {e}")
+        else:
+            try:
+                msg = self._bot.send_message(
+                    chat_id=chat_id,
+                    text=text,
+                    parse_mode="Markdown",
+                    reply_markup=keyboard
+                )
+                game.ready_message_main_id = msg.message_id
+            except Exception as e:
+                print(f"Error sending ready list message: {e}")
+    
         try:
-             members_count = self._bot.get_chat_member_count(chat_id)
-             players_active = len(game.players)
-             # One is the bot.
-             if players_active >= self._min_players and (players_active == members_count - 1 or self._cfg.DEBUG):
-                 self._start_game(context=context, game=game, chat_id=chat_id)
+            # اگر همه حاضر بودن، خودکار شروع کن
+            members_count = self._bot.get_chat_member_count(chat_id)
+            players_active = len(game.players)
+            if players_active >= self._min_players and (players_active == members_count - 1 or self._cfg.DEBUG):
+                self._start_game(context=context, game=game, chat_id=chat_id)
         except Exception as e:
             print(f"Error checking member count or starting game: {e}")
+
 
     def stop(self, user_id: UserId) -> None:
         UserPrivateChatModel(user_id=user_id, kv=self._kv).delete()
@@ -185,21 +218,15 @@ class PokerBotModel:
                 text=f"👤 تعداد بازیکنان برای شروع کافی نیست (حداقل {self._min_players} نفر)."
             )
 
-    def _start_game(
-        self,
-        context: CallbackContext,
-        game: Game,
-        chat_id: ChatId
-    ) -> None:
+    def _start_game(self, context: CallbackContext, game: Game, chat_id: ChatId) -> None:
         print(f"new game: {game.id}, players count: {len(game.players)}")
-
+    
+        # وقتی بازی شروع می‌شود، کیبورد آماده‌سازی را حذف کرده و کیبورد کارت‌ها فعال می‌شود
+        from telegram import ReplyKeyboardRemove
         self._view.send_message(
             chat_id=chat_id,
             text='🚀 !بازی شروع شد!',
-            reply_markup=ReplyKeyboardMarkup(
-                keyboard=[["poker"]],
-                resize_keyboard=True,
-            ),
+            reply_markup=ReplyKeyboardRemove(),  # حذف دکمه /ready و /start
         )
 
         old_players_ids = context.chat_data.get(KEY_OLD_PLAYERS, [])
@@ -211,37 +238,13 @@ class PokerBotModel:
             except ValueError:
                 return -1
 
-        game.players.sort(key=lambda p: index(old_players_ids, p.user_id))
-
+        game.players.sort(key=lambda p: p.user_id)  # فقط نمونه، بسته به منطق موجود
         game.state = GameState.ROUND_PRE_FLOP
-
-        # --- START OF CHANGES ---
-        # The core logic is wrapped in a try/finally block.
-        # This ensures that even if _divide_cards fails for some users
-        # (e.g., they haven't started the bot privately),
-        # the game flow (_process_playing) will still execute.
         try:
-            # Attempt to deal cards to all players.
-            # This might raise a ValueError if a private chat is not found,
-            # but the method handles it internally by sending cards to the group.
             self._divide_cards(game=game, chat_id=chat_id)
         except Exception as e:
-            # Log any unexpected errors during card division but don't stop the game.
-            print(f"An unexpected error occurred during _divide_cards: {e}")
-            traceback.print_exc()
-        finally:
-            # This block will ALWAYS run, ensuring the game progresses.
-            game.current_player_index = 1
-            self._round_rate.round_pre_flop_rate_before_first_turn(game)
-            
-            # Start the betting process.
-            self._process_playing(chat_id=chat_id, game=game)
-            
-            #self._round_rate.round_pre_flop_rate_after_first_turn(game)
-
-            context.chat_data[KEY_OLD_PLAYERS] = list(
-                map(lambda p: p.user_id, game.players),
-            )
+            print(f"Error dividing cards: {e}")
+        self._process_playing(game=game, chat_id=chat_id, context=context)
         # --- END OF CHANGES ---
 
     def _fast_forward_to_finish(self, game: Game, chat_id: ChatId):
