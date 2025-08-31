@@ -522,30 +522,37 @@ class PokerBotModel:
 
     def _finish(self, game: Game, chat_id: ChatId) -> None:
         print(f"Game finishing: {game.id}, pot: {game.pot}")
-
-        # حذف پیام نوبت جاری
+    
+        # 1. حذف پیام نوبت جاری
         if game.turn_message_id:
             self._view.remove_message(chat_id, game.turn_message_id)
             game.turn_message_id = None
-
-        # انتقال همه شرط‌ها به پات
+    
+        # 2. انتقال همه شرط‌ها به پات
         for p in game.players:
             p.total_bet += p.round_rate
             game.pot += p.round_rate
             p.round_rate = 0
-
-        # مشخص کردن برنده
+    
+        # 3. پیدا کردن بازیکنان فعال / آل این
         active_players = game.players_by(states=(PlayerState.ACTIVE, PlayerState.ALL_IN))
+    
         if not active_players:
             text = "🏁 این دست بدون برنده پایان یافت."
         elif len(active_players) == 1:
             winner = active_players[0]
             winner.wallet.inc(game.pot)
-            text = f"🏁 دست پایان یافت\n\n🏆 {winner.mention_markdown}\n🏳️ با فولد دیگران، برنده *{game.pot}$* شد."
+            text = (
+                "🏁 دست پایان یافت\n\n"
+                f"🏆 {winner.mention_markdown}\n"
+                f"🏳️ با فولد دیگران، برنده *{game.pot}$* شد."
+            )
         else:
+            # 4. کامل کردن کارت‌های میز
             while len(game.cards_table) < 5 and game.remain_cards:
                 game.cards_table.append(game.remain_cards.pop())
-
+    
+            # 5. ارسال عکس میز نهایی
             table_msg = self._view.send_desk_cards_img(
                 chat_id=chat_id,
                 cards=game.cards_table,
@@ -553,78 +560,102 @@ class PokerBotModel:
             )
             if table_msg:
                 game.message_ids_to_delete.append(table_msg.message_id)
-
+    
+            # 6. محاسبه امتیازات و دست برنده‌ها
             scores = self._winner_determine.determinate_scores(active_players, game.cards_table)
             winners_money = self._round_rate.finish_rate(game, scores)
-
+    
+            # 🔹 ساخت map برای دسترسی سریع به کارت‌های برنده شاخص هر بازیکن
+            player_best_hand_map = {}
+            for score, plist in scores.items():
+                for player, best_hand_cards in plist:
+                    player_best_hand_map[player.user_id] = best_hand_cards
+    
+            # 🔹 مرتب‌سازی بر اساس قدرت دست (HandsOfPoker.value)
+            from pokerapp.winnerdetermination import HandsOfPoker
+            def hand_rank_key(hand_name: str) -> int:
+                try:
+                    return HandsOfPoker[hand_name.replace(" ", "_").upper()].value
+                except KeyError:
+                    return 0
+    
+            # 🔹 تابع کمکی برای تبدیل کارت‌ها به رشته با ایموجی
+            def cards_to_emoji(cards: Cards) -> str:
+                return " ".join(str(c) for c in cards)
+    
+            # 7. ساخت پیام پایانی با جزئیات
             lines = []
-            for hand, plist in winners_money.items():
+            for hand_name, plist in sorted(winners_money.items(), key=lambda x: hand_rank_key(x[0]), reverse=True):
+                lines.append(f"\n*{hand_name}*")
                 for player, money in plist:
-                    lines.append(f"🏆 {player.mention_markdown} — *{hand}* ➡️ {money}$")
-            text = "🏁 دست پایان یافت\n\n" + "\n".join(lines)
-
-        # ارسال پیام برنده (باقی بماند)
+                    hand_cards = player_best_hand_map.get(player.user_id)
+                    cards_str = cards_to_emoji(hand_cards) if hand_cards else ""
+                    lines.append(f"🏆 {player.mention_markdown} ➡️ `{money}$` {cards_str}")
+    
+            text = "🏁 دست پایان یافت\n" + "\n".join(lines)
+    
+        # 8. ارسال پیام نتیجه
         self._view.send_message(chat_id=chat_id, text=text)
-
-        # پاک‌کردن همه پیام‌های موقت
+    
+        # 9. پاک‌کردن پیام‌های موقت
         for mid in getattr(game, "message_ids_to_delete", []):
             self._view.remove_message_delayed(chat_id, mid, delay=1.0)
         game.message_ids_to_delete.clear()
-
+    
         if getattr(game, "ready_message_main_id", None):
             self._view.remove_message_delayed(chat_id, game.ready_message_main_id, delay=1.0)
             game.ready_message_main_id = None
-
-        # تغییر وضعیت بازی
+    
+        # 10. تغییر وضعیت بازی
         game.state = GameState.FINISHED
-
-        # پیام آماده‌سازی بعدی (یک‌بار)
+    
+        # 11. پیام آماده‌سازی دست بعد
         msg_tmp = self._view.send_message_return_id(
             chat_id=chat_id,
             text="♻️ *دست بعدی* تا چند لحظه دیگر آماده می‌شود..."
         )
         self._view.remove_message_delayed(chat_id, msg_tmp, delay=3.0)
-
-        def reset_game():
-            game.reset()
-            msg_ready = self._view.send_message_return_id(
-                chat_id=chat_id,
-                text="✅ با دستور /ready برای دست بعد آماده شوید."
-            )
-            self._view.remove_message_delayed(chat_id, msg_ready, delay=5.0)
-
-        Timer(3.2, reset_game).start()
-        def reset_game():
-            game.reset()
-            msg_ready = self._view.send_message_return_id(
-                chat_id=chat_id,
-                text="✅ با دستور /ready برای دست بعد آماده شوید."
-            )
-            self._view.remove_message_delayed(chat_id, msg_ready, delay=4.0)
-
-        Timer(3.0, reset_game).start()
     
-        def reset_game():
-            game.reset()
-            msg_ready = self._view.send_message_return_id(
-                chat_id=chat_id,
-                text="✅ با دستور /ready برای دست بعد آماده شوید."
-            )
-            if msg_ready:
-                Timer(4.0, lambda: self._view.remove_message(chat_id, msg_ready)).start()
+            def reset_game():
+                game.reset()
+                msg_ready = self._view.send_message_return_id(
+                    chat_id=chat_id,
+                    text="✅ با دستور /ready برای دست بعد آماده شوید."
+                )
+                self._view.remove_message_delayed(chat_id, msg_ready, delay=5.0)
     
-        Timer(3.0, reset_game).start()
+            Timer(3.2, reset_game).start()
+            def reset_game():
+                game.reset()
+                msg_ready = self._view.send_message_return_id(
+                    chat_id=chat_id,
+                    text="✅ با دستور /ready برای دست بعد آماده شوید."
+                )
+                self._view.remove_message_delayed(chat_id, msg_ready, delay=4.0)
     
-        def reset_game():
-            game.reset()
-            msg_id_ready = self._view.send_message_return_id(
-                chat_id=chat_id,
-                text="✅ با دستور /ready برای دست بعد آماده شوید."
-            )
-            if msg_id_ready:
-                Timer(4.0, lambda: self._view.remove_message(chat_id, msg_id_ready)).start()
-    
-        Timer(3.0, reset_game).start()
+            Timer(3.0, reset_game).start()
+        
+            def reset_game():
+                game.reset()
+                msg_ready = self._view.send_message_return_id(
+                    chat_id=chat_id,
+                    text="✅ با دستور /ready برای دست بعد آماده شوید."
+                )
+                if msg_ready:
+                    Timer(4.0, lambda: self._view.remove_message(chat_id, msg_ready)).start()
+        
+            Timer(3.0, reset_game).start()
+        
+            def reset_game():
+                game.reset()
+                msg_id_ready = self._view.send_message_return_id(
+                    chat_id=chat_id,
+                    text="✅ با دستور /ready برای دست بعد آماده شوید."
+                )
+                if msg_id_ready:
+                    Timer(4.0, lambda: self._view.remove_message(chat_id, msg_id_ready)).start()
+        
+            Timer(3.0, reset_game).start()
         
     def _goto_next_round(self, game: Game, chat_id: ChatId) -> None:
         state_transitions = {
