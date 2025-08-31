@@ -482,11 +482,11 @@ class PokerBotModel:
             if not game.remain_cards: break
             game.cards_table.append(game.remain_cards.pop())
 
-        message = self._view.send_desk_cards_img(
-            chat_id=chat_id,
-            cards=game.cards_table,
-            caption=f"💰 پات فعلی: {game.pot}$",
-        )
+    #    message = self._view.send_desk_cards_img(
+     #       chat_id=chat_id,
+      #      cards=game.cards_table,
+      #      caption=f"💰 پات فعلی: {game.pot}$",
+      #  )
         if message:
             game.message_ids_to_delete.append(message.message_id)
 
