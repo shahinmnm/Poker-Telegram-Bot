@@ -173,6 +173,12 @@ class PokerBotModel:
             except Exception as e:
                 print(f"Error sending ready list message: {e}")
     
+        # <- اینجا اضافه کن
+        # پاک کردن پیام‌های قدیمی آماده‌سازی
+        for msg_id in getattr(game, "message_ids_to_delete", []):
+            self._view.remove_message(chat_id, msg_id)
+        game.message_ids_to_delete.clear()
+    
         try:
             # اگر همه حاضر بودن، خودکار شروع کن
             members_count = self._bot.get_chat_member_count(chat_id)
