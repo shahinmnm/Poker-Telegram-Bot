@@ -297,8 +297,8 @@ class PokerBotViewer:
         delay: float = 3.0
     ) -> None:
         """
-        حذف پیام با تاخیر مشخص (به ثانیه).
-        مثال: self.remove_message_delayed(chat_id, msg_id, delay=2.5)
+        حذف پیام با تاخیر مشخص (ثانیه).
+        پیش‌فرض: 3 ثانیه.
         """
         if not message_id:
             return
@@ -307,7 +307,6 @@ class PokerBotViewer:
             try:
                 self._bot.delete_message(chat_id=chat_id, message_id=message_id)
             except Exception as e:
-                # پیام شاید خیلی قدیمی یا قبلاً حذف شده باشد
                 print(f"Could not delete message {message_id} in chat {chat_id}: {e}")
 
         Timer(delay, _remove).start()
