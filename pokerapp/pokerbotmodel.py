@@ -554,9 +554,36 @@ class PokerBotModel:
     
         active_players = game.players_by(states=(PlayerState.ACTIVE, PlayerState.ALL_IN))
     
+        # توضیحات و ایموجی‌های دست‌ها
+        hand_descriptions = {
+            "ROYAL_FLUSH": "رویال فلاش — پنج کارت از ۱۰ تا آس همخال",
+            "STRAIGHT_FLUSH": "استریت فلاش — پنج کارت پشت سر هم همخال",
+            "FOUR_OF_A_KIND": "چهار کارت هم‌ارزش",
+            "FULL_HOUSE": "سه‌تایی + یک جفت",
+            "FLUSH": "پنج کارت هم‌خال",
+            "STRAIGHTS": "پنج کارت پشت سر هم",
+            "THREE_OF_A_KIND": "سه کارت هم‌ارزش",
+            "TWO_PAIR": "دو جفت کارت هم‌ارزش",
+            "PAIR": "دو کارت هم‌ارزش",
+            "HIGH_CARD": "بالاترین کارت",
+        }
+        emoji_map = {
+            "ROYAL_FLUSH": "👑",
+            "STRAIGHT_FLUSH": "💎",
+            "FOUR_OF_A_KIND": "💥",
+            "FULL_HOUSE": "🏠",
+            "FLUSH": "🌊",
+            "STRAIGHTS": "📏",
+            "THREE_OF_A_KIND": "🎯",
+            "TWO_PAIR": "✌️",
+            "PAIR": "👥",
+            "HIGH_CARD": "⭐",
+        }
+    
         # بدون بازیکن فعال
         if not active_players:
             text = "🏁 این دست بدون برنده پایان یافت."
+    
         # تنها یک بازیکن
         elif len(active_players) == 1:
             winner = active_players[0]
@@ -566,6 +593,7 @@ class PokerBotModel:
                 f"🏆 {winner.mention_markdown}\n"
                 f"📥 برنده *{game.pot}$* شد (با فولد بقیه)."
             )
+    
         # رقابت نهایی (Showdown)
         else:
             while len(game.cards_table) < 5 and game.remain_cards:
@@ -602,15 +630,24 @@ class PokerBotModel:
                 key=lambda x: hand_rank_key(x[0]),
                 reverse=True
             ):
-                lines.append(f"\n*{hand_name}*")
+                hand_key = hand_name.replace(" ", "_").upper()
+                desc = hand_descriptions.get(hand_key, "")
+                emo = emoji_map.get(hand_key, "")
+                if desc:
+                    lines.append(f"\n*{hand_key}* - {desc} {emo}")
+                else:
+                    lines.append(f"\n*{hand_key}* {emo}")
+    
                 for player, money in plist:
                     cards_str = cards_to_emoji(player_best_hand_map.get(player.user_id, []))
                     lines.append(f"🏆 {player.mention_markdown} ➡️ `{money}$` {cards_str}")
     
             text = "🏁 دست پایان یافت\n" + "\n".join(lines)
     
+        # ارسال پیام نتیجه
         self._view.send_message(chat_id=chat_id, text=text)
     
+        # حذف پیام‌های موقت
         for mid in getattr(game, "message_ids_to_delete", []):
             self._view.remove_message_delayed(chat_id, mid, delay=1.0)
         game.message_ids_to_delete.clear()
@@ -621,6 +658,7 @@ class PokerBotModel:
     
         game.state = GameState.FINISHED
     
+        # شروع دور بعدی
         if getattr(self._cfg, "MANUAL_READY_MODE", True):
             def reset_game():
                 game.reset()
@@ -633,7 +671,6 @@ class PokerBotModel:
             Timer(3.0, reset_game).start()
         else:
             Timer(3.0, lambda: self._start_game(context=None, game=game, chat_id=chat_id)).start()
-
 
         
     def _goto_next_round(self, game: Game, chat_id: ChatId) -> None:
