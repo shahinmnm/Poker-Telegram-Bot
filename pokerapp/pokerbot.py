@@ -71,7 +71,7 @@ class MessageDelayBot(Bot):
     def __init__(
         self,
         *args,
-        tasks_delay=3,
+        tasks_delay=0.5,
         **kwargs,
     ):
         super(MessageDelayBot, self).__init__(*args, **kwargs)
