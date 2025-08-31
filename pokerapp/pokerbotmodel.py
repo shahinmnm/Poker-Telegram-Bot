@@ -712,14 +712,17 @@ class PokerBotModel:
         self,
         update: Update,
         context: CallbackContext,
-        raise_bet_rate: PlayerAction
+        raise_bet_rate: int
     ) -> None:
         game = self._game_from_context(context)
         chat_id = update.effective_message.chat_id
         player = self._current_turn_player(game)
         
-        # The actual integer value for the raise (e.g., 10, 25, 50)
-        amount_to_raise = raise_bet_rate.value
+        # === START OF CHANGE ===
+        # The variable 'raise_bet_rate' is already the integer value (e.g., 10, 25, 50).
+        # We no longer need to access '.value'.
+        amount_to_raise = raise_bet_rate
+        # === END OF CHANGE ===
     
         try:
             # --- START OF NEW, SELF-CONTAINED LOGIC ---
@@ -764,7 +767,7 @@ class PokerBotModel:
             return
         except Exception as e:
             self._view.send_message(
-                chat_id=chat_id, text="یک خطای بحرانی در پردازش حرکت رخ داد. بازی ریست شد.")
+                chat_id=chat_id, text="یک خطای بحرانی در پردازش حرکت رخ داد. بازی ریست می‌شود.")
             print(f"FATAL: Unhandled exception in raise_rate_bet: {e}")
             traceback.print_exc()
             game.reset()
