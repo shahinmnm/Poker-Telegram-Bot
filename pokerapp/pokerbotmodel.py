@@ -971,69 +971,77 @@ class RoundRateModel:
         self,
         game: Game,
         player_scores: Dict[Score, List[Tuple[Player, Cards]]],
-    ) -> List[Tuple[Player, Cards, Money]]:
+    ) -> Dict[str, List[Tuple[Player, Money]]]:
         
         all_players_in_hand = game.players_by(states=(PlayerState.ACTIVE, PlayerState.ALL_IN))
-        if not all_players_in_hand: return []
+        if not all_players_in_hand:
+            return {}
         
         total_bets = {p.user_id: p.total_bet for p in game.players if p.total_bet > 0}
-        
-        sorted_unique_bets = sorted(list(set(total_bets.values())))
+        sorted_unique_bets = sorted(set(total_bets.values()))
         
         side_pots = []
         last_bet_level = 0
         for bet_level in sorted_unique_bets:
             pot_amount = 0
             eligible_players_ids = []
-
+    
             for player_id, player_bet in total_bets.items():
                 contribution = min(player_bet, bet_level) - last_bet_level
                 pot_amount += contribution
-
+    
             for player in all_players_in_hand:
-                 if total_bets.get(player.user_id, 0) >= bet_level:
-                      eligible_players_ids.append(player.user_id)
+                if total_bets.get(player.user_id, 0) >= bet_level:
+                    eligible_players_ids.append(player.user_id)
             
             if pot_amount > 0:
                 side_pots.append({"amount": pot_amount, "eligible_players_ids": eligible_players_ids})
-
+    
             last_bet_level = bet_level
-
-        final_winnings = {}
-        
-        # This dict maps user_id to player object for easy lookup
+    
+        final_winnings: Dict[str, List[Tuple[Player, Money]]] = {}
         player_map = {p.user_id: p for p in game.players}
-
+    
         for pot in side_pots:
             eligible_winners = []
             best_score_in_pot = -1
-
             sorted_scores = sorted(player_scores.keys(), reverse=True)
-
+    
             for score in sorted_scores:
                 for player, hand in player_scores[score]:
                     if player.user_id in pot["eligible_players_ids"]:
                         if best_score_in_pot == -1:
                             best_score_in_pot = score
                         if score == best_score_in_pot:
-                             eligible_winners.append((player, hand))
-                if best_score_in_pot != -1: # Found winners for this pot
+                            eligible_winners.append((player, hand))
+                if best_score_in_pot != -1:
                     break
-
-            if not eligible_winners: continue
-
+    
+            if not eligible_winners:
+                continue
+    
             win_share = pot["amount"] // len(eligible_winners)
-            for i, (winner, hand) in enumerate(eligible_winners):
-                # Distribute rounding remainder to the first winner(s)
+            for i, (winner, hand_cards) in enumerate(eligible_winners):
                 payout = win_share + (1 if i < pot["amount"] % len(eligible_winners) else 0)
-
                 winner.wallet.inc(payout)
-
-                if winner.user_id not in final_winnings:
-                    final_winnings[winner.user_id] = {"player": winner, "hand": hand, "money": 0}
-                final_winnings[winner.user_id]["money"] += payout
-        
-        return [(v["player"], v["hand"], v["money"]) for v in final_winnings.values()]
+    
+                # گرفتن نام دست
+                hand_name = self._hand_name_from_score(best_score_in_pot)
+    
+                if hand_name not in final_winnings:
+                    final_winnings[hand_name] = []
+                final_winnings[hand_name].append((winner, payout))
+    
+        return final_winnings
+    
+    
+    def _hand_name_from_score(self, score: int) -> str:
+        # استخراج enum از مقدار score
+        base = score // HAND_RANK
+        try:
+            return HandsOfPoker(base).name.replace("_", " ").title()
+        except ValueError:
+            return "Unknown Hand"
 
 
 class WalletManagerModel(Wallet):
