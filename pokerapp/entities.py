@@ -94,10 +94,9 @@ class Game:
         self.trading_end_user_id = 0
         self.ready_users = set()
         self.last_turn_time = datetime.datetime.now()
-        # --- ویژگی‌های اضافه شده ---
         self.turn_message_id: Optional[MessageId] = None # برای حذف دکمه‌های نوبت
         self.message_ids_to_delete: List[MessageId] = [] # برای پاک کردن پیام‌های بازی
-        # -------------------------
+        self.ready_message_main_id = None  # پیام اصلی لیست بازیکنان آماده
 
     def players_by(self, states: Tuple[PlayerState, ...]) -> List[Player]:
         return list(filter(lambda p: p.state in states, self.players))
