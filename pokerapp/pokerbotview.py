@@ -273,4 +273,45 @@ class PokerBotViewer:
             # Log the error but don't crash the bot.
             # This can happen if the message is too old, already deleted, or bot lacks rights.
             print(f"Could not delete message {message_id} in chat {chat_id}: {e}")
+            
+    def send_finish_message(
+        self,
+        chat_id: ChatId,
+        winners_info: list,
+        player_scores: dict,
+    ) -> None:
+        text = "🏁 بازی با این نتایج به پایان رسید:\n\n"
+
+        if not winners_info:
+            text += "هیچ برنده‌ای وجود نداشت (احتمالاً همه Fold کرده‌اند)."
+            self.send_message(chat_id=chat_id, text=text)
+            return
+
+        # پیدا کردن بهترین دست از بین همه بازیکنان فعال
+        best_score = 0
+        if player_scores:
+            best_score = max(player_scores.keys())
+
+        # نمایش اطلاعات برندگان
+        for player, best_hand, money_won in winners_info:
+            text += f"🏅 {player.mention_markdown}:\n"
+            text += f"🏆 مبلغ برد: *{money_won}$*\n"
+            
+            # نمایش دست برتر، فقط اگر بیش از یک بازیکن در انتها مانده باشد
+            if best_score > 0 and money_won > 0:
+                win_hand_str = " ".join(map(str, best_hand))
+                hand_name, _ = self._desk_generator.get_hand_name_from_score(best_score)
+                text += f"🃏 با دست: {win_hand_str} ({hand_name})\n\n"
+            else:
+                 text += "\n"
+
+
+        text += "برای شروع بازی جدید، /ready را ارسال کنید."
+        self.send_message(chat_id=chat_id, text=text)
+
+    def remove_markup(
+        self,
+        chat_id: ChatId,
+        message_id: MessageId,
+    ) -> None:
 
