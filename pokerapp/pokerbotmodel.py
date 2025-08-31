@@ -525,57 +525,48 @@ class PokerBotModel:
         game: Game,
         chat_id: ChatId,
     ) -> None:
-        print(f"Game finishing: {game.id}, pot: {game.pot}")
-    
-        if game.turn_message_id:
-            self._view.remove_message(chat_id, game.turn_message_id)
-            game.turn_message_id = None
-    
-        # انتقال شرط‌های بازیکنان به پات
-        for p in game.players:
-            p.total_bet += p.round_rate
-            game.pot += p.round_rate
-            p.round_rate = 0
-    
-        print(f"Final pot: {game.pot}")
-        for p in game.players:
-            print(f"Player {p.user_id} final total_bet: {p.total_bet}")
-    
-        active_players = game.players_by(states=(PlayerState.ACTIVE, PlayerState.ALL_IN))
-    
-        if not active_players:
-            text = "بازی بدون برنده تمام شد."
-        elif len(active_players) == 1:
-            winner = active_players[0]
-            winner.wallet.inc(game.pot)
-            text = f"🏁 بازی تمام شد!\n\n{winner.mention_markdown} با فولد بقیه، برنده *{game.pot}$* شد!\n\n"
+        if game.pot > 0:
+            self._round_rate.to_pot(game)
+
+        print(
+            f"game finished: {game.id}, "
+            f"players count: {len(game.players)}, "
+            f"pot: {game.pot}"
+        )
+
+        active_players = game.players_by(
+            states=(PlayerState.ACTIVE, PlayerState.ALL_IN)
+        )
+        
+        # اگر فقط یک بازیکن باقی مانده باشد، نیازی به تعیین دست برتر نیست
+        if len(active_players) == 1:
+            player_scores = {}
         else:
-            # تکمیل کارت‌های روی میز
-            while len(game.cards_table) < 5 and game.remain_cards:
-                game.cards_table.append(game.remain_cards.pop())
-    
-            if game.state != GameState.ROUND_RIVER and game.state != GameState.FINISHED:
-                message = self._view.send_desk_cards_img(
-                    chat_id=chat_id,
-                    cards=game.cards_table,
-                    caption=f"میز نهایی - پات: {game.pot}$",
-                )
-                if message:
-                    game.message_ids_to_delete.append(message.message_id)
-    
-            player_scores = self._winner_determine.determinate_scores(active_players, game.cards_table)
-            winners_hand_money = self._round_rate.finish_rate(game, player_scores)
-    
-            text = "🏆 برندگان:\n"
-            for hand, data in winners_hand_money.items():
-                for player, money in data:
-                    text += f"{player.mention_markdown} {hand} ➡️ *{money}$*\n"
-    
-        # اعلام نتیجه
-        self._view.send_message(chat_id=chat_id, text=text)
-    
-        # **مهم**: پایان بازی و بازگشت به حالت FINISHED
-        game.state = GameState.FINISHED
+            player_scores = self._winner_determine.determinate_scores(
+                players=active_players,
+                cards_table=game.cards_table,
+            )
+
+        # این متد حالا یک لیست از تاپل‌ها برمی‌گرداند
+        # e.g., [(player_instance, best_hand_cards, money_won), ...]
+        winners_info = self._round_rate.finish_rate(
+            game=game,
+            player_scores=player_scores,
+        )
+
+        # لیست نتایج به View ارسال می‌شود تا نمایش داده شود
+        self._view.send_finish_message(
+            chat_id=chat_id,
+            winners_info=winners_info,
+            player_scores=player_scores,
+        )
+
+        # پول‌های شرط‌بندی شده در کیف پول بازیکنان نهایی می‌شود
+        for player in game.players:
+            player.wallet.approve(game.id)
+
+        # بازی ریست می‌شود
+        game.reset()
         
     def _goto_next_round(self, game: Game, chat_id: ChatId) -> None:
         state_transitions = {
