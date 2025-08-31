@@ -261,18 +261,18 @@ class PokerBotModel:
         except Exception as e:
             print(f"An unexpected error occurred during _divide_cards: {e}")
             traceback.print_exc()
-    finally:
-        # ست کردن Small & Big Blind
-        self._round_rate.round_pre_flop_rate_before_first_turn(game)
+        finally:
+            # ست کردن Small & Big Blind
+            self._round_rate.round_pre_flop_rate_before_first_turn(game)
+            
+            # انتقال blindها به پات
+            self._round_rate.to_pot(game)
         
-        # انتقال blindها به پات
-        self._round_rate.to_pot(game)
-    
-        # شروع نوبت‌ها
-        self._process_playing(chat_id=chat_id, game=game)
-    
-        # ذخیره ترتیب بازیکنان
-        context.chat_data[KEY_OLD_PLAYERS] = [p.user_id for p in game.players]
+            # شروع نوبت‌ها
+            self._process_playing(chat_id=chat_id, game=game)
+        
+            # ذخیره ترتیب بازیکنان
+            context.chat_data[KEY_OLD_PLAYERS] = [p.user_id for p in game.players]
     
     def _fast_forward_to_finish(self, game: Game, chat_id: ChatId):
         """ When no more betting is possible, reveals all remaining cards """
