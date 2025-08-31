@@ -218,12 +218,12 @@ class PokerBotViewer:
         call_check_text = f"{call_check_action.value} ({call_amount}$)" if call_check_action == PlayerAction.CALL else call_check_action.value
 
         text = (
-            f"🔄 نوبت {player.mention_markdown}\n"
-            f"کارت‌های روی میز: {cards_table}\n"
-            f"💰 پات فعلی: *{game.pot}$*\n"
-            f"💵 موجودی شما: *{money}$*\n"
-            f" Бет فعلی شما در دور: *{player.round_rate}$*\n"
-            f"حداکثر شرط در این دور: *{game.max_round_rate}$*"
+            f"🔥 *{player.mention_markdown}، وقت حرکتته!* 🔥\n\n"
+            f"🃏 *کارت‌های میز:* {cards_table}\n"
+            f"💰 *پات (Pot):* `{game.pot}$`\n"
+            f"💵 *موجودی شما:* `{money}$`\n"
+            f"🎯 *شرط شما (Bet) فعلی در این دور:* `{player.round_rate}$`\n"
+            f"📈 *بیشترین شرط فعلی (Max Bet):* `{game.max_round_rate}$`"
         )
         markup = self._get_turns_markup(call_check_text, call_check_action)
 
