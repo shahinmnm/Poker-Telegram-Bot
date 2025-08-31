@@ -9,6 +9,7 @@ from telegram import (
     Bot,
     InputMediaPhoto,
 )
+from threading import Timer
 from io import BytesIO
 from typing import List, Optional
 from pokerapp.desk import DeskImageGenerator
@@ -289,3 +290,24 @@ class PokerBotViewer:
             print(f"[INFO] Cannot delete message, bot unauthorized in chat {chat_id}: {e}")
         except Exception as e:
             print(f"[ERROR] Unexpected error deleting message (ID={message_id}): {e}")
+    def remove_message_delayed(
+        self,
+        chat_id: ChatId,
+        message_id: MessageId,
+        delay: float = 3.0
+    ) -> None:
+        """
+        حذف پیام با تاخیر مشخص (به ثانیه).
+        مثال: self.remove_message_delayed(chat_id, msg_id, delay=2.5)
+        """
+        if not message_id:
+            return
+
+        def _remove():
+            try:
+                self._bot.delete_message(chat_id=chat_id, message_id=message_id)
+            except Exception as e:
+                # پیام شاید خیلی قدیمی یا قبلاً حذف شده باشد
+                print(f"Could not delete message {message_id} in chat {chat_id}: {e}")
+
+        Timer(delay, _remove).start()
