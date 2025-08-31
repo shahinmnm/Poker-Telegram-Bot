@@ -208,23 +208,33 @@ class PokerBotViewer:
             player: Player,
             money: Money,
     ) -> Optional[MessageId]:
+        """ارسال پیام نوبت بازیکن با فرمت فارسی/ایموجی و استفاده از delay جدید 0.5s."""
+        # نمایش کارت‌های میز
         if not game.cards_table:
-            cards_table = "🚫 کارتی روی میز نیست."
+            cards_table = "🚫 کارتی روی میز نیست"
         else:
             cards_table = " ".join(game.cards_table)
-        
+
+        # محاسبه CALL یا CHECK
         call_amount = game.max_round_rate - player.round_rate
         call_check_action = self.define_check_call_action(game, player)
-        call_check_text = f"{call_check_action.value} ({call_amount}$)" if call_check_action == PlayerAction.CALL else call_check_action.value
+        if call_check_action == PlayerAction.CALL:
+            call_check_text = f"{call_check_action.value} ({call_amount}$)"
+        else:
+            call_check_text = call_check_action.value
 
+        # متن پیام با Markdown
         text = (
-            f"🔥 *{player.mention_markdown}، وقت حرکتته!* 🔥\n\n"
-            f"🃏 *کارت‌های میز:* {cards_table}\n"
-            f"💰 *پات (Pot):* `{game.pot}$`\n"
-            f"💵 *موجودی شما:* `{money}$`\n"
-            f"🎯 *شرط شما (Bet) فعلی در این دور:* `{player.round_rate}$`\n"
-            f"📈 *بیشترین شرط فعلی (Max Bet):* `{game.max_round_rate}$`"
+            f"🎯 **نوبت بازی {player.mention_markdown}**\n\n"
+            f"🃏 **کارت‌های روی میز:** {cards_table}\n"
+            f"💰 **پات فعلی:** `{game.pot}$`\n"
+            f"💵 **موجودی شما:** `{money}$`\n"
+            f"🎲 **بِت فعلی شما:** `{player.round_rate}$`\n"
+            f"📈 **حداکثر شرط این دور:** `{game.max_round_rate}$`\n\n"
+            f"⬇️ حرکت خود را انتخاب کنید:"
         )
+
+        # کیبورد اینلاین
         markup = self._get_turns_markup(call_check_text, call_check_action)
 
         try:
@@ -233,7 +243,7 @@ class PokerBotViewer:
                 text=text,
                 reply_markup=markup,
                 parse_mode=ParseMode.MARKDOWN,
-                disable_notification=False, # Notify the current player
+                disable_notification=False,  # player gets notification
             )
             if isinstance(message, Message):
                 return message.message_id
