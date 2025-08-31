@@ -523,12 +523,12 @@ class PokerBotModel:
     def _finish(self, game: Game, chat_id: ChatId) -> None:
         print(f"Game finishing: {game.id}, pot: {game.pot}")
     
-        # حذف پیام نوبت فعلی
+        # حذف پیام نوبت
         if game.turn_message_id:
             self._view.remove_message(chat_id, game.turn_message_id)
             game.turn_message_id = None
     
-        # انتقال شرط های باقیمانده به پات
+        # انتقال چیپ‌های باقیمانده بازیکنان به پات
         for p in game.players:
             p.total_bet += p.round_rate
             game.pot += p.round_rate
@@ -536,10 +536,10 @@ class PokerBotModel:
     
         active_players = game.players_by(states=(PlayerState.ACTIVE, PlayerState.ALL_IN))
     
-        # حالت بدون بازیکن
+        # بدون بازیکن فعال
         if not active_players:
-            text = "🏁 این دست بدون برنده به پایان رسید."
-        # حالت یک بازیکن برنده 
+            text = "🏁 این دست بدون برنده پایان یافت."
+        # تنها یک بازیکن
         elif len(active_players) == 1:
             winner = active_players[0]
             winner.wallet.inc(game.pot)
@@ -548,56 +548,51 @@ class PokerBotModel:
                 f"🏆 {winner.mention_markdown}\n"
                 f"📥 برنده *{game.pot}$* شد (با فولد بقیه)."
             )
-        # حالت چند بازیکن (Showdown)
+        # رقابت نهایی (Showdown)
         else:
-            # کامل‌کردن کارت‌های میز تا ۵ کارت
             while len(game.cards_table) < 5 and game.remain_cards:
                 game.cards_table.append(game.remain_cards.pop())
     
-            # ارسال تصویر کارت های میز
-            table_msg_obj = self._view.send_desk_cards_img(
+            table_msg = self._view.send_desk_cards_img(
                 chat_id=chat_id,
                 cards=game.cards_table,
                 caption=f"🃏 میز نهایی — 💰 پات: {game.pot}$"
             )
-            if table_msg_obj:
-                game.message_ids_to_delete.append(table_msg_obj.message_id)
+            if table_msg:
+                game.message_ids_to_delete.append(table_msg.message_id)
     
-            # محاسبه برترین دست‌ها و امتیازها
             scores = self._winner_determine.determinate_scores(active_players, game.cards_table)
             winners_money = self._round_rate.finish_rate(game, scores)
     
-            # نگاشت بازیکن به بهترین کارت‌ها
-            player_best_hand_map: Dict[UserId, Cards] = {}
+            player_best_hand_map: Dict[UserId, list] = {}
             for score, plist in scores.items():
                 for player, best_cards in plist:
                     player_best_hand_map[player.user_id] = best_cards
     
-            # تابع کمکی برای مرتب‌سازی بر اساس قدرت دست
             def hand_rank_key(hand_name: str) -> int:
                 try:
                     return HandsOfPoker[hand_name.replace(" ", "_").upper()].value
                 except KeyError:
                     return 0
     
-            # تابع کمکی برای نمایش کارت‌ها
-            def cards_to_emoji(cards: Cards) -> str:
+            def cards_to_emoji(cards: list) -> str:
                 return " ".join(str(c) for c in cards)
     
-            # ساخت متن نهایی نتیجه
             lines = []
-            for hand_name, plist in sorted(winners_money.items(), key=lambda x: hand_rank_key(x[0]), reverse=True):
+            for hand_name, plist in sorted(
+                winners_money.items(),
+                key=lambda x: hand_rank_key(x[0]),
+                reverse=True
+            ):
                 lines.append(f"\n*{hand_name}*")
                 for player, money in plist:
-                    cards_str = cards_to_emoji(player_best_hand_map.get(player.user_id, Cards()))
+                    cards_str = cards_to_emoji(player_best_hand_map.get(player.user_id, []))
                     lines.append(f"🏆 {player.mention_markdown} ➡️ `{money}$` {cards_str}")
     
             text = "🏁 دست پایان یافت\n" + "\n".join(lines)
     
-        # ارسال پیام نتیجه
         self._view.send_message(chat_id=chat_id, text=text)
     
-        # پاک‌کردن پیام‌های موقتی
         for mid in getattr(game, "message_ids_to_delete", []):
             self._view.remove_message_delayed(chat_id, mid, delay=1.0)
         game.message_ids_to_delete.clear()
@@ -606,10 +601,8 @@ class PokerBotModel:
             self._view.remove_message_delayed(chat_id, game.ready_message_main_id, delay=1.0)
             game.ready_message_main_id = None
     
-        # تغییر وضعیت بازی به پایان یافته
         game.state = GameState.FINISHED
     
-        # حالت آماده سازی دست بعد
         if getattr(self._cfg, "MANUAL_READY_MODE", True):
             def reset_game():
                 game.reset()
@@ -622,6 +615,7 @@ class PokerBotModel:
             Timer(3.0, reset_game).start()
         else:
             Timer(3.0, lambda: self._start_game(context=None, game=game, chat_id=chat_id)).start()
+
 
         
     def _goto_next_round(self, game: Game, chat_id: ChatId) -> None:
