@@ -254,23 +254,38 @@ class PokerBotViewer:
         return InlineKeyboardMarkup(inline_keyboard=keyboard)
 
 
+    from telegram.error import BadRequest, Unauthorized  # اضافه کردن بالای فایل
+    
     def remove_markup(self, chat_id: ChatId, message_id: MessageId) -> None:
+        """حذف دکمه‌های اینلاین از یک پیام و فیلتر کردن ارورهای رایج."""
         if not message_id:
             return
         try:
             self._bot.edit_message_reply_markup(chat_id=chat_id, message_id=message_id)
+        except BadRequest as e:
+            err = str(e).lower()
+            if "message to edit not found" in err or "message is not modified" in err:
+                print(f"[INFO] Markup already removed or message not found (ID={message_id}).")
+            else:
+                print(f"[WARNING] BadRequest removing markup (ID={message_id}): {e}")
+        except Unauthorized as e:
+            print(f"[INFO] Cannot edit markup, bot unauthorized in chat {chat_id}: {e}")
         except Exception as e:
-            print(f"Could not remove markup from message {message_id}: {e}")
-
-    # =====> بلوک اصلاح شده <=====
+            print(f"[ERROR] Unexpected error removing markup (ID={message_id}): {e}")
+    
     def remove_message(self, chat_id: ChatId, message_id: MessageId) -> None:
-        """Deletes a message from the chat, ignoring errors if it fails."""
+        """حذف پیام از چت و فیلتر کردن ارورهای بی‌خطر."""
         if not message_id:
             return
         try:
             self._bot.delete_message(chat_id=chat_id, message_id=message_id)
+        except BadRequest as e:
+            err = str(e).lower()
+            if "message to delete not found" in err or "message can't be deleted" in err:
+                print(f"[INFO] Message already deleted or too old (ID={message_id}).")
+            else:
+                print(f"[WARNING] BadRequest deleting message (ID={message_id}): {e}")
+        except Unauthorized as e:
+            print(f"[INFO] Cannot delete message, bot unauthorized in chat {chat_id}: {e}")
         except Exception as e:
-            # Log the error but don't crash the bot.
-            # This can happen if the message is too old, already deleted, or bot lacks rights.
-            print(f"Could not delete message {message_id} in chat {chat_id}: {e}")
-
+            print(f"[ERROR] Unexpected error deleting message (ID={message_id}): {e}")
