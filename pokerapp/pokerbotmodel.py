@@ -411,28 +411,46 @@ class PokerBotModel:
                 self._view.send_message(chat_id, "کارت‌های کافی در دسته وجود ندارد!")
                 game.reset()
                 return
+    
+            # انتخاب دو کارت برای بازیکن
             cards = player.cards = [
                 game.remain_cards.pop(),
                 game.remain_cards.pop(),
             ]
-
+    
             try:
+                # ارسال کارت‌ها در PV (اگر کاربر /start کرده)
                 self._send_cards_private(player=player, cards=cards)
-            except Exception as ex:
-                print(ex)
-                msg_id = self._view.send_message_return_id(
-                    chat_id,
-                    f"⚠️ {player.mention_markdown} ربات را در چت خصوصی استارت نکرده است. "
-                    "ارسال کارت‌ها در گروه انجام می‌شود. لطفاً ربات را استارت کنید."
-                )
-                if msg_id: game.message_ids_to_delete.append(msg_id)
-                msg_id_2 = self._view.send_cards(
+    
+                # ارسال همزمان در گروه با کیبورد کارتی
+                msg_id_group = self._view.send_cards(
                     chat_id=chat_id,
                     cards=cards,
                     mention_markdown=player.mention_markdown,
                     ready_message_id=player.ready_message_id,
                 )
-                if msg_id_2: game.message_ids_to_delete.append(msg_id_2)
+                if msg_id_group:
+                    game.message_ids_to_delete.append(msg_id_group)
+    
+            except Exception as ex:
+                # اگر PV شکست خورد، هشدار بده و فقط گروه بفرست
+                print(ex)
+                msg_id_warn = self._view.send_message_return_id(
+                    chat_id,
+                    f"⚠️ {player.mention_markdown} ربات را در چت خصوصی استارت نکرده است. "
+                    "ارسال کارت‌ها در گروه انجام می‌شود. لطفاً ربات را استارت کنید."
+                )
+                if msg_id_warn:
+                    game.message_ids_to_delete.append(msg_id_warn)
+    
+                msg_id_group = self._view.send_cards(
+                    chat_id=chat_id,
+                    cards=cards,
+                    mention_markdown=player.mention_markdown,
+                    ready_message_id=player.ready_message_id,
+                )
+                if msg_id_group:
+                    game.message_ids_to_delete.append(msg_id_group)
     
     def _process_playing(self, chat_id: ChatId, game: Game) -> None:
         if game.state not in self.ACTIVE_GAME_STATES:
