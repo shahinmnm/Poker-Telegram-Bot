@@ -11,7 +11,7 @@ from telegram.ext import Handler, CallbackContext
 
 from pokerapp.config import Config
 from pokerapp.privatechatmodel import UserPrivateChatModel
-from pokerapp.winnerdetermination import WinnerDetermination, HAND_RANK
+from pokerapp.winnerdetermination import WinnerDetermination, HAND_RANK, HandsOfPoker
 from pokerapp.cards import Cards
 from pokerapp.entities import (
     Game,
@@ -523,36 +523,38 @@ class PokerBotModel:
     def _finish(self, game: Game, chat_id: ChatId) -> None:
         print(f"Game finishing: {game.id}, pot: {game.pot}")
     
-        # 1. حذف پیام نوبت فعلی
+        # حذف پیام نوبت فعلی
         if game.turn_message_id:
             self._view.remove_message(chat_id, game.turn_message_id)
             game.turn_message_id = None
     
-        # 2. انتقال شرط‌های باقیمانده به پات
+        # انتقال شرط های باقیمانده به پات
         for p in game.players:
             p.total_bet += p.round_rate
             game.pot += p.round_rate
             p.round_rate = 0
     
-        # 3. تعیین بازیکنان باقیمانده
         active_players = game.players_by(states=(PlayerState.ACTIVE, PlayerState.ALL_IN))
     
+        # حالت بدون بازیکن
         if not active_players:
             text = "🏁 این دست بدون برنده به پایان رسید."
+        # حالت یک بازیکن برنده 
         elif len(active_players) == 1:
             winner = active_players[0]
             winner.wallet.inc(game.pot)
             text = (
                 "🏁 دست پایان یافت\n\n"
                 f"🏆 {winner.mention_markdown}\n"
-                f"🏳️ با فولد دیگران، برنده *{game.pot}$* شد."
+                f"📥 برنده *{game.pot}$* شد (با فولد بقیه)."
             )
+        # حالت چند بازیکن (Showdown)
         else:
-            # 4. کامل کردن کارت‌های میز
+            # کامل‌کردن کارت‌های میز تا ۵ کارت
             while len(game.cards_table) < 5 and game.remain_cards:
                 game.cards_table.append(game.remain_cards.pop())
     
-            # 5. نمایش کارت‌های میز نهایی
+            # ارسال تصویر کارت های میز
             table_msg_obj = self._view.send_desk_cards_img(
                 chat_id=chat_id,
                 cards=game.cards_table,
@@ -561,28 +563,28 @@ class PokerBotModel:
             if table_msg_obj:
                 game.message_ids_to_delete.append(table_msg_obj.message_id)
     
-            # 6. محاسبه امتیاز دست‌ها و جوایز
+            # محاسبه برترین دست‌ها و امتیازها
             scores = self._winner_determine.determinate_scores(active_players, game.cards_table)
             winners_money = self._round_rate.finish_rate(game, scores)
     
-            # 📌 ساخت map بازیکن → کارت‌های دست برنده
+            # نگاشت بازیکن به بهترین کارت‌ها
             player_best_hand_map: Dict[UserId, Cards] = {}
             for score, plist in scores.items():
                 for player, best_cards in plist:
                     player_best_hand_map[player.user_id] = best_cards
     
-            # 📌 مرتب‌سازی بر اساس قدرت دست
-            from pokerapp.winnerdetermination import HandsOfPoker
+            # تابع کمکی برای مرتب‌سازی بر اساس قدرت دست
             def hand_rank_key(hand_name: str) -> int:
                 try:
                     return HandsOfPoker[hand_name.replace(" ", "_").upper()].value
                 except KeyError:
                     return 0
     
+            # تابع کمکی برای نمایش کارت‌ها
             def cards_to_emoji(cards: Cards) -> str:
                 return " ".join(str(c) for c in cards)
     
-            # 7. ساخت پیام نتیجه
+            # ساخت متن نهایی نتیجه
             lines = []
             for hand_name, plist in sorted(winners_money.items(), key=lambda x: hand_rank_key(x[0]), reverse=True):
                 lines.append(f"\n*{hand_name}*")
@@ -592,10 +594,10 @@ class PokerBotModel:
     
             text = "🏁 دست پایان یافت\n" + "\n".join(lines)
     
-        # 8. ارسال پیام نتیجه
+        # ارسال پیام نتیجه
         self._view.send_message(chat_id=chat_id, text=text)
     
-        # 9. پاک‌کردن پیام‌های موقتی
+        # پاک‌کردن پیام‌های موقتی
         for mid in getattr(game, "message_ids_to_delete", []):
             self._view.remove_message_delayed(chat_id, mid, delay=1.0)
         game.message_ids_to_delete.clear()
@@ -604,12 +606,11 @@ class PokerBotModel:
             self._view.remove_message_delayed(chat_id, game.ready_message_main_id, delay=1.0)
             game.ready_message_main_id = None
     
-        # 10. تغییر وضعیت بازی
+        # تغییر وضعیت بازی به پایان یافته
         game.state = GameState.FINISHED
     
-        # 11. مدیریت شروع دست بعد — حالت انتخابی
+        # حالت آماده سازی دست بعد
         if getattr(self._cfg, "MANUAL_READY_MODE", True):
-            # حالت آماده‌سازی دستی
             def reset_game():
                 game.reset()
                 msg_id_ready = self._view.send_message_return_id(
@@ -618,10 +619,8 @@ class PokerBotModel:
                 )
                 if msg_id_ready:
                     Timer(4.0, lambda: self._view.remove_message(chat_id, msg_id_ready)).start()
-    
             Timer(3.0, reset_game).start()
         else:
-            # حالت شروع خودکار
             Timer(3.0, lambda: self._start_game(context=None, game=game, chat_id=chat_id)).start()
 
         
