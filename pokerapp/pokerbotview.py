@@ -290,16 +290,9 @@ class PokerBotViewer:
             print(f"[INFO] Cannot delete message, bot unauthorized in chat {chat_id}: {e}")
         except Exception as e:
             print(f"[ERROR] Unexpected error deleting message (ID={message_id}): {e}")
-    def remove_message_delayed(
-        self,
-        chat_id: ChatId,
-        message_id: MessageId,
-        delay: float = 3.0
-    ) -> None:
-        """
-        حذف پیام با تاخیر مشخص (ثانیه).
-        پیش‌فرض: 3 ثانیه.
-        """
+            
+    def remove_message_delayed(self, chat_id: ChatId, message_id: MessageId, delay: float = 3.0) -> None:
+        """حذف پیام با تأخیر برحسب ثانیه."""
         if not message_id:
             return
 
