@@ -224,35 +224,56 @@ class PokerBotModel:
                 text=f"👤 تعداد بازیکنان برای شروع کافی نیست (حداقل {self._min_players} نفر)."
             )
 
-    def _start_game(self, context: CallbackContext, game: Game, chat_id: ChatId) -> None:
+    def _start_game(
+        self,
+        context: CallbackContext,
+        game: Game,
+        chat_id: ChatId
+    ) -> None:
         print(f"new game: {game.id}, players count: {len(game.players)}")
     
-        # وقتی بازی شروع می‌شود، کیبورد آماده‌سازی را حذف کرده و کیبورد کارت‌ها فعال می‌شود
-        from telegram import ReplyKeyboardRemove
+        # پیام شروع بازی با منوی آماده‌سازی
         self._view.send_message(
             chat_id=chat_id,
             text='🚀 !بازی شروع شد!',
-            reply_markup=ReplyKeyboardRemove(),  # حذف دکمه /ready و /start
+            reply_markup=ReplyKeyboardMarkup(
+                keyboard=[["poker"]],
+                resize_keyboard=True,
+            ),
         )
-
+    
         old_players_ids = context.chat_data.get(KEY_OLD_PLAYERS, [])
         old_players_ids = old_players_ids[-1:] + old_players_ids[:-1]
-
+    
         def index(ln: List, obj) -> int:
             try:
                 return ln.index(obj)
             except ValueError:
                 return -1
-
-        game.players.sort(key=lambda p: p.user_id)  # فقط نمونه، بسته به منطق موجود
+    
+        # مرتب‌سازی بازیکنان بر اساس بازی قبلی (آخرین نفر قبلی الان اول می‌شود)
+        game.players.sort(key=lambda p: index(old_players_ids, p.user_id))
         game.state = GameState.ROUND_PRE_FLOP
+    
         try:
+            # پخش کارت‌ها
             self._divide_cards(game=game, chat_id=chat_id)
         except Exception as e:
-            print(f"Error dividing cards: {e}")
-        self._process_playing(chat_id=chat_id, game=game)
-        # --- END OF CHANGES ---
-
+            print(f"An unexpected error occurred during _divide_cards: {e}")
+            traceback.print_exc()
+        finally:
+            # ست کردن Small Blind و Big Blind قبل از شروع اولین نوبت
+            self._round_rate.round_pre_flop_rate_before_first_turn(game)
+    
+            # این تضمین می‌کند که Big Blind به عنوان آخرین نفر فرصت عمل در Pre-Flop را دارد
+            # اگر نیاز بود می‌توان round_pre_flop_rate_after_first_turn را هم فعال کرد
+            # self._round_rate.round_pre_flop_rate_after_first_turn(game)
+    
+            # شروع نوبت‌ها
+            self._process_playing(chat_id=chat_id, game=game)
+    
+            # ذخیره بازیکنان برای مرتب‌سازی در بازی بعد
+            context.chat_data[KEY_OLD_PLAYERS] = list(map(lambda p: p.user_id, game.players))
     def _fast_forward_to_finish(self, game: Game, chat_id: ChatId):
         """ When no more betting is possible, reveals all remaining cards """
         print("Fast-forwarding to finish...")
@@ -505,23 +526,23 @@ class PokerBotModel:
         chat_id: ChatId,
     ) -> None:
         print(f"Game finishing: {game.id}, pot: {game.pot}")
-
+    
         if game.turn_message_id:
             self._view.remove_message(chat_id, game.turn_message_id)
             game.turn_message_id = None
-        
-        # This is the key change: move bets from round_rate to total_bet BEFORE finalizing pot
+    
+        # انتقال شرط‌های بازیکنان به پات
         for p in game.players:
             p.total_bet += p.round_rate
             game.pot += p.round_rate
             p.round_rate = 0
-            
+    
         print(f"Final pot: {game.pot}")
         for p in game.players:
-             print(f"Player {p.user_id} final total_bet: {p.total_bet}")
-
+            print(f"Player {p.user_id} final total_bet: {p.total_bet}")
+    
         active_players = game.players_by(states=(PlayerState.ACTIVE, PlayerState.ALL_IN))
-
+    
         if not active_players:
             text = "بازی بدون برنده تمام شد."
         elif len(active_players) == 1:
@@ -529,43 +550,31 @@ class PokerBotModel:
             winner.wallet.inc(game.pot)
             text = f"🏁 بازی تمام شد!\n\n{winner.mention_markdown} با فولد بقیه، برنده *{game.pot}$* شد!\n\n"
         else:
+            # تکمیل کارت‌های روی میز
             while len(game.cards_table) < 5 and game.remain_cards:
                 game.cards_table.append(game.remain_cards.pop())
-            
+    
             if game.state != GameState.ROUND_RIVER and game.state != GameState.FINISHED:
-                 message = self._view.send_desk_cards_img(
+                message = self._view.send_desk_cards_img(
                     chat_id=chat_id,
                     cards=game.cards_table,
                     caption=f"میز نهایی - پات: {game.pot}$",
                 )
-                 if message:
+                if message:
                     game.message_ids_to_delete.append(message.message_id)
-
+    
             player_scores = self._winner_determine.determinate_scores(active_players, game.cards_table)
             winners_hand_money = self._round_rate.finish_rate(game, player_scores)
-            
-            if not winners_hand_money:
-                 text = "🏁خطا در تعیین برنده. بازی مساوی اعلام شد."
-                 print(f"Error: finish_rate returned empty. Player scores: {player_scores}")
-            else:
-                text = f"🏁 بازی با پات نهایی *{game.pot}$* تمام شد:\n\n"
-                for (player, best_hand, money) in winners_hand_money:
-                    win_hand = " ".join(map(str, best_hand))
-                    # Show player cards
-                    player_cards_str = " ".join(map(str, player.cards))
-                    text += (f"{player.mention_markdown} ({player_cards_str}):\n"
-                            f"🏆 برنده *{money}$* شد\n"
-                            f"🃏 با ترکیب: {win_hand}\n\n")
-
-        text += "برای شروع بازی جدید /ready را بزنید."
+    
+            text = "🏆 برندگان:\n"
+            for hand, data in winners_hand_money.items():
+                for player, money in data:
+                    text += f"{player.mention_markdown} {hand} ➡️ *{money}$*\n"
+    
+        # اعلام نتیجه
         self._view.send_message(chat_id=chat_id, text=text)
-        
-        for msg_id in game.message_ids_to_delete:
-            self._view.remove_message(chat_id, msg_id)
-        
-        for player in game.players:
-            player.wallet.approve(game.id)
-
+    
+        # **مهم**: پایان بازی و بازگشت به حالت FINISHED
         game.state = GameState.FINISHED
         
     def _goto_next_round(self, game: Game, chat_id: ChatId) -> None:
