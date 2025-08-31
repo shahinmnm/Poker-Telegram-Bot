@@ -191,32 +191,56 @@ class PokerBotModel:
         game: Game,
         chat_id: ChatId
     ) -> None:
-        print(f"New game: {game.id}, players count: {len(game.players)}")
+        print(f"new game: {game.id}, players count: {len(game.players)}")
 
-        for msg_id in game.message_ids_to_delete:
-            self._view.remove_message(chat_id, msg_id)
-        game.message_ids_to_delete.clear()
-
-        # Clear ready messages
-        for p in game.players:
-            self._view.remove_message(chat_id, p.ready_message_id)
-
-        msg_id = self._view.send_message_return_id(
+        self._view.send_message(
             chat_id=chat_id,
             text='🚀 !بازی شروع شد!',
+            reply_markup=ReplyKeyboardMarkup(
+                keyboard=[["poker"]],
+                resize_keyboard=True,
+            ),
         )
-        if msg_id: game.message_ids_to_delete.append(msg_id)
 
         old_players_ids = context.chat_data.get(KEY_OLD_PLAYERS, [])
-        if old_players_ids:
-            old_players_ids = old_players_ids[1:] + old_players_ids[:1]
+        old_players_ids = old_players_ids[-1:] + old_players_ids[:-1]
 
-            def index(ln: List, user_id: UserId) -> int:
-                try:
-                    return ln.index(user_id)
-                except ValueError:
-                    return len(ln)
-            game.players.sort(key=lambda p: index(old_players_ids, p.user_id))
+        def index(ln: List, obj) -> int:
+            try:
+                return ln.index(obj)
+            except ValueError:
+                return -1
+
+        game.players.sort(key=lambda p: index(old_players_ids, p.user_id))
+
+        game.state = GameState.ROUND_PRE_FLOP
+
+        # --- START OF CHANGES ---
+        # The core logic is wrapped in a try/finally block.
+        # This ensures that even if _divide_cards fails for some users
+        # (e.g., they haven't started the bot privately),
+        # the game flow (_process_playing) will still execute.
+        try:
+            # Attempt to deal cards to all players.
+            # This might raise a ValueError if a private chat is not found,
+            # but the method handles it internally by sending cards to the group.
+            self._divide_cards(game=game, chat_id=chat_id)
+        except Exception as e:
+            # Log any unexpected errors during card division but don't stop the game.
+            print(f"An unexpected error occurred during _divide_cards: {e}")
+            traceback.print_exc()
+        finally:
+            # This block will ALWAYS run, ensuring the game progresses.
+            game.current_player_index = 1
+            self._round_rate.round_pre_flop_rate_before_first_turn(game)
+            
+            # Start the betting process.
+            self._process_playing(chat_id=chat_id, game=game)
+            
+            self._round_rate.round_pre_flop_rate_after_first_turn(game)
+
+            context.chat_data[KEY_OLD_PLAYERS] = list(
+                map(lambda p: p.user_id, game.players),
 
         game.state = GameState.ROUND_PRE_FLOP
         self._divide_cards(game=game, chat_id=chat_id)
