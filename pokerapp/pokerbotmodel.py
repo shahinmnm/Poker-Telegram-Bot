@@ -72,6 +72,10 @@ class PokerBotModel:
         if self._cfg.DEBUG:
             return 1
         return MIN_PLAYERS
+    @staticmethod
+    def _calc_call_amount(game: Game, player: Player) -> int:
+        return max(0, self._calc_call_amount(game, player))
+
 
     @staticmethod
     def _game_from_context(context: CallbackContext) -> Game:
@@ -239,6 +243,10 @@ class PokerBotModel:
         return (dealer_index + 1) % num_players
 
     def _start_game(self, context: CallbackContext, game: Game, chat_id: ChatId) -> None:
+        if not hasattr(game, 'dealer_index'):
+            game.dealer_index = 0
+        else:
+            game.dealer_index = (game.dealer_index + 1) % len(game.players)
         print(f"new game: {game.id}, players count: {len(game.players)}")
     
         self._view.send_message(
@@ -765,7 +773,7 @@ class PokerBotModel:
         action = PlayerAction.CALL.value if player.round_rate < game.max_round_rate else PlayerAction.CHECK.value
 
         try:
-            amount_to_call = game.max_round_rate - player.round_rate
+            amount_to_call = self._calc_call_amount(game, player)
             if player.wallet.value() <= amount_to_call:
                 return self.all_in(update=update, context=context)
             
@@ -806,7 +814,7 @@ class PokerBotModel:
             action = PlayerAction.BET if game.max_round_rate == 0 else PlayerAction.RAISE_RATE
     
             # 2. Calculate amount needed to call.
-            call_amount = game.max_round_rate - player.round_rate
+            call_amount = self._calc_call_amount(game, player)
     
             # 3. Calculate total amount to deduct from wallet (call + raise).
             total_required_from_wallet = call_amount + amount_to_raise
@@ -908,7 +916,7 @@ class RoundRateModel:
     )
 
     def call_check(self, game: Game, player: Player) -> None:
-        amount_to_add = game.max_round_rate - player.round_rate
+        amount_to_add = self._calc_call_amount(game, player)
         if amount_to_add > 0:
             player.wallet.dec(amount_to_add)
             player.round_rate += amount_to_add
