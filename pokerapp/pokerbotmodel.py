@@ -237,7 +237,7 @@ class PokerBotModel:
                 user_id=user.id,
                 mention_markdown=user.mention_markdown(),
                 wallet=wallet,
-                ready_message_id=update.effective_message.message_id,
+                ready_message_id=update.effective_message.message_id, # <-- کد صحیح
             )
             game.ready_users.add(user.id)
             game.players.append(player)
