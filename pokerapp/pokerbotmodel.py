@@ -65,7 +65,7 @@ class PokerBotModel:
         self._winner_determine: WinnerDetermination = WinnerDetermination()
         self._kv = kv
         self._cfg: Config = cfg
-        self._round_rate: RoundRateModel = RoundRateModel()
+        self._round_rate = RoundRateModel(view=self._view)
 
     @property
     def _min_players(self):
