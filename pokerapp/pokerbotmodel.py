@@ -736,148 +736,115 @@ class PokerBotModel:
         )
         self.fold(update, context, is_ban=True)
 
-    def fold(self, update: Update, context: CallbackContext, is_ban: bool = False) -> None:
-        game = self._game_from_context(context)
-        chat_id = update.effective_chat.id
-        player = self._current_turn_player(game)
-
-        if not player: return
-
-        player.state = PlayerState.FOLD
-        player.has_acted = True
-
-        action_text = "محروم و فولد شد" if is_ban else PlayerAction.FOLD.value
-        msg_id = self._view.send_message_return_id(
-            chat_id=chat_id,
-            text=f"{player.mention_markdown} {action_text}"
-        )
-        if msg_id: game.message_ids_to_delete.append(msg_id)
-
-        self._process_playing(chat_id=chat_id, game=game)
-
-
-    def call_check(self, update: Update, context: CallbackContext) -> None:
-        """
-        درخواست حرکت 'کال/چک' را به RoundRateModel محول کرده و سپس بازی را ادامه می‌دهد.
-        """
+    def fold(self, update: Update, context: CallbackContext) -> None:
+        """Handles a player's FOLD action."""
         game = self._game_from_context(context)
         player = self._current_turn_player(game)
         chat_id = update.effective_chat.id
 
         if not player:
-            # این حالت نباید رخ دهد اگر میدل‌ور به درستی کار کند.
             return
 
         try:
-            # ۱. تمام منطق حرکت را به کلاس مسئول آن بسپار
-            self._round_rate.call_check(game, player)
-
-            # ۲. پس از اجرای موفقیت‌آمیز حرکت، یک پیام تایید بفرست
-            # (اینکه پیام check باشد یا call در خود view مشخص می‌شود، اینجا یک پیام کلی کافیست)
-            call_amount = game.max_round_rate - player.round_rate
-            action_text = "✋ چک کرد" if call_amount == 0 else "🎯 کال کرد"
-
+            player.state = PlayerState.FOLDED
             self._view.send_message(
                 chat_id=chat_id,
-                text=f"✅ {player.mention_markdown} {action_text}.",
+                text=f"😑 {player.mention_markdown} از ادامه بازی انصراف داد.",
                 parse_mode="Markdown"
             )
-
-            # ۳. بازی را به نوبت بعدی ببر
-            self.next_turn(game, context, chat_id, player.user_id)
+            
+            # بعد از حرکت، نوبت را به نفر بعدی بده
+            self._process_playing(chat_id=chat_id, game=game) # <--- این خط را اضافه کنید
 
         except UserException as e:
-            # اگر در هر مرحله از منطق call_check خطای کاربری رخ دهد، آن را به کاربر نمایش بده
             query = update.callback_query
             if query:
                 query.answer(text=f"خطا: {e}", show_alert=True)
 
-    def raise_rate_bet(
-        self,
-        update: Update,
-        context: CallbackContext,
-        raise_bet_rate: int
-    ) -> None:
+
+    def call_check(self, update: Update, context: CallbackContext) -> None:
+        """Handles a player's CALL or CHECK action."""
         game = self._game_from_context(context)
-        chat_id = update.effective_message.chat_id
         player = self._current_turn_player(game)
-        
-        # === START OF CHANGE ===
-        # The variable 'raise_bet_rate' is already the integer value (e.g., 10, 25, 50).
-        # We no longer need to access '.value'.
-        amount_to_raise = raise_bet_rate
-        # === END OF CHANGE ===
-    
+        chat_id = update.effective_chat.id
+
+        if not player:
+            return
+
         try:
-            # --- START OF NEW, SELF-CONTAINED LOGIC ---
-    
-            # 1. Determine action name: "BET" if no previous bet, "RAISE" otherwise.
-            action = PlayerAction.BET if game.max_round_rate == 0 else PlayerAction.RAISE_RATE
-    
-            # 2. Calculate amount needed to call.
-            call_amount = self._calc_call_amount(game, player)
-    
-            # 3. Calculate total amount to deduct from wallet (call + raise).
-            total_required_from_wallet = call_amount + amount_to_raise
-    
-            # 4. Check wallet balance.
-            if player.wallet.value() < total_required_from_wallet:
-                raise UserException("موجودی شما برای این حرکت کافی نیست.")
-    
-            # 5. Perform transactions.
-            player.wallet.dec(total_required_from_wallet)
-            player.round_rate += total_required_from_wallet
-            
-            # 6. Update game state.
-            game.max_round_rate = player.round_rate
-            game.last_raise = amount_to_raise
-    
-            # 7. Reset 'has_acted' for other active players for the next turn.
-            for p in game.players:
-                if p.state == PlayerState.ACTIVE and p.user_id != player.user_id:
-                    p.has_acted = False
-            
-            # --- END OF NEW LOGIC ---
-    
-            # Send confirmation message to the group
-            mention_markdown = player.mention_markdown
+            # منطق کامل call/check به RoundRateModel منتقل شده است
+            self._round_rate.call_check(game, player)
+
+            # اگر بازیکن بعد از call کردن all-in شد، وضعیتش را آپدیت کن
+            if player.wallet.value() == 0:
+                player.state = PlayerState.ALL_IN
+
+            self._view.send_message(
+                chat_id=chat_id, text=f"✅ {player.mention_markdown} کال/چک کرد.",
+                parse_mode="Markdown"
+            )
+
+            # بعد از حرکت، نوبت را به نفر بعدی بده
+            self._process_playing(chat_id=chat_id, game=game) # <--- این خط را اضافه کنید
+
+        except UserException as e:
+            query = update.callback_query
+            if query:
+                query.answer(text=f"خطا: {e}", show_alert=True)
+
+    def raise_rate_bet(self, update: Update, context: CallbackContext, button_value: int):
+        """Handles a player's RAISE or BET action."""
+        game = self._game_from_context(context)
+        player = self._current_turn_player(game)
+        chat_id = update.effective_chat.id
+
+        if not player:
+            return
+
+        try:
+            # منطق کامل raise به RoundRateModel منتقل شده است
+            new_rate = self._round_rate.raise_bet(game, player, button_value)
+
             self._view.send_message(
                 chat_id=chat_id,
-                text=f"{mention_markdown} {action.value} به *{player.round_rate}$*"
+                text=f"📈 {player.mention_markdown} شرط را به {new_rate}$ افزایش داد.",
+                parse_mode="Markdown"
             )
-    
+
+            # بعد از حرکت، نوبت را به نفر بعدی بده
+            self._process_playing(chat_id=chat_id, game=game) # <--- این خط را اضافه کنید
+
         except UserException as e:
-            self._view.send_message(chat_id=chat_id, text=str(e))
-            return
-        except Exception as e:
-            self._view.send_message(
-                chat_id=chat_id, text="یک خطای بحرانی در پردازش حرکت رخ داد. بازی ریست می‌شود.")
-            print(f"FATAL: Unhandled exception in raise_rate_bet: {e}")
-            traceback.print_exc()
-            game.reset()
-            return
-    
-        # If successful, move to the next player.
-        self._process_playing(
-            chat_id=chat_id,
-            game=game,
-        )
+            query = update.callback_query
+            if query:
+                query.answer(text=f"خطا: {e}", show_alert=True)
 
     def all_in(self, update: Update, context: CallbackContext) -> None:
+        """Handles a player's ALL-IN action."""
         game = self._game_from_context(context)
-        chat_id = update.effective_chat.id
         player = self._current_turn_player(game)
+        chat_id = update.effective_chat.id
 
-        if not player: return
+        if not player:
+            return
 
-        amount = self._round_rate.all_in(game, player)
+        try:
+            # منطق کامل all-in به RoundRateModel منتقل شده است
+            all_in_amount = self._round_rate.all_in(game, player)
 
-        msg_id = self._view.send_message_return_id(
-            chat_id=chat_id,
-            text=f"{player.mention_markdown} {PlayerAction.ALL_IN.value} ({amount}$)"
-        )
-        if msg_id: game.message_ids_to_delete.append(msg_id)
-        self._process_playing(chat_id=chat_id, game=game)
+            self._view.send_message(
+                chat_id=chat_id,
+                text=f"💥 {player.mention_markdown} با {all_in_amount}$ آل-این کرد!",
+                parse_mode="Markdown"
+            )
+
+            # بعد از حرکت، نوبت را به نفر بعدی بده
+            self._process_playing(chat_id=chat_id, game=game) # <--- این خط را اضافه کنید
+
+        except UserException as e:
+            query = update.callback_query
+            if query:
+                query.answer(text=f"خطا: {e}", show_alert=True)
 
     def money(self, update: Update, context: CallbackContext):
         wallet = WalletManagerModel(
