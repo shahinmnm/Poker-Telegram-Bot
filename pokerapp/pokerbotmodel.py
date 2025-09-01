@@ -458,61 +458,61 @@ class PokerBotModel:
                 if msg_id_group:
                     game.message_ids_to_delete.append(msg_id_group)
                     
-        def _big_blind_last_action(self, game: Game) -> bool:
-            bb_index = (game.dealer_index + 2) % len(game.players)
-            bb_player = game.players[bb_index]
-            return (not bb_player.has_acted and bb_player.state == PlayerState.ACTIVE
-                    and game.max_round_rate == (2 * SMALL_BLIND))
+    def _big_blind_last_action(self, game: Game) -> bool:
+        bb_index = (game.dealer_index + 2) % len(game.players)
+        bb_player = game.players[bb_index]
+        return (not bb_player.has_acted and bb_player.state == PlayerState.ACTIVE
+                and game.max_round_rate == (2 * SMALL_BLIND))
     
-        def _process_playing(self, chat_id: ChatId, game: Game) -> None:
-            if game.state not in self.ACTIVE_GAME_STATES:
-                return
+    def _process_playing(self, chat_id: ChatId, game: Game) -> None:
+        if game.state not in self.ACTIVE_GAME_STATES:
+            return
         
-            active_and_all_in_players = game.players_by(states=(PlayerState.ACTIVE, PlayerState.ALL_IN))
-            if len(active_and_all_in_players) <= 1:
-                return self._finish(game, chat_id)
-        
-            active_players = game.players_by(states=(PlayerState.ACTIVE,))
-        
-            # بررسی پایان Street
-            round_over = False
-            if active_players:
-                all_acted = all(p.has_acted for p in active_players)
-                all_matched = len(set(p.round_rate for p in active_players)) == 1
-                if all_acted and all_matched:
-                    if not (game.state == GameState.ROUND_PRE_FLOP and self._big_blind_last_action(game)):
-                        round_over = True
-            else:
-                round_over = True
-        
-            if round_over:
-                self._round_rate.to_pot(game, chat_id)
-                if len(game.players_by(states=(PlayerState.ACTIVE,))) < 2:
-                    return self._fast_forward_to_finish(game, chat_id)
-                self._goto_next_round(game, chat_id)
-                if game.state in self.ACTIVE_GAME_STATES:
-                    return self._process_playing(chat_id, game)
-                return
-        
-            # حرکت به بازیکن ACTIVE بعدی
-            num_players = len(game.players)
-            for _ in range(num_players):
-                game.current_player_index = (game.current_player_index + 1) % num_players
-                current_player = self._current_turn_player(game)
-                if current_player.state == PlayerState.ACTIVE:
-                    break
-            else:
-                print("No active player found in _process_playing.")
-                return self._finish(game, chat_id)
-        
-            # ارسال نوبت بازیکن
-            game.last_turn_time = datetime.datetime.now()
-            if game.turn_message_id:
-                self._view.remove_message(chat_id, game.turn_message_id)
-            msg_id = self._view.send_turn_actions(
-                chat_id=chat_id, game=game, player=current_player, money=current_player.wallet.value()
-            )
-            game.turn_message_id = msg_id
+        active_and_all_in_players = game.players_by(states=(PlayerState.ACTIVE, PlayerState.ALL_IN))
+        if len(active_and_all_in_players) <= 1:
+            return self._finish(game, chat_id)
+    
+        active_players = game.players_by(states=(PlayerState.ACTIVE,))
+    
+        # بررسی پایان Street
+        round_over = False
+        if active_players:
+            all_acted = all(p.has_acted for p in active_players)
+            all_matched = len(set(p.round_rate for p in active_players)) == 1
+            if all_acted and all_matched:
+                if not (game.state == GameState.ROUND_PRE_FLOP and self._big_blind_last_action(game)):
+                    round_over = True
+        else:
+            round_over = True
+    
+        if round_over:
+            self._round_rate.to_pot(game, chat_id)
+            if len(game.players_by(states=(PlayerState.ACTIVE,))) < 2:
+                return self._fast_forward_to_finish(game, chat_id)
+            self._goto_next_round(game, chat_id)
+            if game.state in self.ACTIVE_GAME_STATES:
+                return self._process_playing(chat_id, game)
+            return
+    
+        # حرکت به بازیکن ACTIVE بعدی
+        num_players = len(game.players)
+        for _ in range(num_players):
+            game.current_player_index = (game.current_player_index + 1) % num_players
+            current_player = self._current_turn_player(game)
+            if current_player.state == PlayerState.ACTIVE:
+                break
+        else:
+            print("No active player found in _process_playing.")
+            return self._finish(game, chat_id)
+    
+        # ارسال نوبت بازیکن
+        game.last_turn_time = datetime.datetime.now()
+        if game.turn_message_id:
+            self._view.remove_message(chat_id, game.turn_message_id)
+        msg_id = self._view.send_turn_actions(
+            chat_id=chat_id, game=game, player=current_player, money=current_player.wallet.value()
+        )
+        game.turn_message_id = msg_id
 
     def add_cards_to_table(
         self,
