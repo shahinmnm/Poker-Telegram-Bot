@@ -891,7 +891,7 @@ class PokerBotModel:
 class RoundRateModel:
     def __init__(self, view: PokerBotViewer):
         self._view = view
-    def to_pot(self, game: Game) -> None:
+    def to_pot(self, game: Game, chat_id: ChatId) -> None:
         # This function moves money from the current betting round to the main pot
         # and also updates each player's total bet for the hand.
         if game.state == GameState.INITIAL or game.state == GameState.FINISHED:
@@ -910,10 +910,10 @@ class RoundRateModel:
         if pot_increase > 0:
             print(f"Moved {pot_increase} to pot. New pot: {game.pot}")
         self._view.send_desk_cards_img(
-        chat_id=chat_id,
-        cards=game.cards_table,
-        caption=f"💰 پات فعلی: {game.pot}$"
-    )
+            chat_id=chat_id,
+            cards=game.cards_table,
+            caption=f"💰 پات فعلی: {game.pot}$",
+        )
 
     def call_check(self, game: Game, player: Player) -> None:
         amount_to_add = self._calc_call_amount(game, player)
