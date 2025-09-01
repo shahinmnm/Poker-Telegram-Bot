@@ -265,6 +265,9 @@ class PokerBotModel:
             # ست کردن Small & Big Blind
             self._round_rate.round_pre_flop_rate_before_first_turn(game)
             
+            # ثبت مبلغ بیگ‌بلایند به عنوان بیشترین نرخ فعلی
+            game.max_round_rate = SMALL_BLIND * 2
+            
             # انتقال blindها به پات
             self._round_rate.to_pot(game)
         
@@ -463,6 +466,23 @@ class PokerBotModel:
 
         round_over = False
         active_players = game.players_by(states=(PlayerState.ACTIVE,))
+        
+        if all_acted and all_matched:
+            is_bb_option = False
+            if game.state == GameState.ROUND_PRE_FLOP:
+                bb_player_index = 1 % len(game.players)
+                bb_player = game.players[bb_player_index]
+                if (not bb_player.has_acted
+                    and bb_player.state == PlayerState.ACTIVE
+                    and game.max_round_rate == (2 * SMALL_BLIND)
+                    and all(p.round_rate <= game.max_round_rate for p in game.players)):
+                    is_bb_option = True
+    
+            if not is_bb_option:
+                round_over = True
+
+        if not is_bb_option:
+            round_over = True
 
         if active_players:
             all_acted = all(p.has_acted for p in active_players)
@@ -674,6 +694,9 @@ class PokerBotModel:
 
         
     def _goto_next_round(self, game: Game, chat_id: ChatId) -> None:
+                # ریست حرکت‌ها برای بازیکنان فعال
+        for p in game.players_by(states=(PlayerState.ACTIVE,)):
+            p.has_acted = False
         state_transitions = {
             GameState.ROUND_PRE_FLOP: {"next_state": GameState.ROUND_FLOP, "processor": lambda: self.add_cards_to_table(3, game, chat_id)},
             GameState.ROUND_FLOP: {"next_state": GameState.ROUND_TURN, "processor": lambda: self.add_cards_to_table(1, game, chat_id)},
@@ -940,6 +963,11 @@ class RoundRateModel:
         
         if pot_increase > 0:
             print(f"Moved {pot_increase} to pot. New pot: {game.pot}")
+        self._view.send_desk_cards_img(
+        chat_id=chat_id,
+        cards=game.cards_table,
+        caption=f"💰 پات فعلی: {game.pot}$"
+    )
 
     def call_check(self, game: Game, player: Player) -> None:
         amount_to_add = game.max_round_rate - player.round_rate
