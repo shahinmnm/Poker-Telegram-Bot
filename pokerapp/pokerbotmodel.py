@@ -231,16 +231,16 @@ class PokerBotModel:
         num_players = len(game.players)
         dealer_index = getattr(game, "dealer_index", 0)
 
-    if street == GameState.ROUND_PRE_FLOP:
-        # Small Blind
-        sb_index = (dealer_index + 1) % num_players
-        # Big Blind
-        bb_index = (dealer_index + 2) % num_players
-        # نفر بعد از BB شروع می‌کند
-        return (bb_index + 1) % num_players
-    else:
-        # Flop, Turn, River: نفر سمت چپ Dealer
-        return (dealer_index + 1) % num_players
+        if street == GameState.ROUND_PRE_FLOP:
+            # Small Blind
+            sb_index = (dealer_index + 1) % num_players
+            # Big Blind
+            bb_index = (dealer_index + 2) % num_players
+            # نفر بعد از BB شروع می‌کند
+            return (bb_index + 1) % num_players
+        else:
+            # Flop, Turn, River: نفر سمت چپ Dealer
+            return (dealer_index + 1) % num_players
 
     def _start_game(self, context: CallbackContext, game: Game, chat_id: ChatId) -> None:
         if not hasattr(game, 'dealer_index'):
