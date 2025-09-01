@@ -265,14 +265,45 @@ class PokerBotModel:
     
         game.state = GameState.ROUND_PRE_FLOP
         self._divide_cards(game=game, chat_id=chat_id)
-    
-        # ست کردن Blindها
-        self._round_rate.round_pre_flop_rate_before_first_turn(game)
-        self._round_rate.to_pot(game, chat_id)
-    
-        # تعیین نفر شروع Pre-Flop
-        game.current_player_index = self._starting_player_index(game, GameState.ROUND_PRE_FLOP)
-    
+
+        # ==================== بلوک اصلاح شده برای Blind ها ====================
+        print("DEBUG: Setting up blinds for Pre-Flop.")
+        num_players = len(game.players)
+        dealer_index = game.dealer_index
+
+        # تعیین بازیکنان Small و Big Blind
+        sb_player = game.players[(dealer_index + 1) % num_players]
+        bb_player = game.players[(dealer_index + 2) % num_players]
+
+        print(f"DEBUG: Dealer: {game.players[dealer_index].mention_markdown}, SB: {sb_player.mention_markdown}, BB: {bb_player.mention_markdown}")
+
+        # کم کردن مبلغ Blind از موجودی و اضافه کردن به شرط بازیکن
+        sb_amount = min(SMALL_BLIND, sb_player.wallet.value())
+        sb_player.wallet.dec(sb_amount)
+        sb_player.round_rate = sb_amount
+        sb_player.total_bet = sb_amount
+        sb_player.has_acted = False # پرداخت بلایند حرکت محسوب نمی‌شود
+
+        bb_amount = min(SMALL_BLIND * 2, bb_player.wallet.value())
+        bb_player.wallet.dec(bb_amount)
+        bb_player.round_rate = bb_amount
+        bb_player.total_bet = bb_amount
+        bb_player.has_acted = False
+
+        # آپدیت پات و حداکثر شرط
+        game.pot = sb_amount + bb_amount
+        game.max_round_rate = bb_amount
+
+        print(f"DEBUG: Blinds posted. Pot: {game.pot}, Max Round Rate: {game.max_round_rate}")
+        # ==================== پایان بلوک اصلاح شده ====================
+
+
+        # تعیین نفر شروع Pre-Flop (نفر بعد از Big Blind)
+        start_player_index = (dealer_index + 3) % num_players
+        game.current_player_index = self._find_next_active_player_index(game, start_player_index)
+
+        print(f"DEBUG: Pre-Flop starting player is at index {game.current_player_index}: {self._current_turn_player(game).mention_markdown}")
+
         self._process_playing(chat_id=chat_id, game=game)
         context.chat_data[KEY_OLD_PLAYERS] = [p.user_id for p in game.players]
     
@@ -1094,79 +1125,102 @@ class RoundRateModel:
         game: Game,
         player_scores: Dict[Score, List[Tuple[Player, Cards]]],
     ) -> Dict[str, List[Tuple[Player, Money]]]:
-        """محاسبه برندگان و مبلغ برد آن‌ها، گروه‌بندی‌شده بر اساس نام دست"""
+        """
+        محاسبه برندگان و مبلغ برد آن‌ها با در نظر گرفتن Side Pot ها.
+        این متد همچنین حالت برنده شدن به دلیل فولد سایر بازیکنان را مدیریت می‌کند.
+        """
+        final_winnings: Dict[str, List[Tuple[Player, Money]]] = {}
         
-        # همه بازیکنان که هنوز در دست هستند (ACTIVE یا ALL_IN)
-        active_or_all_in = game.players_by(states=(PlayerState.ACTIVE, PlayerState.ALL_IN))
-        if not active_or_all_in:
-            return {}
+        # بازیکنانی که فولد نکرده‌اند
+        active_and_all_in_players = game.players_by(states=(PlayerState.ACTIVE, PlayerState.ALL_IN))
         
-        # مجموع شرط هر بازیکن
+        # --- مدیریت حالت خاص: برنده شدن با فولد دیگران ---
+        if len(active_and_all_in_players) == 1:
+            winner = active_and_all_in_players[0]
+            winnings = game.pot
+            winner.wallet.inc(winnings) # کل پات به کیف پول برنده اضافه می‌شود
+            
+            final_winnings["Winner by Fold"] = [(winner, winnings)]
+            print(f"DEBUG: Player {winner.mention_markdown} won {winnings}$ because all others folded.")
+            return final_winnings
+
+        # --- منطق اصلی برای Showdown و Side Pot ها ---
         total_bets = {p.user_id: p.total_bet for p in game.players if p.total_bet > 0}
-        sorted_unique_bets = sorted(set(total_bets.values()))  # برای تشخیص side pots
         
+        # اگر هیچ شرطی وجود ندارد (بسیار بعید با وجود بلایندها)
+        if not total_bets and game.pot > 0:
+            eligible_players = active_and_all_in_players
+            if not eligible_players: return {}
+            
+            share = game.pot // len(eligible_players)
+            remainder = game.pot % len(eligible_players)
+            for i, player in enumerate(eligible_players):
+                payout = share + (1 if i < remainder else 0)
+                if payout > 0:
+                    player.wallet.inc(payout)
+                    final_winnings["Split Pot"] = final_winnings.get("Split Pot", []) + [(player, payout)]
+            return final_winnings
+
+        showdown_players = active_and_all_in_players
+        sorted_unique_bets = sorted(list(set(b for b in total_bets.values() if b > 0)))
         side_pots = []
         last_bet_level = 0
 
         for bet_level in sorted_unique_bets:
             pot_amount = 0
-            eligible_players_ids = []
-
-            # محاسبه سهم هر بازیکن برای این سطح pot
             for player_id, player_bet in total_bets.items():
                 contribution = min(player_bet, bet_level) - last_bet_level
                 if contribution > 0:
                     pot_amount += contribution
 
-            for player in active_or_all_in:
-                if total_bets.get(player.user_id, 0) >= bet_level:
-                    eligible_players_ids.append(player.user_id)
+            eligible_players = [p for p in showdown_players if total_bets.get(p.user_id, 0) >= bet_level]
 
-            if pot_amount > 0:
-                side_pots.append({
-                    "amount": pot_amount,
-                    "eligible_players_ids": eligible_players_ids
-                })
-
+            if pot_amount > 0 and eligible_players:
+                side_pots.append({"amount": pot_amount, "eligible_players": eligible_players})
             last_bet_level = bet_level
 
-        # دیکشنری نتیجه نهایی: {نام دست: [(بازیکن, مبلغ), ...]}
-        final_winnings: Dict[str, List[Tuple[Player, Money]]] = {}
+        sorted_scores = sorted(player_scores.keys(), reverse=True)
 
         for pot in side_pots:
-            eligible_winners = []
             best_score_in_pot = -1
-            sorted_scores = sorted(player_scores.keys(), reverse=True)
-
-            # پیدا کردن بهترین دست‌ها در این pot
+            winners_in_pot = []
+            
             for score in sorted_scores:
                 for player, hand_cards in player_scores[score]:
-                    if player.user_id in pot["eligible_players_ids"]:
+                    if player in pot["eligible_players"]:
                         if best_score_in_pot == -1:
                             best_score_in_pot = score
                         if score == best_score_in_pot:
-                            eligible_winners.append((player, hand_cards))
+                            winners_in_pot.append(player)
                 if best_score_in_pot != -1:
-                    break  # فقط بالاترین امتیاز را نگه داریم
+                    break
 
-            if not eligible_winners:
+            if not winners_in_pot:
                 continue
 
-            # تقسیم مبلغ pot بین برندگان
-            win_share = pot["amount"] // len(eligible_winners)
-            remainder = pot["amount"] % len(eligible_winners)
+            win_share = pot['amount'] // len(winners_in_pot)
+            remainder = pot['amount'] % len(winners_in_pot)
 
-            for idx, (winner, hand_cards) in enumerate(eligible_winners):
-                payout = win_share + (1 if idx < remainder else 0)
-                winner.wallet.inc(payout)  # آپدیت موجودی
-                
-                hand_name = self._hand_name_from_score(best_score_in_pot)
+            for i, winner in enumerate(winners_in_pot):
+                payout = win_share + (1 if i < remainder else 0)
+                if payout > 0:
+                    winner.wallet.inc(payout)
+                    hand_name = self._hand_name_from_score(best_score_in_pot)
+                    
+                    if hand_name not in final_winnings:
+                        final_winnings[hand_name] = []
 
-                if hand_name not in final_winnings:
-                    final_winnings[hand_name] = []
-                final_winnings[hand_name].append((winner, payout))
+                    found = False
+                    for j, (p, m) in enumerate(final_winnings[hand_name]):
+                        if p.user_id == winner.user_id:
+                            final_winnings[hand_name][j] = (p, m + payout)
+                            found = True
+                            break
+                    if not found:
+                         final_winnings[hand_name].append((winner, payout))
 
         return final_winnings
+
 
     def _hand_name_from_score(self, score: int) -> str:
         """تبدیل عدد امتیاز به نام دست پوکر"""
