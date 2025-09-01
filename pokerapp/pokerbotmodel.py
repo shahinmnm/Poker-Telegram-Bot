@@ -223,64 +223,59 @@ class PokerBotModel:
                 chat_id=chat_id,
                 text=f"👤 تعداد بازیکنان برای شروع کافی نیست (حداقل {self._min_players} نفر)."
             )
+    def _starting_player_index(self, game: Game, street: GameState) -> int:
+    num_players = len(game.players)
+    dealer_index = getattr(game, "dealer_index", 0)
 
-    def _start_game(
-        self,
-        context: CallbackContext,
-        game: Game,
-        chat_id: ChatId
-    ) -> None:
+    if street == GameState.ROUND_PRE_FLOP:
+        # Small Blind
+        sb_index = (dealer_index + 1) % num_players
+        # Big Blind
+        bb_index = (dealer_index + 2) % num_players
+        # نفر بعد از BB شروع می‌کند
+        return (bb_index + 1) % num_players
+    else:
+        # Flop, Turn, River: نفر سمت چپ Dealer
+        return (dealer_index + 1) % num_players
+
+    def _start_game(self, context: CallbackContext, game: Game, chat_id: ChatId) -> None:
         print(f"new game: {game.id}, players count: {len(game.players)}")
     
-        # پیام شروع بازی با منوی آماده‌سازی
         self._view.send_message(
             chat_id=chat_id,
             text='🚀 !بازی شروع شد!',
-            reply_markup=ReplyKeyboardMarkup(
-                keyboard=[["poker"]],
-                resize_keyboard=True,
-            ),
+            reply_markup=ReplyKeyboardMarkup(keyboard=[["poker"]], resize_keyboard=True),
         )
     
         old_players_ids = context.chat_data.get(KEY_OLD_PLAYERS, [])
         old_players_ids = old_players_ids[-1:] + old_players_ids[:-1]
-    
         def index(ln: List, obj) -> int:
             try:
                 return ln.index(obj)
             except ValueError:
                 return -1
-    
-        # مرتب‌سازی بازیکنان بر اساس بازی قبلی (آخرین نفر قبلی الان اول می‌شود)
         game.players.sort(key=lambda p: index(old_players_ids, p.user_id))
-        game.state = GameState.ROUND_PRE_FLOP
     
-        try:
-            # پخش کارت‌ها
-            self._divide_cards(game=game, chat_id=chat_id)
-        except Exception as e:
-            print(f"An unexpected error occurred during _divide_cards: {e}")
-            traceback.print_exc()
-        finally:
-            # ست کردن Small & Big Blind
-            self._round_rate.round_pre_flop_rate_before_first_turn(game)
-            
-            # ثبت مبلغ بیگ‌بلایند به عنوان بیشترین نرخ فعلی
-            game.max_round_rate = SMALL_BLIND * 2
-            
-            # انتقال blindها به پات
-            self._round_rate.to_pot(game)
-        
-            # شروع نوبت‌ها
-            self._process_playing(chat_id=chat_id, game=game)
-        
-            # ذخیره ترتیب بازیکنان
-            context.chat_data[KEY_OLD_PLAYERS] = [p.user_id for p in game.players]
+        # تعیین Dealer
+        game.dealer_index = 0 if not hasattr(game, "dealer_index") else (game.dealer_index + 1) % len(game.players)
+    
+        game.state = GameState.ROUND_PRE_FLOP
+        self._divide_cards(game=game, chat_id=chat_id)
+    
+        # ست کردن Blindها
+        self._round_rate.round_pre_flop_rate_before_first_turn(game)
+        self._round_rate.to_pot(game)
+    
+        # تعیین نفر شروع Pre-Flop
+        game.current_player_index = self._starting_player_index(game, GameState.ROUND_PRE_FLOP)
+    
+        self._process_playing(chat_id=chat_id, game=game)
+        context.chat_data[KEY_OLD_PLAYERS] = [p.user_id for p in game.players]
     
     def _fast_forward_to_finish(self, game: Game, chat_id: ChatId):
         """ When no more betting is possible, reveals all remaining cards """
         print("Fast-forwarding to finish...")
-        self._round_rate.to_pot(game)
+        self.to_pot_and_update(chat_id, game)
         if game.state == GameState.ROUND_PRE_FLOP:
             self.add_cards_to_table(3, game, chat_id)
             game.state = GameState.ROUND_FLOP
@@ -454,91 +449,62 @@ class PokerBotModel:
                 )
                 if msg_id_group:
                     game.message_ids_to_delete.append(msg_id_group)
+                    
+        def _big_blind_last_action(self, game: Game) -> bool:
+            bb_index = (game.dealer_index + 2) % len(game.players)
+            bb_player = game.players[bb_index]
+            return (not bb_player.has_acted and bb_player.state == PlayerState.ACTIVE
+                    and game.max_round_rate == (2 * SMALL_BLIND))
     
-    def _process_playing(self, chat_id: ChatId, game: Game) -> None:
-        if game.state not in self.ACTIVE_GAME_STATES:
-            return
-
-        active_and_all_in_players = game.players_by(states=(PlayerState.ACTIVE, PlayerState.ALL_IN))
-        if len(active_and_all_in_players) <= 1:
-            self._finish(game, chat_id)
-            return
-
-        round_over = False
-        active_players = game.players_by(states=(PlayerState.ACTIVE,))
+        def _process_playing(self, chat_id: ChatId, game: Game) -> None:
+            if game.state not in self.ACTIVE_GAME_STATES:
+                return
         
-        if all_acted and all_matched:
-            is_bb_option = False
-            if game.state == GameState.ROUND_PRE_FLOP:
-                bb_player_index = 1 % len(game.players)
-                bb_player = game.players[bb_player_index]
-                if (not bb_player.has_acted
-                    and bb_player.state == PlayerState.ACTIVE
-                    and game.max_round_rate == (2 * SMALL_BLIND)
-                    and all(p.round_rate <= game.max_round_rate for p in game.players)):
-                    is_bb_option = True
-    
-            if not is_bb_option:
-                round_over = True
-
-        if not is_bb_option:
-            round_over = True
-
-        if active_players:
-            all_acted = all(p.has_acted for p in active_players)
-            all_matched = len(set(p.round_rate for p in active_players)) == 1
-
-            if all_acted and all_matched:
-                is_bb_option = False
-                if len(game.players) > 1 and game.state == GameState.ROUND_PRE_FLOP:
-                    bb_player_index = 1 % len(game.players) 
-                    bb_player = game.players[bb_player_index]
-                    if (not bb_player.has_acted and 
-                        bb_player.state == PlayerState.ACTIVE and
-                        game.max_round_rate == (2 * SMALL_BLIND)):
-                        is_bb_option = True
-
-                if not is_bb_option:
-                    round_over = True
-        else:
-            round_over = True
-
-        if round_over:
-            self._round_rate.to_pot(game)
-            active_players_after_pot = game.players_by(states=(PlayerState.ACTIVE,))
-            if len(active_players_after_pot) < 2:
-                 self._fast_forward_to_finish(game, chat_id)
+            active_and_all_in_players = game.players_by(states=(PlayerState.ACTIVE, PlayerState.ALL_IN))
+            if len(active_and_all_in_players) <= 1:
+                return self._finish(game, chat_id)
+        
+            active_players = game.players_by(states=(PlayerState.ACTIVE,))
+        
+            # بررسی پایان Street
+            round_over = False
+            if active_players:
+                all_acted = all(p.has_acted for p in active_players)
+                all_matched = len(set(p.round_rate for p in active_players)) == 1
+                if all_acted and all_matched:
+                    if not (game.state == GameState.ROUND_PRE_FLOP and self._big_blind_last_action(game)):
+                        round_over = True
             else:
-                 self._goto_next_round(game, chat_id)
-                 if game.state in self.ACTIVE_GAME_STATES:
-                     self._process_playing(chat_id, game)
-            return
-
-        start_index = game.current_player_index
-        num_players = len(game.players)
-        for _ in range(num_players):
-            game.current_player_index = (game.current_player_index + 1) % num_players
-            current_player = self._current_turn_player(game)
-            if current_player.state == PlayerState.ACTIVE:
-                break
-        else:
-            print("Error: Full circle without finding an active player in _process_playing.")
-            self._finish(game, chat_id)
-            return
-
-        game.last_turn_time = datetime.datetime.now()
-        current_player_money = current_player.wallet.value()
-
-        if game.turn_message_id:
-            self._view.remove_message(chat_id, game.turn_message_id)
-
-        msg_id = self._view.send_turn_actions(
-            chat_id=chat_id,
-            game=game,
-            player=current_player,
-            money=current_player_money,
-        )
-        game.turn_message_id = msg_id
+                round_over = True
+        
+            if round_over:
+                self._round_rate.to_pot(game)
+                if len(game.players_by(states=(PlayerState.ACTIVE,))) < 2:
+                    return self._fast_forward_to_finish(game, chat_id)
+                self._goto_next_round(game, chat_id)
+                if game.state in self.ACTIVE_GAME_STATES:
+                    return self._process_playing(chat_id, game)
+                return
+        
+            # حرکت به بازیکن ACTIVE بعدی
+            num_players = len(game.players)
+            for _ in range(num_players):
+                game.current_player_index = (game.current_player_index + 1) % num_players
+                current_player = self._current_turn_player(game)
+                if current_player.state == PlayerState.ACTIVE:
+                    break
+            else:
+                print("No active player found in _process_playing.")
+                return self._finish(game, chat_id)
+        
+            # ارسال نوبت بازیکن
+            game.last_turn_time = datetime.datetime.now()
+            if game.turn_message_id:
+                self._view.remove_message(chat_id, game.turn_message_id)
+            msg_id = self._view.send_turn_actions(
+                chat_id=chat_id, game=game, player=current_player, money=current_player.wallet.value()
+            )
+            game.turn_message_id = msg_id
 
     def add_cards_to_table(
         self,
@@ -693,55 +659,27 @@ class PokerBotModel:
             Timer(3.0, lambda: self._start_game(context=None, game=game, chat_id=chat_id)).start()
 
         
-    def _goto_next_round(self, game: Game, chat_id: ChatId) -> None:
-                # ریست حرکت‌ها برای بازیکنان فعال
-        for p in game.players_by(states=(PlayerState.ACTIVE,)):
-            p.has_acted = False
-        state_transitions = {
-            GameState.ROUND_PRE_FLOP: {"next_state": GameState.ROUND_FLOP, "processor": lambda: self.add_cards_to_table(3, game, chat_id)},
-            GameState.ROUND_FLOP: {"next_state": GameState.ROUND_TURN, "processor": lambda: self.add_cards_to_table(1, game, chat_id)},
-            GameState.ROUND_TURN: {"next_state": GameState.ROUND_RIVER, "processor": lambda: self.add_cards_to_table(1, game, chat_id)},
-            GameState.ROUND_RIVER: {"next_state": GameState.FINISHED, "processor": lambda: self._finish(game, chat_id)}
-        }
-
-        if game.state not in state_transitions:
-            print("Unexpected game state: " + str(game.state))
-            self._finish(game, chat_id)
-            return
-
-        transition = state_transitions[game.state]
+        def _goto_next_round(self, game: Game, chat_id: ChatId) -> None:
+            if game.state == GameState.ROUND_PRE_FLOP:
+                self.add_cards_to_table(3, game, chat_id)
+                game.state = GameState.ROUND_FLOP
+            elif game.state == GameState.ROUND_FLOP:
+                self.add_cards_to_table(1, game, chat_id)
+                game.state = GameState.ROUND_TURN
+            elif game.state == GameState.ROUND_TURN:
+                self.add_cards_to_table(1, game, chat_id)
+                game.state = GameState.ROUND_RIVER
+            else:
+                return self._finish(game, chat_id)
         
-        # If the next state is FINISHED, it means the betting round on the river is over.
-        # We should call _finish directly.
-        if transition["next_state"] == GameState.FINISHED:
-            transition["processor"]()
-            return
-            
-        game.state = transition["next_state"]
-        transition["processor"]()
-
-        if game.state in self.ACTIVE_GAME_STATES:
+            # ریست بازیکنان ACTIVE
             for p in game.players_by(states=(PlayerState.ACTIVE,)):
                 p.has_acted = False
-            
-            num_players = len(game.players)
-            # Find first active player to act, starting from player after dealer button.
-            # Player 0 is dealer/SB in 2-player, or just dealer in 3+ player.
-            # So we start searching from index 1.
-            first_active_player_index = -1
-            for i in range(num_players):
-                player_index = (1 + i) % num_players
-                player = game.players[player_index]
-                if player.state == PlayerState.ACTIVE:
-                    first_active_player_index = player_index
-                    break
-            
-            if first_active_player_index != -1:
-                game.current_player_index = first_active_player_index - 1
-            else:
-                print("Error: No active players found to start the new round.")
-                self._fast_forward_to_finish(game, chat_id)
-
+                p.round_rate = 0
+            game.max_round_rate = 0
+        
+            # تعیین نفر شروع‌کننده Street جدید
+            game.current_player_index = self._starting_player_index(game, game.state)
     def middleware_user_turn(self, fn: Handler) -> Handler:
         def m(update: Update, context: CallbackContext):
             query = update.callback_query
