@@ -683,21 +683,21 @@ class PokerBotModel:
 
     def _go_to_next_street(self, game: Game, chat_id: ChatId) -> None:
         """
-        بازی را به مرحله بعدی (Street) می‌برد.
-        Pre-Flop -> Flop -> Turn -> River -> Finish
+        Moves the game to the next street (Flop, Turn, River) or finishes it.
         """
-        print(f"DEBUG: Moving from {game.state.name} to the next street.")
-        
-        # پول‌های شرط‌بندی شده در این دور را به Pot اصلی منتقل کن
-        self.to_pot_and_update(chat_id, game) # فرض می‌کنیم این متد وجود دارد
-    
-        # ریست کردن وضعیت بازیکنان برای دور جدید شرط‌بندی
-        for player in game.players:
-            player.round_rate = 0
-            player.has_acted = False
-        
+        print(f"Game {game.id}: Moving to the next street from {game.state.name}")
+
+        # 1. جمع‌آوری پول‌ها در پات اصلی و ریست کردن مقادیر دور
+        # ======== شروع اصلاح ========
+        self._round_rate.to_pot(game, chat_id)
+        # ======== پایان اصلاح ========
+
+        # 2. ریست کردن وضعیت بازیکنان برای دور جدید
         game.max_round_rate = 0
-        
+        for p in game.players:
+            p.round_rate = 0
+            p.has_acted = False
+                
         # تعیین نفر شروع‌کننده برای دور جدید (معمولاً نفر بعد از دیلر)
         game.current_player_index = self._starting_player_index(game, game.state)
         # از آنجایی که در _process_playing یکبار ایندکس جلو میرود، یکی عقب برمیگردانیم
