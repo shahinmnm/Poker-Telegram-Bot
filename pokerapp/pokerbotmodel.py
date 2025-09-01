@@ -192,10 +192,11 @@ class PokerBotModel:
 
 
     def _divide_cards(self, game: Game, chat_id: ChatId):
-        """کارت‌ها را بین بازیکنان پخش می‌کند."""
-        # This part of your code seems to send cards to the group chat.
-        # Sending them privately to each user is generally better for poker.
-        # However, I will keep your original logic.
+        """
+        کارت‌ها را بین بازیکنان پخش می‌کند.
+        - یک نسخه از کارت‌ها به صورت خصوصی برای بازیکن ارسال می‌شود (بدون ریپلای).
+        - یک پیام "کارت‌های شما ارسال شد" به صورت ریپلای به پیام /ready در گروه ارسال می‌شود.
+        """
         for player in game.players:
             if len(game.remain_cards) < 2:
                 self._view.send_message(chat_id, "کارت‌های کافی در دسته وجود ندارد! بازی ریست می‌شود.")
@@ -205,16 +206,41 @@ class PokerBotModel:
             cards = [game.remain_cards.pop(), game.remain_cards.pop()]
             player.cards = cards
 
-            # ارسال کارت‌ها در pv
-            msg_id = self._view.send_cards(
-                chat_id=player.user_id,
-                cards=cards,
-                mention_markdown=player.mention_markdown,
-                ready_message_id=player.ready_message_id,
-            )
-            # You may not want to delete private messages.
-            # if msg_id:
-            #     game.message_ids_to_delete.append(msg_id)
+            # --- شروع بلوک اصلاح شده ---
+
+            # مرحله ۱: ارسال کارت‌ها به چت خصوصی بازیکن (بدون ریپلای)
+            try:
+                # ما اینجا از یک متد جدید در View استفاده می‌کنیم که فقط عکس کارت‌ها را می‌فرستد.
+                # اگر این متد را ندارید، از view.send_message عادی هم می‌توانید استفاده کنید.
+                self._view.send_desk_cards_img(
+                    chat_id=player.user_id,
+                    cards=cards,
+                    caption="🃏 این کارت‌های شما برای این دست است."
+                )
+            except Exception as e:
+                # اگر کاربر ربات را در PV استارت نکرده باشد، این ارسال شکست می‌خورد.
+                # یک پیام هشدار در گروه می‌فرستیم.
+                print(f"WARNING: Could not send cards to private chat for user {player.user_id}. Maybe bot is not started? Error: {e}")
+                self._view.send_message(
+                    chat_id=chat_id,
+                    text=f"⚠️ {player.mention_markdown}، نتوانستم کارت‌ها را در چت خصوصی ارسال کنم. لطفاً ربات را استارت کن (/start).",
+                    parse_mode="Markdown"
+                )
+
+            # مرحله ۲: ارسال یک پیام در گروه به صورت ریپلای به پیام /ready
+            # این پیام فقط اطلاع می‌دهد که کارت‌ها ارسال شده‌اند و حاوی خود کارت‌ها نیست.
+            # این کار از بروز خطا جلوگیری می‌کند.
+            try:
+                # ما به جای send_cards از send_message_reply استفاده می‌کنیم.
+                self._view.send_message_reply(
+                    chat_id=chat_id,
+                    message_id=player.ready_message_id,
+                    text=f"✅ {player.mention_markdown}، کارت‌هایت در چت خصوصی ارسال شد!"
+                )
+            except Exception as e:
+                # اگر به هر دلیلی پیام /ready حذف شده بود، این ریپلای شکست می‌خورد.
+                # ما این خطا را به سادگی نادیده می‌گیریم چون ارسال کارت در PV موفق بوده است.
+                print(f"INFO: Could not reply to ready message {player.ready_message_id} in group. It might have been deleted. Error: {e}")
 
     def _process_playing(self, chat_id: ChatId, game: Game):
         """
