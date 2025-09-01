@@ -463,49 +463,67 @@ class PokerBotModel:
     def _process_playing(self, chat_id: ChatId, game: Game) -> None:
         if game.state not in self.ACTIVE_GAME_STATES:
             return
-        
+    
+        # اگر کمتر از دو نفر در بازی مانده‌اند (چه Active چه All-in)، بازی تمام است
         active_and_all_in_players = game.players_by(states=(PlayerState.ACTIVE, PlayerState.ALL_IN))
         if len(active_and_all_in_players) <= 1:
             return self._finish(game, chat_id)
     
         active_players = game.players_by(states=(PlayerState.ACTIVE,))
     
-        # بررسی پایان Street
+        # ==================== شروع بلوک اصلاح شده ====================
+        # منطق بررسی پایان دور شرط‌بندی
         round_over = False
         if active_players:
             all_acted = all(p.has_acted for p in active_players)
             all_matched = len(set(p.round_rate for p in active_players)) == 1
             if all_acted and all_matched:
+                # بررسی حالت خاص Big Blind که می‌تواند آخرین حرکت را داشته باشد
                 if not (game.state == GameState.ROUND_PRE_FLOP and self._big_blind_last_action(game)):
                     round_over = True
         else:
+            # اگر بازیکن فعال (Active) دیگری وجود ندارد (همه Fold یا All-in کرده‌اند)
             round_over = True
-    
-        if self._is_round_finished(game):
-            print("Round finished, going to next street.")
-            # Clear previous turn message as we are moving to a new state
+        
+        # استفاده از متغیر round_over به جای فراخوانی متد ناموجود
+        if round_over:
+            print("DEBUG: Betting round is over. Proceeding to the next street.")
+            # پاک کردن پیام نوبت قبلی چون به مرحله بعد می‌رویم
             if game.turn_message_id:
                 self._view.remove_markup(chat_id, game.turn_message_id)
                 game.turn_message_id = None
-            self._go_to_next_round(game, chat_id) # <--- اصلاح اشتباه تایپی
-            self._process_playing(chat_id, game)  # Re-call to start the new round
+    
+            # رفتن به مرحله بعد (Flop, Turn, River)
+            # فرض می‌کنیم متدی به نام _go_to_next_street وجود دارد یا باید ایجاد شود.
+            # با بررسی کد، متدی با این نام پیدا نکردم، پس آن را ایجاد می‌کنیم.
+            self._go_to_next_street(game, chat_id) 
+            
+            # اگر بازی تمام نشده باشد، دور بعدی را با همین متد شروع کن
+            if game.state != GameState.FINISHED:
+                self._process_playing(chat_id, game)
             return
+        # ==================== پایان بلوک اصلاح شده ====================
     
         # حرکت به بازیکن ACTIVE بعدی
         num_players = len(game.players)
+        # این حلقه تضمین می‌کند که بازیکن بعدی حتما ACTIVE باشد
         for _ in range(num_players):
-            game.current_player_index = (game.current_player_index + 1) % num_players
+            current_player_index = (game.current_player_index + 1) % num_players
+            game.current_player_index = current_player_index
             current_player = self._current_turn_player(game)
             if current_player.state == PlayerState.ACTIVE:
                 break
         else:
-            print("No active player found in _process_playing.")
+            # این حالت نباید رخ دهد اگر منطق بالا درست باشد، اما برای اطمینان
+            print("CRITICAL: No active player found to give the turn to. Finishing game.")
             return self._finish(game, chat_id)
     
-        # ارسال نوبت بازیکن
+        # ارسال پیام نوبت به بازیکن
         game.last_turn_time = datetime.datetime.now()
         if game.turn_message_id:
-            self._view.remove_message(chat_id, game.turn_message_id)
+            # بهتر است به جای حذف کامل پیام، فقط دکمه‌ها حذف شوند تا تاریخچه چت حفظ شود
+            self._view.remove_markup(chat_id, game.turn_message_id)
+    
         msg_id = self._view.send_turn_actions(
             chat_id=chat_id, game=game, player=current_player, money=current_player.wallet.value()
         )
@@ -662,6 +680,50 @@ class PokerBotModel:
             Timer(3.0, reset_game).start()
         else:
             Timer(3.0, lambda: self._start_game(context=None, game=game, chat_id=chat_id)).start()
+
+        def _go_to_next_street(self, game: Game, chat_id: ChatId) -> None:
+            """
+            بازی را به مرحله بعدی (Street) می‌برد.
+            Pre-Flop -> Flop -> Turn -> River -> Finish
+            """
+            print(f"DEBUG: Moving from {game.state.name} to the next street.")
+            
+            # پول‌های شرط‌بندی شده در این دور را به Pot اصلی منتقل کن
+            self.to_pot_and_update(chat_id, game) # فرض می‌کنیم این متد وجود دارد
+        
+            # ریست کردن وضعیت بازیکنان برای دور جدید شرط‌بندی
+            for player in game.players:
+                player.round_rate = 0
+                player.has_acted = False
+            
+            game.max_round_rate = 0
+            
+            # تعیین نفر شروع‌کننده برای دور جدید (معمولاً نفر بعد از دیلر)
+            game.current_player_index = self._starting_player_index(game, game.state)
+            # از آنجایی که در _process_playing یکبار ایندکس جلو میرود، یکی عقب برمیگردانیم
+            game.current_player_index = (game.current_player_index - 1 + len(game.players)) % len(game.players)
+        
+        
+            if game.state == GameState.ROUND_PRE_FLOP:
+                game.state = GameState.ROUND_FLOP
+                self.add_cards_to_table(3, game, chat_id) # رو کردن 3 کارت Flop
+            elif game.state == GameState.ROUND_FLOP:
+                game.state = GameState.ROUND_TURN
+                self.add_cards_to_table(1, game, chat_id) # رو کردن کارت Turn
+            elif game.state == GameState.ROUND_TURN:
+                game.state = GameState.ROUND_RIVER
+                self.add_cards_to_table(1, game, chat_id) # رو کردن کارت River
+            elif game.state == GameState.ROUND_RIVER:
+                # بعد از River، بازی تمام می‌شود و باید برنده مشخص شود
+                self._finish(game, chat_id)
+                return
+        
+            self._view.send_message(
+                chat_id=chat_id,
+                text=f" مرحلۀ {game.state.name.replace('ROUND_', '')} شروع شد "
+            )
+            # نمایش میز بعد از هر مرحله
+            self.show_table(chat_id, game)
 
         
         def _goto_next_round(self, game: Game, chat_id: ChatId) -> None:
