@@ -253,6 +253,22 @@ class PokerBotModel:
         msg_id = self._view.send_turn_actions(chat_id, game, player, money)
         game.turn_message_id = msg_id
         game.last_turn_time = datetime.datetime.now()
+
+    def _move_to_next_player_and_process(self, game: Game, chat_id: ChatId):
+        """
+        ایندکس بازیکن را به نفر فعال بعدی منتقل کرده و حلقه بازی را ادامه می‌دهد.
+        این متد، مشکل حلقه بی‌نهایت را حل می‌کند.
+        """
+        next_player_index = self._find_next_active_player_index(
+            game, (game.current_player_index + 1) % len(game.players)
+        )
+        if next_player_index == -1: # اگر بازیکن فعال دیگری نمانده
+            # مستقیم به مرحله بعد برو، چون شرط‌بندی تمام است
+            self._go_to_next_street(game, chat_id)
+        else:
+            game.current_player_index = next_player_index
+            self._process_playing(chat_id, game)
+
         
     def _go_to_next_street(self, game: Game, chat_id: ChatId):
         """بازی را به مرحله بعدی (Flop, Turn, River) یا به پایان (Finish) می‌برد."""
@@ -340,41 +356,64 @@ class PokerBotModel:
     def call_check(self, update: Update, context: CallbackContext):
         game = self._game_from_context(context)
         player = self._current_turn_player(game)
+        chat_id = update.effective_chat.id
         try:
-            action_text = "چک کرد" if game.max_round_rate == player.round_rate else "کال کرد"
+            action_text = "چک کرد" if game.max_round_rate <= player.round_rate else "کال کرد"
             self._round_rate.player_action_call_check(game, player)
-            self._view.send_message(update.effective_chat.id, f"✅ {player.mention_markdown} {action_text}.")
-            self._process_playing(update.effective_chat.id, game)
+            self._view.send_message(chat_id, f"✅ {player.mention_markdown} {action_text}.")
+            
+            # === تغییر کلیدی: به نفر بعدی برو ===
+            self._move_to_next_player_and_process(game, chat_id)
+
         except UserException as e:
             update.callback_query.answer(str(e), show_alert=True)
+            # اگر خطا رخ داد (مثلا موجودی ناکافی)، دوباره به همین بازیکن نوبت بده
+            self._send_turn_message(game, player, chat_id)
             
     def fold(self, update: Update, context: CallbackContext):
         game = self._game_from_context(context)
         player = self._current_turn_player(game)
+        chat_id = update.effective_chat.id
+
         player.state = PlayerState.FOLD
-        self._view.send_message(update.effective_chat.id, f"🏳️ {player.mention_markdown} فولد کرد.")
-        self._process_playing(update.effective_chat.id, game)
+        player.has_acted = True # مهم: بازیکن فولد کرده هم نوبتش را بازی کرده
+        self._view.send_message(chat_id, f"🏳️ {player.mention_markdown} فولد کرد.")
+
+        # === تغییر کلیدی: به نفر بعدی برو ===
+        self._move_to_next_player_and_process(game, chat_id)
 
     def raise_rate_bet(self, update: Update, context: CallbackContext, amount: int):
         game = self._game_from_context(context)
         player = self._current_turn_player(game)
+        chat_id = update.effective_chat.id
         try:
             new_rate = self._round_rate.player_action_raise_bet(game, player, amount)
             action_text = "شرط بست" if game.max_round_rate == new_rate else "افزایش داد"
-            self._view.send_message(update.effective_chat.id, f"💹 {player.mention_markdown} شرط را به {new_rate}$ {action_text}.")
-            self._process_playing(update.effective_chat.id, game)
+            self._view.send_message(chat_id, f"💹 {player.mention_markdown} شرط را به {new_rate}$ {action_text}.")
+            
+            # === تغییر کلیدی: به نفر بعدی برو ===
+            self._move_to_next_player_and_process(game, chat_id)
+
         except UserException as e:
             update.callback_query.answer(str(e), show_alert=True)
+            # اگر خطا رخ داد، دوباره به همین بازیکن نوبت بده
+            self._send_turn_message(game, player, chat_id)
 
     def all_in(self, update: Update, context: CallbackContext):
         game = self._game_from_context(context)
         player = self._current_turn_player(game)
+        chat_id = update.effective_chat.id
         try:
             total_bet = self._round_rate.player_action_all_in(game, player)
-            self._view.send_message(update.effective_chat.id, f"💥 {player.mention_markdown} با تمام موجودی خود ({total_bet}$) آل-این کرد!")
-            self._process_playing(update.effective_chat.id, game)
+            self._view.send_message(chat_id, f"💥 {player.mention_markdown} با تمام موجودی خود ({total_bet}$) آل-این کرد!")
+            
+            # === تغییر کلیدی: به نفر بعدی برو ===
+            self._move_to_next_player_and_process(game, chat_id)
+
         except UserException as e:
             update.callback_query.answer(str(e), show_alert=True)
+            # اگر خطا رخ داد، دوباره به همین بازیکن نوبت بده
+            self._send_turn_message(game, player, chat_id)
 
     # --- متدهای کمکی و جانبی ---
     def bonus(self, update: Update, context: CallbackContext):
