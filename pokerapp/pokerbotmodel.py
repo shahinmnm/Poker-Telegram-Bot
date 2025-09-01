@@ -157,6 +157,61 @@ class PokerBotModel:
             else:
                  print(f"Error sending cards: {e}")
         return None
+    def hide_cards(self, update: Update, context: CallbackContext) -> None:
+        """
+        کیبورد کارتی را پنهان کرده و کیبورد "نمایش مجدد" را نشان می‌دهد.
+        """
+        chat_id = update.effective_chat.id
+        user = update.effective_user
+        self._view.show_reopen_keyboard(chat_id, user.mention_markdown())
+        # پیام "کارت‌ها پنهان شد" را پس از چند ثانیه حذف می‌کنیم تا چت شلوغ نشود.
+        self._view.remove_message_delayed(chat_id, update.message.message_id, delay=5)
+
+
+    def send_cards_to_user(self, update: Update, context: CallbackContext) -> None:
+        """
+        کارت‌های بازیکن را با کیبورد مخصوص در گروه دوباره ارسال می‌کند.
+        این متد زمانی فراخوانی می‌شود که بازیکن دکمه "نمایش کارت‌ها" را می‌زند.
+        """
+        game = self._game_from_context(context)
+        chat_id = update.effective_chat.id
+        user_id = update.effective_user.id
+        
+        # پیدا کردن بازیکن در لیست بازیکنان بازی فعلی
+        current_player = None
+        for p in game.players:
+            if p.user_id == user_id:
+                current_player = p
+                break
+        
+        if not current_player or not current_player.cards:
+            self._view.send_message(chat_id, "شما در بازی فعلی حضور ندارید یا کارتی ندارید.")
+            return
+
+        # ارسال پیام با کیبورد کارتی
+        # اینجا دیگر نیازی به ریپلای نیست.
+        cards_message_id = self._view.send_cards(
+            chat_id=chat_id,
+            cards=current_player.cards,
+            mention_markdown=current_player.mention_markdown,
+            ready_message_id=None, # <-- چون این یک نمایش مجدد است، ریپلای نمی‌زنیم.
+        )
+        if cards_message_id:
+            game.message_ids_to_delete.append(cards_message_id)
+        
+        # حذف پیام "/نمایش کارت‌ها" که بازیکن فرستاده
+        self._view.remove_message_delayed(chat_id, update.message.message_id, delay=1)
+
+
+    def show_table(self, update: Update, context: CallbackContext):
+        """کارت‌های روی میز را به درخواست بازیکن نمایش می‌دهد."""
+        game = self._game_from_context(context)
+        chat_id = update.effective_chat.id
+        if game.state in self.ACTIVE_GAME_STATES:
+            self.add_cards_to_table(0, game, chat_id) # فراخوانی با count=0 فقط میز را نمایش می‌دهد
+        else:
+            self._view.send_message(chat_id, "هنوز بازی شروع نشده است.")
+        self._view.remove_message_delayed(chat_id, update.message.message_id, delay=1)
 
     def ready(self, update: Update, context: CallbackContext) -> None:
         """بازیکن برای شروع بازی اعلام آمادگی می‌کند."""
