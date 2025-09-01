@@ -481,13 +481,14 @@ class PokerBotModel:
         else:
             round_over = True
     
-        if round_over:
-            self._round_rate.to_pot(game, chat_id)
-            if len(game.players_by(states=(PlayerState.ACTIVE,))) < 2:
-                return self._fast_forward_to_finish(game, chat_id)
-            self._goto_next_round(game, chat_id)
-            if game.state in self.ACTIVE_GAME_STATES:
-                return self._process_playing(chat_id, game)
+        if self._is_round_finished(game):
+            print("Round finished, going to next street.")
+            # Clear previous turn message as we are moving to a new state
+            if game.turn_message_id:
+                self._view.remove_markup(chat_id, game.turn_message_id)
+                game.turn_message_id = None
+            self._go_to_next_round(game, chat_id) # <--- اصلاح اشتباه تایپی
+            self._process_playing(chat_id, game)  # Re-call to start the new round
             return
     
         # حرکت به بازیکن ACTIVE بعدی
