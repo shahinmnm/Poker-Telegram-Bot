@@ -72,7 +72,7 @@ class PokerBotModel:
         if self._cfg.DEBUG:
             return 1
         return MIN_PLAYERS
-    @staticmethod
+        
     def _calc_call_amount(self, game: Game, player: Player) -> int:
         return max(0, game.max_round_rate - player.round_rate)
 
