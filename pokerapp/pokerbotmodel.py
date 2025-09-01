@@ -73,8 +73,8 @@ class PokerBotModel:
             return 1
         return MIN_PLAYERS
     @staticmethod
-    def _calc_call_amount(game: Game, player: Player) -> int:
-        return max(0, self._calc_call_amount(game, player))
+    def _calc_call_amount(self, game: Game, player: Player) -> int:
+        return max(0, game.max_round_rate - player.round_rate)
 
 
     @staticmethod
