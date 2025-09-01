@@ -757,39 +757,37 @@ class PokerBotModel:
 
 
     def call_check(self, update: Update, context: CallbackContext) -> None:
-        """Handles a player's CALL or CHECK action."""
+        """
+        درخواست حرکت 'کال/چک' را به RoundRateModel محول کرده و سپس بازی را ادامه می‌دهد.
+        """
         game = self._game_from_context(context)
         player = self._current_turn_player(game)
         chat_id = update.effective_chat.id
 
         if not player:
-            return  # Should not happen if middleware is working
+            # این حالت نباید رخ دهد اگر میدل‌ور به درستی کار کند.
+            return
 
         try:
-            # === شروع بلوک اصلاح شده ===
-            # قبلا: amount_to_call = self._calc_call_amount(game, player)
-            # حالا باید از آبجکت _round_rate فراخوانی شود
-            
-            # در واقع، تمام منطق call/check به RoundRateModel منتقل شده.
-            # پس کل این بلاک می‌تواند با فراخوانی یک متد جایگزین شود.
+            # ۱. تمام منطق حرکت را به کلاس مسئول آن بسپار
             self._round_rate.call_check(game, player)
 
-            # === پایان بلوک اصلاح شده ===
-
-            # اگر بازیکن بعد از call کردن all-in شد، وضعیتش را آپدیت کن
-            if player.wallet.value() == 0:
-                player.state = PlayerState.ALL_IN
+            # ۲. پس از اجرای موفقیت‌آمیز حرکت، یک پیام تایید بفرست
+            # (اینکه پیام check باشد یا call در خود view مشخص می‌شود، اینجا یک پیام کلی کافیست)
+            call_amount = game.max_round_rate - player.round_rate
+            action_text = "✋ چک کرد" if call_amount == 0 else "🎯 کال کرد"
 
             self._view.send_message(
-                chat_id=chat_id, text=f"✅ {player.mention_markdown} کال/چک کرد.",
+                chat_id=chat_id,
+                text=f"✅ {player.mention_markdown} {action_text}.",
                 parse_mode="Markdown"
             )
 
-            # بعد از حرکت، نوبت را به نفر بعدی بده
+            # ۳. بازی را به نوبت بعدی ببر
             self._next_turn(game, context, chat_id, player.user_id)
 
         except UserException as e:
-            # پاسخ به callback query برای نمایش خطا به کاربر
+            # اگر در هر مرحله از منطق call_check خطای کاربری رخ دهد، آن را به کاربر نمایش بده
             query = update.callback_query
             if query:
                 query.answer(text=f"خطا: {e}", show_alert=True)
@@ -894,11 +892,36 @@ class PokerBotModel:
 class RoundRateModel:
     def __init__(self, view: PokerBotViewer):
         self._view = view
-        
+
     @staticmethod
     def _calc_call_amount(game: Game, player: Player) -> int:
         """محاسبه مبلغ مورد نیاز برای Call کردن."""
         return max(0, game.max_round_rate - player.round_rate)
+
+    def call_check(self, game: Game, player: Player) -> None:
+        """
+        منطق کامل برای اجرای حرکت Call یا Check.
+        این متد مسئولیت کامل این حرکت را بر عهده دارد.
+        """
+        if player.state in (PlayerState.FOLD, PlayerState.ALL_IN):
+            raise UserException("شما قادر به انجام این حرکت نیستید.")
+
+        amount_to_add = self._calc_call_amount(game, player)
+
+        if player.wallet.value() < amount_to_add:
+            raise UserException("موجودی شما برای این کار کافی نیست.")
+
+        # انتقال پول از کیف پول به شرط‌بندی
+        player.wallet.inc(-amount_to_add)
+        player.round_rate += amount_to_add
+        player.total_bet += amount_to_add
+        game.pot += amount_to_add
+
+        # اگر بازیکن تمام موجودی خود را شرط بسته باشد
+        if player.wallet.value() == 0:
+            player.state = PlayerState.ALL_IN
+
+        player.has_acted = True
         
     def to_pot(self, game: Game, chat_id: ChatId) -> None:
         # This function moves money from the current betting round to the main pot
@@ -923,13 +946,6 @@ class RoundRateModel:
             cards=game.cards_table,
             caption=f"💰 پات فعلی: {game.pot}$",
         )
-
-    def call_check(self, game: Game, player: Player) -> None:
-        amount_to_add = self._calc_call_amount(game, player)
-        if amount_to_add > 0:
-            player.wallet.dec(amount_to_add)
-            player.round_rate += amount_to_add
-        player.has_acted = True
 
     def all_in(self, game: Game, player: Player) -> Money:
         amount = player.wallet.value()
