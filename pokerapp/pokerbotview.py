@@ -51,16 +51,18 @@ class PokerBotViewer:
             print(f"Error sending message and returning ID: {e}")
         return None
 
+
     def send_message(
         self,
         chat_id: ChatId,
         text: str,
         reply_markup: ReplyKeyboardMarkup = None,
+        parse_mode: str = ParseMode.MARKDOWN,  # <--- پارامتر جدید اضافه شد
     ) -> Optional[MessageId]:
         try:
             message = self._bot.send_message(
                 chat_id=chat_id,
-                parse_mode=ParseMode.MARKDOWN,
+                parse_mode=parse_mode,  # <--- از پارامتر ورودی استفاده شد
                 text=text,
                 reply_markup=reply_markup,
                 disable_notification=True,
