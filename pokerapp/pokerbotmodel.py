@@ -681,72 +681,72 @@ class PokerBotModel:
         else:
             Timer(3.0, lambda: self._start_game(context=None, game=game, chat_id=chat_id)).start()
 
-        def _go_to_next_street(self, game: Game, chat_id: ChatId) -> None:
-            """
-            بازی را به مرحله بعدی (Street) می‌برد.
-            Pre-Flop -> Flop -> Turn -> River -> Finish
-            """
-            print(f"DEBUG: Moving from {game.state.name} to the next street.")
-            
-            # پول‌های شرط‌بندی شده در این دور را به Pot اصلی منتقل کن
-            self.to_pot_and_update(chat_id, game) # فرض می‌کنیم این متد وجود دارد
+    def _go_to_next_street(self, game: Game, chat_id: ChatId) -> None:
+        """
+        بازی را به مرحله بعدی (Street) می‌برد.
+        Pre-Flop -> Flop -> Turn -> River -> Finish
+        """
+        print(f"DEBUG: Moving from {game.state.name} to the next street.")
         
-            # ریست کردن وضعیت بازیکنان برای دور جدید شرط‌بندی
-            for player in game.players:
-                player.round_rate = 0
-                player.has_acted = False
-            
-            game.max_round_rate = 0
-            
-            # تعیین نفر شروع‌کننده برای دور جدید (معمولاً نفر بعد از دیلر)
-            game.current_player_index = self._starting_player_index(game, game.state)
-            # از آنجایی که در _process_playing یکبار ایندکس جلو میرود، یکی عقب برمیگردانیم
-            game.current_player_index = (game.current_player_index - 1 + len(game.players)) % len(game.players)
+        # پول‌های شرط‌بندی شده در این دور را به Pot اصلی منتقل کن
+        self.to_pot_and_update(chat_id, game) # فرض می‌کنیم این متد وجود دارد
+    
+        # ریست کردن وضعیت بازیکنان برای دور جدید شرط‌بندی
+        for player in game.players:
+            player.round_rate = 0
+            player.has_acted = False
         
+        game.max_round_rate = 0
         
-            if game.state == GameState.ROUND_PRE_FLOP:
-                game.state = GameState.ROUND_FLOP
-                self.add_cards_to_table(3, game, chat_id) # رو کردن 3 کارت Flop
-            elif game.state == GameState.ROUND_FLOP:
-                game.state = GameState.ROUND_TURN
-                self.add_cards_to_table(1, game, chat_id) # رو کردن کارت Turn
-            elif game.state == GameState.ROUND_TURN:
-                game.state = GameState.ROUND_RIVER
-                self.add_cards_to_table(1, game, chat_id) # رو کردن کارت River
-            elif game.state == GameState.ROUND_RIVER:
-                # بعد از River، بازی تمام می‌شود و باید برنده مشخص شود
-                self._finish(game, chat_id)
-                return
-        
-            self._view.send_message(
-                chat_id=chat_id,
-                text=f" مرحلۀ {game.state.name.replace('ROUND_', '')} شروع شد "
-            )
-            # نمایش میز بعد از هر مرحله
-            self.show_table(chat_id, game)
+        # تعیین نفر شروع‌کننده برای دور جدید (معمولاً نفر بعد از دیلر)
+        game.current_player_index = self._starting_player_index(game, game.state)
+        # از آنجایی که در _process_playing یکبار ایندکس جلو میرود، یکی عقب برمیگردانیم
+        game.current_player_index = (game.current_player_index - 1 + len(game.players)) % len(game.players)
+    
+    
+        if game.state == GameState.ROUND_PRE_FLOP:
+            game.state = GameState.ROUND_FLOP
+            self.add_cards_to_table(3, game, chat_id) # رو کردن 3 کارت Flop
+        elif game.state == GameState.ROUND_FLOP:
+            game.state = GameState.ROUND_TURN
+            self.add_cards_to_table(1, game, chat_id) # رو کردن کارت Turn
+        elif game.state == GameState.ROUND_TURN:
+            game.state = GameState.ROUND_RIVER
+            self.add_cards_to_table(1, game, chat_id) # رو کردن کارت River
+        elif game.state == GameState.ROUND_RIVER:
+            # بعد از River، بازی تمام می‌شود و باید برنده مشخص شود
+            self._finish(game, chat_id)
+            return
+    
+        self._view.send_message(
+            chat_id=chat_id,
+            text=f" مرحلۀ {game.state.name.replace('ROUND_', '')} شروع شد "
+        )
+        # نمایش میز بعد از هر مرحله
+        self.show_table(chat_id, game)
 
-        
-        def _goto_next_round(self, game: Game, chat_id: ChatId) -> None:
-            if game.state == GameState.ROUND_PRE_FLOP:
-                self.add_cards_to_table(3, game, chat_id)
-                game.state = GameState.ROUND_FLOP
-            elif game.state == GameState.ROUND_FLOP:
-                self.add_cards_to_table(1, game, chat_id)
-                game.state = GameState.ROUND_TURN
-            elif game.state == GameState.ROUND_TURN:
-                self.add_cards_to_table(1, game, chat_id)
-                game.state = GameState.ROUND_RIVER
-            else:
-                return self._finish(game, chat_id)
-        
-            # ریست بازیکنان ACTIVE
-            for p in game.players_by(states=(PlayerState.ACTIVE,)):
-                p.has_acted = False
-                p.round_rate = 0
-            game.max_round_rate = 0
-        
-            # تعیین نفر شروع‌کننده Street جدید
-            game.current_player_index = self._starting_player_index(game, game.state)
+    
+    def _goto_next_round(self, game: Game, chat_id: ChatId) -> None:
+        if game.state == GameState.ROUND_PRE_FLOP:
+            self.add_cards_to_table(3, game, chat_id)
+            game.state = GameState.ROUND_FLOP
+        elif game.state == GameState.ROUND_FLOP:
+            self.add_cards_to_table(1, game, chat_id)
+            game.state = GameState.ROUND_TURN
+        elif game.state == GameState.ROUND_TURN:
+            self.add_cards_to_table(1, game, chat_id)
+            game.state = GameState.ROUND_RIVER
+        else:
+            return self._finish(game, chat_id)
+    
+        # ریست بازیکنان ACTIVE
+        for p in game.players_by(states=(PlayerState.ACTIVE,)):
+            p.has_acted = False
+            p.round_rate = 0
+        game.max_round_rate = 0
+    
+        # تعیین نفر شروع‌کننده Street جدید
+        game.current_player_index = self._starting_player_index(game, game.state)
     def middleware_user_turn(self, fn: Handler) -> Handler:
         def m(update: Update, context: CallbackContext):
             query = update.callback_query
