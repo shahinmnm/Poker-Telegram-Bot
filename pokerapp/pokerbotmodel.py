@@ -14,7 +14,6 @@ from pokerapp.config import Config
 from pokerapp.privatechatmodel import UserPrivateChatModel
 from pokerapp.winnerdetermination import WinnerDetermination, HAND_RANK, HandsOfPoker
 from pokerapp.cards import Cards
-from pokerapp.pokerbotmodel import DEFAULT_MONEY
 from pokerapp.entities import (
     Game,
     GameState,
@@ -28,6 +27,10 @@ from pokerapp.entities import (
     Score,
     Wallet,
     Mention,
+    DEFAULT_MONEY,
+    SMALL_BLIND,
+    MIN_PLAYERS,
+    MAX_PLAYERS,
 )
 from pokerapp.pokerbotview import PokerBotViewer
 
@@ -39,10 +42,6 @@ DICES = "⚀⚁⚂⚃⚄⚅"
 KEY_CHAT_DATA_GAME = "game"
 KEY_OLD_PLAYERS = "old_players"
 
-MAX_PLAYERS = 8
-MIN_PLAYERS = 2
-SMALL_BLIND = 5
-DEFAULT_MONEY = 1000
 MAX_TIME_FOR_TURN = datetime.timedelta(minutes=2)
 DESCRIPTION_FILE = "assets/description_bot.md"
 
