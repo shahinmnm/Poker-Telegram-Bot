@@ -784,7 +784,7 @@ class PokerBotModel:
             )
 
             # ۳. بازی را به نوبت بعدی ببر
-            self._next_turn(game, context, chat_id, player.user_id)
+            self.next_turn(game, context, chat_id, player.user_id)
 
         except UserException as e:
             # اگر در هر مرحله از منطق call_check خطای کاربری رخ دهد، آن را به کاربر نمایش بده
