@@ -755,37 +755,44 @@ class PokerBotModel:
 
         self._process_playing(chat_id=chat_id, game=game)
 
-    def call_check(
-        self,
-        update: Update,
-        context: CallbackContext,
-    ) -> None:
+
+    def call_check(self, update: Update, context: CallbackContext) -> None:
+        """Handles a player's CALL or CHECK action."""
         game = self._game_from_context(context)
-        chat_id = update.effective_chat.id
         player = self._current_turn_player(game)
+        chat_id = update.effective_chat.id
 
-        if not player: return
-
-        action = PlayerAction.CALL.value if player.round_rate < game.max_round_rate else PlayerAction.CHECK.value
+        if not player:
+            return  # Should not happen if middleware is working
 
         try:
-            amount_to_call = self._calc_call_amount(game, player)
-            if player.wallet.value() <= amount_to_call:
-                return self.all_in(update=update, context=context)
+            # === شروع بلوک اصلاح شده ===
+            # قبلا: amount_to_call = self._calc_call_amount(game, player)
+            # حالا باید از آبجکت _round_rate فراخوانی شود
             
+            # در واقع، تمام منطق call/check به RoundRateModel منتقل شده.
+            # پس کل این بلاک می‌تواند با فراخوانی یک متد جایگزین شود.
             self._round_rate.call_check(game, player)
 
-            msg_id = self._view.send_message_return_id(
-                chat_id=chat_id,
-                text=f"{player.mention_markdown} {action}"
+            # === پایان بلوک اصلاح شده ===
+
+            # اگر بازیکن بعد از call کردن all-in شد، وضعیتش را آپدیت کن
+            if player.wallet.value() == 0:
+                player.state = PlayerState.ALL_IN
+
+            self._view.send_message(
+                chat_id=chat_id, text=f"✅ {player.mention_markdown} کال/چک کرد.",
+                parse_mode="Markdown"
             )
-            if msg_id: game.message_ids_to_delete.append(msg_id)
+
+            # بعد از حرکت، نوبت را به نفر بعدی بده
+            self._next_turn(game, context, chat_id, player.user_id)
 
         except UserException as e:
-            self._view.send_message(chat_id=chat_id, text=str(e))
-            return
-
-        self._process_playing(chat_id=chat_id, game=game)
+            # پاسخ به callback query برای نمایش خطا به کاربر
+            query = update.callback_query
+            if query:
+                query.answer(text=f"خطا: {e}", show_alert=True)
 
     def raise_rate_bet(
         self,
