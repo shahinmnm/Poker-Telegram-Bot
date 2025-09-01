@@ -6,6 +6,10 @@ import datetime
 from typing import Tuple, List, Optional
 from uuid import uuid4
 from pokerapp.cards import get_cards
+MAX_PLAYERS = 8
+MIN_PLAYERS = 2
+SMALL_BLIND = 5
+DEFAULT_MONEY = 1000
 
 MessageId = str
 ChatId = str
