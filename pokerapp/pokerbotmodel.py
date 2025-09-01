@@ -91,19 +91,26 @@ class PokerBotModel:
 
     # ==================== متد ready (اصلاح شده) ====================
     def ready(self, update: Update, context: CallbackContext) -> None:
+        print("DEBUG: Inside model.ready()")
         game = self._game_from_context(context)
         chat_id = update.effective_chat.id
         user = update.effective_message.from_user
+        print(f"DEBUG: Game state is {game.state}")
 
+        # جلوگیری اگر بازی شروع شده
         if game.state != GameState.INITIAL:
+            print("DEBUG: Condition failed: Game already started.")
             self._view.send_message_reply(
                 chat_id=chat_id,
                 message_id=update.effective_message.message_id,
                 text="⚠️ بازی قبلاً شروع شده است، لطفاً صبر کنید!"
             )
             return
+        
+        print("DEBUG: Condition passed: Game state is INITIAL.")
 
         if len(game.players) >= MAX_PLAYERS:
+            print("DEBUG: Condition failed: Room is full.")
             self._view.send_message_reply(
                 chat_id=chat_id,
                 text="🚪 اتاق پر است!",
@@ -111,16 +118,31 @@ class PokerBotModel:
             )
             return
 
+        print(f"DEBUG: Condition passed: Room not full ({len(game.players)}/{MAX_PLAYERS}).")
+
+        # بررسی موجودی
         wallet = WalletManagerModel(user.id, self._kv)
-        if wallet.value() < 2 * SMALL_BLIND:
-            self._view.send_message_reply(
-                chat_id=chat_id,
-                message_id=update.effective_message.message_id,
-                text=f"💸 موجودی شما برای ورود به بازی کافی نیست (حداقل {2*SMALL_BLIND}$ نیاز است).",
-            )
+        try:
+            user_money = wallet.value()
+            print(f"DEBUG: Checking wallet for user {user.id}. Money: {user_money}")
+            if user_money < 2 * SMALL_BLIND:
+                print("DEBUG: Condition failed: Not enough money.")
+                self._view.send_message_reply(
+                    chat_id=chat_id,
+                    message_id=update.effective_message.message_id,
+                    text=f"💸 موجودی شما برای ورود به بازی کافی نیست (حداقل {2*SMALL_BLIND}$ نیاز است).",
+                )
+                return
+        except Exception as e:
+            print(f"CRITICAL ERROR: Failed to get wallet value for user {user.id}.")
+            traceback.print_exc() # این خطاها را کامل چاپ می‌کند
             return
 
+        print("DEBUG: Condition passed: User has enough money.")
+
+        # اگر بازیکن از قبل آماده نبوده، اضافه کن
         if user.id not in game.ready_users:
+            print(f"DEBUG: User {user.id} is new. Adding to players list.")
             player = Player(
                 user_id=user.id,
                 mention_markdown=user.mention_markdown(),
@@ -129,54 +151,9 @@ class PokerBotModel:
             )
             game.ready_users.add(user.id)
             game.players.append(player)
+        else:
+            print(f"DEBUG: User {user.id} was already in ready_users.")
 
-        ready_list = "\n".join(
-            [f"{i+1}. {p.mention_markdown} 🟢" for i, p in enumerate(game.players)]
-        )
-        total_ready = len(game.players)
-
-        text = (
-            f"👥 *لیست بازیکنان آماده*\n\n"
-            f"{ready_list}\n\n"
-            f"📊 {total_ready}/{MAX_PLAYERS} بازیکن آماده\n\n"
-            f"🚀 برای شروع بازی، بازیکنی که آماده شده دکمه /start را بزند."
-        )
-
-        keyboard = ReplyKeyboardMarkup(
-            [["/ready", "/start"]],
-            resize_keyboard=True,
-            one_time_keyboard=False
-        )
-        
-        try:
-            # اگر پیام اصلی لیست آماده‌ها وجود داشت، آن را ویرایش کن
-            if game.ready_message_main_id:
-                # استفاده از bot.edit_message_text چون باید فوری انجام شود
-                self._bot.edit_message_text(
-                    chat_id=chat_id,
-                    message_id=game.ready_message_main_id,
-                    text=text,
-                    parse_mode="Markdown",
-                    reply_markup=keyboard
-                )
-            # اگر وجود نداشت، یک پیام جدید بفرست
-            else:
-                # استفاده از send_message_sync چون نیاز به message_id داریم
-                msg = self._bot.send_message_sync(
-                    chat_id=chat_id,
-                    text=text,
-                    parse_mode="Markdown",
-                    reply_markup=keyboard
-                )
-                # فقط اگر پیام با موفقیت ارسال شد، ID آن را ذخیره کن
-                if msg:
-                    game.ready_message_main_id = msg.message_id
-        except Exception as e:
-            # این خطا معمولا برای Flood Control یا "message is not modified" است
-            print(f"INFO: Could not edit/send ready list message: {e}")
-
-        # پاک کردن پیام /ready خود کاربر با تاخیر برای تمیز ماندن چت و کاهش بار API
-        self._view.remove_message_delayed(chat_id, update.effective_message.message_id, delay=5.0)
 
     # =============================================================
 
