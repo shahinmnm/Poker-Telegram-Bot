@@ -459,6 +459,49 @@ class PokerBotModel:
         bb_player = game.players[bb_index]
         return (not bb_player.has_acted and bb_player.state == PlayerState.ACTIVE
                 and game.max_round_rate == (2 * SMALL_BLIND))
+    def _is_round_finished(self, game: Game) -> Tuple[bool, bool]:
+        """
+        بررسی می‌کند که آیا دور شرط‌بندی تمام شده است یا خیر.
+
+        یک تاپل (bool, bool) برمی‌گرداند:
+        - (True, False): دور تمام شده، به مرحله بعد (street) بروید.
+        - (True, True): دور تمام شده چون بازیکنان all-in هستند، مستقیم به showdown بروید.
+        - (False, False): دور هنوز تمام نشده است.
+        """
+        active_players = game.players_by(states=(PlayerState.ACTIVE,))
+        all_in_players = game.players_by(states=(PlayerState.ALL_IN,))
+
+        # اگر فقط یک بازیکن فعال مانده (بقیه فولد کرده‌اند)، بازی باید تمام شود نه فقط دور.
+        # این منطق در جای دیگری هندل می‌شود، اینجا فقط دور شرط‌بندی را چک می‌کنیم.
+        if len(active_players) < 2:
+            # اگر بازیکنان All-in وجود دارند، باید به Showdown برویم
+            if len(all_in_players) > 0:
+                 # اگر هیچ بازیکنی برای ادامه شرط بندی باقی نمانده، دور تمام است
+                 if len(active_players) == 0:
+                     return True, True # Showdown
+                 # اگر یک بازیکن فعال و چند بازیکن آل-این داریم، باید دید شرط‌ها برابر است یا نه
+                 if all(p.total_bet >= max(player.total_bet for player in active_players) for p in all_in_players):
+                     return True, True
+
+            # اگر هیچ بازیکنی برای شرط‌بندی نمانده، دور تمام است.
+            if len(active_players) <= 1 and not game.all_in_players_are_covered():
+                return True, True # Showdown
+
+        # همه بازیکنان فعال باید بازی کرده باشند
+        all_acted = all(p.has_acted for p in active_players)
+        if not all_acted:
+            return False, False  # هنوز بازیکنانی هستند که بازی نکرده‌اند
+
+        # همه بازیکنان فعال باید مبلغ شرط یکسانی گذاشته باشند
+        # (مگر اینکه آل-این شده باشند که وضعیتشان ACTIVE نیست)
+        if len(active_players) > 0:
+            first_player_rate = active_players[0].round_rate
+            all_rates_equal = all(p.round_rate == first_player_rate for p in active_players)
+            if not all_rates_equal:
+                return False, False # شرط‌ها هنوز برابر نشده
+
+        # اگر تمام شرایط بالا برقرار بود، دور تمام شده است.
+        return True, False
     
     def _process_playing(self, chat_id: ChatId, game: Game) -> None:
         """
