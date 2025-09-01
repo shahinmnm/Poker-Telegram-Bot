@@ -502,6 +502,39 @@ class PokerBotModel:
 
         # اگر تمام شرایط بالا برقرار بود، دور تمام شده است.
         return True, False
+        
+    def _send_turn_message(self, game: Game, player: Player, chat_id: ChatId):
+        """
+        پیام نوبت را برای بازیکن مشخص شده ارسال می‌کند و شناسه پیام را در آبجکت game ذخیره می‌کند.
+        """
+        print(f"DEBUG: Sending turn message for player {player.mention_markdown}.")
+
+        # حذف دکمه‌های پیام نوبت قبلی، اگر وجود داشته باشد
+        if game.turn_message_id:
+            print(f"DEBUG: Removing markup from previous turn message: {game.turn_message_id}")
+            self._view.remove_markup(
+                chat_id=chat_id,
+                message_id=game.turn_message_id,
+            )
+            game.turn_message_id = None # پاک کردن شناسه قدیمی
+
+        # ارسال پیام جدید نوبت و ذخیره شناسه آن
+        # این شناسه برای حذف دکمه‌ها در حرکت بعدی استفاده خواهد شد.
+        money = player.wallet.value()
+        message_id = self._view.send_turn_actions(
+            chat_id=chat_id,
+            game=game,
+            player=player,
+            money=money,
+        )
+
+        if message_id:
+            print(f"DEBUG: Turn message sent. New turn_message_id: {message_id}")
+            game.turn_message_id = message_id
+            game.last_turn_time = datetime.datetime.now()
+        else:
+            print(f"WARNING: Failed to send turn message or get its ID.")
+
     
     def _process_playing(self, chat_id: ChatId, game: Game) -> None:
         """
