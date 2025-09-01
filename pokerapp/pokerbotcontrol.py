@@ -134,47 +134,36 @@ class PokerBotCotroller:
         update: Update,
         context: CallbackContext,
     ) -> None:
-        # ==================== شروع بلوک اصلی دیباگ و اصلاح ====================
+        # ... (کدهای دیباگ و حذف مارک‌آپ که قبلاً داشتیم)
         chat_id = update.effective_chat.id
         game: Game = context.chat_data.get(KEY_CHAT_DATA_GAME)
 
-        # لاگ کردن اطلاعات مهم قبل از هر کاری
-        query_data = update.callback_query.data
-        print(f"DEBUG: Processing player action. Action: '{query_data}'")
-        print(f"DEBUG: Current Game state: {game.state}, Turn message ID from game object: {game.turn_message_id}")
-
-        # ۱. تلاش برای حذف دکمه‌های پیام نوبت قبلی
-        if game.turn_message_id:
-            try:
-                print(f"DEBUG: Attempting to remove markup from message {game.turn_message_id} in chat {chat_id}.")
-                self._view.remove_markup(
-                    chat_id=chat_id,
-                    message_id=game.turn_message_id,
-                )
-                print(f"DEBUG: Successfully removed markup for message {game.turn_message_id}.")
-            except Exception:
-                # این مهمترین لاگ است! خطا را با جزئیات چاپ می‌کند
-                print(f"CRITICAL ERROR: Failed to remove markup for message {game.turn_message_id}.")
-                traceback.print_exc()  # چاپ کامل خطا
-                # با این حال ادامه می‌دهیم تا بازی قفل نشود
-        else:
-            print("WARNING: game.turn_message_id was None. Cannot remove markup.")
-
+        # ... (بخش حذف مارک‌آپ)
 
         # ۲. اجرای اکشن بازیکن
         try:
+            query_data = update.callback_query.data # <--- دریافت دیتا از کوئری
+
+            # --- شروع بلوک اصلاح شده ---
             if query_data == PlayerAction.CHECK.value or query_data == PlayerAction.CALL.value:
-                self._model.call_check(update, context)
+                # self._model.call_check(update, context)  # <--- این متد دیگر وجود ندارد
+                self._model.player_action_call_check(update, context, game) # <--- نام صحیح جدید
             elif query_data == PlayerAction.FOLD.value:
-                self._model.fold(update, context)
+                # self._model.fold(update, context) # <--- این متد دیگر وجود ندارد
+                self._model.player_action_fold(update, context, game) # <--- نام صحیح جدید
             elif query_data == str(PlayerAction.SMALL.value):
-                self._model.raise_rate_bet(update, context, PlayerAction.SMALL.value)
+                # self._model.raise_rate_bet(update, context, PlayerAction.SMALL.value) # <--- این متد دیگر وجود ندارد
+                self._model.player_action_raise_bet(update, context, game, PlayerAction.SMALL.value) # <--- نام صحیح جدید
             elif query_data == str(PlayerAction.NORMAL.value):
-                self._model.raise_rate_bet(update, context, PlayerAction.NORMAL.value)
+                # self._model.raise_rate_bet(update, context, PlayerAction.NORMAL.value) # <--- این متد دیگر وجود ندارد
+                self._model.player_action_raise_bet(update, context, game, PlayerAction.NORMAL.value) # <--- نام صحیح جدید
             elif query_data == str(PlayerAction.BIG.value):
-                self._model.raise_rate_bet(update, context, PlayerAction.BIG.value)
+                # self._model.raise_rate_bet(update, context, PlayerAction.BIG.value) # <--- این متد دیگر وجود ندارد
+                self._model.player_action_raise_bet(update, context, game, PlayerAction.BIG.value) # <--- نام صحیح جدید
             elif query_data == PlayerAction.ALL_IN.value:
-                self._model.all_in(update, context)
+                # self._model.all_in(update, context) # <--- این متد دیگر وجود ندارد
+                self._model.player_action_all_in(update, context, game) # <--- نام صحیح جدید
+            # --- پایان بلوک اصلاح شده ---
             else:
                 print(f"WARNING: Unknown callback query data: {query_data}")
 
