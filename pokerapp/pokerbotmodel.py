@@ -72,10 +72,6 @@ class PokerBotModel:
         if self._cfg.DEBUG:
             return 1
         return MIN_PLAYERS
-        
-    def _calc_call_amount(self, game: Game, player: Player) -> int:
-        return max(0, game.max_round_rate - player.round_rate)
-
 
     @staticmethod
     def _game_from_context(context: CallbackContext) -> Game:
@@ -891,6 +887,12 @@ class PokerBotModel:
 class RoundRateModel:
     def __init__(self, view: PokerBotViewer):
         self._view = view
+        
+    @staticmethod
+    def _calc_call_amount(game: Game, player: Player) -> int:
+        """محاسبه مبلغ مورد نیاز برای Call کردن."""
+        return max(0, game.max_round_rate - player.round_rate)
+        
     def to_pot(self, game: Game, chat_id: ChatId) -> None:
         # This function moves money from the current betting round to the main pot
         # and also updates each player's total bet for the hand.
