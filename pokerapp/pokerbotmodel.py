@@ -228,8 +228,8 @@ class PokerBotModel:
                 text=f"👤 تعداد بازیکنان برای شروع کافی نیست (حداقل {self._min_players} نفر)."
             )
     def _starting_player_index(self, game: Game, street: GameState) -> int:
-    num_players = len(game.players)
-    dealer_index = getattr(game, "dealer_index", 0)
+        num_players = len(game.players)
+        dealer_index = getattr(game, "dealer_index", 0)
 
     if street == GameState.ROUND_PRE_FLOP:
         # Small Blind
