@@ -461,73 +461,42 @@ class PokerBotModel:
                 and game.max_round_rate == (2 * SMALL_BLIND))
     
     def _process_playing(self, chat_id: ChatId, game: Game) -> None:
-        if game.state not in self.ACTIVE_GAME_STATES:
-            return
-    
-        # اگر کمتر از دو نفر در بازی مانده‌اند (چه Active چه All-in)، بازی تمام است
-        active_and_all_in_players = game.players_by(states=(PlayerState.ACTIVE, PlayerState.ALL_IN))
-        if len(active_and_all_in_players) <= 1:
-            return self._finish(game, chat_id)
-    
-        active_players = game.players_by(states=(PlayerState.ACTIVE,))
-    
-        # ==================== شروع بلوک اصلاح شده ====================
-        # منطق بررسی پایان دور شرط‌بندی
-        round_over = False
-        if active_players:
-            all_acted = all(p.has_acted for p in active_players)
-            all_matched = len(set(p.round_rate for p in active_players)) == 1
-            if all_acted and all_matched:
-                # بررسی حالت خاص Big Blind که می‌تواند آخرین حرکت را داشته باشد
-                if not (game.state == GameState.ROUND_PRE_FLOP and self._big_blind_last_action(game)):
-                    round_over = True
-        else:
-            # اگر بازیکن فعال (Active) دیگری وجود ندارد (همه Fold یا All-in کرده‌اند)
-            round_over = True
-        
-        # استفاده از متغیر round_over به جای فراخوانی متد ناموجود
+        """
+        بازیکن بعدی که باید بازی کند را پیدا کرده و پیام نوبت را برای او ارسال می‌کند.
+        این متد دیگر به صورت خودکار برای بازیکنان بازی نمی‌کند.
+        """
+        print(f"DEBUG: Entering _process_playing for game {game.id}")
+
+        # بررسی سریع: آیا همه بازیکنان فعال، بازی کرده‌اند؟
+        round_over, all_in_showdown = self._is_round_finished(game)
         if round_over:
-            print("DEBUG: Betting round is over. Proceeding to the next street.")
-            # پاک کردن پیام نوبت قبلی چون به مرحله بعد می‌رویم
-            if game.turn_message_id:
-                self._view.remove_markup(chat_id, game.turn_message_id)
-                game.turn_message_id = None
-    
-            # رفتن به مرحله بعد (Flop, Turn, River)
-            # فرض می‌کنیم متدی به نام _go_to_next_street وجود دارد یا باید ایجاد شود.
-            # با بررسی کد، متدی با این نام پیدا نکردم، پس آن را ایجاد می‌کنیم.
-            self._go_to_next_street(game, chat_id) 
-            
-            # اگر بازی تمام نشده باشد، دور بعدی را با همین متد شروع کن
-            if game.state != GameState.FINISHED:
-                self._process_playing(chat_id, game)
+            print(f"DEBUG: Round is finished. Moving to next street.")
+            if all_in_showdown:
+                self._fast_forward_to_finish(game, chat_id)
+            else:
+                self._go_to_next_street(game, chat_id)
             return
-        # ==================== پایان بلوک اصلاح شده ====================
-    
-        # حرکت به بازیکن ACTIVE بعدی
+
+        # پیدا کردن بازیکن بعدی که نوبتش است
         num_players = len(game.players)
-        # این حلقه تضمین می‌کند که بازیکن بعدی حتما ACTIVE باشد
-        for _ in range(num_players):
-            current_player_index = (game.current_player_index + 1) % num_players
-            game.current_player_index = current_player_index
-            current_player = self._current_turn_player(game)
-            if current_player.state == PlayerState.ACTIVE:
-                break
-        else:
-            # این حالت نباید رخ دهد اگر منطق بالا درست باشد، اما برای اطمینان
-            print("CRITICAL: No active player found to give the turn to. Finishing game.")
-            return self._finish(game, chat_id)
-    
-        # ارسال پیام نوبت به بازیکن
-        game.last_turn_time = datetime.datetime.now()
-        if game.turn_message_id:
-            # بهتر است به جای حذف کامل پیام، فقط دکمه‌ها حذف شوند تا تاریخچه چت حفظ شود
-            self._view.remove_markup(chat_id, game.turn_message_id)
-    
-        msg_id = self._view.send_turn_actions(
-            chat_id=chat_id, game=game, player=current_player, money=current_player.wallet.value()
-        )
-        game.turn_message_id = msg_id
+        for i in range(num_players):
+            # از بازیکن فعلی شروع کن و در دایره بچرخ
+            player_index = (game.current_player_index + i) % num_players
+            player = game.players[player_index]
+
+            # این بازیکن باید فعال باشد و در این دور هنوز بازی نکرده باشد
+            if player.state == PlayerState.ACTIVE and not player.has_acted:
+                print(f"DEBUG: Found next player: {player.mention_markdown} at index {player_index}")
+                game.current_player_index = player_index
+
+                # فقط پیام نوبت را ارسال کن و تمام!
+                self._send_turn_message(game, player, chat_id)
+                return # از متد خارج شو و منتظر حرکت بازیکن بمان
+
+        # اگر بعد از گشتن تمام بازیکنان، کسی برای بازی پیدا نشد،
+        # یعنی دور تمام شده است (این حالت نباید زیاد پیش بیاید چون در بالا چک شد)
+        print("DEBUG: No player found to act, re-evaluating round finish.")
+        self._go_to_next_street(game, chat_id)
 
     def add_cards_to_table(
         self,
