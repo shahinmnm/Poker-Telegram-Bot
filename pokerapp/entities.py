@@ -80,6 +80,7 @@ class PlayerState(enum.Enum):
 
 class Game:
     def __init__(self):
+        self.dealer_index = 0  # ایندکس بازیکن Dealer فعلی
         self.reset()
 
     def reset(self):
