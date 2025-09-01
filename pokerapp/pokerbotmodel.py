@@ -82,6 +82,81 @@ class PokerBotModel:
         if game.current_player_index >= len(game.players):
             return None
         return game.players[game.current_player_index]
+    @staticmethod
+    def _get_cards_markup(cards: Cards) -> ReplyKeyboardMarkup:
+        """کیبورد مخصوص نمایش کارت‌های بازیکن و دکمه‌های کنترلی را می‌سازد."""
+        # این دکمه‌ها برای مدیریت کیبورد توسط بازیکن استفاده می‌شوند
+        hide_cards_button_text = "🙈 پنهان کردن کارت‌ها"
+        show_table_button_text = "👁️ نمایش میز" # این دکمه را هم اضافه می‌کنیم
+        return ReplyKeyboardMarkup(
+            keyboard=[
+                cards, # <-- ردیف اول: خود کارت‌ها
+                [hide_cards_button_text, show_table_button_text]
+            ],
+            selective=True,  # <-- کیبورد فقط برای بازیکن مورد نظر نمایش داده می‌شود
+            resize_keyboard=True,
+            one_time_keyboard=False,
+        )
+
+    def show_reopen_keyboard(self, chat_id: ChatId, player_mention: Mention) -> None:
+        """کیبورد جایگزین را بعد از پنهان کردن کارت‌ها نمایش می‌دهد."""
+        show_cards_button_text = "🃏 نمایش کارت‌ها"
+        show_table_button_text = "👁️ نمایش میز"
+        reopen_keyboard = ReplyKeyboardMarkup(
+            keyboard=[[show_cards_button_text, show_table_button_text]],
+            selective=True,
+            resize_keyboard=True,
+            one_time_keyboard=False
+        )
+        self.send_message(
+            chat_id=chat_id,
+            text=f"کارت‌های {player_mention} پنهان شد. برای مشاهده دوباره، از دکمه زیر استفاده کن.",
+            reply_markup=reopen_keyboard,
+        )
+
+    def send_cards(
+            self,
+            chat_id: ChatId,
+            cards: Cards,
+            mention_markdown: Mention,
+            ready_message_id: MessageId,
+    ) -> Optional[MessageId]:
+        """
+        یک پیام در گروه با کیبورد حاوی کارت‌های بازیکن ارسال می‌کند و به پیام /ready ریپلای می‌زند.
+        """
+        markup = self._get_cards_markup(cards)
+        try:
+            # اینجا ما به جای محتوای کارت‌ها، یک متن عمومی می‌فرستیم
+            # و خود کارت‌ها را در کیبورد ReplyKeyboardMarkup قرار می‌دهیم.
+            message = self._bot.send_message(
+                chat_id=chat_id,
+                text="کارت‌های شما " + mention_markdown,
+                reply_markup=markup,
+                reply_to_message_id=ready_message_id,
+                parse_mode=ParseMode.MARKDOWN,
+                disable_notification=True,
+            )
+            if isinstance(message, Message):
+                return message.message_id
+        except Exception as e:
+            # اگر ریپلای شکست خورد (پیام /ready حذف شده)، بدون ریپلای تلاش می‌کنیم
+            if 'message to be replied not found' in str(e).lower():
+                print(f"INFO: ready_message_id {ready_message_id} not found. Sending cards without reply.")
+                try:
+                    message = self._bot.send_message(
+                        chat_id=chat_id,
+                        text="کارت‌های شما " + mention_markdown,
+                        reply_markup=markup,
+                        parse_mode=ParseMode.MARKDOWN,
+                        disable_notification=True,
+                    )
+                    if isinstance(message, Message):
+                        return message.message_id
+                except Exception as inner_e:
+                     print(f"Error sending cards (second attempt): {inner_e}")
+            else:
+                 print(f"Error sending cards: {e}")
+        return None
 
     def ready(self, update: Update, context: CallbackContext) -> None:
         """بازیکن برای شروع بازی اعلام آمادگی می‌کند."""
@@ -193,9 +268,9 @@ class PokerBotModel:
 
     def _divide_cards(self, game: Game, chat_id: ChatId):
         """
-        کارت‌ها را بین بازیکنان پخش می‌کند.
-        - یک نسخه از کارت‌ها به صورت خصوصی برای بازیکن ارسال می‌شود (بدون ریپلای).
-        - یک پیام "کارت‌های شما ارسال شد" به صورت ریپلای به پیام /ready در گروه ارسال می‌شود.
+        کارت‌ها را بین بازیکنان پخش می‌کند:
+        ۱. کارت‌ها را در PV بازیکن ارسال می‌کند.
+        ۲. یک پیام در گروه با کیبورد حاوی کارت‌های بازیکن ارسال می‌کند.
         """
         for player in game.players:
             if len(game.remain_cards) < 2:
@@ -208,39 +283,35 @@ class PokerBotModel:
 
             # --- شروع بلوک اصلاح شده ---
 
-            # مرحله ۱: ارسال کارت‌ها به چت خصوصی بازیکن (بدون ریپلای)
+            # ۱. ارسال کارت‌ها به چت خصوصی (برای سابقه و دسترسی آسان)
             try:
-                # ما اینجا از یک متد جدید در View استفاده می‌کنیم که فقط عکس کارت‌ها را می‌فرستد.
-                # اگر این متد را ندارید، از view.send_message عادی هم می‌توانید استفاده کنید.
                 self._view.send_desk_cards_img(
                     chat_id=player.user_id,
                     cards=cards,
-                    caption="🃏 این کارت‌های شما برای این دست است."
+                    caption="🃏 کارت‌های شما برای این دست."
                 )
             except Exception as e:
-                # اگر کاربر ربات را در PV استارت نکرده باشد، این ارسال شکست می‌خورد.
-                # یک پیام هشدار در گروه می‌فرستیم.
-                print(f"WARNING: Could not send cards to private chat for user {player.user_id}. Maybe bot is not started? Error: {e}")
+                print(f"WARNING: Could not send cards to private chat for user {player.user_id}. Error: {e}")
                 self._view.send_message(
                     chat_id=chat_id,
-                    text=f"⚠️ {player.mention_markdown}، نتوانستم کارت‌ها را در چت خصوصی ارسال کنم. لطفاً ربات را استارت کن (/start).",
+                    text=f"⚠️ {player.mention_markdown}، نتوانستم کارت‌ها را در PV ارسال کنم. لطفاً ربات را استارت کن (/start).",
                     parse_mode="Markdown"
                 )
 
-            # مرحله ۲: ارسال یک پیام در گروه به صورت ریپلای به پیام /ready
-            # این پیام فقط اطلاع می‌دهد که کارت‌ها ارسال شده‌اند و حاوی خود کارت‌ها نیست.
-            # این کار از بروز خطا جلوگیری می‌کند.
-            try:
-                # ما به جای send_cards از send_message_reply استفاده می‌کنیم.
-                self._view.send_message_reply(
-                    chat_id=chat_id,
-                    message_id=player.ready_message_id,
-                    text=f"✅ {player.mention_markdown}، کارت‌هایت در چت خصوصی ارسال شد!"
-                )
-            except Exception as e:
-                # اگر به هر دلیلی پیام /ready حذف شده بود، این ریپلای شکست می‌خورد.
-                # ما این خطا را به سادگی نادیده می‌گیریم چون ارسال کارت در PV موفق بوده است.
-                print(f"INFO: Could not reply to ready message {player.ready_message_id} in group. It might have been deleted. Error: {e}")
+            # ۲. ارسال پیام با کیبورد کارتی در گروه
+            # این پیام برای دسترسی سریع بازیکن به کارت‌هایش است.
+            cards_message_id = self._view.send_cards(
+                chat_id=chat_id,
+                cards=player.cards,
+                mention_markdown=player.mention_markdown,
+                ready_message_id=player.ready_message_id,
+            )
+
+            # این پیام موقتی است و در آخر دست پاک خواهد شد.
+            if cards_message_id:
+                game.message_ids_to_delete.append(cards_message_id)
+            
+            # --- پایان بلوک اصلاح شده ---
 
     def _process_playing(self, chat_id: ChatId, game: Game):
         """
