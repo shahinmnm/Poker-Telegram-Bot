@@ -272,7 +272,7 @@ class PokerBotModel:
     
         # ست کردن Blindها
         self._round_rate.round_pre_flop_rate_before_first_turn(game)
-        self._round_rate.to_pot(game)
+        self._round_rate.to_pot(game, chat_id)
     
         # تعیین نفر شروع Pre-Flop
         game.current_player_index = self._starting_player_index(game, GameState.ROUND_PRE_FLOP)
@@ -486,7 +486,7 @@ class PokerBotModel:
                 round_over = True
         
             if round_over:
-                self._round_rate.to_pot(game)
+                self._round_rate.to_pot(game, chat_id)
                 if len(game.players_by(states=(PlayerState.ACTIVE,))) < 2:
                     return self._fast_forward_to_finish(game, chat_id)
                 self._goto_next_round(game, chat_id)
