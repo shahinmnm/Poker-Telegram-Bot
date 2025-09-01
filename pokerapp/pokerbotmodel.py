@@ -889,8 +889,8 @@ class PokerBotModel:
         )
 
 class RoundRateModel:
-    def __init__(self):
-        pass
+    def __init__(self, view: PokerBotViewer):
+        self._view = view
     def to_pot(self, game: Game) -> None:
         # This function moves money from the current betting round to the main pot
         # and also updates each player's total bet for the hand.
