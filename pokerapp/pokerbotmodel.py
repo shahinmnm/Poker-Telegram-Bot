@@ -683,70 +683,69 @@ class PokerBotModel:
 
     def _go_to_next_street(self, game: Game, chat_id: ChatId) -> None:
         """
-        Moves the game to the next street (Flop, Turn, River) or finishes it.
+        بازی را به مرحله بعدی (Street) می‌برد یا در صورت لزوم به پایان می‌رساند.
+        از متن‌های فارسی و جذاب برای اعلام وضعیت استفاده می‌کند.
         """
         print(f"Game {game.id}: Moving to the next street from {game.state.name}")
 
-        # 1. جمع‌آوری پول‌ها در پات اصلی و ریست کردن مقادیر دور
-        # ======== شروع اصلاح ========
+        # ۱. جمع‌آوری شرط‌های این دور و واریز به پات اصلی
         self._round_rate.to_pot(game, chat_id)
-        # ======== پایان اصلاح ========
 
-        # 2. ریست کردن وضعیت بازیکنان برای دور جدید
+        # ۲. ریست کردن وضعیت بازیکنان برای دور جدید شرط‌بندی
         game.max_round_rate = 0
+        game.trading_end_user_id = 0
         for p in game.players:
             p.round_rate = 0
             p.has_acted = False
-                
-        # تعیین نفر شروع‌کننده برای دور جدید (معمولاً نفر بعد از دیلر)
-        game.current_player_index = self._starting_player_index(game, game.state)
-        # از آنجایی که در _process_playing یکبار ایندکس جلو میرود، یکی عقب برمیگردانیم
-        game.current_player_index = (game.current_player_index - 1 + len(game.players)) % len(game.players)
-    
-    
-        if game.state == GameState.ROUND_PRE_FLOP:
-            game.state = GameState.ROUND_FLOP
-            self.add_cards_to_table(3, game, chat_id) # رو کردن 3 کارت Flop
-        elif game.state == GameState.ROUND_FLOP:
-            game.state = GameState.ROUND_TURN
-            self.add_cards_to_table(1, game, chat_id) # رو کردن کارت Turn
-        elif game.state == GameState.ROUND_TURN:
-            game.state = GameState.ROUND_RIVER
-            self.add_cards_to_table(1, game, chat_id) # رو کردن کارت River
-        elif game.state == GameState.ROUND_RIVER:
-            # بعد از River، بازی تمام می‌شود و باید برنده مشخص شود
+
+        # ۳. بررسی سریع برای پایان بازی (اگر فقط یک نفر باقی مانده)
+        active_players = game.players_by(states=(PlayerState.ACTIVE,))
+        if len(active_players) < 2:
+            print(f"Game {game.id}: Not enough active players to continue. Finishing game.")
             self._finish(game, chat_id)
             return
-    
-        self._view.send_message(
-            chat_id=chat_id,
-            text=f" مرحلۀ {game.state.name.replace('ROUND_', '')} شروع شد "
-        )
-        # نمایش میز بعد از هر مرحله
-        self.show_table(chat_id, game)
 
-    
-    def _goto_next_round(self, game: Game, chat_id: ChatId) -> None:
+        # ۴. پیشروی به مرحله بعدی بازی (Street)
+        street_name_persian = ""
         if game.state == GameState.ROUND_PRE_FLOP:
-            self.add_cards_to_table(3, game, chat_id)
             game.state = GameState.ROUND_FLOP
+            self.add_cards_to_table(3, game, chat_id)
+            street_name_persian = "فلاپ (Flop)"
         elif game.state == GameState.ROUND_FLOP:
-            self.add_cards_to_table(1, game, chat_id)
             game.state = GameState.ROUND_TURN
-        elif game.state == GameState.ROUND_TURN:
             self.add_cards_to_table(1, game, chat_id)
+            street_name_persian = "تِرن (Turn)"
+        elif game.state == GameState.ROUND_TURN:
             game.state = GameState.ROUND_RIVER
+            self.add_cards_to_table(1, game, chat_id)
+            street_name_persian = "ریوِر (River)"
+        elif game.state == GameState.ROUND_RIVER:
+            game.state = GameState.FINISHED
+        
+        # ۵. نمایش میز و شروع دور جدید شرط‌بندی یا پایان بازی
+        if game.state != GameState.FINISHED:
+            # ساختن کپشن جذاب برای عکس میز
+            caption = (
+                f"🔥 **مرحله {street_name_persian} رو شد!** 🔥\n\n"
+                f"💰 **پات به `{game.pot}$` رسید!**\n"
+                f"دور جدید شرط‌بندی شروع می‌شود..."
+            )
+
+            # ارسال عکس میز به گروه
+            msg = self._view.send_desk_cards_img(
+                chat_id=chat_id,
+                cards=game.cards_table,
+                caption=caption
+            )
+            if msg:
+                game.message_ids_to_delete.append(msg.message_id)
+
+            # تعیین نفر شروع‌کننده برای این دور
+            game.current_player_index = self._starting_player_index(game, game.state)
+            self._process_playing(chat_id=chat_id, game=game)
         else:
-            return self._finish(game, chat_id)
-    
-        # ریست بازیکنان ACTIVE
-        for p in game.players_by(states=(PlayerState.ACTIVE,)):
-            p.has_acted = False
-            p.round_rate = 0
-        game.max_round_rate = 0
-    
-        # تعیین نفر شروع‌کننده Street جدید
-        game.current_player_index = self._starting_player_index(game, game.state)
+            # اگر تمام کارت‌ها رو شده، بازی به مرحله حساس پایانی (Showdown) می‌رسد
+            self._finish(game, chat_id)
     def middleware_user_turn(self, fn: Handler) -> Handler:
         def m(update: Update, context: CallbackContext):
             query = update.callback_query
