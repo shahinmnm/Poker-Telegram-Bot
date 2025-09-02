@@ -19,6 +19,7 @@ from pokerapp.entities import (
     Player,
     ChatId,
     UserId,
+    MessageId,  # <--- این خط را اضافه کنید
     UserException,
     Money,
     PlayerAction,
