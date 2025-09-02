@@ -609,7 +609,7 @@ class PokerBotModel:
 
 
 
-    def _finish(self, game: Game, chat_id: ChatId) -> None:
+    def _finish(self, winners_data: List[Dict], game: Game, chat_id: ChatId):
         """
         بازی را تمام می‌کند، برنده را تعیین کرده و نتایج را با فرمت جدید و خلاقانه نمایش می‌دهد.
         """
