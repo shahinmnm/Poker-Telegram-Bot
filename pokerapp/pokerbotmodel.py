@@ -12,7 +12,7 @@ from telegram.ext import Handler, CallbackContext
 from pokerapp.config import Config
 from pokerapp.privatechatmodel import UserPrivateChatModel
 from pokerapp.winnerdetermination import WinnerDetermination, HAND_NAMES_TRANSLATIONS, HandsOfPoker
-from pokerapp.cards import Cards
+from pokerapp.cards import Card, Cards
 from pokerapp.entities import (
     Game,
     GameState,
@@ -643,86 +643,6 @@ class PokerBotModel:
         # Timer(15, self._prepare_new_round, args=(context, chat_id)).start()
         print(f"[INFO] Round finished in chat {chat_id}. New round can be started with /start.")
 
-    def _calculate_winnings(self, game: Game, showdown_players: List[Player]) -> Dict[Player, Tuple[Money, Score, Tuple]]:
-        """
-        محاسبه برندگان، مبلغ برد، امتیاز و دست برتر هر بازیکن.
-        این متد پیچیدگی ساید-پات (side-pot) را نیز مدیریت می‌کند.
-        """
-        # اگر بازیکنی برای نمایش دست وجود ندارد (مثلاً همه فولد کردند)، محاسبات را رد کن
-        if not showdown_players:
-            return {}
-
-        # 1. محاسبه امتیاز و دست برتر برای هر بازیکن در showdown
-        player_scores = {}
-        for player in showdown_players:
-            score, best_hand = self._winner_determine.get_hand_value(player.cards, game.cards_table)
-            player_scores[player.user_id] = {"score": score, "hand": best_hand, "player": player}
-        
-        # 2. مرتب‌سازی بازیکنان بر اساس امتیاز (از بیشترین به کمترین)
-        sorted_players = sorted(player_scores.values(), key=lambda x: x['score'], reverse=True)
-
-        # 3. محاسبه پات‌ها (اصلی و جانبی)
-        all_bets = sorted([p.total_bet for p in game.players if p.total_bet > 0])
-        unique_bet_levels = sorted(list(set(all_bets)))
-        
-        pots = []
-        last_level = 0
-        for level in unique_bet_levels:
-            pot_amount = 0
-            eligible_player_ids = []
-            
-            # محاسبه سهم هر بازیکن در این pot
-            for player in game.players:
-                contribution = min(player.total_bet, level) - last_level
-                if contribution > 0:
-                    pot_amount += contribution
-            
-            # شناسایی بازیکنانی که در این pot شریک هستند
-            for p in showdown_players:
-                if p.total_bet >= level:
-                    eligible_player_ids.append(p.user_id)
-
-            if pot_amount > 0:
-                pots.append({"amount": pot_amount, "eligible_ids": eligible_player_ids})
-            last_level = level
-
-        # 4. توزیع پات‌ها بین برندگان
-        winnings = {} # {player: (total_win, score, hand)}
-
-        for pot in pots:
-            best_score_in_pot = 0
-            winners_in_pot = []
-            
-            # پیدا کردن بهترین دست(ها) در بین بازیکنان مجاز این pot
-            for p_data in sorted_players:
-                if p_data['player'].user_id in pot['eligible_ids']:
-                    if not winners_in_pot or p_data['score'] == best_score_in_pot:
-                        best_score_in_pot = p_data['score']
-                        winners_in_pot.append(p_data)
-                    elif p_data['score'] < best_score_in_pot:
-                        break # چون بازیکنان مرتب هستند، نیازی به ادامه نیست
-            
-            if not winners_in_pot:
-                continue
-
-            # تقسیم پول pot بین برندگان
-            win_share = pot['amount'] // len(winners_in_pot)
-            remainder = pot['amount'] % len(winners_in_pot)
-
-            for i, winner_data in enumerate(winners_in_pot):
-                payout = win_share + (1 if i < remainder else 0)
-                player = winner_data['player']
-                
-                if player not in winnings:
-                    winnings[player] = [0, winner_data['score'], winner_data['hand']]
-                
-                winnings[player][0] += payout
-                player.wallet.inc(payout)
-
-        # تبدیل لیست به تاپل برای خروجی نهایی
-        final_winnings = {p: (money, score, hand) for p, (money, score, hand) in winnings.items()}
-        return final_winnings
-
     def _hand_name_from_score(self, score: int) -> str:
         """تبدیل عدد امتیاز به نام دست پوکر"""
         base_rank = score // HAND_RANK
@@ -734,48 +654,64 @@ class PokerBotModel:
 class RoundRateModel:
     def __init__(self, view: PokerBotViewer, kv: redis.Redis):
         self._view = view
-        self._kv = kv # Storing kv for wallet interactions
+        self._kv = kv
 
-    def set_blinds(self, game: Game, chat_id: ChatId):
-        """Sets small and big blinds for the players."""
-        num_players = len(game.players)
-        if num_players < 2: return
+    def set_blinds(self, game: Game, chat_id: ChatId) -> None:
+        """
+        بلایند کوچک و بزرگ را برای شروع دور جدید تعیین و از حساب بازیکنان کم می‌کند.
+        """
+        # یافتن بازیکنان برای بلایند کوچک و بزرگ
+        small_blind_index = (game.dealer_index + 1) % len(game.players)
+        big_blind_index = (game.dealer_index + 2) % len(game.players)
 
-        # In 2-player games (heads-up), dealer is SB and acts first pre-flop.
-        if num_players == 2:
-            sb_player_index = game.dealer_index
-            bb_player_index = (game.dealer_index + 1) % num_players
-        else:
-            sb_player_index = (game.dealer_index + 1) % num_players
-            bb_player_index = (game.dealer_index + 2) % num_players
+        # اگر فقط دو بازیکن باشند، دیلر بلایند کوچک است.
+        if len(game.players) == 2:
+            small_blind_index = game.dealer_index
+            big_blind_index = (game.dealer_index + 1) % len(game.players)
 
-        sb_player = game.players[sb_player_index]
-        bb_player = game.players[bb_player_index]
+        small_blind_player = game.players[small_blind_index]
+        big_blind_player = game.players[big_blind_index]
+        
+        # اعمال بلایندها
+        self._set_player_blind(small_blind_player, SMALL_BLIND, "کوچک", chat_id)
+        self._set_player_blind(big_blind_player, SMALL_BLIND * 2, "بزرگ", chat_id)
 
-        # Small Blind
+        game.max_round_rate = SMALL_BLIND * 2
+        
+        # تعیین نوبت اولین بازیکن بعد از بلایندها
+        game.current_player_index = (big_blind_index + 1) % len(game.players)
+        game.trading_end_user_id = game.players[big_blind_index].user_id
+        
+        # ارسال پیام نوبت به بازیکن
+        player_turn = game.players[game.current_player_index]
+        self._view.send_turn_actions(
+            chat_id=chat_id,
+            game=game,
+            player=player_turn,
+            money=player_turn.wallet.value()
+        )
+
+    def _set_player_blind(self, player: Player, amount: Money, blind_type: str, chat_id: ChatId):
+        """یک بلایند مشخص را روی بازیکن اعمال می‌کند."""
         try:
-            sb_amount = min(SMALL_BLIND, sb_player.wallet.value())
-            sb_player.wallet.authorize(game.id, sb_amount)
-            sb_player.round_rate += sb_amount
-            sb_player.total_bet += sb_amount
-            game.pot += sb_amount
-            self._view.send_message(chat_id, f"👤 {sb_player.mention_markdown} بلایند کوچک ({sb_amount}$) را گذاشت.")
+            player.wallet.authorize(game_id=str(chat_id), amount=amount)
+            player.round_rate += amount
+            game.pot += amount
+            self._view.send_message(
+                chat_id,
+                f"💸 {player.mention_markdown} بلایند {blind_type} به مبلغ {amount}$ را پرداخت کرد."
+            )
         except UserException as e:
-            self._view.send_message(chat_id, f"⚠️ {sb_player.mention_markdown} موجودی کافی برای بلایند کوچک ندارد و فولد می‌شود.")
-            sb_player.state = PlayerState.FOLD
-
-        # Big Blind
-        try:
-            bb_amount = min(SMALL_BLIND * 2, bb_player.wallet.value())
-            bb_player.wallet.authorize(game.id, bb_amount)
-            bb_player.round_rate += bb_amount
-            bb_player.total_bet += bb_amount
-            game.pot += bb_amount
-            game.max_round_rate = bb_amount
-            self._view.send_message(chat_id, f"👤 {bb_player.mention_markdown} بلایند بزرگ ({bb_amount}$) را گذاشت.")
-        except UserException as e:
-            self._view.send_message(chat_id, f"⚠️ {bb_player.mention_markdown} موجودی کافی برای بلایند بزرگ ندارد و فولد می‌شود.")
-            bb_player.state = PlayerState.FOLD
+            # اگر پول کافی نبود، بازیکن آل-این می‌شود
+            available_money = player.wallet.value()
+            player.wallet.authorize(game_id=str(chat_id), amount=available_money)
+            player.round_rate += available_money
+            game.pot += available_money
+            player.state = PlayerState.ALL_IN
+            self._view.send_message(
+                chat_id,
+                f"⚠️ {player.mention_markdown} موجودی کافی برای بلایند نداشت و All-in شد ({available_money}$)."
+            )
 
     def player_action_fold(self, game: Game, player: Player, chat_id: ChatId):
         player.state = PlayerState.FOLD
