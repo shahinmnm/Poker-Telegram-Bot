@@ -62,10 +62,8 @@ class PokerBotModel:
         self._bot: Bot = bot
         self._cfg: Config = cfg
         self._kv = kv
-        # فرض بر این است که WinnerDetermination بروز شده است
         self._winner_determine: WinnerDetermination = WinnerDetermination()
-        # RoundRateModel در این فایل وجود ندارد، بنابراین فرض می‌کنم بخش دیگری از کد است
-        # self._round_rate = RoundRateModel(view=self._view, kv=self._kv) # Pass kv to RoundRateModel
+        self._round_rate = RoundRateModel(view=self._view, kv=self._kv) # Pass kv to RoundRateModel
 
     @property
     def _min_players(self):
@@ -735,6 +733,7 @@ class RoundRateModel:
     def __init__(self, view: PokerBotViewer, kv: redis.Redis):
         self._view = view
         self._kv = kv
+        self._model = model # <<< نمونه model ذخیره شد
 
     # داخل کلاس RoundRateModel
     def set_blinds(self, game: Game, chat_id: ChatId) -> None:
