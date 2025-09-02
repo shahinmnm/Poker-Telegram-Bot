@@ -71,6 +71,43 @@ class WinnerDetermination:
         
         # برگرداندن تاپل سه‌تایی
         return best_hand_type, max_score, best_hand_cards
+    def get_hand_value_and_type(self, player_cards: Cards, table_cards: Cards) -> Tuple[Score, Tuple[Card, ...], HandsOfPoker]:
+        """
+        متد اصلی و عمومی کلاس.
+        بهترین دست ۵ کارتی را پیدا کرده و امتیاز، کارت‌ها و نوع دست را برمی‌گرداند.
+        """
+        all_cards = player_cards + table_cards
+        if len(all_cards) < 5:
+            return 0, tuple(), HandsOfPoker.HIGH_CARD
+
+        possible_hands = list(combinations(all_cards, 5))
+
+        max_score = 0
+        best_hand: Tuple[Card, ...] = tuple()
+        best_hand_type: HandsOfPoker = HandsOfPoker.HIGH_CARD
+
+        for hand in possible_hands:
+            score, hand_type = self._calculate_hand_score_and_type(hand) # این متد هم باید بروز شود
+            if score > max_score:
+                max_score = score
+                best_hand = hand
+                best_hand_type = hand_type
+
+        return max_score, best_hand, best_hand_type
+
+    def _calculate_hand_score_and_type(self, hand: Tuple[Card, ...]) -> Tuple[Score, HandsOfPoker]:
+        """
+        امتیاز و نوع یک دست ۵ کارتی را محاسبه می‌کند.
+        (این متد باید جایگزین _calculate_hand_score شود و در انتها به جای فقط score،
+        یک تاپل (score, hand_type) برگرداند.)
+        """
+        # ... منطق محاسبه امتیاز ...
+        # در هر return، نوع دست را هم برگردانید. مثال:
+        # if is_royal_flush:
+        #     hand_type = HandsOfPoker.ROYAL_FLUSH
+        #     return self._calculate_score_value([], hand_type), hand_type
+        # ...
+        pass
 
     def _calculate_hand_score(self, hand: Tuple[Card, ...]) -> Tuple[Score, HandsOfPoker]:
         """
