@@ -6,7 +6,7 @@ from threading import Timer
 from typing import List, Tuple, Dict, Optional
 
 import redis
-from telegram import Message, ReplyKeyboardMarkup, Update, Bot
+from telegram import Message, ReplyKeyboardMarkup, Update, Bot, ParseMode
 from telegram.ext import Handler, CallbackContext
 
 from pokerapp.config import Config
