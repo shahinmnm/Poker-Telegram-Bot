@@ -292,34 +292,26 @@ class PokerBotModel:
         if game.ready_message_main_id:
             self._view.remove_message(chat_id, game.ready_message_main_id)
             game.ready_message_main_id = None
-
+    
         # Ensure dealer_index is initialized before use
         if not hasattr(game, 'dealer_index'):
              game.dealer_index = -1
         game.dealer_index = (game.dealer_index + 1) % len(game.players)
-
+    
         self._view.send_message(chat_id, '🚀 !بازی شروع شد!')
-
+    
         game.state = GameState.ROUND_PRE_FLOP
         self._divide_cards(game, chat_id)
-
+    
+        # این متد به تنهایی تمام کارهای لازم برای شروع راند را انجام می‌دهد.
+        # از جمله تعیین بلایندها، تعیین نوبت اول و ارسال پیام نوبت.
         self._round_rate.set_blinds(game, chat_id)
-
-        # Start player is the one after the big blind.
-        # Handle 2-player game case where dealer=SB is first to act.
-        if len(game.players) == 2:
-            start_player_index = game.dealer_index
-        else:
-            start_player_index = (game.dealer_index + 3) % len(game.players)
-
-        game.current_player_index = self._find_next_active_player_index(game, start_player_index)
+    
+        # نیازی به هیچ کد دیگری در اینجا نیست.
+        # کدهای اضافی حذف شدند.
         
-        # In case the first player couldn't be found (e.g. all-in on blinds) start from beginning
-        if game.current_player_index == -1:
-             game.current_player_index = self._find_next_active_player_index(game, 0)
-
+        # ذخیره بازیکنان برای دست بعدی (این خط می‌تواند بماند)
         context.chat_data[KEY_OLD_PLAYERS] = [p.user_id for p in game.players]
-        self._process_playing(chat_id, game)
 
 
     def _divide_cards(self, game: Game, chat_id: ChatId):
@@ -656,33 +648,44 @@ class RoundRateModel:
         self._view = view
         self._kv = kv
 
+    # داخل کلاس RoundRateModel
     def set_blinds(self, game: Game, chat_id: ChatId) -> None:
         """
         بلایند کوچک و بزرگ را برای شروع دور جدید تعیین و از حساب بازیکنان کم می‌کند.
+        این متد برای حالت دو نفره (Heads-up) نیز بهینه شده است.
         """
-        # یافتن بازیکنان برای بلایند کوچک و بزرگ
-        small_blind_index = (game.dealer_index + 1) % len(game.players)
-        big_blind_index = (game.dealer_index + 2) % len(game.players)
-
-        # اگر فقط دو بازیکن باشند، دیلر بلایند کوچک است.
-        if len(game.players) == 2:
+        num_players = len(game.players)
+    
+        if num_players < 2:
+            # نباید این اتفاق بیفتد، اما برای اطمینان
+            return 
+    
+        # --- بلوک اصلاح شده برای تعیین بلایندها ---
+        if num_players == 2:
+            # حالت دو نفره (Heads-up): دیلر اسمال بلایند است و اول بازی می‌کند.
             small_blind_index = game.dealer_index
-            big_blind_index = (game.dealer_index + 1) % len(game.players)
-
+            big_blind_index = (game.dealer_index + 1) % num_players
+            first_action_index = small_blind_index # در pre-flop، اسمال بلایند اول حرکت می‌کند
+        else:
+            # حالت استاندارد برای بیش از دو بازیکن
+            small_blind_index = (game.dealer_index + 1) % num_players
+            big_blind_index = (game.dealer_index + 2) % num_players
+            first_action_index = (big_blind_index + 1) % num_players
+        # --- پایان بلوک اصلاح شده ---
+    
         small_blind_player = game.players[small_blind_index]
         big_blind_player = game.players[big_blind_index]
         
         # اعمال بلایندها
         self._set_player_blind(game, small_blind_player, SMALL_BLIND, "کوچک", chat_id)
         self._set_player_blind(game, big_blind_player, SMALL_BLIND * 2, "بزرگ", chat_id)
-
-
-
+    
         game.max_round_rate = SMALL_BLIND * 2
         
-        # تعیین نوبت اولین بازیکن بعد از بلایندها
-        game.current_player_index = (big_blind_index + 1) % len(game.players)
-        game.trading_end_user_id = game.players[big_blind_index].user_id
+        # تعیین نوبت اولین بازیکن برای اقدام
+        game.current_player_index = first_action_index
+        # بازیکنی که دور شرط‌بندی به او ختم می‌شود، بیگ بلایند است
+        game.trading_end_user_id = big_blind_player.user_id
         
         # ارسال پیام نوبت به بازیکن
         player_turn = game.players[game.current_player_index]
@@ -692,6 +695,7 @@ class RoundRateModel:
             player=player_turn,
             money=player_turn.wallet.value()
         )
+
 
     def _set_player_blind(self, game: Game, player: Player, amount: Money, blind_type: str, chat_id: ChatId):
 
