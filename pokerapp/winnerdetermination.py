@@ -71,23 +71,25 @@ class WinnerDetermination:
         
         # برگرداندن تاپل سه‌تایی
         return best_hand_type, max_score, best_hand_cards
+        
     def get_hand_value_and_type(self, player_cards: Cards, table_cards: Cards) -> Tuple[Score, Tuple[Card, ...], HandsOfPoker]:
         """
         متد اصلی و عمومی کلاس.
-        بهترین دست ۵ کارتی را پیدا کرده و امتیاز، کارت‌ها و نوع دست را برمی‌گرداند.
+        کارت‌های بازیکن و میز را گرفته، بهترین دست ۵ کارتی را پیدا کرده
+        و بالاترین امتیاز، کارت‌های آن دست و نوع دست را برمی‌گرداند.
         """
         all_cards = player_cards + table_cards
         if len(all_cards) < 5:
-            return 0, tuple(), HandsOfPoker.HIGH_CARD
+            return 0, tuple(), HandsOfPoker.HIGH_CARD # Return a default hand type
 
         possible_hands = list(combinations(all_cards, 5))
 
         max_score = 0
         best_hand: Tuple[Card, ...] = tuple()
-        best_hand_type: HandsOfPoker = HandsOfPoker.HIGH_CARD
+        best_hand_type: HandsOfPoker = HandsOfPoker.HIGH_CARD # Default value
 
         for hand in possible_hands:
-            score, hand_type = self._calculate_hand_score_and_type(hand) # این متد هم باید بروز شود
+            score, hand_type = self._calculate_hand_score_and_type(hand)
             if score > max_score:
                 max_score = score
                 best_hand = hand
@@ -97,17 +99,68 @@ class WinnerDetermination:
 
     def _calculate_hand_score_and_type(self, hand: Tuple[Card, ...]) -> Tuple[Score, HandsOfPoker]:
         """
-        امتیاز و نوع یک دست ۵ کارتی را محاسبه می‌کند.
-        (این متد باید جایگزین _calculate_hand_score شود و در انتها به جای فقط score،
-        یک تاپل (score, hand_type) برگرداند.)
+        امتیاز و نوع یک دست ۵ کارتی مشخص را محاسبه و برمی‌گرداند.
         """
-        # ... منطق محاسبه امتیاز ...
-        # در هر return، نوع دست را هم برگردانید. مثال:
-        # if is_royal_flush:
-        #     hand_type = HandsOfPoker.ROYAL_FLUSH
-        #     return self._calculate_score_value([], hand_type), hand_type
-        # ...
-        pass
+        values = sorted([card.value for card in hand])
+        suits = [card.suit for card in hand]
+
+        is_flush = len(set(suits)) == 1
+
+        is_straight = False
+        unique_values = sorted(list(set(values)))
+        straight_high_card = 0
+        if len(unique_values) == 5:
+            if unique_values[4] - unique_values[0] == 4:
+                is_straight = True
+                straight_high_card = unique_values[4]
+            elif unique_values == [2, 3, 4, 5, 14]: # Ace-low straight
+                is_straight = True
+                straight_high_card = 5
+
+        grouped_values, grouped_keys = self._group_hand_by_value(values)
+
+        if is_straight and is_flush:
+            if straight_high_card == 14 and values[0] == 10:
+                hand_type = HandsOfPoker.ROYAL_FLUSH
+                score = self._calculate_score_value([], hand_type)
+                return score, hand_type
+            hand_type = HandsOfPoker.STRAIGHT_FLUSH
+            score = self._calculate_score_value([straight_high_card], hand_type)
+            return score, hand_type
+
+        if grouped_values == [1, 4]:
+            hand_type = HandsOfPoker.FOUR_OF_A_KIND
+            score = self._calculate_score_value(grouped_keys, hand_type)
+            return score, hand_type
+        if grouped_values == [2, 3]:
+            hand_type = HandsOfPoker.FULL_HOUSE
+            score = self._calculate_score_value(grouped_keys, hand_type)
+            return score, hand_type
+        if is_flush:
+            hand_type = HandsOfPoker.FLUSH
+            score = self._calculate_score_value(values[::-1], hand_type)
+            return score, hand_type
+        if is_straight:
+            hand_type = HandsOfPoker.STRAIGHT
+            score = self._calculate_score_value([straight_high_card], hand_type)
+            return score, hand_type
+        if grouped_values == [1, 1, 3]:
+            hand_type = HandsOfPoker.THREE_OF_A_KIND
+            score = self._calculate_score_value(grouped_keys, hand_type)
+            return score, hand_type
+        if grouped_values == [1, 2, 2]:
+            hand_type = HandsOfPoker.TWO_PAIR
+            score = self._calculate_score_value(grouped_keys, hand_type)
+            return score, hand_type
+        if grouped_values == [1, 1, 1, 2]:
+            hand_type = HandsOfPoker.PAIR
+            score = self._calculate_score_value(grouped_keys, hand_type)
+            return score, hand_type
+
+        # This is the crucial part that was missing a proper return structure
+        hand_type = HandsOfPoker.HIGH_CARD
+        score = self._calculate_score_value(values[::-1], hand_type)
+        return score, hand_type
 
     def _calculate_hand_score(self, hand: Tuple[Card, ...]) -> Tuple[Score, HandsOfPoker]:
         """
@@ -167,11 +220,9 @@ class WinnerDetermination:
     def _calculate_score_value(hand_values: List[int], hand_type: HandsOfPoker) -> Score:
         score = HAND_RANK_MULTIPLIER * hand_type.value
         i = 1
-        # برای امتیازدهی دقیق‌تر، از ارزش کارت‌ها به ترتیب اهمیت استفاده می‌کنیم
-        # hand_values باید از قبل مرتب شده باشد (چه خود ارزش کارت‌ها چه ارزش گروه‌ها)
         for val in hand_values:
-            score += val * (15 ** i) # استفاده از توان برای جلوگیری از تداخل
-            i += 1
+            score += val * i
+            i *= 15
         return score
 
     @staticmethod
@@ -179,7 +230,6 @@ class WinnerDetermination:
         dict_hand = {}
         for i in hand_values:
             dict_hand[i] = dict_hand.get(i, 0) + 1
-        # مرتب‌سازی بر اساس تعداد، و سپس بر اساس ارزش کارت
         sorted_dict_items = sorted(dict_hand.items(), key=lambda item: (item[1], item[0]))
         counts = [item[1] for item in sorted_dict_items]
         keys = [item[0] for item in sorted_dict_items]
