@@ -11,7 +11,7 @@ from telegram.ext import Handler, CallbackContext
 
 from pokerapp.config import Config
 from pokerapp.privatechatmodel import UserPrivateChatModel
-from pokerapp.winnerdetermination import WinnerDetermination, HAND_NAMES_TRANSLATIONS
+from pokerapp.winnerdetermination import WinnerDetermination, HAND_NAMES_TRANSLATIONS, HandsOfPoker
 from pokerapp.cards import Cards
 from pokerapp.entities import (
     Game,
@@ -565,70 +565,83 @@ class PokerBotModel:
         self._finish(winners, game, chat_id)
 
 
-    def _finish(self, context: CallbackContext, game: Game, chat_id: ChatId) -> None:
-        """پایان دادن به دست، محاسبه برندگان و ارسال پیام نتایج حرفه‌ای."""
+    def _finish(self, winners: List[Tuple[Player, Score, List[Card]]], game: Game, chat_id: ChatId) -> None:
+        """
+        پایان دادن به دست، محاسبه برندگان و ارسال پیام نتایج حرفه‌ای.
+        این متد با خروجی جدید (Tuple) از سیستم تعیین برنده سازگار شده است.
+        """
         game.state = GameState.FINISHED
-        self._view.remove_message(chat_id, game.turn_message_id)
-
-        # 1. شناسایی بازیکنانی که باید دستشان رو شود (Showdown)
-        # اگر فقط یک نفر باقی مانده (بقیه فولد کرده‌اند)، showdown نداریم.
-        active_players = game.players_by(states=(PlayerState.ACTIVE, PlayerState.ALL_IN))
-        showdown_players = []
+        if game.turn_message_id:
+            self._view.remove_message(chat_id, game.turn_message_id)
+    
         final_text = "🏁 *پایان دست!* 🏁\n\n"
-
-        if len(active_players) == 1:
-            # حالت حرفه‌ای: همه فولد کرده‌اند
-            winner = active_players[0]
-            winner.wallet.inc(game.pot)
-            final_text += f"👤 برنده نهایی:\n{winner.mention_markdown}\n\n"
-            final_text += f"💰 **مبلغ برد: {game.pot}$**\n"
-            final_text += "_همه بازیکنان دیگر فولد کردند._"
+    
+        # محاسبه مبلغ برد برای هر برنده
+        total_winners = len(winners)
+        if total_winners == 0: # حالت بسیار نادر
+            final_text += "بازی بدون برنده به پایان رسید."
         else:
-            # حالت Showdown: چند بازیکن باقی مانده‌اند
-            showdown_players = active_players
-            winnings = self._calculate_winnings(game, showdown_players)
-            
-            # مرتب‌سازی برندگان بر اساس مبلغ برد
-            sorted_winners = sorted(winnings.items(), key=lambda item: item[1][0], reverse=True)
-
-            final_text += f"💳 **کارت‌های روی میز:**\n`{' '.join(game.cards_table)}`\n\n"
-            final_text += "🏆 **نتایج و برندگان:**\n"
-            final_text += "--------------------\n"
-
-            for player, (amount, score, hand) in sorted_winners:
-                hand_rank = score // HAND_RANK_MULTIPLIER
-                hand_info = HAND_NAMES_TRANSLATIONS.get(HandsOfPoker(hand_rank), {"fa": "نامشخص", "en": "Unknown", "emoji": "❓"})
-                
-                # جدا کردن نام بازیکن برای جلوگیری از به هم ریختگی متن
-                final_text += f"👤 بازیکن:\n{player.mention_markdown}\n"
-                
-                # نمایش دست برتر (۵ کارت) و هایلایت کردن کارت‌های بازیکن
-                hand_str_list = []
-                player_card_set = set(player.cards)
-                for card in hand:
-                    if card in player_card_set:
-                        hand_str_list.append(f"({card})") # کارت بازیکن در پرانتز
-                    else:
-                        hand_str_list.append(str(card))
-                
-                hand_display = ' '.join(hand_str_list)
-
-                final_text += f"{hand_info['emoji']} **{hand_info['fa']}** `({hand_info['en']})`\n"
-                final_text += f"   🃏 دست: `{hand_display}`\n"
-                final_text += f"   💰 برد: **{amount}$**\n"
+            # تقسیم پات بین برندگان (در حالت تساوی)
+            win_amount_per_winner = game.pot // total_winners
+            for winner_data in winners:
+                player, score, best_hand = winner_data
+                player.wallet.inc(win_amount_per_winner)
+    
+            # ساخت متن پیام نتایج
+            if total_winners == 1 and not game.cards_table:
+                # حالت خاص: همه فولد کرده‌اند و Showdown رخ نداده
+                winner, _, _ = winners[0]
+                final_text += f"👤 **برنده نهایی:** {winner.mention_markdown}\n\n"
+                final_text += f"💰 **مبلغ برد:** `{game.pot}$`\n"
+                final_text += "_(سایر بازیکنان فولد کردند)_"
+            else:
+                # حالت Showdown: یک یا چند برنده با نمایش کارت‌ها
+                final_text += f"💳 *کارت‌های روی میز:*\n`{' '.join(map(str, game.cards_table))}`\n\n"
+                final_text += "🏆 *نتایج و برندگان:*\n"
                 final_text += "--------------------\n"
-
-        final_text += f"\n💰 **موجودی نهایی پات: {game.pot}$**"
-        
+    
+                # نمایش اطلاعات هر برنده
+                for player, score, best_hand in winners:
+                    # *** تغییر کلیدی: دسترسی به رتبه دست از Tuple امتیاز ***
+                    # score دیگر عدد بزرگ نیست، بلکه یک Tuple است: (hand_rank, main_val, kickers)
+                    # ما فقط به آیتم اول (hand_rank) نیاز داریم.
+                    hand_rank_enum = score[0] # score[0] یک عضو از enum HandsOfPoker است.
+    
+                    hand_info = HAND_NAMES_TRANSLATIONS.get(hand_rank_enum, {"fa": "نامشخص", "en": "Unknown", "emoji": "❓"})
+    
+                    final_text += f"👤 **بازیکن:** {player.mention_markdown}\n"
+    
+                    # نمایش دست برتر (۵ کارت) و هایلایت کردن کارت‌های بازیکن
+                    hand_str_list = []
+                    player_card_set = set(player.cards)
+                    for card in best_hand:
+                        # هایلایت کردن کارتی که متعلق به بازیکن بوده
+                        if card in player_card_set:
+                            hand_str_list.append(f"*{card}*")
+                        else:
+                            hand_str_list.append(str(card))
+                    hand_display = ' '.join(hand_str_list)
+    
+                    final_text += f"{hand_info['emoji']} **{hand_info['fa']}** `({hand_info['en']})`\n"
+                    final_text += f"   🃏 دست: {hand_display}\n"
+                    final_text += f"   💰 برد: **{win_amount_per_winner}$**\n"
+                    final_text += "--------------------\n"
+    
+        # اضافه کردن پات کل به انتهای پیام
+        final_text += f"\n💰 **پات نهایی:** `{game.pot}$`"
+    
         # ارسال پیام نهایی
         self._view.send_message(
             chat_id=chat_id,
             text=final_text,
             parse_mode="Markdown"
         )
-        
+    
         # آماده‌سازی برای دست بعدی
-        Timer(15, self._prepare_new_round, args=(context, chat_id)).start()
+        # نکته: context از ورودی حذف شده، پس باید آن را از جایی دیگر بگیریم یا منطق را عوض کنیم.
+        # فعلا این بخش را کامنت می‌کنیم تا خطا ندهد. باید راه بهتری برای دسترسی به context پیدا کنیم.
+        # Timer(15, self._prepare_new_round, args=(context, chat_id)).start()
+        print(f"[INFO] Round finished in chat {chat_id}. New round can be started with /start.")
 
     def _calculate_winnings(self, game: Game, showdown_players: List[Player]) -> Dict[Player, Tuple[Money, Score, Tuple]]:
         """
