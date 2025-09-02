@@ -360,7 +360,7 @@ class PokerBotModel:
             
             # --- پایان بلوک اصلاح شده ---
 
-    def _process_playing(self, chat_id: ChatId, game: Game):
+    def _process_playing(self, chat_id: ChatId, game: Game, context: CallbackContext):
         """
         حلقه اصلی بازی: وضعیت را چک می‌کند، اگر دور تمام شده به مرحله بعد می‌رود،
         در غیر این صورت نوبت را به بازیکن بعدی می‌دهد.
@@ -433,7 +433,7 @@ class PokerBotModel:
             game.current_player_index = next_player_index
             self._process_playing(chat_id, game)
             
-    def _go_to_next_street(self, game: Game, chat_id: ChatId) -> None:
+    def _go_to_next_street(self, game: Game, chat_id: ChatId, context: CallbackContext):
         """بازی را به مرحله بعدی (Flop, Turn, River) یا به پایان (Finish) می‌برد."""
         self._round_rate.collect_bets_for_pot(game)
 
@@ -458,7 +458,7 @@ class PokerBotModel:
         elif game.state == GameState.ROUND_RIVER:
             # این حالت را به جای else صریحاً می‌نویسیم تا خواناتر باشد
             # بعد از پایان شرط‌بندی در River، باید برندگان را مشخص کنیم
-            self._determine_winners(game, chat_id)
+            self._determine_winners(game, chat_id, context) # <--- این فراخوانی کاملاً صحیح است!
             return
     def _determine_all_scores(self, game: Game) -> List[Dict]:
         """
@@ -578,7 +578,7 @@ class PokerBotModel:
             # ساختار جدید: ((نوع دست, امتیاز عددی), بهترین کارت‌ها, بازیکن)
             winners_data = [((None, 1), [], winner_player)] 
             print(f"DEBUG: Only one player left. Winner is {winner_player.user_id}")
-            self._finish(winners_data, game, chat_id)
+            self._finish(winners_data, game, chat_id, context) # <--- context اضافه شد
             return
     
         # ۲. محاسبه امتیاز دست هر بازیکن فعال
@@ -605,11 +605,11 @@ class PokerBotModel:
         print(f"DEBUG: Highest score is {highest_score}. Winners: {[w[2].user_id for w in winners]}")
     
         # ۵. فراخوانی متد _finish با داده‌های صحیح
-        self._finish(winners, game, chat_id)
+        self._finish(winners, game, chat_id, context) # <--- context اضافه شد
 
 
 
-    def _finish(self, winners_data: List[Dict], game: Game, chat_id: ChatId):
+    def _finish(self, winners_data: List[Dict], game: Game, chat_id: ChatId, context: CallbackContext):
         """
         بازی را تمام می‌کند، برنده را تعیین کرده و نتایج را با فرمت جدید و خلاقانه نمایش می‌دهد.
         """
