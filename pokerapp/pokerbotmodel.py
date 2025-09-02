@@ -367,7 +367,7 @@ class PokerBotModel:
         """
         contenders = game.players_by(states=(PlayerState.ACTIVE, PlayerState.ALL_IN))
         if len(contenders) <= 1:
-            self._go_to_next_street(game, chat_id)
+            self._go_to_next_street(game, chat_id, context)
             return
 
         active_players = game.players_by(states=(PlayerState.ACTIVE,))
@@ -418,20 +418,20 @@ class PokerBotModel:
                 return next_index
         return -1 # هیچ بازیکن فعالی یافت نشد
 
-    def _move_to_next_player_and_process(self, game: Game, chat_id: ChatId):
+    def _move_to_next_player_and_process(self, game: Game, chat_id: ChatId, context: CallbackContext):
         """
         ایندکس بازیکن را به نفر فعال بعدی منتقل کرده و حلقه بازی را ادامه می‌دهد.
-        این متد، مشکل حلقه بی‌نهایت را حل می‌کند.
         """
         next_player_index = self._find_next_active_player_index(
             game, game.current_player_index
         )
-        if next_player_index == -1: # اگر بازیکن فعال دیگری نمانده
-            # مستقیم به مرحله بعد برو، چون شرط‌بندی تمام است
-            self._go_to_next_street(game, chat_id)
+        if next_player_index == -1:
+            # حالا که context را داریم، آن را به go_to_next_street هم پاس می‌دهیم
+            self._go_to_next_street(game, chat_id, context)
         else:
             game.current_player_index = next_player_index
-            self._process_playing(chat_id, game)
+            # context را به process_playing پاس می‌دهیم
+            self._process_playing(chat_id, game, context)
             
     def _go_to_next_street(self, game: Game, chat_id: ChatId, context: CallbackContext):
         """بازی را به مرحله بعدی (Flop, Turn, River) یا به پایان (Finish) می‌برد."""
@@ -534,7 +534,9 @@ class PokerBotModel:
         if not player: return
         self._round_rate.player_action_call_check(game, player, update.effective_chat.id)
         player.has_acted = True
-        self._move_to_next_player_and_process(game, update.effective_chat.id)
+        # context را اینجا پاس می‌دهیم چون از ورودی متد در دسترس است
+        self._move_to_next_player_and_process(game, update.effective_chat.id, context)
+
 
     def player_action_all_in(self, update: Update, context: CallbackContext, game: Game) -> None:
         player = self._current_turn_player(game)
