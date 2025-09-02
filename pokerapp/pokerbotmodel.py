@@ -519,7 +519,52 @@ class PokerBotModel:
         except UserException as e:
             # Answer callback query to show the error message to the user
             context.bot.answer_callback_query(callback_query_id=update.callback_query.id, text=str(e), show_alert=True)
-    
+            
+    def _determine_winners(self, game: Game, chat_id: ChatId) -> None:
+        """
+        برندگان بازی را مشخص کرده و سپس متد _finish را برای اعلام نتایج فراخوانی می‌کند.
+        """
+        print("DEBUG: Determining winners...")
+        
+        # ۱. فقط بازیکنانی را که FOLD نکرده‌اند در نظر بگیر
+        active_players = [p for p in game.players if p.state != PlayerState.FOLD]
+
+        # اگر فقط یک بازیکن باقی مانده باشد، او برنده است
+        if len(active_players) == 1:
+            winner = active_players[0]
+            # برای سازگاری با فرمت _finish، یک نتیجه ساختگی ایجاد می‌کنیم
+            # Score و best_hand اینجا اهمیت زیادی ندارند چون رقابتی نبوده
+            winners_data = [(winner, Score(1), [])]
+            print(f"DEBUG: Only one player left. Winner is {winner.user_id}")
+            self._finish(winners_data, game, chat_id)
+            return
+
+        # ۲. محاسبه امتیاز دست هر بازیکن فعال
+        player_scores: List[Tuple[Player, Score, Tuple[Card, ...]]] = []
+        for player in active_players:
+            # از کلاس WinnerDetermination برای گرفتن امتیاز و بهترین دست استفاده می‌کنیم
+            score, best_hand = self._winner_determine.get_hand_value(
+                player_cards=player.cards, 
+                table_cards=game.cards_table
+            )
+            player_scores.append((player, score, best_hand))
+            print(f"DEBUG: Player {player.user_id} has score {score} with hand {best_hand}")
+
+        # ۳. مرتب‌سازی بازیکنان بر اساس امتیاز (از بیشترین به کمترین)
+        player_scores.sort(key=lambda item: item[1], reverse=True)
+
+        # ۴. پیدا کردن برنده(ها) - ممکن است چند نفر امتیاز یکسان داشته باشند
+        highest_score = player_scores[0][1]
+        winners = [
+            (p, score, list(best_hand)) for p, score, best_hand in player_scores if score == highest_score
+        ]
+        
+        print(f"DEBUG: Highest score is {highest_score}. Winners: {[w[0].user_id for w in winners]}")
+
+        # ۵. فراخوانی متد _finish با داده‌های صحیح
+        self._finish(winners, game, chat_id)
+
+
     def _finish(self, context: CallbackContext, game: Game, chat_id: ChatId) -> None:
         """پایان دادن به دست، محاسبه برندگان و ارسال پیام نتایج حرفه‌ای."""
         game.state = GameState.FINISHED
