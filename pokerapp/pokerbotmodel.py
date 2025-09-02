@@ -11,7 +11,7 @@ from telegram.ext import Handler, CallbackContext
 
 from pokerapp.config import Config
 from pokerapp.privatechatmodel import UserPrivateChatModel
-from pokerapp.winnerdetermination import WinnerDetermination, HAND_NAMES_TRANSLATIONS, HAND_RANK
+from pokerapp.winnerdetermination import WinnerDetermination, HAND_NAMES_TRANSLATIONS
 from pokerapp.cards import Cards
 from pokerapp.entities import (
     Game,
