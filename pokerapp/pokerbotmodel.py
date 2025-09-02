@@ -729,7 +729,7 @@ class PokerBotModel:
         except ValueError:
             return "Unknown Hand"
 class RoundRateModel:
-    def __init__(self, view: PokerBotViewer, kv: redis.Redis):
+    def __init__(self, view: PokerBotViewer, kv: redis.Redis, model: "PokerBotModel"):
         self._view = view
         self._kv = kv
         self._model = model # <<< نمونه model ذخیره شد
