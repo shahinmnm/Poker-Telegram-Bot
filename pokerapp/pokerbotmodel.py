@@ -673,8 +673,10 @@ class RoundRateModel:
         big_blind_player = game.players[big_blind_index]
         
         # اعمال بلایندها
-        self._set_player_blind(small_blind_player, SMALL_BLIND, "کوچک", chat_id)
-        self._set_player_blind(big_blind_player, SMALL_BLIND * 2, "بزرگ", chat_id)
+        self._set_player_blind(game, small_blind_player, SMALL_BLIND, "کوچک", chat_id)
+        self._set_player_blind(game, big_blind_player, SMALL_BLIND * 2, "بزرگ", chat_id)
+
+
 
         game.max_round_rate = SMALL_BLIND * 2
         
@@ -691,7 +693,8 @@ class RoundRateModel:
             money=player_turn.wallet.value()
         )
 
-    def _set_player_blind(self, player: Player, amount: Money, blind_type: str, chat_id: ChatId):
+    def _set_player_blind(self, game: Game, player: Player, amount: Money, blind_type: str, chat_id: ChatId):
+
         """یک بلایند مشخص را روی بازیکن اعمال می‌کند."""
         try:
             player.wallet.authorize(game_id=str(chat_id), amount=amount)
