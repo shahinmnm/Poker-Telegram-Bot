@@ -11,7 +11,7 @@ from telegram.ext import Handler, CallbackContext
 
 from pokerapp.config import Config
 from pokerapp.privatechatmodel import UserPrivateChatModel
-from pokerapp.winnerdetermination import WinnerDetermination, HAND_RANK, HandsOfPoker
+from pokerapp.winnerdetermination import HAND_NAMES_TRANSLATIONS, HandsOfPoker, HAND_RANK_MULTIPLIER
 from pokerapp.cards import Cards
 from pokerapp.entities import (
     Game,
@@ -518,75 +518,149 @@ class PokerBotModel:
             # Answer callback query to show the error message to the user
             context.bot.answer_callback_query(callback_query_id=update.callback_query.id, text=str(e), show_alert=True)
     
-    def _finish(self, game: Game, chat_id: ChatId):
-        """Determines winner, distributes pot, and concludes the game."""
+    def _finish(self, context: CallbackContext, game: Game, chat_id: ChatId) -> None:
+        """پایان دادن به دست، محاسبه برندگان و ارسال پیام نتایج حرفه‌ای."""
         game.state = GameState.FINISHED
-        
-        final_winnings = self._calculate_winnings(game)
-        
-        if not final_winnings:
-            # Case where everyone folded except one person
-            contenders = game.players_by(states=(PlayerState.ACTIVE, PlayerState.ALL_IN))
-            if len(contenders) == 1:
-                winner = contenders[0]
-                winner.wallet.inc(game.pot)
-                self._view.send_message(chat_id, f"🎉 {winner.mention_markdown} برنده پات ({game.pot}$) شد (همه فولد کردند).")
-            else:
-                 self._view.send_message(chat_id, "بازی بدون برنده به پایان رسید.")
-        else:
-            win_messages = []
-            for hand_name, winners_list in final_winnings.items():
-                for winner, payout in winners_list:
-                    # The money is already given in _calculate_winnings, just announce it
-                     win_messages.append(f"🎉 {winner.mention_markdown} با دست *{hand_name}* برنده {payout}$ شد.")
-            
-            self._view.send_message(chat_id, "\n".join(win_messages))
+        self._view.remove_message(chat_id, game.turn_message_id)
 
-        # Cleanup for next round
-        self._view.send_message(chat_id, "بازی جدید تا چند ثانیه دیگر شروع می‌شود. برای خروج /stop یا برای ادامه منتظر بمانید.")
-        # You can add a timer here to auto-start the next game
-        game.reset() # This prepares the game object for the next hand.
-        # Logic to re-add players and start a new game would go here.
+        # 1. شناسایی بازیکنانی که باید دستشان رو شود (Showdown)
+        # اگر فقط یک نفر باقی مانده (بقیه فولد کرده‌اند)، showdown نداریم.
+        active_players = game.players_by(states=(PlayerState.ACTIVE, PlayerState.ALL_IN))
+        showdown_players = []
+        final_text = "🏁 *پایان دست!* 🏁\n\n"
 
-    def _calculate_winnings(self, game: Game) -> Dict[str, List[Tuple[Player, Money]]]:
-        """Calculates winnings, handles side pots, and distributes money."""
-        # This is a complex method. Your original file has it commented out.
-        # I'll provide a simplified version that works for most cases without side pots.
-        # For a full implementation with side pots, the logic from my previous response would be needed.
-        all_contenders = game.players_by(states=(PlayerState.ACTIVE, PlayerState.ALL_IN))
-        if len(all_contenders) == 0:
-            return {}
-        
-        if len(all_contenders) == 1:
-            winner = all_contenders[0]
+        if len(active_players) == 1:
+            # حالت حرفه‌ای: همه فولد کرده‌اند
+            winner = active_players[0]
             winner.wallet.inc(game.pot)
-            # Approve the transaction for the winner
-            winner.wallet.approve(game.id)
-            return {"Walkover": [(winner, game.pot)]}
-
-        # Showdown
-        scores = {}
-        for player in all_contenders:
-            scores[player.user_id] = self._winner_determine.get_score(player.cards, game.cards_table)
-
-        best_score = max(scores.values())
-        winners = [p for p in all_contenders if scores[p.user_id] == best_score]
-        
-        win_share = game.pot // len(winners)
-        hand_name = self._hand_name_from_score(best_score)
-        final_winnings = {hand_name: []}
-
-        for winner in winners:
-            winner.wallet.inc(win_share)
-            winner.wallet.approve(game.id)
-            final_winnings[hand_name].append((winner, win_share))
+            final_text += f"👤 برنده نهایی:\n{winner.mention_markdown}\n\n"
+            final_text += f"💰 **مبلغ برد: {game.pot}$**\n"
+            final_text += "_همه بازیکنان دیگر فولد کردند._"
+        else:
+            # حالت Showdown: چند بازیکن باقی مانده‌اند
+            showdown_players = active_players
+            winnings = self._calculate_winnings(game, showdown_players)
             
-        # For losing players, cancel their transactions to refund any un-called bets
-        all_winners_id = {p.user_id for p in winners}
-        for p in all_contenders:
-            if p.user_id not in all_winners_id:
-                p.wallet.cancel(game.id)
+            # مرتب‌سازی برندگان بر اساس مبلغ برد
+            sorted_winners = sorted(winnings.items(), key=lambda item: item[1][0], reverse=True)
 
+            final_text += f"💳 **کارت‌های روی میز:**\n`{' '.join(game.cards_table)}`\n\n"
+            final_text += "🏆 **نتایج و برندگان:**\n"
+            final_text += "--------------------\n"
+
+            for player, (amount, score, hand) in sorted_winners:
+                hand_rank = score // HAND_RANK_MULTIPLIER
+                hand_info = HAND_NAMES_TRANSLATIONS.get(HandsOfPoker(hand_rank), {"fa": "نامشخص", "en": "Unknown", "emoji": "❓"})
+                
+                # جدا کردن نام بازیکن برای جلوگیری از به هم ریختگی متن
+                final_text += f"👤 بازیکن:\n{player.mention_markdown}\n"
+                
+                # نمایش دست برتر (۵ کارت) و هایلایت کردن کارت‌های بازیکن
+                hand_str_list = []
+                player_card_set = set(player.cards)
+                for card in hand:
+                    if card in player_card_set:
+                        hand_str_list.append(f"({card})") # کارت بازیکن در پرانتز
+                    else:
+                        hand_str_list.append(str(card))
+                
+                hand_display = ' '.join(hand_str_list)
+
+                final_text += f"{hand_info['emoji']} **{hand_info['fa']}** `({hand_info['en']})`\n"
+                final_text += f"   🃏 دست: `{hand_display}`\n"
+                final_text += f"   💰 برد: **{amount}$**\n"
+                final_text += "--------------------\n"
+
+        final_text += f"\n💰 **موجودی نهایی پات: {game.pot}$**"
+        
+        # ارسال پیام نهایی
+        self._view.send_message(
+            chat_id=chat_id,
+            text=final_text,
+            parse_mode="Markdown"
+        )
+        
+        # آماده‌سازی برای دست بعدی
+        Timer(15, self._prepare_new_round, args=(context, chat_id)).start()
+
+    def _calculate_winnings(self, game: Game, showdown_players: List[Player]) -> Dict[Player, Tuple[Money, Score, Tuple]]:
+        """
+        محاسبه برندگان، مبلغ برد، امتیاز و دست برتر هر بازیکن.
+        این متد پیچیدگی ساید-پات (side-pot) را نیز مدیریت می‌کند.
+        """
+        # اگر بازیکنی برای نمایش دست وجود ندارد (مثلاً همه فولد کردند)، محاسبات را رد کن
+        if not showdown_players:
+            return {}
+
+        # 1. محاسبه امتیاز و دست برتر برای هر بازیکن در showdown
+        player_scores = {}
+        for player in showdown_players:
+            score, best_hand = self._winner_determine.get_hand_value(player.cards, game.cards_table)
+            player_scores[player.user_id] = {"score": score, "hand": best_hand, "player": player}
+        
+        # 2. مرتب‌سازی بازیکنان بر اساس امتیاز (از بیشترین به کمترین)
+        sorted_players = sorted(player_scores.values(), key=lambda x: x['score'], reverse=True)
+
+        # 3. محاسبه پات‌ها (اصلی و جانبی)
+        all_bets = sorted([p.total_bet for p in game.players if p.total_bet > 0])
+        unique_bet_levels = sorted(list(set(all_bets)))
+        
+        pots = []
+        last_level = 0
+        for level in unique_bet_levels:
+            pot_amount = 0
+            eligible_player_ids = []
+            
+            # محاسبه سهم هر بازیکن در این pot
+            for player in game.players:
+                contribution = min(player.total_bet, level) - last_level
+                if contribution > 0:
+                    pot_amount += contribution
+            
+            # شناسایی بازیکنانی که در این pot شریک هستند
+            for p in showdown_players:
+                if p.total_bet >= level:
+                    eligible_player_ids.append(p.user_id)
+
+            if pot_amount > 0:
+                pots.append({"amount": pot_amount, "eligible_ids": eligible_player_ids})
+            last_level = level
+
+        # 4. توزیع پات‌ها بین برندگان
+        winnings = {} # {player: (total_win, score, hand)}
+
+        for pot in pots:
+            best_score_in_pot = 0
+            winners_in_pot = []
+            
+            # پیدا کردن بهترین دست(ها) در بین بازیکنان مجاز این pot
+            for p_data in sorted_players:
+                if p_data['player'].user_id in pot['eligible_ids']:
+                    if not winners_in_pot or p_data['score'] == best_score_in_pot:
+                        best_score_in_pot = p_data['score']
+                        winners_in_pot.append(p_data)
+                    elif p_data['score'] < best_score_in_pot:
+                        break # چون بازیکنان مرتب هستند، نیازی به ادامه نیست
+            
+            if not winners_in_pot:
+                continue
+
+            # تقسیم پول pot بین برندگان
+            win_share = pot['amount'] // len(winners_in_pot)
+            remainder = pot['amount'] % len(winners_in_pot)
+
+            for i, winner_data in enumerate(winners_in_pot):
+                payout = win_share + (1 if i < remainder else 0)
+                player = winner_data['player']
+                
+                if player not in winnings:
+                    winnings[player] = [0, winner_data['score'], winner_data['hand']]
+                
+                winnings[player][0] += payout
+                player.wallet.inc(payout)
+
+        # تبدیل لیست به تاپل برای خروجی نهایی
+        final_winnings = {p: (money, score, hand) for p, (money, score, hand) in winnings.items()}
         return final_winnings
 
     def _hand_name_from_score(self, score: int) -> str:
