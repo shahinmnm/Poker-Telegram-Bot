@@ -442,7 +442,7 @@ class PokerBotModel:
             game.current_player_index = next_player_index
             self._process_playing(chat_id, game)
             
-    def _go_to_next_street(self, game: Game, chat_id: ChatId):
+    def _go_to_next_street(self, game: Game, chat_id: ChatId) -> None:
         """بازی را به مرحله بعدی (Flop, Turn, River) یا به پایان (Finish) می‌برد."""
         self._round_rate.collect_bets_for_pot(game)
 
@@ -464,8 +464,10 @@ class PokerBotModel:
             game.state = GameState.ROUND_RIVER
             self.add_cards_to_table(1, game, chat_id, "ریوِر (River)")
             self._process_playing(chat_id, game)
-        else: # اگر در River بودیم یا شرایط پایان بازی برقرار بود
-            self._finish(game, chat_id)
+        elif game.state == GameState.ROUND_RIVER:
+            # این حالت را به جای else صریحاً می‌نویسیم تا خواناتر باشد
+            # بعد از پایان شرط‌بندی در River، باید برندگان را مشخص کنیم
+            self._determine_winners(game, chat_id)
             return
 
     def add_cards_to_table(self, count: int, game: Game, chat_id: ChatId, street_name: str):
