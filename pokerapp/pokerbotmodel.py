@@ -850,24 +850,68 @@ class PokerBotModel:
 
         # ۲. تمام پیام‌های متنی با چرخه عمر TURN را پاک می‌کند
             self._cleanup_messages_by_lifespan(game, chat_id, MessageLifespan.TURN) # <--- "Lifespan" صحیح است
+            
+    def _format_cards(self, cards: List[str]) -> str:
+        """
+        کارت‌ها را با دو فاصله بینشان و حفظ ترتیب برمی‌گرداند.
+        Example: ['Q♣', '7♦', '8♣'] -> "Q♣  7♦  8♣"
+        """
+        return "  ".join(str(c) for c in cards)
     
-    # --- این نسخه را جایگزین _showdown قبلی کن ---
-    def _showdown(self, game: Game, chat_id: ChatId, context: CallbackContext) -> None:
+    def _showdown(self, game: Game, chat_id: ChatId) -> None:
         """
-        مرحله نهایی (Showdown): پیام اعلان را ارسال کرده و تمام پیام‌های دست را پاک می‌کند.
+        نمایش نتایج نهایی دست (Showdown) با فرمت حرفه‌ای و فارسی.
         """
-        # این پیام یک اعلان نهایی است و نیازی به مدیریت خودکار ندارد، پس با view ارسال می‌شود.
-        self._view.send_message(
-            chat_id=chat_id,
-            text="⚔️ **شــــــــــــودان!** ⚔️\n\nوقت رو کردن کارت‌ها و مشخص شدن برنده است..."
+        winners_data = self._winner_determine.determine_winners_with_hand_details(game)
+        if not winners_data:
+            self._view.send_message(chat_id, "خطایی در تعیین برنده رخ داد.")
+            return
+
+        # توزیع پات
+        win_amount_per_winner = game.pot // len(winners_data)
+        for data in winners_data:
+            data['player'].wallet.inc(win_amount_per_winner)
+            # مبلغ برد رو برای نمایش در پیام ذخیره می‌کنیم
+            data['win_amount'] = win_amount_per_winner
+
+        # ساخت پیام خروجی
+        # 💳 کارت‌های روی میز:
+        # Q♣  7♦  8♣  A♣  K♠
+        table_cards_str = self._format_cards(game.cards_table)
+        results_text = (
+            f"🏁 *پایان دست!* 🏁\n\n"
+            f"💳 *کارت‌های روی میز:*\n`{table_cards_str}`\n\n"
+            f"🏆 *نتایج و برندگان:*\n"
         )
-    
-        # <<< جادوی اصلی اینجاست!
-        # تمام پیام‌های دارای چرخه عمر HAND (مانند تصاویر کارت‌های میز) را پاک می‌کنیم.
-        self._cleanup_messages_by_lifespan(game, chat_id, MessageLifespan.HAND)
-    
-        # فراخوانی متد نهایی برای تعیین برنده و اتمام دست
-        self._finish(game, chat_id, context)
+        
+        # 👋 کارت‌های دست بازیکن:
+        # J♦  8♣
+
+        for data in winners_data:
+            player = data['player']
+            hand_info = HAND_NAMES_TRANSLATIONS[data['hand_type']]
+            hand_cards_str = self._format_cards(player.cards)
+            best_5_cards_str = self._format_cards(data['best_hand_cards'])
+            win_amount = data['win_amount']
+
+            results_text += (
+                f"--------------------\n"
+                f"👤 *بازیکن:* {player.mention_markdown}\n"
+                f"👋 *کارت‌های دست:*\n`{hand_cards_str}`\n"
+                f"{hand_info['emoji']} {hand_info['fa']}\n"
+                f"🃏 *دست:* `{best_5_cards_str}`\n"
+                f"💰 *برد:* `{win_amount}$`\n"
+            )
+
+        results_text += (
+            f"--------------------\n\n"
+            f"💰 *پات نهایی:* `{game.pot}$`"
+        )
+
+        self._view.send_message(chat_id, results_text, parse_mode="Markdown")
+        self._end_hand(game, chat_id) # <--- پایان دست را اینجا صدا می‌زنیم
+
+
         
     def _send_managed_message(
         self,
