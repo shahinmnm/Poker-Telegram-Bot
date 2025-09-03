@@ -419,6 +419,131 @@ class PokerBotModel:
         if msg_id:
             game.turn_message_id = msg_id
         game.last_turn_time = datetime.datetime.now()
+    # --- Player Action Handlers ---
+    # این بخش تمام حرکات ممکن بازیکنان در نوبتشان را مدیریت می‌کند.
+    
+    def player_action_fold(self, update: Update, context: CallbackContext, game: Game) -> None:
+        """بازیکن فولد می‌کند، از دور شرط‌بندی کنار می‌رود و نوبت به نفر بعدی منتقل می‌شود."""
+        current_player = self._current_turn_player(game)
+        if not current_player:
+            return
+    
+        chat_id = update.effective_chat.id
+        current_player.state = PlayerState.FOLD
+        self._view.send_message(chat_id, f"🏳️ {current_player.mention_markdown} فولد کرد.")
+    
+        # برای اطمینان از پاک شدن دکمه‌ها، مارک‌آپ را حذف می‌کنیم
+        if game.turn_message_id:
+            self._view.remove_markup(chat_id, game.turn_message_id)
+    
+        self._move_to_next_player_and_process(game, chat_id, context)
+    
+    def player_action_call_check(self, update: Update, context: CallbackContext, game: Game) -> None:
+        """بازیکن کال (پرداخت) یا چک (عبور) را انجام می‌دهد."""
+        current_player = self._current_turn_player(game)
+        if not current_player:
+            return
+    
+        chat_id = update.effective_chat.id
+        call_amount = game.max_round_rate - current_player.round_rate
+        current_player.has_acted = True
+    
+        try:
+            if call_amount > 0:
+                # منطق Call
+                current_player.wallet.authorize(game.id, call_amount)
+                current_player.round_rate += call_amount
+                current_player.total_bet += call_amount
+                game.pot += call_amount
+                self._view.send_message(chat_id, f"🎯 {current_player.mention_markdown} با {call_amount}$ کال کرد.")
+            else:
+                # منطق Check
+                self._view.send_message(chat_id, f"✋ {current_player.mention_markdown} چک کرد.")
+        except UserException as e:
+            self._view.send_message(chat_id, f"⚠️ خطای {current_player.mention_markdown}: {e}")
+            return  # اگر پول نداشت، از ادامه متد جلوگیری کن
+    
+        if game.turn_message_id:
+            self._view.remove_markup(chat_id, game.turn_message_id)
+    
+        self._move_to_next_player_and_process(game, chat_id, context)
+    
+    def player_action_raise_bet(self, update: Update, context: CallbackContext, game: Game, raise_amount: int) -> None:
+        """بازیکن شرط را افزایش می‌دهد (Raise) یا برای اولین بار شرط می‌بندد (Bet)."""
+        current_player = self._current_turn_player(game)
+        if not current_player:
+            return
+    
+        chat_id = update.effective_chat.id
+        call_amount = game.max_round_rate - current_player.round_rate
+        total_amount_to_bet = call_amount + raise_amount
+    
+        try:
+            current_player.wallet.authorize(game.id, total_amount_to_bet)
+            current_player.round_rate += total_amount_to_bet
+            current_player.total_bet += total_amount_to_bet
+            game.pot += total_amount_to_bet
+    
+            # به‌روزرسانی حداکثر شرط و اعلام آن
+            game.max_round_rate = current_player.round_rate
+            action_text = "بِت" if call_amount == 0 else "رِیز"
+            self._view.send_message(chat_id, f"💹 {current_player.mention_markdown} {action_text} زد و شرط رو به {current_player.round_rate}$ رسوند.")
+    
+            # --- بخش کلیدی منطق پوکر ---
+            # وقتی کسی رِیز می‌کند، نوبت بازی باید یک دور کامل دیگر بچرخد
+            game.trading_end_user_id = current_player.user_id
+            current_player.has_acted = True
+            # وضعیت بقیه بازیکنان فعال را برای بازی در دور جدید ریست می‌کنیم
+            for p in game.players_by(states=(PlayerState.ACTIVE,)):
+                if p.user_id != current_player.user_id:
+                    p.has_acted = False
+    
+        except UserException as e:
+            self._view.send_message(chat_id, f"⚠️ خطای {current_player.mention_markdown}: {e}")
+            return
+    
+        if game.turn_message_id:
+            self._view.remove_markup(chat_id, game.turn_message_id)
+    
+        self._move_to_next_player_and_process(game, chat_id, context)
+    
+    def player_action_all_in(self, update: Update, context: CallbackContext, game: Game) -> None:
+        """بازیکن تمام موجودی خود را شرط می‌بندد (All-in)."""
+        current_player = self._current_turn_player(game)
+        if not current_player:
+            return
+    
+        chat_id = update.effective_chat.id
+        all_in_amount = current_player.wallet.value()
+    
+        if all_in_amount <= 0:
+            self._view.send_message(chat_id, f"👀 {current_player.mention_markdown} موجودی برای آل-این ندارد و چک می‌کند.")
+            self.player_action_call_check(update, context, game) # این حرکت معادل چک است
+            return
+    
+        current_player.wallet.authorize(game.id, all_in_amount)
+        current_player.round_rate += all_in_amount
+        current_player.total_bet += all_in_amount
+        game.pot += all_in_amount
+        current_player.state = PlayerState.ALL_IN
+        current_player.has_acted = True
+    
+        self._view.send_message(chat_id, f"🀄 {current_player.mention_markdown} با {all_in_amount}$ آل‑این کرد!")
+    
+        if current_player.round_rate > game.max_round_rate:
+            game.max_round_rate = current_player.round_rate
+            # اگر آل-این باعث افزایش شرط شد، مانند رِیز عمل می‌کند
+            game.trading_end_user_id = current_player.user_id
+            for p in game.players_by(states=(PlayerState.ACTIVE,)):
+                if p.user_id != current_player.user_id:
+                    p.has_acted = False
+    
+        if game.turn_message_id:
+            self._view.remove_markup(chat_id, game.turn_message_id)
+    
+        self._move_to_next_player_and_process(game, chat_id, context)
+    
+
         
     def _find_next_active_player_index(self, game: Game, start_index: int) -> int:
         """از ایندکس مشخص شده، به دنبال بازیکن بعدی که FOLD یا ALL_IN نکرده می‌گردد."""
@@ -564,47 +689,7 @@ class PokerBotModel:
         # پیام تصویر میز را برای حذف در انتهای دست، ذخیره می‌کنیم
         if msg:
             game.message_ids_to_delete.append(msg.message_id)
-
-    def player_action_fold(self, update: Update, context: CallbackContext, game: Game) -> None:
-        player = self._current_turn_player(game)
-        if not player: return
-        self._round_rate.player_action_fold(game, player, update.effective_chat.id)
-        player.has_acted = True
-        self._move_to_next_player_and_process(game, update.effective_chat.id)
-
-    def player_action_call_check(self, update: Update, context: CallbackContext, game: Game) -> None:
-        player = self._current_turn_player(game)
-        if not player: return
-        self._round_rate.player_action_call_check(game, player, update.effective_chat.id)
-        player.has_acted = True
-        # context را اینجا پاس می‌دهیم چون از ورودی متد در دسترس است
-        self._move_to_next_player_and_process(game, update.effective_chat.id, context)
-
-
-    def player_action_all_in(self, update: Update, context: CallbackContext, game: Game) -> None:
-        player = self._current_turn_player(game)
-        if not player: return
-        self._round_rate.player_action_all_in(game, player, update.effective_chat.id)
-        player.has_acted = True
-        self._move_to_next_player_and_process(game, update.effective_chat.id)
-
-    def player_action_raise_bet(self, update: Update, context: CallbackContext, game: Game, amount: int) -> None:
-        player = self._current_turn_player(game)
-        if not player: return
-        try:
-            self._round_rate.player_action_raise_bet(game, player, amount, update.effective_chat.id)
-            player.has_acted = True
-            # When someone raises, the action is on other players again.
-            # Reset `has_acted` for all other active players.
-            for p in game.players:
-                if p.user_id != player.user_id and p.state == PlayerState.ACTIVE:
-                    p.has_acted = False
-            self._move_to_next_player_and_process(game, update.effective_chat.id)
-        except UserException as e:
-            # Answer callback query to show the error message to the user
-            context.bot.answer_callback_query(callback_query_id=update.callback_query.id, text=str(e), show_alert=True)
             
-
     def _determine_winners(self, game: Game, chat_id: ChatId) -> None:
         """
         برندگان بازی را مشخص کرده و سپس متد _finish را برای اعلام نتایج فراخوانی می‌کند.
@@ -850,67 +935,6 @@ class RoundRateModel:
                 chat_id,
                 f"⚠️ {player.mention_markdown} موجودی کافی برای بلایند نداشت و All-in شد ({available_money}$)."
             )
-
-    def player_action_fold(self, game: Game, player: Player, chat_id: ChatId):
-        player.state = PlayerState.FOLD
-        self._view.send_message(chat_id, f"🏳️ {player.mention_markdown} فولد کرد.")
-        # Player's money is already authorized. It will be handled at the end of the hand.
-
-    def player_action_call_check(self, game: Game, player: Player, chat_id: ChatId):
-        amount_to_call = game.max_round_rate - player.round_rate
-        if amount_to_call > 0:
-            # This is a Call
-            actual_call = min(amount_to_call, player.wallet.value())
-            player.wallet.authorize(game.id, actual_call)
-            player.round_rate += actual_call
-            player.total_bet += actual_call
-            game.pot += actual_call
-            self._view.send_message(chat_id, f"🎯 {player.mention_markdown} کال کرد ({actual_call}$).")
-            if actual_call < amount_to_call:
-                player.state = PlayerState.ALL_IN
-                self._view.send_message(chat_id, f"🀄 {player.mention_markdown} با کال کردن آل-این شد.")
-        else:
-            # This is a Check
-            self._view.send_message(chat_id, f"✋ {player.mention_markdown} چک کرد.")
-    
-    def player_action_all_in(self, game: Game, player: Player, chat_id: ChatId):
-        all_in_amount = player.wallet.value()
-        player.wallet.authorize(game.id, all_in_amount)
-        
-        # Add to pot and update player/game state
-        game.pot += all_in_amount
-        player.round_rate += all_in_amount
-        player.total_bet += all_in_amount
-        player.state = PlayerState.ALL_IN
-        
-        # Update max round rate if this all-in is a raise
-        if player.round_rate > game.max_round_rate:
-            game.max_round_rate = player.round_rate
-
-        self._view.send_message(chat_id, f"🀄 {player.mention_markdown} آل-این کرد (مبلغ کل: {player.round_rate}$).")
-
-    def player_action_raise_bet(self, game: Game, player: Player, amount: int, chat_id: ChatId):
-        # amount is the total new bet amount (e.g., raise to 50)
-        current_bet = player.round_rate
-        raise_amount = amount - current_bet # The additional money needed
-
-        if raise_amount <= 0:
-            raise UserException("مقدار رِیز باید از شرط فعلی شما بیشتر باشد.")
-        
-        if amount < game.max_round_rate * 2 and game.max_round_rate > 0:
-            raise UserException(f"حداقل رِیز باید دو برابر آخرین شرط باشد ({game.max_round_rate * 2}$).")
-
-        player.wallet.authorize(game.id, raise_amount)
-        
-        # --- FIX 2: Correctly update the pot ---
-        # Instead of adding the full `amount`, add only the `raise_amount`.
-        game.pot += raise_amount
-        # ----------------------------------------
-        
-        player.round_rate = amount
-        player.total_bet += raise_amount
-        game.max_round_rate = amount
-        self._view.send_message(chat_id, f"💹 {player.mention_markdown} شرط را به {amount}$ افزایش داد.")
 
     def collect_bets_for_pot(self, game: Game):
         # This function resets the round-specific bets for the next street.
