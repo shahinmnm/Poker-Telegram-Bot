@@ -217,6 +217,7 @@ class WinnerDetermination:
         return self._calculate_score_value(values, hand_type), hand_type
 
     
+# In class WinnerDetermination:
     def determine_winners_with_hand_details(self, game) -> List[Dict]:
         """
         برندگان را به همراه جزئیات کامل دست‌شان (نوع دست، بهترین ۵ کارت) برمی‌گرداند.
@@ -229,21 +230,25 @@ class WinnerDetermination:
             winner = players_in_game[0]
             # جزئیات دست را حتی برای یک برنده هم محاسبه می‌کنیم
             hand_type, score, best_cards = self.get_hand_value(winner.cards, game.cards_table)
-            return [{
-                'player': winner,
-                'score': score,
-                'hand_type': hand_type,
-                'best_hand_cards': best_cards,
-            }]
+            return [{'player': winner, 'score': score, 'hand_type': hand_type, 'best_hand_cards': best_cards}]
 
         scores = {}
         for player in players_in_game:
             hand_type, score, best_cards = self.get_hand_value(player.cards, game.cards_table)
-            scores[player] = {
-                'score': score,
-                'hand_type': hand_type,
-                'best_hand_cards': best_cards
-            }
+            scores[player] = {'score': score, 'hand_type': hand_type, 'best_hand_cards': best_cards}
+
+        if not scores:
+            return []
+            
+        max_score = max(s['score'] for s in scores.values())
+        
+        winners_details = []
+        for player, details in scores.items():
+            if details['score'] == max_score:
+                winners_details.append({'player': player, **details})
+        
+        return winners_details
+
 
         if not scores:
             return []
