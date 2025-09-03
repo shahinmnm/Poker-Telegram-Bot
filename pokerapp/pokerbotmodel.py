@@ -849,7 +849,7 @@ class PokerBotModel:
             game.turn_message_id = None
 
         # ۲. تمام پیام‌های متنی با چرخه عمر TURN را پاک می‌کند
-        self._cleanup_messages_by_lifespan(game, chat_id, MessageLifpan.TURN)
+            self._cleanup_messages_by_lifespan(game, chat_id, MessageLifespan.TURN) # <--- "Lifespan" صحیح است
     
     # --- این نسخه را جایگزین _showdown قبلی کن ---
     def _showdown(self, game: Game, chat_id: ChatId, context: CallbackContext) -> None:
