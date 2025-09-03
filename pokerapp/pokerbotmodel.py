@@ -424,31 +424,35 @@ class PokerBotModel:
     # این بخش تمام حرکات ممکن بازیکنان در نوبتشان را مدیریت می‌کند.
     
     def player_action_fold(self, update: Update, context: CallbackContext, game: Game) -> None:
-        """بازیکن فولد می‌کند، از دور شرط‌بندی کنار می‌رود و نوبت به نفر بعدی منتقل می‌شود."""
+        """بازیکن فولد می‌کند و پیام آن با چرخه عمر TURN ثبت می‌شود."""
         current_player = self._current_turn_player(game)
         if not current_player:
             return
-    
+
         chat_id = update.effective_chat.id
         current_player.state = PlayerState.FOLD
-        self._view.send_message(chat_id, f"🏳️ {current_player.mention_markdown} فولد کرد.")
-    
-        # برای اطمینان از پاک شدن دکمه‌ها، مارک‌آپ را حذف می‌کنیم
-        if game.turn_message_id:
-            self._view.remove_markup(chat_id, game.turn_message_id)
-    
+        
+        # استفاده از دروازه‌بان پیام با چرخه عمر TURN
+        self._send_managed_message(
+            game,
+            chat_id,
+            lifespan=MessageLifespan.TURN,
+            text=f"🏳️ {current_player.mention_markdown} فولد کرد."
+        )
+
+        # حذف دستی مارک‌آپ دیگر لازم نیست!
         self._move_to_next_player_and_process(game, chat_id, context)
-    
+
     def player_action_call_check(self, update: Update, context: CallbackContext, game: Game) -> None:
-        """بازیکن کال (پرداخت) یا چک (عبور) را انجام می‌دهد."""
+        """بازیکن کال یا چک می‌کند و پیام آن با چرخه عمر TURN ثبت می‌شود."""
         current_player = self._current_turn_player(game)
         if not current_player:
             return
-    
+
         chat_id = update.effective_chat.id
         call_amount = game.max_round_rate - current_player.round_rate
         current_player.has_acted = True
-    
+
         try:
             if call_amount > 0:
                 # منطق Call
@@ -456,95 +460,114 @@ class PokerBotModel:
                 current_player.round_rate += call_amount
                 current_player.total_bet += call_amount
                 game.pot += call_amount
-                self._view.send_message(chat_id, f"🎯 {current_player.mention_markdown} با {call_amount}$ کال کرد.")
+                # استفاده از دروازه‌بان پیام
+                self._send_managed_message(
+                    game,
+                    chat_id,
+                    lifespan=MessageLifespan.TURN,
+                    text=f"🎯 {current_player.mention_markdown} با {call_amount}$ کال کرد."
+                )
             else:
                 # منطق Check
-                self._view.send_message(chat_id, f"✋ {current_player.mention_markdown} چک کرد.")
+                # استفاده از دروازه‌بان پیام
+                self._send_managed_message(
+                    game,
+                    chat_id,
+                    lifespan=MessageLifespan.TURN,
+                    text=f"✋ {current_player.mention_markdown} چک کرد."
+                )
         except UserException as e:
+            # پیام‌های خطا باید باقی بمانند، پس از view استفاده می‌کنیم
             self._view.send_message(chat_id, f"⚠️ خطای {current_player.mention_markdown}: {e}")
-            return  # اگر پول نداشت، از ادامه متد جلوگیری کن
-    
-        if game.turn_message_id:
-            self._view.remove_markup(chat_id, game.turn_message_id)
-    
+            return
+
+        # حذف دستی مارک‌آپ دیگر لازم نیست!
         self._move_to_next_player_and_process(game, chat_id, context)
-    
+
     def player_action_raise_bet(self, update: Update, context: CallbackContext, game: Game, raise_amount: int) -> None:
-        """بازیکن شرط را افزایش می‌دهد (Raise) یا برای اولین بار شرط می‌بندد (Bet)."""
+        """بازیکن شرط را افزایش می‌دهد و پیام آن با چرخه عمر TURN ثبت می‌شود."""
         current_player = self._current_turn_player(game)
         if not current_player:
             return
-    
+
         chat_id = update.effective_chat.id
         call_amount = game.max_round_rate - current_player.round_rate
         total_amount_to_bet = call_amount + raise_amount
-    
+
         try:
             current_player.wallet.authorize(game.id, total_amount_to_bet)
             current_player.round_rate += total_amount_to_bet
             current_player.total_bet += total_amount_to_bet
             game.pot += total_amount_to_bet
-    
-            # به‌روزرسانی حداکثر شرط و اعلام آن
+            
             game.max_round_rate = current_player.round_rate
             action_text = "بِت" if call_amount == 0 else "رِیز"
-            self._view.send_message(chat_id, f"💹 {current_player.mention_markdown} {action_text} زد و شرط رو به {current_player.round_rate}$ رسوند.")
-    
-            # --- بخش کلیدی منطق پوکر ---
-            # وقتی کسی رِیز می‌کند، نوبت بازی باید یک دور کامل دیگر بچرخد
+            
+            # استفاده از دروازه‌بان پیام
+            self._send_managed_message(
+                game,
+                chat_id,
+                lifespan=MessageLifespan.TURN,
+                text=f"💹 {current_player.mention_markdown} {action_text} زد و شرط رو به {current_player.round_rate}$ رسوند."
+            )
+
             game.trading_end_user_id = current_player.user_id
             current_player.has_acted = True
-            # وضعیت بقیه بازیکنان فعال را برای بازی در دور جدید ریست می‌کنیم
             for p in game.players_by(states=(PlayerState.ACTIVE,)):
                 if p.user_id != current_player.user_id:
                     p.has_acted = False
-    
+
         except UserException as e:
             self._view.send_message(chat_id, f"⚠️ خطای {current_player.mention_markdown}: {e}")
             return
-    
-        if game.turn_message_id:
-            self._view.remove_markup(chat_id, game.turn_message_id)
-    
+
+        # حذف دستی مارک‌آپ دیگر لازم نیست!
         self._move_to_next_player_and_process(game, chat_id, context)
-    
+
     def player_action_all_in(self, update: Update, context: CallbackContext, game: Game) -> None:
-        """بازیکن تمام موجودی خود را شرط می‌بندد (All-in)."""
+        """بازیکن آل-این می‌کند و پیام آن با چرخه عمر TURN ثبت می‌شود."""
         current_player = self._current_turn_player(game)
         if not current_player:
             return
-    
+
         chat_id = update.effective_chat.id
         all_in_amount = current_player.wallet.value()
-    
+
         if all_in_amount <= 0:
-            self._view.send_message(chat_id, f"👀 {current_player.mention_markdown} موجودی برای آل-این ندارد و چک می‌کند.")
-            self.player_action_call_check(update, context, game) # این حرکت معادل چک است
+            # استفاده از دروازه‌بان پیام
+            self._send_managed_message(
+                game,
+                chat_id,
+                lifespan=MessageLifespan.TURN,
+                text=f"👀 {current_player.mention_markdown} موجودی برای آل-این ندارد و چک می‌کند."
+            )
+            self.player_action_call_check(update, context, game)
             return
-    
+
         current_player.wallet.authorize(game.id, all_in_amount)
         current_player.round_rate += all_in_amount
         current_player.total_bet += all_in_amount
         game.pot += all_in_amount
         current_player.state = PlayerState.ALL_IN
         current_player.has_acted = True
-    
-        self._view.send_message(chat_id, f"🀄 {current_player.mention_markdown} با {all_in_amount}$ آل‑این کرد!")
-    
+
+        # استفاده از دروازه‌بان پیام
+        self._send_managed_message(
+            game,
+            chat_id,
+            lifespan=MessageLifespan.TURN,
+            text=f"🀄 {current_player.mention_markdown} با {all_in_amount}$ آل‑این کرد!"
+        )
+
         if current_player.round_rate > game.max_round_rate:
             game.max_round_rate = current_player.round_rate
-            # اگر آل-این باعث افزایش شرط شد، مانند رِیز عمل می‌کند
             game.trading_end_user_id = current_player.user_id
             for p in game.players_by(states=(PlayerState.ACTIVE,)):
                 if p.user_id != current_player.user_id:
                     p.has_acted = False
-    
-        if game.turn_message_id:
-            self._view.remove_markup(chat_id, game.turn_message_id)
-    
-        self._move_to_next_player_and_process(game, chat_id, context)
-    
 
+        # حذف دستی مارک‌آپ دیگر لازم نیست!
+        self._move_to_next_player_and_process(game, chat_id, context)
         
     def _find_next_active_player_index(self, game: Game, start_index: int) -> int:
         """از ایندکس مشخص شده، به دنبال بازیکن بعدی که FOLD یا ALL_IN نکرده می‌گردد."""
@@ -558,16 +581,21 @@ class PokerBotModel:
     def _move_to_next_player_and_process(self, game: Game, chat_id: ChatId, context: CallbackContext):
         """
         ایندکس بازیکن را به نفر فعال بعدی منتقل کرده و حلقه بازی را ادامه می‌دهد.
+        همچنین پیام‌های نوبت قبلی را در ابتدای هر حرکت پاک می‌کند.
         """
+        # <<< جادوی اصلی اینجاست! پاک‌سازی پیام‌های نوبت قبلی.
+        self._cleanup_turn_messages(game, chat_id)
+        # --------------------------------------------------------
+
         next_player_index = self._find_next_active_player_index(
             game, game.current_player_index
         )
         if next_player_index == -1:
-            # حالا که context را داریم، آن را به go_to_next_street هم پاس می‌دهیم
+            # اگر بازیکن دیگری برای بازی در این دور نمانده، به مرحله بعد می‌رویم
             self._go_to_next_street(game, chat_id, context)
         else:
+            # در غیر این صورت، نوبت را به بازیکن بعدی می‌دهیم
             game.current_player_index = next_player_index
-            # context را به process_playing پاس می‌دهیم
             self._process_playing(chat_id, game, context)
             
     def _go_to_next_street(self, game: Game, chat_id: ChatId, context: CallbackContext):
@@ -656,10 +684,9 @@ class PokerBotModel:
         
     def add_cards_to_table(self, count: int, game: Game, chat_id: ChatId, street_name: str):
         """
-        کارت‌های جدید را به میز اضافه کرده و تصویر میز را با فرمت جدید و زیبا ارسال می‌کند.
-        اگر count=0 باشد، فقط کارت‌های فعلی را نمایش می‌دهد.
+        کارت‌های جدید را به میز اضافه می‌کند و پیام آن را با چرخه عمر HAND ثبت می‌کند.
         """
-        # مرحله ۱: اضافه کردن کارت‌های جدید در صورت نیاز
+        # مرحله ۱: اضافه کردن کارت‌های جدید (بدون تغییر)
         if count > 0:
             for _ in range(count):
                 if game.remain_cards:
@@ -667,30 +694,32 @@ class PokerBotModel:
 
         # مرحله ۲: بررسی وجود کارت روی میز
         if not game.cards_table:
-            # اگر کارتی روی میز نیست، به جای عکس، یک پیام متنی ساده می‌فرستیم.
-            msg_id = self._view.send_message_return_id(chat_id, "هنوز کارتی روی میز نیامده است.")
-            if msg_id:
-                game.message_ids_to_delete.append(msg_id)
-                self._view.remove_message_delayed(chat_id, msg_id, 5)
+            # اگر کارتی نیست، یک پیام موقت با چرخه عمر TURN ارسال می‌کنیم
+            self._send_managed_message(
+                game,
+                chat_id,
+                lifespan=MessageLifespan.TURN,
+                text="هنوز کارتی روی میز نیامده است."
+            )
             return
 
-        # مرحله ۳: ساخت رشته کارت‌ها با فرمت جدید (دو فاصله بین هر کارت)
+        # مرحله ۳: ساخت رشته کارت‌ها (بدون تغییر)
         cards_str = "  ".join(game.cards_table)
 
-        # مرحله ۴: ساخت کپشن دو خطی و زیبا
+        # مرحله ۴: ساخت کپشن زیبا (بدون تغییر)
         caption = f"{street_name}\n{cards_str}"
 
-        # مرحله ۵: ارسال تصویر میز با کپشن جدید
+        # مرحله ۵: ارسال تصویر میز (بدون تغییر)
         msg = self._view.send_desk_cards_img(
             chat_id=chat_id,
             cards=game.cards_table,
             caption=caption,
         )
 
-        # پیام تصویر میز را برای حذف در انتهای دست، ذخیره می‌کنیم
-        if msg:
-            game.message_ids_to_delete.append(msg.message_id)
-
+        # <<< جادوی اصلی اینجاست!
+        # به جای لیست قدیمی، پیام را در دفتر ثبت جدید با چرخه عمر HAND ذخیره می‌کنیم.
+        if msg and msg.message_id:
+            game.message_ledger.append((msg.message_id, MessageLifespan.HAND))
 
     # --- این نسخه جدید و کامل را جایگزین _finish قبلی کن ---
     def _finish(self, game: Game, chat_id: ChatId, context: CallbackContext) -> None:
@@ -819,19 +848,21 @@ class PokerBotModel:
     # --- این نسخه را جایگزین _showdown قبلی کن ---
     def _showdown(self, game: Game, chat_id: ChatId, context: CallbackContext) -> None:
         """
-        مرحله نهایی بازی (Showdown): کارت‌ها رو می‌شود و برندگان مشخص می‌شوند.
-        این متد اکنون به طور مستقیم متد _finish را برای پردازش نهایی فرا می‌خواند.
+        مرحله نهایی (Showdown): پیام اعلان را ارسال کرده و تمام پیام‌های دست را پاک می‌کند.
         """
+        # این پیام یک اعلان نهایی است و نیازی به مدیریت خودکار ندارد، پس با view ارسال می‌شود.
         self._view.send_message(
             chat_id=chat_id,
             text="⚔️ **شــــــــــــودان!** ⚔️\n\nوقت رو کردن کارت‌ها و مشخص شدن برنده است..."
         )
     
-        # پاک کردن تمام پیام‌های نوبت و کارت‌های قبلی
-        self._clear_game_messages(game, chat_id)
+        # <<< جادوی اصلی اینجاست!
+        # تمام پیام‌های دارای چرخه عمر HAND (مانند تصاویر کارت‌های میز) را پاک می‌کنیم.
+        self._cleanup_messages_by_lifespan(game, chat_id, MessageLifespan.HAND)
     
-        # فراخوانی مستقیم و تمیز متد نهایی برای تعیین برنده، تقسیم جوایز و اتمام دست
+        # فراخوانی متد نهایی برای تعیین برنده و اتمام دست
         self._finish(game, chat_id, context)
+        
     def _send_managed_message(
         self,
         game: Game,
