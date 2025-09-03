@@ -439,32 +439,42 @@ class PokerBotModel:
             self._process_playing(chat_id, game, context)
             
     def _go_to_next_street(self, game: Game, chat_id: ChatId, context: CallbackContext):
-        """بازی را به مرحله بعدی (Flop, Turn, River) یا به پایان (Finish) می‌برد."""
-        self._round_rate.collect_bets_for_pot(game)
+        """
+        بازی را به مرحله بعدی (Flop, Turn, River, Showdown) منتقل می‌کند.
+        این متد همچنین وضعیت بازیکنان را برای دور شرط‌بندی جدید ریست می‌کند.
+        """
+        # اگر کمتر از دو بازیکن برای ادامه بازی وجود داشته باشند، مستقیماً به نمایش کارت‌ها بروید
+        contenders = game.players_by(states=(PlayerState.ACTIVE, PlayerState.ALL_IN))
+        if len(contenders) < 2:
+            self._showdown(game, chat_id, context)
+            return
 
-        # Reset has_acted for all players for the new betting round
-        for p in game.players:
-            # Don't reset for FOLD players, keep their state
-            if p.state != PlayerState.FOLD:
-                p.has_acted = False
+        # ریست کردن وضعیت بازیکنان برای دور شرط‌بندی جدید
+        game.reset_round_rates_and_actions()
+        # تعیین نوبت اول برای دورهای بعد از فلاپ (اولین بازیکن فعال بعد از دیلر)
+        if game.state != GameState.ROUND_PRE_FLOP:
+            game.current_player_index = self._find_next_active_player_index(game, game.dealer_index)
 
+        # انتقال به مرحله بعدی
         if game.state == GameState.ROUND_PRE_FLOP:
             game.state = GameState.ROUND_FLOP
-            self.add_cards_to_table(3, game, chat_id, "فلاپ (Flop)")
-            self._process_playing(chat_id, game)
+            self.add_cards_to_table(3, game, chat_id)
         elif game.state == GameState.ROUND_FLOP:
             game.state = GameState.ROUND_TURN
-            self.add_cards_to_table(1, game, chat_id, "تِرن (Turn)")
-            self._process_playing(chat_id, game)
+            self.add_cards_to_table(1, game, chat_id)
         elif game.state == GameState.ROUND_TURN:
             game.state = GameState.ROUND_RIVER
-            self.add_cards_to_table(1, game, chat_id, "ریوِر (River)")
-            self._process_playing(chat_id, game)
+            self.add_cards_to_table(1, game, chat_id)
         elif game.state == GameState.ROUND_RIVER:
-            # این حالت را به جای else صریحاً می‌نویسیم تا خواناتر باشد
-            # بعد از پایان شرط‌بندی در River، باید برندگان را مشخص کنیم
-            self._determine_winners(game, chat_id, context) # <--- این فراخوانی کاملاً صحیح است!
+            self._showdown(game, chat_id, context)
             return
+        else: # اگر به هر دلیلی وضعیت نامشخص بود
+            self._showdown(game, chat_id, context)
+            return
+
+        # شروع حلقه اصلی بازی برای دور جدید شرط‌بندی با پاس دادن context
+        self._process_playing(chat_id, game, context)
+
     def _determine_all_scores(self, game: Game) -> List[Dict]:
         """
         برای تمام بازیکنان فعال، دست و امتیازشان را محاسبه کرده و لیستی از دیکشنری‌ها را برمی‌گرداند.
