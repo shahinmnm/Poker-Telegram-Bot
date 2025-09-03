@@ -5,9 +5,6 @@ import traceback
 from threading import Timer
 from typing import List, Tuple, Dict, Optional
 
-import logging
-from telegram.error import TelegramError  # برای هندلینگ خطاهای PTB
-
 import redis
 from telegram import Message, ReplyKeyboardMarkup, Update, Bot, ParseMode
 from telegram.ext import Handler, CallbackContext
@@ -46,9 +43,10 @@ DICES = "⚀⚁⚂⚃⚄⚅"
 KEY_CHAT_DATA_GAME = "game"
 KEY_OLD_PLAYERS = "old_players"
 
-logging.basicConfig(level=logging.WARNING)
-logger = logging.getLogger(__name__)
-
+# MAX_PLAYERS = 8 (Defined in entities)
+# MIN_PLAYERS = 2 (Defined in entities)
+# SMALL_BLIND = 5 (Defined in entities)
+# DEFAULT_MONEY = 1000 (Defined in entities)
 MAX_TIME_FOR_TURN = datetime.timedelta(minutes=2)
 DESCRIPTION_FILE = "assets/description_bot.md"
 
@@ -825,63 +823,47 @@ class PokerBotModel:
     def _cleanup_messages_by_lifespan(self, game: Game, chat_id: ChatId, lifespan: MessageLifespan):
         """
         تمام پیام‌های با چرخه عمر مشخص را از چت و از دفتر ثبت پاک می‌کند.
-        فیکس: اضافه کردن هندلینگ خطا و لاگ برای silent failure، و retry ساده.
         """
         messages_to_keep = []
         messages_to_delete = []
-    
+
+        # ما روی یک کپی از لیست پیمایش می‌کنیم تا از خطا جلوگیری کنیم
         for msg_id, msg_lifespan in list(game.message_ledger):
             if msg_lifespan == lifespan:
                 messages_to_delete.append(msg_id)
             else:
                 messages_to_keep.append((msg_id, msg_lifespan))
-    
+
         print(f"DEBUG: Cleaning up {len(messages_to_delete)} messages with lifespan '{lifespan.name}'.")
-        
         for msg_id in messages_to_delete:
-            try:
-                # فیکس: چک کردن نتیجه و retry اگر fail کرد (حداکثر ۱ بار)
-                success = self._view.remove_message(chat_id, msg_id)
-                if not success:
-                    logger.warning(f"Failed to delete message {msg_id} (first attempt). Retrying...")
-                    success = self._view.remove_message(chat_id, msg_id)  # Retry
-                if success:
-                    logger.info(f"Message {msg_id} deleted successfully.")
-                else:
-                    raise ValueError("Delete failed after retry")
-            except (TelegramError, ValueError) as e:
-                logger.error(f"Error deleting message {msg_id} in chat {chat_id}: {e}. Message may already be deleted or bot lacks permissions.")
-                # فیکس برای حفظ مکانیزم: اگر fail کرد، پیام را در ledger نگه دار (برای cleanup بعدی)
-                messages_to_keep.append((msg_id, lifespan))  # حفظ در ledger برای دست بعدی
-    
-        # دفتر ثبت را با پیام‌هایی که هنوز عمرشان تمام نشده، به‌روز می‌کنیم (یا fail کرده‌اند)
+            self._view.remove_message(chat_id, msg_id)
+
+        # دفتر ثبت را با پیام‌هایی که هنوز عمرشان تمام نشده، به‌روز می‌کنیم
         game.message_ledger = messages_to_keep
-    
+
     def _cleanup_turn_messages(self, game: Game, chat_id: ChatId):
         """پیام‌های نوبت قبلی را پاک می‌کند."""
-        # ۱. دکمه‌های پیام نوبت قبلی را حذف می‌کند
+        # ۱. دکمه‌های پیام نوبت قبلی را حذف می‌کند (این کار از بازی کردن خارج از نوبت جلوگیری می‌کند)
         if game.turn_message_id:
-            try:
-                self._view.remove_markup(chat_id, game.turn_message_id)
-                game.turn_message_id = None
-            except TelegramError as e:
-                logger.error(f"Error removing markup for message {game.turn_message_id}: {e}")
-        
-        # ۲. تمام پیام‌های متنی با چرخه عمر TURN را پاک می‌کند (با فیکس جدید)
-        self._cleanup_messages_by_lifespan(game, chat_id, MessageLifespan.TURN)
+            self._view.remove_markup(chat_id, game.turn_message_id)
+            game.turn_message_id = None
+
+        # ۲. تمام پیام‌های متنی با چرخه عمر TURN را پاک می‌کند
+            self._cleanup_messages_by_lifespan(game, chat_id, MessageLifespan.TURN) # <--- "Lifespan" صحیح است
     
-    # فیکس برای _showdown (برای حفظ مکانیزم پس از پایان دست)
+    # --- این نسخه را جایگزین _showdown قبلی کن ---
     def _showdown(self, game: Game, chat_id: ChatId, context: CallbackContext) -> None:
         """
         مرحله نهایی (Showdown): پیام اعلان را ارسال کرده و تمام پیام‌های دست را پاک می‌کند.
-        فیکس: مطمئن شو که cleanup پس از پایان دست انجام شود و ledger حفظ شود اگر fail کرد.
         """
+        # این پیام یک اعلان نهایی است و نیازی به مدیریت خودکار ندارد، پس با view ارسال می‌شود.
         self._view.send_message(
             chat_id=chat_id,
             text="⚔️ **شــــــــــــودان!** ⚔️\n\nوقت رو کردن کارت‌ها و مشخص شدن برنده است..."
         )
     
-        # پاک‌سازی پیام‌های HAND (با متد فیکس‌شده)
+        # <<< جادوی اصلی اینجاست!
+        # تمام پیام‌های دارای چرخه عمر HAND (مانند تصاویر کارت‌های میز) را پاک می‌کنیم.
         self._cleanup_messages_by_lifespan(game, chat_id, MessageLifespan.HAND)
     
         # فراخوانی متد نهایی برای تعیین برنده و اتمام دست
