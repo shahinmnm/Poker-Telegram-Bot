@@ -203,16 +203,21 @@ class PokerBotModel:
         self._view.remove_message_delayed(chat_id, update.message.message_id, delay=1)
         
     def show_table(self, update: Update, context: CallbackContext):
-        """کارت‌های روی میز را به درخواست بازیکن نمایش می‌دهد."""
+        """کارت‌های روی میز را به درخواست بازیکن با فرمت جدید نمایش می‌دهد."""
         game = self._game_from_context(context)
         chat_id = update.effective_chat.id
-        if game.state in self.ACTIVE_GAME_STATES:
-            # فراخوانی با count=0 فقط میز را نمایش می‌دهد
-            # VVVV اصلاح اینجاست VVVV
-            self.add_cards_to_table(0, game, chat_id, "👁️ کارت‌های فعلی روی میز")
-        else:
-            self._view.send_message(chat_id, "هنوز بازی شروع نشده است.")
+
+        # پیام درخواست بازیکن را حذف می‌کنیم تا چت تمیز بماند
         self._view.remove_message_delayed(chat_id, update.message.message_id, delay=1)
+
+        if game.state in self.ACTIVE_GAME_STATES and game.cards_table:
+            # از متد اصلاح‌شده برای نمایش میز استفاده می‌کنیم
+            # با count=0 و یک عنوان عمومی و زیبا
+            self.add_cards_to_table(0, game, chat_id, "🃏 کارت‌های روی میز")
+        else:
+            msg_id = self._view.send_message_return_id(chat_id, "هنوز بازی شروع نشده یا کارتی روی میز نیست.")
+            if msg_id:
+                self._view.remove_message_delayed(chat_id, msg_id, 5)
 
     def ready(self, update: Update, context: CallbackContext) -> None:
         """بازیکن برای شروع بازی اعلام آمادگی می‌کند."""
@@ -524,17 +529,41 @@ class PokerBotModel:
         return winners, highest_score
         
     def add_cards_to_table(self, count: int, game: Game, chat_id: ChatId, street_name: str):
-        """Adds cards to the table and announces the new street."""
-        if len(game.remain_cards) < count:
-            self._view.send_message(chat_id, f"کارت کافی برای {street_name} نیست. بازی تمام می‌شود.")
-            self._finish(game, chat_id)
+        """
+        کارت‌های جدید را به میز اضافه کرده و تصویر میز را با فرمت جدید و زیبا ارسال می‌کند.
+        اگر count=0 باشد، فقط کارت‌های فعلی را نمایش می‌دهد.
+        """
+        # مرحله ۱: اضافه کردن کارت‌های جدید در صورت نیاز
+        if count > 0:
+            for _ in range(count):
+                if game.remain_cards:
+                    game.cards_table.append(game.remain_cards.pop())
+
+        # مرحله ۲: بررسی وجود کارت روی میز
+        if not game.cards_table:
+            # اگر کارتی روی میز نیست، به جای عکس، یک پیام متنی ساده می‌فرستیم.
+            msg_id = self._view.send_message_return_id(chat_id, "هنوز کارتی روی میز نیامده است.")
+            if msg_id:
+                game.message_ids_to_delete.append(msg_id)
+                self._view.remove_message_delayed(chat_id, msg_id, 5)
             return
-            
-        new_cards = [game.remain_cards.pop() for _ in range(count)]
-        game.cards_table.extend(new_cards)
-        
-        cards_str = " ".join(game.cards_table)
-        self._view.send_message(chat_id, f"--- {street_name}: {cards_str} ---")
+
+        # مرحله ۳: ساخت رشته کارت‌ها با فرمت جدید (دو فاصله بین هر کارت)
+        cards_str = "  ".join(game.cards_table)
+
+        # مرحله ۴: ساخت کپشن دو خطی و زیبا
+        caption = f"{street_name}\n{cards_str}"
+
+        # مرحله ۵: ارسال تصویر میز با کپشن جدید
+        msg = self._view.send_desk_cards_img(
+            chat_id=chat_id,
+            cards=game.cards_table,
+            caption=caption,
+        )
+
+        # پیام تصویر میز را برای حذف در انتهای دست، ذخیره می‌کنیم
+        if msg:
+            game.message_ids_to_delete.append(msg.message_id)
 
     def player_action_fold(self, update: Update, context: CallbackContext, game: Game) -> None:
         player = self._current_turn_player(game)
