@@ -865,27 +865,22 @@ class PokerBotModel:
         winners_data = self._winner_determine.determine_winners_with_hand_details(game)
         if not winners_data:
             self._view.send_message(chat_id, "خطایی در تعیین برنده رخ داد.")
+            self._end_hand(game, chat_id)
             return
 
         # توزیع پات
         win_amount_per_winner = game.pot // len(winners_data)
         for data in winners_data:
-            data['player'].wallet.inc(win_amount_per_winner)
-            # مبلغ برد رو برای نمایش در پیام ذخیره می‌کنیم
+            data['player'].wallet.approve(game.id) # <--- تایید تراکنش
             data['win_amount'] = win_amount_per_winner
 
         # ساخت پیام خروجی
-        # 💳 کارت‌های روی میز:
-        # Q♣  7♦  8♣  A♣  K♠
         table_cards_str = self._format_cards(game.cards_table)
         results_text = (
             f"🏁 *پایان دست!* 🏁\n\n"
             f"💳 *کارت‌های روی میز:*\n`{table_cards_str}`\n\n"
             f"🏆 *نتایج و برندگان:*\n"
         )
-        
-        # 👋 کارت‌های دست بازیکن:
-        # J♦  8♣
 
         for data in winners_data:
             player = data['player']
@@ -909,8 +904,76 @@ class PokerBotModel:
         )
 
         self._view.send_message(chat_id, results_text, parse_mode="Markdown")
-        self._end_hand(game, chat_id) # <--- پایان دست را اینجا صدا می‌زنیم
+        self._end_hand(game, chat_id)
+    def _check_game_state_and_proceed(self, context: CallbackContext, game: Game, chat_id: ChatId):
+        """
+        [متد جدید] وضعیت بازی را بررسی کرده و به مرحله بعد (نوبت بعدی، کارت بعدی، یا پایان دست) می‌رود.
+        این متد جایگزین منطق تکراری در تمام متدهای اکشن بازیکن می‌شود.
+        """
+        all_in_players = game.players_by(states=(PlayerState.ALL_IN,))
+        active_players = game.players_by(states=(PlayerState.ACTIVE,))
+        players_in_hand = active_players + all_in_players
 
+        # سناریوی ۱: فقط یک نفر باقی مانده (همه فولد کرده‌اند)
+        if len(players_in_hand) == 1:
+            winner = players_in_hand[0]
+            total_pot = game.pot
+            winner.wallet.approve(game.id)
+
+            # --- بلوک تولید پیام جدید برای حالت فولد ---
+            table_cards_str = self._format_cards(game.cards_table)
+            results_text = (
+                f"🏁 *پایان دست!* 🏁\n\n"
+                f"💳 *کارت‌های روی میز:*\n`{table_cards_str if table_cards_str else ' '}`\n\n"
+                f"🏆 *نتایج و برندگان:*\n"
+                f"--------------------\n"
+                f"👤 *بازیکن:* {winner.mention_markdown}\n"
+                f"👋 *کارت‌های دست:*\n`??  ??` (مخفی - برد با فولد)\n"
+                f"💰 *برد:* `{total_pot}$`\n"
+                f"--------------------\n\n"
+                f"💰 *پات نهایی:* `{total_pot}$`"
+            )
+            self._view.send_message(chat_id, results_text, parse_mode="Markdown")
+            # --- پایان بلوک جدید ---
+            
+            self._end_hand(game, chat_id)
+            return
+
+        # سناریوی ۲: دور شرط‌بندی تمام شده است
+        if self._is_trading_ended(game):
+            game.reset_round_rates_and_actions()
+            start_index = self._find_next_player_index(game, game.dealer_index)
+            if start_index == -1:
+                self._showdown(game, chat_id)
+                return
+            game.current_player_index = start_index
+
+            if game.state == GameState.ROUND_PRE_FLOP:
+                self._deal_flop(game, chat_id)
+            elif game.state == GameState.ROUND_FLOP:
+                self._deal_turn(game, chat_id)
+            elif game.state == GameState.ROUND_TURN:
+                self._deal_river(game, chat_id)
+            elif game.state == GameState.ROUND_RIVER:
+                self._showdown(game, chat_id)
+                return
+            
+            player = self._current_turn_player(game)
+            if player:
+                self.send_turn_message(game, player, chat_id)
+            else:
+                self._showdown(game, chat_id)
+            return
+
+        # سناریوی ۳: دور شرط‌بندی ادامه دارد، برو به بازیکن بعدی
+        next_player_index = self._find_next_player_index(game, game.current_player_index)
+        game.current_player_index = next_player_index
+        player = self._current_turn_player(game)
+        if player:
+            self.send_turn_message(game, player, chat_id)
+        else:
+            print("WARNING: No next player found, forcing showdown.")
+            self._showdown(game, chat_id)
 
         
     def _send_managed_message(
