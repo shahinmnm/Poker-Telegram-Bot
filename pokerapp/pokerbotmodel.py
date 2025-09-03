@@ -201,14 +201,15 @@ class PokerBotModel:
         
         # حذف پیام "/نمایش کارت‌ها" که بازیکن فرستاده
         self._view.remove_message_delayed(chat_id, update.message.message_id, delay=1)
-
-
+        
     def show_table(self, update: Update, context: CallbackContext):
         """کارت‌های روی میز را به درخواست بازیکن نمایش می‌دهد."""
         game = self._game_from_context(context)
         chat_id = update.effective_chat.id
         if game.state in self.ACTIVE_GAME_STATES:
-            self.add_cards_to_table(0, game, chat_id) # فراخوانی با count=0 فقط میز را نمایش می‌دهد
+            # فراخوانی با count=0 فقط میز را نمایش می‌دهد
+            # VVVV اصلاح اینجاست VVVV
+            self.add_cards_to_table(0, game, chat_id, "👁️ کارت‌های فعلی روی میز")
         else:
             self._view.send_message(chat_id, "هنوز بازی شروع نشده است.")
         self._view.remove_message_delayed(chat_id, update.message.message_id, delay=1)
@@ -443,37 +444,35 @@ class PokerBotModel:
         بازی را به مرحله بعدی (Flop, Turn, River, Showdown) منتقل می‌کند.
         این متد همچنین وضعیت بازیکنان را برای دور شرط‌بندی جدید ریست می‌کند.
         """
-        # اگر کمتر از دو بازیکن برای ادامه بازی وجود داشته باشند، مستقیماً به نمایش کارت‌ها بروید
         contenders = game.players_by(states=(PlayerState.ACTIVE, PlayerState.ALL_IN))
         if len(contenders) < 2:
             self._showdown(game, chat_id, context)
             return
 
-        # ریست کردن وضعیت بازیکنان برای دور شرط‌بندی جدید
         game.reset_round_rates_and_actions()
-        # تعیین نوبت اول برای دورهای بعد از فلاپ (اولین بازیکن فعال بعد از دیلر)
         if game.state != GameState.ROUND_PRE_FLOP:
             game.current_player_index = self._find_next_active_player_index(game, game.dealer_index)
 
-        # انتقال به مرحله بعدی
         if game.state == GameState.ROUND_PRE_FLOP:
             game.state = GameState.ROUND_FLOP
-            self.add_cards_to_table(3, game, chat_id)
+            self.add_cards_to_table(3, game, chat_id, "🃏 فلاپ (Flop)")
         elif game.state == GameState.ROUND_FLOP:
             game.state = GameState.ROUND_TURN
-            self.add_cards_to_table(1, game, chat_id)
+            # VVVV اموجی منطقی‌تر VVVV
+            self.add_cards_to_table(1, game, chat_id, "4️⃣ تِرن (Turn)")
         elif game.state == GameState.ROUND_TURN:
             game.state = GameState.ROUND_RIVER
-            self.add_cards_to_table(1, game, chat_id)
+            # VVVV اموجی منطقی‌تر VVVV
+            self.add_cards_to_table(1, game, chat_id, "🏁 ریوِر (River)")
         elif game.state == GameState.ROUND_RIVER:
             self._showdown(game, chat_id, context)
             return
-        else: # اگر به هر دلیلی وضعیت نامشخص بود
+        else:
             self._showdown(game, chat_id, context)
             return
 
-        # شروع حلقه اصلی بازی برای دور جدید شرط‌بندی با پاس دادن context
-        self._process_playing(chat_id, game, context)
+        if game.state != GameState.FINISHED:
+             self._process_playing(chat_id, game, context)
 
     def _determine_all_scores(self, game: Game) -> List[Dict]:
         """
