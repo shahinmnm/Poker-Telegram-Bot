@@ -575,6 +575,31 @@ class PokerBotModel:
             if game.players[next_index].state == PlayerState.ACTIVE:
                 return next_index
         return -1 # هیچ بازیکن فعالی یافت نشد
+    def _is_trading_ended(self, game: Game) -> bool:
+        """
+        [جدید] بررسی می‌کند که آیا دور شرط‌بندی فعلی به پایان رسیده است یا خیر.
+        شرایط پایان دور:
+        1. همه بازیکنانی که FOLD نکرده‌اند، به یک میزان شرط بسته باشند.
+        2. همه بازیکنان فعال (ACTIVE) حداقل یک بار در این دور بازی کرده باشند.
+        """
+        # بازیکنانی که هنوز می‌توانند شرط ببندند را پیدا کن
+        active_players = [p for p in game.players if p.state == PlayerState.ACTIVE]
+        
+        # اگر کمتر از دو بازیکن فعال برای شرط‌بندی وجود داشته باشد، دور تمام است
+        if len(active_players) < 2:
+            return True
+
+        # همه باید حداقل یک بار نوبت خود را بازی کرده باشند
+        if not all(p.has_acted for p in active_players):
+            return False
+
+        # همه باید به اندازه بیشترین شرط در این دور، پول گذاشته باشند
+        if not all(p.round_rate == game.max_round_rate for p in active_players):
+            return False
+
+        # اگر همه شرایط بالا برقرار بود، دور شرط‌بندی تمام شده است
+        return True
+
 
     def _move_to_next_player_and_process(self, game: Game, chat_id: ChatId, context: CallbackContext) -> None:
         """
