@@ -1,4 +1,4 @@
-player_action_fold#!/usr/bin/env python3
+#!/usr/bin/env python3
 
 import datetime
 import traceback
