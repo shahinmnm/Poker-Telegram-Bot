@@ -1,15 +1,18 @@
 #!/usr/bin/env python3
-
 from abc import abstractmethod
 import enum
 import datetime
 from typing import Tuple, List, Optional
 from uuid import uuid4
 from pokerapp.cards import get_cards
+from typing import Any
+
 MAX_PLAYERS = 8
 MIN_PLAYERS = 2
 SMALL_BLIND = 5
 DEFAULT_MONEY = 1000
+
+KEY_CHAT_DATA_GAME = "game"
 
 MessageId = str
 ChatId = str
@@ -107,7 +110,12 @@ class Game:
         self.ready_message_main_id = None  # پیام اصلی لیست بازیکنان آماده
 
     @staticmethod
-    def _game_from_context(context: CallbackContext) -> Game:
+    def _game_from_context(context: Any) -> "Game":
+        """
+        Safely get or create a Game instance in chat_data.
+        Using `Any` avoids importing telegram types here (prevents NameError).
+        Ensures `message_ledger` and `message_ids_to_delete` exist on the Game instance.
+        """
         if KEY_CHAT_DATA_GAME not in context.chat_data:
             context.chat_data[KEY_CHAT_DATA_GAME] = Game()
         g = context.chat_data[KEY_CHAT_DATA_GAME]
