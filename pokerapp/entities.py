@@ -53,9 +53,6 @@ class Wallet:
 
     def cancel(self, game_id: str) -> None:
         pass
-class MessageLifespan(enum.Enum):
-    TURN = "turn"   # پاک‌سازی در نوبت بعدی
-    HAND = "hand"   # پاک‌سازی در انتهای دست
 
 class Player:
     def __init__(
@@ -103,32 +100,8 @@ class Game:
         self.ready_users = set()
         self.last_turn_time = datetime.datetime.now()
         self.turn_message_id: Optional[MessageId] = None # برای حذف دکمه‌های نوبت
-        self.message_ledger: List[Tuple[MessageId, MessageLifespan]] = []
+        self.message_ids_to_delete: List[MessageId] = [] # برای پاک کردن پیام‌های بازی
         self.ready_message_main_id = None  # پیام اصلی لیست بازیکنان آماده
-
-    @staticmethod
-    def _game_from_context(context: CallbackContext) -> Game:
-        if KEY_CHAT_DATA_GAME not in context.chat_data:
-            context.chat_data[KEY_CHAT_DATA_GAME] = Game()
-        g = context.chat_data[KEY_CHAT_DATA_GAME]
-        if not hasattr(g, 'message_ledger'):
-            g.message_ledger = []
-        if not hasattr(g, 'message_ids_to_delete'):
-            g.message_ids_to_delete = []
-        return g
-
-        
-    def reset_round_rates_and_actions(self):
-        """
-        Resets the betting state for a new round (street).
-        This should be called before dealing the flop, turn, or river.
-        """
-        self.max_round_rate = 0
-        for player in self.players:
-            player.round_rate = 0
-            # Only reset has_acted for players still in the hand
-            if player.state != PlayerState.FOLD:
-                player.has_acted = False
 
     def players_by(self, states: Tuple[PlayerState, ...]) -> List[Player]:
         return list(filter(lambda p: p.state in states, self.players))
@@ -179,3 +152,4 @@ class PlayerAction(enum.Enum):
 
 class UserException(Exception):
     pass
+
