@@ -102,6 +102,18 @@ class Game:
         self.turn_message_id: Optional[MessageId] = None # برای حذف دکمه‌های نوبت
         self.message_ids_to_delete: List[MessageId] = [] # برای پاک کردن پیام‌های بازی
         self.ready_message_main_id = None  # پیام اصلی لیست بازیکنان آماده
+        
+    def reset_round_rates_and_actions(self):
+        """
+        Resets the betting state for a new round (street).
+        This should be called before dealing the flop, turn, or river.
+        """
+        self.max_round_rate = 0
+        for player in self.players:
+            player.round_rate = 0
+            # Only reset has_acted for players still in the hand
+            if player.state != PlayerState.FOLD:
+                player.has_acted = False
 
     def players_by(self, states: Tuple[PlayerState, ...]) -> List[Player]:
         return list(filter(lambda p: p.state in states, self.players))
