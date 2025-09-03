@@ -264,6 +264,13 @@ class WinnerDetermination:
                 })
         
         return winners_details
+        
+    def determine_winners(self, game) -> List['Player']:
+        """
+        لیستی از بازیکنان برنده را برمی‌گرداند.
+        """
+        winners_details = self.determine_winners_with_hand_details(game)
+        return [data['player'] for data in winners_details]
 
     @staticmethod
     def _calculate_score_value(hand_values: List[int], hand_type: HandsOfPoker) -> Score:
