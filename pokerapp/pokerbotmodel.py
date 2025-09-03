@@ -689,158 +689,92 @@ class PokerBotModel:
         # پیام تصویر میز را برای حذف در انتهای دست، ذخیره می‌کنیم
         if msg:
             game.message_ids_to_delete.append(msg.message_id)
-            
-    def _determine_winners(self, game: Game, chat_id: ChatId) -> None:
+
+
+    # --- این نسخه جدید و کامل را جایگزین _finish قبلی کن ---
+    def _finish(self, game: Game, chat_id: ChatId, context: CallbackContext) -> None:
         """
-        برندگان بازی را مشخص کرده و سپس متد _finish را برای اعلام نتایج فراخوانی می‌کند.
+        پایان یک دست از بازی: برندگان را مشخص، نتایج را اعلام، و پول را تقسیم می‌کند.
+        این متد به تنهایی تمام منطق پایان بازی را مدیریت می‌کند.
         """
-        print("DEBUG: Determining winners...")
-        
-        # ۱. فقط بازیکنانی را که FOLD نکرده‌اند در نظر بگیر
+        print("DEBUG: Entering the unified _finish method.")
+    
+        # --- بخش ۱: تعیین برنده(ها) ---
         active_players = [p for p in game.players if p.state != PlayerState.FOLD]
+        winners_data = [] # ساختار داده: [((نوع دست, امتیاز), کارت‌ها, بازیکن), ...]
     
-        # اگر فقط یک بازیکن باقی مانده باشد، او برنده است (بدون نیاز به نمایش کارت)
         if len(active_players) == 1:
+            # حالت اول: فقط یک بازیکن باقی مانده (بقیه فولد کرده‌اند)
             winner_player = active_players[0]
-            # یک ساختار داده سازگار با _finish ایجاد می‌کنیم
-            # چون Showdown رخ نداده، نوع دست و کارت‌ها اهمیتی ندارند و می‌توانند خالی باشند.
-            # امتیاز عددی (1) فقط برای این است که لیست خالی نباشد.
-            # ساختار جدید: ((نوع دست, امتیاز عددی), بهترین کارت‌ها, بازیکن)
-            winners_data = [((None, 1), [], winner_player)] 
-            print(f"DEBUG: Only one player left. Winner is {winner_player.user_id}")
-            self._finish(winners_data, game, chat_id, context) # <--- context اضافه شد
+            # چون Showdown رخ نداده، نوع دست و کارت‌ها اهمیتی ندارد.
+            winners_data.append(((None, 1), [], winner_player))
+            print(f"DEBUG: Only one player left. Winner: {winner_player.user_id}")
+        else:
+            # حالت دوم: Showdown! باید امتیازات محاسبه شود.
+            player_scores_data = []
+            for player in active_players:
+                hand_type, score, best_hand = self._winner_determine.get_hand_value(
+                    player_cards=player.cards,
+                    table_cards=game.cards_table
+                )
+                player_scores_data.append(((hand_type, score), best_hand, player))
+                print(f"DEBUG: Player {player.user_id} has {hand_type.name} with score {score}")
+    
+            # مرتب‌سازی بر اساس امتیاز
+            player_scores_data.sort(key=lambda x: x[0][1], reverse=True)
+    
+            # پیدا کردن تمام بازیکنان با بالاترین امتیاز
+            if player_scores_data:
+                highest_score = player_scores_data[0][0][1]
+                winners_data = [data for data in player_scores_data if data[0][1] == highest_score]
+                print(f"DEBUG: Highest score is {highest_score}. Winners: {[w[2].user_id for w in winners_data]}")
+    
+        # --- بخش ۲: نمایش نتایج و تقسیم پول ---
+        if not winners_data:
+            self._view.send_message(chat_id, "خطایی در تعیین برنده رخ داد. هیچ برنده‌ای یافت نشد.")
+            game.reset()
             return
     
-        # ۲. محاسبه امتیاز دست هر بازیکن فعال
-        # لیست جدید ما تاپل‌های سه‌تایی نگهداری می‌کند: ((نوع دست, امتیاز عددی), بهترین کارت‌ها, بازیکن)
-        player_scores_data: List[Tuple[Tuple[HandsOfPoker, Score], Tuple[Card, ...], Player]] = []
-        for player in active_players:
-            # get_hand_value حالا یک تاپل سه‌تایی برمی‌گرداند: (نوع دست، امتیاز عددی، بهترین کارت‌ها)
-            hand_type, score, best_hand = self._winner_determine.get_hand_value(
-                player_cards=player.cards, 
-                table_cards=game.cards_table
-            )
-            # ما داده‌ها را در ساختار جدید بسته‌بندی می‌کنیم
-            player_scores_data.append(((hand_type, score), best_hand, player))
-            print(f"DEBUG: Player {player.user_id} has hand_type {hand_type.name} with score {score}")
+        # نمایش نتایج
+        # (این بخش منطق نمایش نتایج و تقسیم پول است که قبلاً هم در finish وجود داشت)
+        winners_count = len(winners_data)
+        win_amount = game.pot // winners_count
+        
+        # نمایش دست برنده
+        first_winner_data = winners_data[0]
+        win_hand_type = first_winner_data[0][0]
+        win_hand_cards = first_winner_data[2].cards # نمایش کارت‌های خود بازیکن
     
-        # ۳. مرتب‌سازی بازیکنان بر اساس امتیاز عددی (از بیشترین به کمترین)
-        # امتیاز عددی در x[0][1] قرار دارد
-        player_scores_data.sort(key=lambda x: x[0][1], reverse=True)
+        if win_hand_type: # اگر بازی به شودان رسیده باشد
+            hand_info = HAND_NAMES_TRANSLATIONS.get(win_hand_type, {"fa": "نامشخص", "emoji": "❓"})
+            hand_text = f"{hand_info['emoji']} دست برنده: **{hand_info['fa']}**"
+            cards_text = " ".join(str(c) for c in win_hand_cards)
+            self._view.send_message(chat_id, f"{hand_text}\n{cards_text}")
     
-        # ۴. پیدا کردن برنده(ها) - ممکن است چند نفر امتیاز یکسان داشته باشند
-        highest_score = player_scores_data[0][0][1]
-        winners = [data for data in player_scores_data if data[0][1] == highest_score]
-        
-        print(f"DEBUG: Highest score is {highest_score}. Winners: {[w[2].user_id for w in winners]}")
+        # اعلام برندگان
+        mentions = [f"🏆 {w[2].mention_markdown}" for w in winners_data]
+        result_text = f"🎉 **برنده(ها):**\n" + "\n".join(mentions)
+        result_text += f"\n\n💰 هر کدام **{win_amount}$** برنده شدید!"
+        self._view.send_message(chat_id, result_text)
     
-        # ۵. فراخوانی متد _finish با داده‌های صحیح
-        self._finish(winners, game, chat_id, context) # <--- context اضافه شد
-
-
-
-    def _finish(self, winners_data: List[Dict], game: Game, chat_id: ChatId, context: CallbackContext):
-        """
-        بازی را تمام می‌کند، برنده را تعیین کرده و نتایج را با فرمت جدید و خلاقانه نمایش می‌دهد.
-        """
-        game.state = GameState.FINISHED
-        self._view.send_message(chat_id, "<b>... Showdown ...</b>\nنمایش نهایی کارت‌ها:", parse_mode=ParseMode.HTML)
-        
-        # 1. دریافت امتیازات همه بازیکنان (contenders)
-        player_scores_data = self._determine_all_scores(game)
-        
-        if not player_scores_data:
-            self._view.send_message(chat_id, "خطایی در تعیین برنده رخ داد یا بازیکنی باقی نمانده. بازی ریست می‌شود.")
-            game.reset() # ریست کردن وضعیت بازی
-            # در اینجا می‌توانید منطق شروع دور جدید را اضافه کنید
-            return
-
-        # 2. پیدا کردن برندگان و محاسبه مبلغ برد
-        winners, highest_score = self._find_winners_from_scores(player_scores_data)
-        # TODO: در آینده منطق Side Pot اینجا اضافه شود. فعلا پات اصلی تقسیم می‌شود.
-        win_amount = game.pot // len(winners) if winners else 0
-
-        # 3. ساختن متن خروجی برای هر بازیکن
-        # مرتب‌سازی بازیکنان بر اساس امتیاز از بیشترین به کمترین
-        sorted_players_data = sorted(player_scores_data, key=lambda x: x['score'], reverse=True)
-
-        player_results_parts = []
-        for data in sorted_players_data:
-            player: Player = data['player']
-            hand_type: HandsOfPoker = data['hand_type']
-            best_hand_cards: Tuple[Card, ...] = data['best_hand']
-            
-            # هایلایت کردن کارت‌های شخصی بازیکن که در دست نهایی او استفاده شده‌اند
-            hand_str_parts = []
-            for card in best_hand_cards:
-                is_player_card = any(c.rank == card.rank and c.suit == card.suit for c in player.cards)
-                if is_player_card:
-                    hand_str_parts.append(f"<b>{str(card)}</b>") # Bold کردن کارت‌های شخصی
-                else:
-                    hand_str_parts.append(str(card))
-            hand_str = " ".join(hand_str_parts)
-
-            # دریافت اطلاعات دست (ایموجی و نام فارسی) از دیکشنری
-            hand_info = HAND_NAMES_TRANSLATIONS.get(hand_type, {"emoji": "❔", "fa": "نامشخص"})
-            # مثال: "🔗 پِر (7)"
-            # برای سادگی، فعلا فقط نام دست را نمایش می‌دهیم. می‌توانید ارزش دست را هم اضافه کنید.
-            hand_name_str = f"{hand_info['emoji']} {hand_info['fa']}"
-
-            # تعیین وضعیت بازیکن (برنده یا بازنده)
-            old_wallet = player.wallet.value()
-            current_win = 0
-            if player in winners:
-                status_emoji = "🏆"
-                player.wallet.inc(win_amount) # افزایش موجودی برنده
-                current_win = win_amount
-            else:
-                status_emoji = "💔"
-            
-            new_wallet = player.wallet.value()
-            
-            # ساخت رشته نمایش تغییر موجودی
-            wallet_change_str = f"موجودی: {old_wallet}$ ⟩⟩ <b>{new_wallet}$</b>"
-            if current_win > 0:
-                wallet_change_str += f" (+{current_win}$)"
-            
-            # کنار هم چیدن اطلاعات بازیکن در یک بلوک
-            player_block = (
-                f"{status_emoji} <b>{player.mention_markdown}</b>\n"
-                f"   دست: {hand_name_str}\n"
-                f"   کارت‌ها: {hand_str}\n"
-                f"   {wallet_change_str}"
-            )
-            player_results_parts.append(player_block)
-
-        # 4. ساخت پیام نهایی
-        # بخش بازیکنان در یک تگ <pre>
-        players_html = "<pre>" + "\n\n".join(player_results_parts) + "</pre>"
-        
-        # فوتر بازی در یک تگ <pre> جداگانه برای ایجاد فاصله بصری
-        table_cards_str = " ".join(map(str, game.cards_table))
-        footer_html = (
-            f"<pre>"
-            f"🏛️ <b>میز:</b> {table_cards_str if table_cards_str else 'کارت مشترکی رو نشد'}\n"
-            f"🔥 <b>کارت سوخته:</b> 🂠\n"
-            f"💰 <b>پات نهایی:</b> {game.pot}$"
-            f"</pre>"
-        )
-
-        final_html_message = f"{players_html}\n{footer_html}"
-        
+        # تقسیم پول
+        for _, _, winner_player in winners_data:
+            winner_player.wallet.inc(win_amount)
+            winner_player.wallet.approve(game.id) # تایید تراکنش‌های این دست
+    
+        # برای بازیکنانی که در بازی بودند ولی نبردند
+        for p in game.players:
+            is_winner = any(p.user_id == w[2].user_id for w in winners_data)
+            if not is_winner:
+                p.wallet.approve(game.id) # پول آنها خرج شده و تمام
+    
+        # --- بخش ۳: آماده‌سازی برای دست بعدی ---
         self._view.send_message(
-            chat_id=chat_id,
-            text=final_html_message,
-            parse_mode=ParseMode.HTML
+            chat_id,
+            "برای شروع دست بعدی، /start را بزنید.\nبرای دیدن موجودی /money را بزنید."
         )
-
-        # 5. پاک کردن پیام‌های موقتی بازی (کارت‌ها، دکمه‌های نوبت و ...)
-        self._cleanup_messages(game, chat_id)
-
-        # 6. ریست کردن وضعیت بازی برای دور بعد
-        context.chat_data[KEY_OLD_PLAYERS] = [p.user_id for p in game.players if p.wallet.value() > SMALL_BLIND * 2]
-        game.reset()
-        # در اینجا می‌توانید دکمه "شروع دور جدید" را ارسال کنید
+        game.state = GameState.FINISHED
+        context.chat_data[KEY_OLD_PLAYERS] = [p.user_id for p in game.players]
         
     def _cleanup_messages(self, game: Game, chat_id: ChatId):
         """پیام‌های مربوط به دست تمام شده را پاک می‌کند."""
@@ -858,6 +792,23 @@ class PokerBotModel:
             return HandsOfPoker(base_rank).name.replace("_", " ").title()
         except ValueError:
             return "Unknown Hand"
+    # --- این نسخه را جایگزین _showdown قبلی کن ---
+    def _showdown(self, game: Game, chat_id: ChatId, context: CallbackContext) -> None:
+        """
+        مرحله نهایی بازی (Showdown): کارت‌ها رو می‌شود و برندگان مشخص می‌شوند.
+        این متد اکنون به طور مستقیم متد _finish را برای پردازش نهایی فرا می‌خواند.
+        """
+        self._view.send_message(
+            chat_id=chat_id,
+            text="⚔️ **شــــــــــــودان!** ⚔️\n\nوقت رو کردن کارت‌ها و مشخص شدن برنده است..."
+        )
+    
+        # پاک کردن تمام پیام‌های نوبت و کارت‌های قبلی
+        self._clear_game_messages(game, chat_id)
+    
+        # فراخوانی مستقیم و تمیز متد نهایی برای تعیین برنده، تقسیم جوایز و اتمام دست
+        self._finish(game, chat_id, context)
+
 class RoundRateModel:
     def __init__(self, view: PokerBotViewer, kv: redis.Redis, model: "PokerBotModel"):
         self._view = view
