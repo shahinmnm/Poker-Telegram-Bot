@@ -53,6 +53,9 @@ class Wallet:
 
     def cancel(self, game_id: str) -> None:
         pass
+class MessageLifespan(enum.Enum):
+    TURN = "turn"   # پاک‌سازی در نوبت بعدی
+    HAND = "hand"   # پاک‌سازی در انتهای دست
 
 class Player:
     def __init__(
@@ -100,7 +103,7 @@ class Game:
         self.ready_users = set()
         self.last_turn_time = datetime.datetime.now()
         self.turn_message_id: Optional[MessageId] = None # برای حذف دکمه‌های نوبت
-        self.message_ids_to_delete: List[MessageId] = [] # برای پاک کردن پیام‌های بازی
+        self.message_ledger: List[Tuple[MessageId, MessageLifespan]] = []
         self.ready_message_main_id = None  # پیام اصلی لیست بازیکنان آماده
         
     def reset_round_rates_and_actions(self):
