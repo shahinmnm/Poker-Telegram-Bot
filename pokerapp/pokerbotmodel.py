@@ -580,7 +580,7 @@ class PokerBotModel:
         """
         [جایگزین شود] وضعیت بازی را بررسی کرده و به مرحله بعد (پایان دست، کارت بعدی، یا نوبت بعدی) می‌رود.
         """
-        self._cleanup_turn_messages(game)
+        self._cleanup_turn_messages(game, chat_id)
 
         players_in_hand = [p for p in game.players if p.state != PlayerState.FOLD]
 
