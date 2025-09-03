@@ -641,60 +641,39 @@ class PokerBotModel:
 
     def _move_to_next_player_and_process(self, game: Game, chat_id: ChatId, context: CallbackContext) -> None:
         """
-        [جایگزین شود] وضعیت بازی را بررسی کرده و به مرحله بعد (پایان دست، کارت بعدی، یا نوبت بعدی) می‌رود.
+        [اصلاح شده] نوبت را به بازیکن بعدی منتقل کرده و وضعیت بازی را پردازش می‌کند.
+        فراخوانی _go_to_next_street در اینجا اصلاح شد.
         """
         self._cleanup_turn_messages(game, chat_id)
 
-        players_in_hand = [p for p in game.players if p.state != PlayerState.FOLD]
-
-        # --- بلوک جدید برای مدیریت برد با فولد ---
-        # اگر فقط یک بازیکن در دست باقی مانده باشد، او برنده است.
-        if len(players_in_hand) == 1:
-            winner = players_in_hand[0]
-            
-            # انتقال کل پات به برنده
-            winner.wallet.approve(game.id)
-            winner.wallet.inc(game.pot)
-            win_amount = game.pot
-            game.pot = 0
-
-            table_cards_str = self._format_cards(game.cards_table)
-            results_text = (
-                f"🏁 *پایان دست!* 🏁\n\n"
-                f"💳 *کارت‌های روی میز:*\n`{table_cards_str if table_cards_str else ' '}`\n\n"
-                f"🏆 *نتایج و برندگان:*\n"
-                f"--------------------\n"
-                f"👤 *بازیکن:* {winner.mention_markdown} (برنده 👑)\n"
-                f"💰 *برد:* `{win_amount}$`\n"
-                f"👋 *کارت‌های دست:*\n`??  ??` (مخفی - برد با فولد دیگران)\n"
-                f"--------------------\n"
-            )
-            self._view.send_message(chat_id, results_text, parse_mode="Markdown")
-            
-            self._end_hand(game, chat_id)
+        # اگر فقط یک نفر باقی مانده، او برنده است
+        active_players = game.players_by(states=(PlayerState.ACTIVE, PlayerState.ALL_IN))
+        if len(active_players) <= 1:
+            self._showdown(game, chat_id, context)
             return
-        # --- پایان بلوک جدید ---
 
-        # اگر دور شرط‌بندی تمام شده باشد
+        # بررسی اینکه آیا دور شرط‌بندی تمام شده است یا نه
         if self._is_trading_ended(game):
-            # اگر بازیکنان all-in تحت پوشش نیستند، مستقیم به رو کردن کارت‌ها برو
-            if not game.all_in_players_are_covered():
-                self._fast_forward_to_showdown(game, chat_id)
-                return
-
-            self._go_to_next_street(game, chat_id)
-            return
-
-        # اگر هیچ‌کدام از شرایط بالا برقرار نبود، به نوبت بازیکن بعدی برو
-        next_player_index = self._find_next_player_index(game, game.current_player_index)
-        if next_player_index == -1:
-            # این حالت نباید رخ دهد اگر منطق درست باشد، اما برای اطمینان
-            self._go_to_next_street(game, chat_id)
+            # اگر تمام شده، به مرحله بعدی بازی (street) بروید.
+            # 
+            # VVVV  اصلاح اصلی و نهایی اینجا اعمال شد  VVVV
+            self._go_to_next_street(game, chat_id, context)
+            # ^^^^  پارامتر context اضافه شد  ^^^^
+            #
         else:
-            game.current_player_index = next_player_index
-            next_player = self._current_turn_player(game)
-            if next_player:
-                self.send_turn_message(game, next_player, chat_id)
+            # اگر دور شرط‌بندی ادامه دارد، نوبت را به بازیکن بعدی بدهید
+            next_player_index = self._find_next_player_index(game, game.current_player_index)
+            if next_player_index != -1:
+                game.current_player_index = next_player_index
+                player = self._current_turn_player(game)
+                if player:
+                    self.send_turn_message(game, player, chat_id)
+            else:
+                # این حالت یک سناریوی اضطراری است و نباید اتفاق بیفتد
+                # اگر _is_trading_ended به درستی کار کند.
+                print("WARNING: Inconsistency detected. No next player found, but trading is not over. Forcing showdown.")
+                self._showdown(game, chat_id, context)
+
 
             
     def _go_to_next_street(self, game: Game, chat_id: ChatId, context: CallbackContext) -> None:
