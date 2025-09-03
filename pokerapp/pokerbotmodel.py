@@ -31,6 +31,7 @@ from pokerapp.entities import (
     SMALL_BLIND,
     MIN_PLAYERS,
     MAX_PLAYERS,
+    MessageLifespan,
 )
 from pokerapp.pokerbotview import PokerBotViewer
 
@@ -785,25 +786,35 @@ class PokerBotModel:
         except ValueError:
             return "Unknown Hand"
             
-    def _clear_game_messages(self, game: Game, chat_id: ChatId) -> None:
+    def _cleanup_messages_by_lifespan(self, game: Game, chat_id: ChatId, lifespan: MessageLifespan):
         """
-        تمام پیام‌های مربوط به این دست از بازی، از جمله پیام نوبت فعلی
-        و سایر پیام‌های ثبت‌شده را پاک می‌کند تا چت برای نمایش نتایج تمیز شود.
+        تمام پیام‌های با چرخه عمر مشخص را از چت و از دفتر ثبت پاک می‌کند.
         """
-        print(f"DEBUG: Clearing game messages...")
-    
-        # ۱. پاک کردن پیام نوبت فعال (که دکمه‌ها را دارد)
-        if game.turn_message_id:
-            self._view.remove_message(chat_id, game.turn_message_id)
-            game.turn_message_id = None # آن را نال می‌کنیم تا دوباره استفاده نشود
-    
-        # ۲. پاک کردن بقیه پیام‌های ذخیره شده در لیست
-        # ما از یک کپی از لیست استفاده می‌کنیم تا حذف عناصر در حین پیمایش مشکلی ایجاد نکند
-        for message_id in list(game.message_ids_to_delete):
-            self._view.remove_message(chat_id, message_id)
+        messages_to_keep = []
+        messages_to_delete = []
+
+        for msg_id, msg_lifespan in game.message_ledger:
+            if msg_lifespan == lifespan:
+                messages_to_delete.append(msg_id)
+            else:
+                messages_to_keep.append((msg_id, msg_lifespan))
+
+        print(f"DEBUG: Cleaning up {len(messages_to_delete)} messages with lifespan '{lifespan.value}'.")
+        for msg_id in messages_to_delete:
+            self._view.remove_message(chat_id, msg_id)
         
-        # ۳. بعد از اتمام کار، لیست را کاملاً خالی می‌کنیم
-        game.message_ids_to_delete.clear()
+        # دفتر ثبت را با پیام‌هایی که هنوز عمرشان تمام نشده، به‌روز می‌کنیم
+        game.message_ledger = messages_to_keep
+
+    def _cleanup_turn_messages(self, game: Game, chat_id: ChatId):
+        """پیام‌های نوبت قبلی را پاک می‌کند."""
+        # ۱. دکمه‌های پیام نوبت قبلی را حذف می‌کند
+        if game.turn_message_id:
+            self._view.remove_markup(chat_id, game.turn_message_id)
+            game.turn_message_id = None
+        
+        # ۲. پیام‌های متنی با چرخه عمر TURN را پاک می‌کند
+        self._cleanup_messages_by_lifespan(game, chat_id, MessageLifespan.TURN)
     
     # --- این نسخه را جایگزین _showdown قبلی کن ---
     def _showdown(self, game: Game, chat_id: ChatId, context: CallbackContext) -> None:
@@ -821,6 +832,23 @@ class PokerBotModel:
     
         # فراخوانی مستقیم و تمیز متد نهایی برای تعیین برنده، تقسیم جوایز و اتمام دست
         self._finish(game, chat_id, context)
+    def _send_managed_message(
+        self,
+        game: Game,
+        chat_id: ChatId,
+        lifespan: MessageLifespan,
+        text: str,
+        **kwargs
+    ) -> Optional[MessageId]:
+        """
+        پیام را ارسال کرده و آن را با چرخه عمر مشخص در دفتر ثبت پیام، بایگانی می‌کند.
+        این متد، نقطه مرکزی مدیریت پیام‌های موقتی است.
+        """
+        msg_id = self._view.send_message_return_id(chat_id, text, **kwargs)
+        if msg_id:
+            game.message_ledger.append((msg_id, lifespan))
+            print(f"DEBUG: Message {msg_id} logged with lifespan '{lifespan.value}'.")
+        return msg_id
 
 class RoundRateModel:
     def __init__(self, view: PokerBotViewer, kv: redis.Redis, model: "PokerBotModel"):
