@@ -404,24 +404,29 @@ class PokerBotModel:
             # If current player is not active, move to the next one.
             self._move_to_next_player_and_process(game, chat_id, context)
 
-
-
-    # FIX 1 (PART 1): Remove the 'money' parameter. The function will fetch the latest wallet value itself.
     def _send_turn_message(self, game: Game, player: Player, chat_id: ChatId):
-        """پیام نوبت را ارسال کرده و شناسه آن را برای حذف در آینده ذخیره می‌کند."""
+        """پیام نوبت را ارسال کرده و شناسه آن را برای حذف و مدیریت آینده ثبت می‌کند. (نسخه نهایی)"""
+        # ۱. دکمه‌های پیام نوبت قبلی را حذف می‌کنیم تا بازیکن قبلی نتواند بازی کند.
         if game.turn_message_id:
             self._view.remove_markup(chat_id, game.turn_message_id)
 
-        # Fetch the most current wallet value right here, ensuring it's up-to-date.
+        # ۲. موجودی بازیکن را به‌روز دریافت می‌کنیم.
         money = player.wallet.value()
         
+        # ۳. پیام نوبت جدید را ارسال و شناسه آن را دریافت می‌کنیم.
         msg_id = self._view.send_turn_actions(chat_id, game, player, money)
         
+        # ۴. اگر پیام با موفقیت ارسال شد، شناسه آن را در دو محل کلیدی ذخیره می‌کنیم.
         if msg_id:
+            # این متغیر برای حذف دکمه‌ها در نوبت بعدی استفاده می‌شود (کد شما این را داشت).
             game.turn_message_id = msg_id
+            
+            # *** این خط مهم‌ترین بخش اصلاح است ***
+            # شناسه را به دفتر ثبت کل پیام‌ها اضافه می‌کنیم تا متد cleanup بتواند آن را پیدا و حذف کند.
+            game.message_ledger.append((msg_id, MessageLifespan.TURN))
+
+        # ۵. زمان آخرین نوبت را برای مدیریت تایم‌اوت ثبت می‌کنیم.
         game.last_turn_time = datetime.datetime.now()
-    # --- Player Action Handlers ---
-    # این بخش تمام حرکات ممکن بازیکنان در نوبتشان را مدیریت می‌کند.
     
     def player_action_fold(self, update: Update, context: CallbackContext, game: Game) -> None:
         """بازیکن فولد می‌کند و پیام آن با چرخه عمر TURN ثبت می‌شود."""
