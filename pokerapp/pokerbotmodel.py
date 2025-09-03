@@ -599,6 +599,29 @@ class PokerBotModel:
 
         # اگر همه شرایط بالا برقرار بود، دور شرط‌بندی تمام شده است
         return True
+    def _find_next_player_index(self, game: Game, start_index: int) -> int:
+        """
+        [جدید] ایندکس بازیکن فعال بعدی را برای شروع نوبت پیدا می‌کند.
+        از ایندکس فعلی شروع به جستجو می‌کند و در لیست بازیکنان دور می‌زند.
+        بازیکنانی که FOLD کرده یا ALL_IN هستند را رد می‌کند.
+        اگر هیچ بازیکن واجد شرایطی پیدا نشود، -1 برمی‌گرداند.
+        """
+        num_players = len(game.players)
+        if num_players == 0:
+            return -1
+
+        # برای پیدا کردن نفر بعد، لیست را از نفر فعلی به بعد می‌گردیم
+        # این حلقه تضمین می‌کند که کل لیست یک دور کامل چک شود
+        for i in range(1, num_players + 1):
+            next_index = (start_index + i) % num_players
+            player = game.players[next_index]
+            
+            # نوبت فقط به بازیکنی می‌رسد که در وضعیت ACTIVE باشد
+            if player.state == PlayerState.ACTIVE:
+                return next_index
+        
+        # اگر هیچ بازیکن فعالی پیدا نشد (مثلاً بقیه همه آل-این یا فولد هستند)
+        return -1
 
 
     def _move_to_next_player_and_process(self, game: Game, chat_id: ChatId, context: CallbackContext) -> None:
