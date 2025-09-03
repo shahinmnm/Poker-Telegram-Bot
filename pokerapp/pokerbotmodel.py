@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+player_action_fold#!/usr/bin/env python3
 
 import datetime
 import traceback
@@ -427,26 +427,19 @@ class PokerBotModel:
 
         # ۵. زمان آخرین نوبت را برای مدیریت تایم‌اوت ثبت می‌کنیم.
         game.last_turn_time = datetime.datetime.now()
-    
-    def player_action_fold(self, update: Update, context: CallbackContext, game: Game) -> None:
-        """بازیکن فولد می‌کند و پیام آن با چرخه عمر TURN ثبت می‌شود."""
-        current_player = self._current_turn_player(game)
-        if not current_player:
-            return
-
-        chat_id = update.effective_chat.id
-        current_player.state = PlayerState.FOLD
         
-        # استفاده از دروازه‌بان پیام با چرخه عمر TURN
-        self._send_managed_message(
-            game,
-            chat_id,
-            lifespan=MessageLifespan.TURN,
-            text=f"🏳️ {current_player.mention_markdown} فولد کرد."
-        )
+    def player_action_fold(self, update: Update, context: CallbackContext, game: Game):
+        player = self._current_turn_player(game)
+        chat_id = update.effective_chat.id
 
-        # حذف دستی مارک‌آپ دیگر لازم نیست!
-        self._move_to_next_player_and_process(game, chat_id, context)
+        player.state = PlayerState.FOLD
+        self._view.send_message(
+            chat_id, f"{player.mention_markdown} فولد کرد.", parse_mode="Markdown"
+        )
+        
+        # تمام منطق قبلی را حذف کن و این خط را جایگزین کن:
+        self._check_game_state_and_proceed(context, game, chat_id)
+
 
     def player_action_call_check(self, update: Update, context: CallbackContext, game: Game) -> None:
         """بازیکن کال یا چک می‌کند و پیام آن با چرخه عمر TURN ثبت می‌شود."""
@@ -583,25 +576,63 @@ class PokerBotModel:
                 return next_index
         return -1 # هیچ بازیکن فعالی یافت نشد
 
-    def _move_to_next_player_and_process(self, game: Game, chat_id: ChatId, context: CallbackContext):
+    def _move_to_next_player_and_process(self, game: Game, chat_id: ChatId, context: CallbackContext) -> None:
         """
-        ایندکس بازیکن را به نفر فعال بعدی منتقل کرده و حلقه بازی را ادامه می‌دهد.
-        همچنین پیام‌های نوبت قبلی را در ابتدای هر حرکت پاک می‌کند.
+        [جایگزین شود] وضعیت بازی را بررسی کرده و به مرحله بعد (پایان دست، کارت بعدی، یا نوبت بعدی) می‌رود.
         """
-        # <<< جادوی اصلی اینجاست! پاک‌سازی پیام‌های نوبت قبلی.
-        self._cleanup_turn_messages(game, chat_id)
-        # --------------------------------------------------------
+        self._cleanup_turn_messages(game)
 
-        next_player_index = self._find_next_active_player_index(
-            game, game.current_player_index
-        )
+        players_in_hand = [p for p in game.players if p.state != PlayerState.FOLD]
+
+        # --- بلوک جدید برای مدیریت برد با فولد ---
+        # اگر فقط یک بازیکن در دست باقی مانده باشد، او برنده است.
+        if len(players_in_hand) == 1:
+            winner = players_in_hand[0]
+            
+            # انتقال کل پات به برنده
+            winner.wallet.approve(game.id)
+            winner.wallet.inc(game.pot)
+            win_amount = game.pot
+            game.pot = 0
+
+            table_cards_str = self._format_cards(game.cards_table)
+            results_text = (
+                f"🏁 *پایان دست!* 🏁\n\n"
+                f"💳 *کارت‌های روی میز:*\n`{table_cards_str if table_cards_str else ' '}`\n\n"
+                f"🏆 *نتایج و برندگان:*\n"
+                f"--------------------\n"
+                f"👤 *بازیکن:* {winner.mention_markdown} (برنده 👑)\n"
+                f"💰 *برد:* `{win_amount}$`\n"
+                f"👋 *کارت‌های دست:*\n`??  ??` (مخفی - برد با فولد دیگران)\n"
+                f"--------------------\n"
+            )
+            self._view.send_message(chat_id, results_text, parse_mode="Markdown")
+            
+            self._end_hand(game, chat_id)
+            return
+        # --- پایان بلوک جدید ---
+
+        # اگر دور شرط‌بندی تمام شده باشد
+        if self._is_trading_ended(game):
+            # اگر بازیکنان all-in تحت پوشش نیستند، مستقیم به رو کردن کارت‌ها برو
+            if not game.all_in_players_are_covered():
+                self._fast_forward_to_showdown(game, chat_id)
+                return
+
+            self._go_to_next_street(game, chat_id)
+            return
+
+        # اگر هیچ‌کدام از شرایط بالا برقرار نبود، به نوبت بازیکن بعدی برو
+        next_player_index = self._find_next_player_index(game, game.current_player_index)
         if next_player_index == -1:
-            # اگر بازیکن دیگری برای بازی در این دور نمانده، به مرحله بعد می‌رویم
-            self._go_to_next_street(game, chat_id, context)
+            # این حالت نباید رخ دهد اگر منطق درست باشد، اما برای اطمینان
+            self._go_to_next_street(game, chat_id)
         else:
-            # در غیر این صورت، نوبت را به بازیکن بعدی می‌دهیم
             game.current_player_index = next_player_index
-            self._process_playing(chat_id, game, context)
+            next_player = self._current_turn_player(game)
+            if next_player:
+                self.send_turn_message(game, next_player, chat_id)
+
             
     def _go_to_next_street(self, game: Game, chat_id: ChatId, context: CallbackContext):
         """
@@ -860,7 +891,7 @@ class PokerBotModel:
     
     def _showdown(self, game: Game, chat_id: ChatId) -> None:
         """
-        نمایش نتایج نهایی دست (Showdown) با فرمت حرفه‌ای و فارسی.
+        [جایگزین شود] نمایش نتایج نهایی دست (Showdown) با فرمت حرفه‌ای و فارسی.
         """
         winners_data = self._winner_determine.determine_winners_with_hand_details(game)
         if not winners_data:
@@ -869,10 +900,14 @@ class PokerBotModel:
             return
 
         # توزیع پات
+        # نکته: منطق Side Pot اینجا پیاده‌سازی نشده، فرض بر توزیع مساوی است.
         win_amount_per_winner = game.pot // len(winners_data)
         for data in winners_data:
-            data['player'].wallet.approve(game.id) # <--- تایید تراکنش
+            data['player'].wallet.approve(game.id)
+            data['player'].wallet.inc(win_amount_per_winner) # واریز مستقیم
             data['win_amount'] = win_amount_per_winner
+
+        game.pot = 0 # پات توزیع شد
 
         # ساخت پیام خروجی
         table_cards_str = self._format_cards(game.cards_table)
@@ -882,29 +917,46 @@ class PokerBotModel:
             f"🏆 *نتایج و برندگان:*\n"
         )
 
-        for data in winners_data:
-            player = data['player']
-            hand_info = HAND_NAMES_TRANSLATIONS[data['hand_type']]
-            hand_cards_str = self._format_cards(player.cards)
-            best_5_cards_str = self._format_cards(data['best_hand_cards'])
-            win_amount = data['win_amount']
+        all_players_in_showdown = [p for p in game.players if p.state != PlayerState.FOLD]
 
+        for player in all_players_in_showdown:
+            is_winner = any(player.user_id == w['player'].user_id for w in winners_data)
+            
+            # پیدا کردن جزئیات دست بازیکن فعلی (چه برنده باشد چه بازنده)
+            player_details = next((d for d in winners_data if d['player'].user_id == player.user_id), None)
+            if not player_details:
+                # اگر در لیست برندگان نبود، دستش را جداگانه محاسبه می‌کنیم
+                hand_type, _, best_cards = self._winner_determine.get_hand_value(player.cards, game.cards_table)
+            else:
+                hand_type = player_details['hand_type']
+                best_cards = player_details['best_hand_cards']
+
+            hand_info = HAND_NAMES_TRANSLATIONS[hand_type]
+            hand_cards_str = self._format_cards(player.cards)
+            best_5_cards_str = self._format_cards(best_cards)
+            
             results_text += (
                 f"--------------------\n"
-                f"👤 *بازیکن:* {player.mention_markdown}\n"
+                f"👤 *بازیکن:* {player.mention_markdown}"
+            )
+            
+            if is_winner:
+                win_amount = next(w['win_amount'] for w in winners_data if w['player'].user_id == player.user_id)
+                results_text += f" (برنده 👑)\n"
+                results_text += f"💰 *برد:* `{win_amount}$`\n"
+            else:
+                results_text += "\n"
+
+            results_text += (
                 f"👋 *کارت‌های دست:*\n`{hand_cards_str}`\n"
-                f"{hand_info['emoji']} {hand_info['fa']}\n"
-                f"🃏 *دست:* `{best_5_cards_str}`\n"
-                f"💰 *برد:* `{win_amount}$`\n"
+                f"{hand_info['emoji']} *دست:* {hand_info['fa']}\n"
+                f"`{best_5_cards_str}`\n"
             )
 
-        results_text += (
-            f"--------------------\n\n"
-            f"💰 *پات نهایی:* `{game.pot}$`"
-        )
-
+        results_text += f"--------------------\n"
         self._view.send_message(chat_id, results_text, parse_mode="Markdown")
         self._end_hand(game, chat_id)
+
     def _check_game_state_and_proceed(self, context: CallbackContext, game: Game, chat_id: ChatId):
         """
         [متد جدید] وضعیت بازی را بررسی کرده و به مرحله بعد (نوبت بعدی، کارت بعدی، یا پایان دست) می‌رود.
