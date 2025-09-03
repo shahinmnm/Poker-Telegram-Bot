@@ -367,6 +367,7 @@ class PokerBotModel:
         """
         contenders = game.players_by(states=(PlayerState.ACTIVE, PlayerState.ALL_IN))
         if len(contenders) <= 1:
+            # اطمینان از پاس دادن context
             self._go_to_next_street(game, chat_id, context)
             return
 
@@ -383,7 +384,9 @@ class PokerBotModel:
                                 not all_acted)
 
         if not active_players or (all_acted and rates_equal and not is_preflop_bb_option):
-            self._go_to_next_street(game, chat_id)
+            # ===== نقطه اصلی اصلاح =====
+            # خطای شما از اینجا بود. آرگومان context پاس داده نمی‌شد.
+            self._go_to_next_street(game, chat_id, context)
             return
 
         player = self._current_turn_player(game)
@@ -392,7 +395,9 @@ class PokerBotModel:
             self._send_turn_message(game, player, chat_id)
         else:
             # If current player is not active, move to the next one.
-            self._move_to_next_player_and_process(game, chat_id)
+            self._move_to_next_player_and_process(game, chat_id, context)
+
+
 
     # FIX 1 (PART 1): Remove the 'money' parameter. The function will fetch the latest wallet value itself.
     def _send_turn_message(self, game: Game, player: Player, chat_id: ChatId):
