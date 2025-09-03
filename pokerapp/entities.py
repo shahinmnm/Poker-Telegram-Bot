@@ -105,6 +105,18 @@ class Game:
         self.turn_message_id: Optional[MessageId] = None # برای حذف دکمه‌های نوبت
         self.message_ledger: List[Tuple[MessageId, MessageLifespan]] = []
         self.ready_message_main_id = None  # پیام اصلی لیست بازیکنان آماده
+
+    @staticmethod
+    def _game_from_context(context: CallbackContext) -> Game:
+        if KEY_CHAT_DATA_GAME not in context.chat_data:
+            context.chat_data[KEY_CHAT_DATA_GAME] = Game()
+        g = context.chat_data[KEY_CHAT_DATA_GAME]
+        if not hasattr(g, 'message_ledger'):
+            g.message_ledger = []
+        if not hasattr(g, 'message_ids_to_delete'):
+            g.message_ids_to_delete = []
+        return g
+
         
     def reset_round_rates_and_actions(self):
         """
