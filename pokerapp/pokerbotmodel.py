@@ -198,7 +198,7 @@ class PokerBotModel:
             ready_message_id=None, # <-- چون این یک نمایش مجدد است، ریپلای نمی‌زنیم.
         )
         if cards_message_id:
-            game.message_ids_to_delete.append(cards_message_id)
+            game.message_ledger.append((cards_message_id, MessageLifespan.HAND))
         
         # حذف پیام "/نمایش کارت‌ها" که بازیکن فرستاده
         self._view.remove_message_delayed(chat_id, update.message.message_id, delay=1)
@@ -298,6 +298,9 @@ class PokerBotModel:
         if game.ready_message_main_id:
             self._view.remove_message(chat_id, game.ready_message_main_id)
             game.ready_message_main_id = None
+            
+        self._cleanup_messages_by_lifespan(game, chat_id, MessageLifespan.TURN)
+        self._cleanup_messages_by_lifespan(game, chat_id, MessageLifespan.HAND)
     
         # Ensure dealer_index is initialized before use
         if not hasattr(game, 'dealer_index'):
@@ -362,8 +365,8 @@ class PokerBotModel:
             )
 
             # این پیام موقتی است و در آخر دست پاک خواهد شد.
-            if cards_message_id:
-                game.message_ids_to_delete.append(cards_message_id)
+        if cards_message_id:
+            game.message_ledger.append((cards_message_id, MessageLifespan.HAND))
             
             # --- پایان بلوک اصلاح شده ---
 
@@ -842,11 +845,12 @@ class PokerBotModel:
         game.message_ledger = messages_to_keep
 
     def _cleanup_turn_messages(self, game: Game, chat_id: ChatId):
-        """پیام‌های نوبت قبلی را پاک می‌کند."""
-        # ۱. دکمه‌های پیام نوبت قبلی را حذف می‌کند (این کار از بازی کردن خارج از نوبت جلوگیری می‌کند)
+        # ۱) حذف دکمه‌های پیام نوبت قبلی
         if game.turn_message_id:
             self._view.remove_markup(chat_id, game.turn_message_id)
             game.turn_message_id = None
+        # ۲) پاک‌سازی همه پیام‌های TURN — همیشه اجرا شود
+        self._cleanup_messages_by_lifespan(game, chat_id, MessageLifespan.TURN)
 
         # ۲. تمام پیام‌های متنی با چرخه عمر TURN را پاک می‌کند
             self._cleanup_messages_by_lifespan(game, chat_id, MessageLifespan.TURN) # <--- "Lifespan" صحیح است
@@ -932,14 +936,10 @@ class RoundRateModel:
         # بازیکنی که دور شرط‌بندی به او ختم می‌شود، بیگ بلایند است
         game.trading_end_user_id = big_blind_player.user_id
         
-        # ارسال پیام نوبت به بازیکن
+        # 0000
         player_turn = game.players[game.current_player_index]
-        self._view.send_turn_actions(
-            chat_id=chat_id,
-            game=game,
-            player=player_turn,
-            money=player_turn.wallet.value()
-        )
+        self._model._send_turn_message(game, player_turn, chat_id)
+
 
 
     def _set_player_blind(self, game: Game, player: Player, amount: Money, blind_type: str, chat_id: ChatId):
