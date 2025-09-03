@@ -775,14 +775,6 @@ class PokerBotModel:
         )
         game.state = GameState.FINISHED
         context.chat_data[KEY_OLD_PLAYERS] = [p.user_id for p in game.players]
-        
-    def _cleanup_messages(self, game: Game, chat_id: ChatId):
-        """پیام‌های مربوط به دست تمام شده را پاک می‌کند."""
-        if game.turn_message_id:
-            self._view.remove_message(chat_id, game.turn_message_id)
-        for msg_id in game.message_ids_to_delete:
-            self._view.remove_message(chat_id, msg_id)
-        game.message_ids_to_delete.clear()
 
     def _hand_name_from_score(self, score: int) -> str:
         """تبدیل عدد امتیاز به نام دست پوکر"""
@@ -792,6 +784,27 @@ class PokerBotModel:
             return HandsOfPoker(base_rank).name.replace("_", " ").title()
         except ValueError:
             return "Unknown Hand"
+            
+    def _clear_game_messages(self, game: Game, chat_id: ChatId) -> None:
+        """
+        تمام پیام‌های مربوط به این دست از بازی، از جمله پیام نوبت فعلی
+        و سایر پیام‌های ثبت‌شده را پاک می‌کند تا چت برای نمایش نتایج تمیز شود.
+        """
+        print(f"DEBUG: Clearing game messages...")
+    
+        # ۱. پاک کردن پیام نوبت فعال (که دکمه‌ها را دارد)
+        if game.turn_message_id:
+            self._view.remove_message(chat_id, game.turn_message_id)
+            game.turn_message_id = None # آن را نال می‌کنیم تا دوباره استفاده نشود
+    
+        # ۲. پاک کردن بقیه پیام‌های ذخیره شده در لیست
+        # ما از یک کپی از لیست استفاده می‌کنیم تا حذف عناصر در حین پیمایش مشکلی ایجاد نکند
+        for message_id in list(game.message_ids_to_delete):
+            self._view.remove_message(chat_id, message_id)
+        
+        # ۳. بعد از اتمام کار، لیست را کاملاً خالی می‌کنیم
+        game.message_ids_to_delete.clear()
+    
     # --- این نسخه را جایگزین _showdown قبلی کن ---
     def _showdown(self, game: Game, chat_id: ChatId, context: CallbackContext) -> None:
         """
