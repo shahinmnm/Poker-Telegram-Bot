@@ -827,28 +827,29 @@ class PokerBotModel:
         messages_to_keep = []
         messages_to_delete = []
 
-        for msg_id, msg_lifespan in game.message_ledger:
+        # ما روی یک کپی از لیست پیمایش می‌کنیم تا از خطا جلوگیری کنیم
+        for msg_id, msg_lifespan in list(game.message_ledger):
             if msg_lifespan == lifespan:
                 messages_to_delete.append(msg_id)
             else:
                 messages_to_keep.append((msg_id, msg_lifespan))
 
-        print(f"DEBUG: Cleaning up {len(messages_to_delete)} messages with lifespan '{lifespan.value}'.")
+        print(f"DEBUG: Cleaning up {len(messages_to_delete)} messages with lifespan '{lifespan.name}'.")
         for msg_id in messages_to_delete:
             self._view.remove_message(chat_id, msg_id)
-        
+
         # دفتر ثبت را با پیام‌هایی که هنوز عمرشان تمام نشده، به‌روز می‌کنیم
         game.message_ledger = messages_to_keep
 
     def _cleanup_turn_messages(self, game: Game, chat_id: ChatId):
         """پیام‌های نوبت قبلی را پاک می‌کند."""
-        # ۱. دکمه‌های پیام نوبت قبلی را حذف می‌کند
+        # ۱. دکمه‌های پیام نوبت قبلی را حذف می‌کند (این کار از بازی کردن خارج از نوبت جلوگیری می‌کند)
         if game.turn_message_id:
             self._view.remove_markup(chat_id, game.turn_message_id)
             game.turn_message_id = None
-        
-        # ۲. پیام‌های متنی با چرخه عمر TURN را پاک می‌کند
-        self._cleanup_messages_by_lifespan(game, chat_id, MessageLifespan.TURN)
+
+        # ۲. تمام پیام‌های متنی با چرخه عمر TURN را پاک می‌کند
+        self._cleanup_messages_by_lifespan(game, chat_id, MessageLifpan.TURN)
     
     # --- این نسخه را جایگزین _showdown قبلی کن ---
     def _showdown(self, game: Game, chat_id: ChatId, context: CallbackContext) -> None:
