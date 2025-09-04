@@ -396,24 +396,23 @@ class PokerBotModel:
         """
         با استفاده از WinnerDetermination، برندگان را به تفکیک پات‌ها مشخص می‌کند.
         خروجی: لیستی از تاپل‌ها -> (pot_info, [winners_info_list])
-        pot_info: {"amount": int}
-        winners_info_list: [{"player": Player, "hand_cards": Cards, "hand_type": HandsOfPoker}]
         """
         winners_by_pot = []
-    
-        # کل پات فعلی (در حالت تک پات)
-        total_pot = sum(p.total_bet for p in game.players)
+
+        # --- ✅ اصلاح منطق محاسبه پات ---
+        # به جای محاسبه مجدد و پرخطر، از game.pot که منبع اصلی و صحیح است استفاده می‌کنیم.
+        total_pot = game.pot
         if total_pot == 0 or not contenders:
             return []
-    
+
         best_score = 0
         winners_info = []
-    
+
         for player in contenders:
             hand_type, score, best_hand_cards = self._winner_determine.get_hand_value(
                 player.cards, game.cards_table
             )
-    
+
             if score > best_score:
                 best_score = score
                 winners_info = [{
@@ -427,7 +426,7 @@ class PokerBotModel:
                     "hand_cards": best_hand_cards,
                     "hand_type": hand_type
                 })
-    
+
         winners_by_pot.append(({"amount": total_pot}, winners_info))
         return winners_by_pot
 
@@ -810,13 +809,13 @@ class PokerBotModel:
         ۳. پیام‌های قدیمی را پاک کرده و بازی را برای دست بعد ریست می‌کند (منطق Model).
         """
         contenders = game.players_by(states=(PlayerState.ACTIVE, PlayerState.ALL_IN))
-        
+
         if not contenders:
             self._view.send_message(chat_id, "🏆 هیچ بازیکنی در مرحله نهایی باقی نمانده است. پات به دست بعدی منتقل می‌شود.")
         else:
             # ۱. تعیین برندگان و به‌روزرسانی کیف پول (منطق خالص Model)
             winners_by_pot = self._determine_winners(game, contenders)
-            
+
             if winners_by_pot:
                 for pot_info, winners_info in winners_by_pot:
                     pot_amount = pot_info.get("amount", 0)
@@ -825,7 +824,7 @@ class PokerBotModel:
                         for winner in winners_info:
                             player = winner["player"]
                             player.wallet.inc(win_amount_per_player)
-            
+
             # ۲. فراخوانی View برای نمایش نتایج
             self._view.send_showdown_results(chat_id, game, winners_by_pot)
 
@@ -833,7 +832,7 @@ class PokerBotModel:
         for msg_id in game.message_ids_to_delete:
             self._view.remove_message(chat_id, msg_id)
         game.message_ids_to_delete.clear()
-        
+
         if game.turn_message_id:
             self._view.remove_message(chat_id, game.turn_message_id)
             game.turn_message_id = None
@@ -841,13 +840,12 @@ class PokerBotModel:
         remaining_players = [p for p in game.players if p.wallet.value() > 0]
         context.chat_data[KEY_OLD_PLAYERS] = [p.user_id for p in remaining_players]
 
-        game.reset(preserve_players=remaining_players)
-        
+        # --- ✅ اصلاح خطای TypeError ---
+        # آرگومان preserve_players از اینجا حذف شد چون متد reset آن را نمی‌پذیرد.
+        game.reset()
+
         # فراخوانی View برای ارسال پیام آمادگی دست جدید
         self._view.send_new_hand_ready_message(chat_id)
-
-
-
     def _end_hand(self, game: Game, chat_id: ChatId, context: CallbackContext) -> None:
         """
         یک دست از بازی را تمام کرده، پیام‌ها را پاکسازی کرده و برای دست بعدی آماده می‌شود.
