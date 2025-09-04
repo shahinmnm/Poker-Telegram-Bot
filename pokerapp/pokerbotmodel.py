@@ -811,7 +811,6 @@ class PokerBotModel:
         کارت‌های همه بازیکنان باقی‌مانده را نمایش داده، برندگان را مشخص کرده
         و پیام نهایی خلاصه دست را ارسال می‌کند.
         """
-        # ارزیابی دست بازیکنانی که فولد نکرده‌اند
         player_hands = []
         for player in game.players:
             if player.state != PlayerState.FOLD:
@@ -819,72 +818,93 @@ class PokerBotModel:
                     player.cards, game.cards_table
                 )
                 player_hands.append({
-                    "player": player,
-                    "hand_type": hand_type,
-                    "score": score,
-                    "best_5_cards": best_5_cards
+                    "player": player, "hand_type": hand_type, "score": score
                 })
     
-        # مرتب‌سازی براساس امتیاز
         player_hands.sort(key=lambda x: x["score"], reverse=True)
     
-        # برندگان
-        winners = []
+        winners_data = []
         if player_hands:
             highest_score = player_hands[0]["score"]
-            winners = [p for p in player_hands if p["score"] == highest_score]
+            winners_data = [p for p in player_hands if p["score"] == highest_score]
     
-        pot_per_winner = game.pot / len(winners) if winners else 0
+        pot_per_winner = game.pot / len(winners_data) if winners_data else 0
     
-        # ساخت پیام نتیجه
         summary_lines = [
             f"🏆 *پایان دست! برنده(ها) مشخص شدند!*",
             f"💰 *مجموع پات: {game.pot}*",
             "⎯" * 20,
             f"🃏 *کارت‌های میز:*",
-            self._format_cards(game.cards_table),
+            f"`{self._format_cards(game.cards_table)}`", # <--- برای هم‌ترازی بهتر، داخل backtick گذاشتم
             "⎯" * 20
         ]
     
-        # نمایش برندگان
-        for winner_data in winners:
-            player = winner_data['player']
-            hand_type = winner_data['hand_type']
+        for data in winners_data:
+            player, hand_type = data['player'], data['hand_type']
             hand_info = HAND_NAMES_TRANSLATIONS[hand_type]
-    
+            player.wallet.inc(pot_per_winner) # <-- پول برنده رو به حسابش اضافه می‌کنیم
             summary_lines.append(
-                f"🥇 *برنده:* {player.mention_markdown} (برد: {pot_per_winner:.0f}$)"
+                f"🥇 *برنده:* {player.mention_markdown} (برد: *{int(pot_per_winner)}* $)"
             )
-            summary_lines.append(
-                f"    {hand_info['emoji']} دست: *{hand_info['fa']}*"
-            )
-            summary_lines.append(
-                f"    {self._format_cards(player.cards)}"
-            )
+            summary_lines.append(f"    {hand_info['emoji']} دست: *{hand_info['fa']}*")
+            summary_lines.append(f"    `{self._format_cards(player.cards)}`") # <-- هم‌ترازی با backtick
             summary_lines.append("")
     
-        # نمایش بازندگان
-        losers = [p for p in player_hands if p not in winners]
-        if losers:
+        losers_data = [p for p in player_hands if p not in winners_data]
+        if losers_data:
             summary_lines.append("*سایر بازیکنان:*")
-            for loser_data in losers:
-                player = loser_data['player']
-                hand_type = loser_data['hand_type']
+            for data in losers_data:
+                player, hand_type = data['player'], data['hand_type']
                 hand_info = HAND_NAMES_TRANSLATIONS[hand_type]
-    
                 summary_lines.append(f"    - {player.mention_markdown}: {hand_info['fa']}")
-                summary_lines.append(f"      {self._format_cards(player.cards)}")
+                summary_lines.append(f"      `{self._format_cards(player.cards)}`") # <-- هم‌ترازی
     
         final_message = "\n".join(summary_lines)
     
-        # ارسال پیام
         context.bot.send_message(
             chat_id,
             final_message,
-            parse_mode=ParseMode.MARKDOWN_V2
+            parse_mode=ParseMode.MARKDOWN  # <-- نکته کلیدی: تغییر به مارک‌داون نسخه ۱
         )
     
-        self._end_hand(game, context)
+        # فراخوانی متد جدید با آرگومان‌های صحیح
+        self._end_hand(game, chat_id, context)
+
+    def _end_hand(self, game: Game, chat_id: ChatId, context: CallbackContext) -> None:
+        """
+        یک دست از بازی را تمام کرده، پیام‌ها را پاکسازی کرده و برای دست بعدی آماده می‌شود.
+        """
+        # ۱. پاکسازی تمام پیام‌های موقت این دست (کارت‌های بازیکنان و ...)
+        # این کار باعث می‌شود چت گروه شلوغ نشود
+        for message_id in set(game.message_ids_to_delete): # از set استفاده می‌کنیم که پیام تکراری حذف نکنیم
+            try:
+                context.bot.delete_message(chat_id=chat_id, message_id=message_id)
+            except Exception as e:
+                # اگر پیام قبلاً حذف شده یا مشکلی پیش بیاید، خطا را فقط چاپ می‌کنیم
+                print(f"INFO: Could not delete message {message_id} in chat {chat_id}. Reason: {e}")
+        
+        # پاک کردن آخرین پیام نوبت
+        if game.turn_message_id:
+            try:
+                context.bot.delete_message(chat_id=chat_id, message_id=game.turn_message_id)
+            except Exception as e:
+                print(f"INFO: Could not delete turn message {game.turn_message_id}. Reason: {e}")
+    
+        # ۲. ذخیره بازیکنان برای دست بعدی
+        # این باعث می‌شود در بازی بعدی، لازم نباشد همه دوباره /ready بزنند
+        context.chat_data[KEY_OLD_PLAYERS] = [p.user_id for p in game.players if p.wallet.value() > 0]
+    
+        # ۳. ریست کردن کامل آبجکت بازی برای شروع یک دست جدید و تمیز
+        # یک آبجکت جدید Game می‌سازیم تا هیچ داده‌ای از دست قبل باقی نماند
+        context.chat_data[KEY_CHAT_DATA_GAME] = Game()
+    
+        # ۴. اعلام پایان دست و راهنمایی برای شروع دست بعدی
+        keyboard = ReplyKeyboardMarkup([["/ready", "/start"]], resize_keyboard=True)
+        context.bot.send_message(
+            chat_id=chat_id,
+            text="🎉 دست تمام شد! برای شروع دست بعدی، /ready بزنید یا منتظر بمانید تا کسی /start کند.",
+            reply_markup=keyboard
+        )
 
 
     def _format_cards(self, cards: Cards) -> str:
