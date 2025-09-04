@@ -805,96 +805,82 @@ class PokerBotModel:
 
     def _showdown(self, game: Game, chat_id: ChatId, context: CallbackContext) -> None:
         """
-        مرحله نهایی بازی: تعیین برندگان، توزیع پات و اعلام نتایج.
-        این متد بازنویسی شده تا تمام سناریوها (یک برنده نهایی یا نمایش کارت‌ها) را مدیریت کند
-        و همیشه یک پیام خروجی معتبر و خوانا به زبان فارسی تولید کند.
+        نتایج نهایی را نمایش می‌دهد، برندگان را مشخص کرده و پات را تقسیم می‌کند.
+        این نسخه اصلاح شده مشکلات ظاهری و خطای مربوط به _finish را حل کرده است.
         """
-        game.state = GameState.FINISHED
-        final_message = "🔴 خطایی در پردازش نتایج رخ داد. لطفاً بازی جدیدی را شروع کنید." # پیام پیش‌فرض برای جلوگیری از خطا
-    
-        # سناریو ۱: فقط یک بازیکن باقی مانده (همه فولد کرده‌اند)
-        active_players = game.players_by(states=(PlayerState.ACTIVE, PlayerState.ALL_IN))
-        if len(active_players) == 1:
-            winner = active_players[0]
-            pot_total = sum(p.total_bet for p in game.players) # محاسبه کل پات
-            winner.wallet.inc(pot_total)
-            
-            final_message = (
-                f"🏆 *پایان دست!*\n\n"
-                f"همه بازیکنان دیگر فولد کردند.\n"
-                f"برنده نهایی: {winner.mention_markdown}\n\n"
-                f"💰 {winner.mention_markdown} مبلغ *{pot_total}$* از پات را برنده شد!"
-            )
-    
-        # سناریو ۲: بیش از یک بازیکن باقی مانده (Showdown واقعی)
+        contenders = game.players_by(states=(PlayerState.ACTIVE, PlayerState.ALL_IN))
+        if not contenders:
+            final_message = "🏆 هیچ بازیکنی در مرحله نهایی باقی نمانده است. پات به دست بعدی منتقل می‌شود."
+            self.send_message(chat_id, final_message)
         else:
-            contenders = game.players_by(states=(PlayerState.ACTIVE, PlayerState.ALL_IN))
-            if not contenders:
-                final_message = "ℹ️ هیچ بازیکنی برای نمایش کارت‌ها باقی نمانده است. بازی بدون برنده پایان یافت."
+            winners_by_pot = self._determine_winners(game, contenders)
+            final_message = "🏆 *نتایج نهایی و نمایش کارت‌ها*\n\n"
+
+            if not winners_by_pot:
+                final_message += "خطایی در تعیین برنده رخ داد. پات تقسیم نشد."
             else:
-                winners_by_pot = self._determine_winners(game, contenders)
-    
-                if not winners_by_pot:
-                    final_message = "ℹ️ بازی به پایان رسید اما هیچ برنده‌ای مشخص نشد. پات بین بازیکنان فعال تقسیم می‌شود."
-                    # (در اینجا می‌توانید منطق تقسیم پات را اضافه کنید اگر لازم است)
-                else:
-                    # ساخت پیام نتایج با جزئیات کامل
-                    results_text = "🏆 *نتایج نهایی و نمایش کارت‌ها*\n\n"
-                    total_pot_distributed = 0
-    
-                    for i, (pot, winners) in enumerate(winners_by_pot):
-                        pot_amount = pot['amount']
-                        total_pot_distributed += pot_amount
+                for pot_info, winners_info in winners_by_pot:
+                    pot_amount = pot_info.get("amount", 0)
+                    if pot_amount == 0 or not winners_info:
+                        continue
+
+                    final_message += f"💰 *پات اصلی: {pot_amount}$*\n"
+                    win_amount_per_player = pot_amount // len(winners_info)
+
+                    for winner in winners_info:
+                        player = winner["player"]
+                        player.wallet.inc(win_amount_per_player)
                         
-                        # اگر چند پات وجود داشته باشد (Side Pots)
-                        pot_title = f" principali" if len(winners_by_pot) == 1 else f" جانبی {i+1}"
-                        results_text += f"💰 *پات{pot_title}:* {pot_amount}$\n"
-                        
-                        win_amount_per_player = pot_amount // len(winners)
-                        for winner in winners:
-                            player = next((p for p in game.players if p.user_id == winner['player'].user_id), None)
-                            if player:
-                                player.wallet.inc(win_amount_per_player)
-                                hand_name = HAND_NAMES_TRANSLATIONS.get(winner['hand_type'], "نامشخص")
-                                hand_str = " ".join(map(str, winner['hand_cards']))
-                                results_text += (
-                                    f"  - {player.mention_markdown} با دست `{hand_name}` برنده *{win_amount_per_player}$* شد.\n"
-                                    f"    کارت‌ها: {hand_str}\n"
-                                )
-                    
-                    results_text += f"\n⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯\n"
-                    results_text += f"🃏 *کارت‌های روی میز:* {' '.join(map(str, game.cards_table))}\n"
-    
-                    # نمایش کارت‌های بازیکنانی که فولد نکرده‌اند ولی نبرده‌اند
-                    losers_text = "\n🤚 *کارت‌های سایر بازیکنان:*\n"
-                    losers_found = False
-                    all_winner_ids = {w['player'].user_id for pot, winners in winners_by_pot for w in winners}
-                    
-                    for player in contenders:
-                        if player.user_id not in all_winner_ids:
-                            losers_found = True
-                            losers_text += f"  - {player.mention_markdown}: {' '.join(map(str, player.cards))}\n"
-    
-                    if losers_found:
-                        results_text += losers_text
-                    
-                    final_message = results_text
-    
-        # ارسال پیام نهایی به گروه
-        if final_message:
-            try:
-                context.bot.send_message(
-                    chat_id=chat_id,
-                    text=final_message,
-                    parse_mode="Markdown"
-                )
-            except Exception as e:
-                print(f"ERROR in _showdown sending message: {e}")
-                # اگر ارسال با Markdown شکست خورد، بدون آن تلاش کن
-                context.bot.send_message(chat_id=chat_id, text="بازی به پایان رسید. نتایج در دسترس است.")
-    
-        # آماده‌سازی برای دست بعدی
-        self._finish(game, chat_id, context)
+                        # --- ⭐️ اصلاح مشکل ظاهری نتایج ---
+                        # به جای چاپ کل دیکشنری، مقادیر فارسی و ایموجی را استخراج می‌کنیم.
+                        hand_name_data = HAND_NAMES_TRANSLATIONS.get(winner['hand_type'], {})
+                        hand_display_name = f"{hand_name_data.get('emoji', '🃏')} {hand_name_data.get('fa', 'دست نامشخص')}"
+
+                        # --- ⭐️ بهبود ظاهری با حذف بک‌تیک ---
+                        final_message += (
+                            f"  - {player.mention_markdown} با دست {hand_display_name} "
+                            f"برنده *{win_amount_per_player}$* شد.\n"
+                        )
+                        final_message += f"    کارت‌ها: {' '.join(map(str, winner['hand_cards']))}\n"
+
+            final_message += "\n" + "⎯" * 20 + "\n"
+            final_message += f"🃏 *کارت‌های روی میز:* {' '.join(map(str, game.cards_table)) if game.cards_table else '🚫'}\n\n"
+            
+            final_message += "🤚 *کارت‌های سایر بازیکنان:*\n"
+            all_players = game.players_by(states=(PlayerState.ACTIVE, PlayerState.ALL_IN, PlayerState.FOLDED))
+            for p in all_players:
+                # فقط کارت بازیکنانی را نشان می‌دهیم که برنده نشده‌اند
+                is_winner = any(p.user_id == w['player'].user_id for pot_winners in winners_by_pot for w in pot_winners[1])
+                if not is_winner:
+                    final_message += f"  - {p.mention_markdown}: {' '.join(map(str, p.cards)) if p.cards else 'ندارد'}\n"
+
+            self.send_message(chat_id=chat_id, text=final_message, parse_mode="Markdown")
+
+        # --- ✅ جایگزینی منطق _finish به صورت مستقیم ---
+        # به جای فراخوانی یک متد حذف شده، کارهای ضروری آن را اینجا انجام می‌دهیم.
+        
+        # ۱. پاک کردن پیام‌های موقت بازی (مثل پیام نوبت و کیبورد کارت‌ها)
+        for msg_id in game.message_ids_to_delete:
+            self._view.remove_message(chat_id, msg_id)
+        game.message_ids_to_delete.clear()
+        if game.turn_message_id:
+            self._view.remove_message(chat_id, game.turn_message_id)
+
+        # ۲. ذخیره بازیکنان فعلی برای استفاده در دست بعدی
+        # (فقط بازیکنانی که پول دارند و از بازی خارج نشده‌اند)
+        remaining_players = [p for p in game.players if p.wallet.value() > 0]
+        context.chat_data[KEY_OLD_PLAYERS] = [p.user_id for p in remaining_players]
+
+        # ۳. ریست کردن وضعیت بازی برای دست بعدی
+        game.reset(preserve_players=remaining_players)
+        
+        # ۴. ارسال پیام برای آمادگی دست بعدی
+        self._view.send_message(
+            chat_id,
+            "♻️ دست به پایان رسید. بازیکنان باقی‌مانده برای دست بعد حفظ شدند.\n"
+            "برای شروع دست جدید، /start را بزنید یا بازیکنان جدید می‌توانند با /ready اعلام آمادگی کنند."
+        )
+
 
 
     def _end_hand(self, game: Game, chat_id: ChatId, context: CallbackContext) -> None:
