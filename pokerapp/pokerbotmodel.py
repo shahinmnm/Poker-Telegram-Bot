@@ -392,30 +392,49 @@ class PokerBotModel:
         return True
 
 
+# در کلاس PokerBotModel این متد را جایگزین کنید
     def _process_playing(self, chat_id: ChatId, game: Game, context: CallbackContext) -> None:
         """
-        حلقه اصلی بازی: وضعیت را ارزیابی کرده و تصمیم می‌گیرد که
-        آیا به مرحله بعد برود یا نوبت را به بازیکن بعدی بدهد.
+        مغز متفکر و کنترل‌کننده اصلی جریان بازی.
+        این متد پس از هر حرکت بازیکن فراخوانی می‌شود تا تصمیم بگیرد:
+        1. آیا دست تمام شده؟ (یک نفر باقی مانده)
+        2. آیا دور شرط‌بندی تمام شده؟
+        3. در غیر این صورت، نوبت را به بازیکن فعال بعدی بده.
+        این متد جایگزین چرخه بازگشتی قبلی بین _process_playing و _move_to_next_player_and_process شده است.
         """
-        # ابتدا پیام نوبت قبلی را حذف می‌کنیم تا صفحه تمیز شود
+        # پاک کردن پیام نوبت قبلی برای تمیز نگه داشتن چت
         if game.turn_message_id:
             self._view.remove_message(chat_id, game.turn_message_id)
             game.turn_message_id = None
     
-        # بررسی می‌کنیم چند بازیکن هنوز در بازی هستند (برای شرایط خاص مثل برنده شدن پیش از موعد)
+        # شرط ۱: آیا فقط یک بازیکن (یا کمتر) در بازی باقی مانده؟
         contenders = game.players_by(states=(PlayerState.ACTIVE, PlayerState.ALL_IN))
         if len(contenders) <= 1:
-            self._go_to_next_street(game, chat_id, context) # این متد خودش showdown را مدیریت می‌کند
+            self._go_to_next_street(game, chat_id, context)
             return
     
-        # با استفاده از متد کمکی، چک می‌کنیم آیا دور شرط‌بندی تمام شده است
+        # شرط ۲: آیا دور شرط‌بندی فعلی به پایان رسیده است؟
         if self._is_betting_round_over(game):
             self._go_to_next_street(game, chat_id, context)
             return
     
-        # اگر به اینجا رسیدیم، یعنی دور هنوز تمام نشده و باید نوبت را حرکت دهیم.
-        # این کار توسط متد زیر انجام می‌شود که بازیکن فعال بعدی را پیدا کرده و پیام نوبت را ارسال می‌کند.
-        self._move_to_next_player_and_process(game, chat_id, context)
+        # شرط ۳: بازی ادامه دارد، نوبت را به بازیکن بعدی منتقل کن
+        # از متدی که از قبل در RoundRateModel وجود داشت استفاده می‌کنیم
+        next_player_index = self._round_rate._find_next_active_player_index(game)
+    
+        if next_player_index != -1:
+            game.current_player_index = next_player_index
+            player = game.players[next_player_index]
+            
+            # ارسال پیام نوبت به بازیکن جدید
+            message_id = self._view.send_turn_message(chat_id, game, player)
+            if message_id:
+                game.turn_message_id = message_id
+        else:
+            # اگر هیچ بازیکن فعالی برای حرکت بعدی وجود ندارد (مثلاً همه All-in هستند)
+            # مستقیماً به مرحله بعدی برو
+            self._go_to_next_street(game, chat_id, context)
+
 
 
     # FIX 1 (PART 1): Remove the 'money' parameter. The function will fetch the latest wallet value itself.
@@ -449,7 +468,7 @@ class PokerBotModel:
         if game.turn_message_id:
             self._view.remove_markup(chat_id, game.turn_message_id)
     
-        self._move_to_next_player_and_process(game, chat_id, context)
+        self._process_playing(game, chat_id, context)
     
     def player_action_call_check(self, update: Update, context: CallbackContext, game: Game) -> None:
         """بازیکن کال (پرداخت) یا چک (عبور) را انجام می‌دهد."""
@@ -479,7 +498,7 @@ class PokerBotModel:
         if game.turn_message_id:
             self._view.remove_markup(chat_id, game.turn_message_id)
     
-        self._move_to_next_player_and_process(game, chat_id, context)
+        self._process_playing(game, chat_id, context)
     
     def player_action_raise_bet(self, update: Update, context: CallbackContext, game: Game, raise_amount: int) -> None:
         """بازیکن شرط را افزایش می‌دهد (Raise) یا برای اولین بار شرط می‌بندد (Bet)."""
@@ -518,7 +537,7 @@ class PokerBotModel:
         if game.turn_message_id:
             self._view.remove_markup(chat_id, game.turn_message_id)
     
-        self._move_to_next_player_and_process(game, chat_id, context)
+        self._process_playing(game, chat_id, context)
     
     def player_action_all_in(self, update: Update, context: CallbackContext, game: Game) -> None:
         """بازیکن تمام موجودی خود را شرط می‌بندد (All-in)."""
@@ -554,73 +573,7 @@ class PokerBotModel:
         if game.turn_message_id:
             self._view.remove_markup(chat_id, game.turn_message_id)
     
-        self._move_to_next_player_and_process(game, chat_id, context)
-    
-
-
-
-    def _move_to_next_player_and_process(self, game: Game, chat_id: ChatId, context: CallbackContext) -> None:
-        """
-        نوبت را به بازیکن فعال بعدی منتقل می‌کند و پیام نوبت را برای او ارسال می‌کند.
-        نکتهٔ کلیدی: این متد نباید _process_playing را دوباره صدا بزند (تا از recursion جلوگیری شود).
-        """
-        # محافظت در برابر آرایهٔ خالی یا ایندکس نامعتبر
-        if not game.players:
-            self._go_to_next_street(game, chat_id, context)
-            return
-    
-        # به‌دست آوردن ایندکس بازیکن فعال بعدی با کمک RoundRateModel
-        try:
-            next_index = self._round_rate._find_next_active_player_index(game, game.current_player_index)
-        except Exception as e:
-            print(f"WARNING: error while finding next active player: {e}")
-            next_index = -1
-    
-        # اگر هیچ بازیکن فعالی پیدا نشد، به مرحلهٔ بعد می‌رویم
-        if next_index == -1 or next_index is None:
-            self._go_to_next_street(game, chat_id, context)
-            return
-    
-        # اگر ایندکس به‌طور غیرمنتظره‌ای خارج بازه بود، محافظت می‌کنیم
-        if next_index < 0 or next_index >= len(game.players):
-            self._go_to_next_street(game, chat_id, context)
-            return
-    
-        # اگر ایندکس همان ایندکس فعلی است، احتمال loop وجود دارد -> مرحله بعد
-        if next_index == game.current_player_index:
-            # اگر بازی در حالتی است که باید ادامه بگیرد، اجازه بدهیم _process_playing تصمیم بگیرد.
-            # اما برای ایمنی، به مرحله بعد می‌رویم تا از تکرار بی‌پایان جلوگیری شود.
-            self._go_to_next_street(game, chat_id, context)
-            return
-    
-        # ست کردن بازیکن فعلی جدید
-        game.current_player_index = next_index
-    
-        # ارسال پیام نوبت به بازیکن جدید
-        current_player = self._current_turn_player(game)
-        if current_player and current_player.state == PlayerState.ACTIVE:
-            try:
-                self._send_turn_message(game, current_player, chat_id)
-            except Exception as e:
-                # اگر ارسال پیام شکست خورد، لاگ کن و تلاش برای رفتن به بعدی
-                print(f"ERROR: failed to send turn message for player {current_player.user_id}: {e}")
-                # به بازیکن بعدی برو
-                # برای جلوگیری از حلقهٔ بی‌نهایت، اگر تلاش دوم هم شکست خورد، می‌رویم به مرحله بعد.
-                try:
-                    next_index_2 = self._round_rate._find_next_active_player_index(game, game.current_player_index)
-                    if next_index_2 == -1 or next_index_2 == game.current_player_index:
-                        self._go_to_next_street(game, chat_id, context)
-                    else:
-                        game.current_player_index = next_index_2
-                        next_player = self._current_turn_player(game)
-                        if next_player:
-                            self._send_turn_message(game, next_player, chat_id)
-                except Exception as inner_e:
-                    print(f"ERROR: fallback moving to next player also failed: {inner_e}")
-                    self._go_to_next_street(game, chat_id, context)
-        else:
-            # اگر بازیکن جدید هم فعال نبود (نادر اما ممکن)، به مرحله بعد می‌رویم
-            self._go_to_next_street(game, chat_id, context)
+        self._process_playing(game, chat_id, context)
             
     def _go_to_next_street(self, game: Game, chat_id: ChatId, context: CallbackContext) -> None:
         """
