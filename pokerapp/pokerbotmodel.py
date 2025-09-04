@@ -96,7 +96,9 @@ class PokerBotModel:
             selective=True,  # <-- کیبورد فقط برای بازیکن مورد نظر نمایش داده می‌شود
             resize_keyboard=True,
             one_time_keyboard=False,
-        )
+            )
+    def _log_bet_change(player, amount, source):
+        print(f"[DEBUG] {source}: {player.mention_markdown} bet +{amount}, total_bet={player.total_bet}, round_rate={player.round_rate}, pot={game.pot}")
 
     def show_reopen_keyboard(self, chat_id: ChatId, player_mention: Mention) -> None:
         """کیبورد جایگزین را بعد از پنهان کردن کارت‌ها نمایش می‌دهد."""
