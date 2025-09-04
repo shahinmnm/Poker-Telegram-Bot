@@ -804,23 +804,102 @@ class PokerBotModel:
         
         # ۳. بعد از اتمام کار، لیست را کاملاً خالی می‌کنیم
         game.message_ids_to_delete.clear()
-    
-    # --- این نسخه را جایگزین _showdown قبلی کن ---
-    def _showdown(self, game: Game, chat_id: ChatId, context: CallbackContext) -> None:
+        
+    def _format_cards(self, cards: tuple[Card, ...], separator: str = "  ") -> str:
         """
-        مرحله نهایی بازی (Showdown): کارت‌ها رو می‌شود و برندگان مشخص می‌شوند.
-        این متد اکنون به طور مستقیم متد _finish را برای پردازش نهایی فرا می‌خواند.
+        یک تاپل از کارت‌ها را به یک رشته زیبا و خوانا برای نمایش در تلگرام تبدیل می‌کند.
+        مثال خروجی: `[ A♦️ ]  [ K♣️ ]`
         """
-        self._view.send_message(
-            chat_id=chat_id,
-            text="⚔️ **شــــــــــــودان!** ⚔️\n\nوقت رو کردن کارت‌ها و مشخص شدن برنده است..."
+        if not cards:
+            return ""
+        
+        # استفاده از فونت monospace برای تراز بودن کارت‌ها
+        return f"`{separator.join(f'[ {str(card)} ]' for card in cards)}`"
+
+    def _showdown(self, game: Game, context: CallbackContext) -> None:
+        """
+        مرحله نهایی بازی (Showdown).
+        کارت‌های همه بازیکنان باقی‌مانده را نمایش داده، برندگان را مشخص کرده
+        و پیام نهایی و زیبای خلاصه دست را ارسال می‌کند.
+        """
+        chat_id = game.chat_id
+        
+        # ارزیابی دست همه بازیکنانی که فولد نکرده‌اند
+        player_hands = []
+        for player in game.players:
+            if not player.folded:
+                hand_type, score, best_5_cards = self.winner_determination.get_hand_value(
+                    player.cards, game.table_cards
+                )
+                player_hands.append({
+                    "player": player,
+                    "hand_type": hand_type,
+                    "score": score,
+                    "best_5_cards": best_5_cards
+                })
+
+        # مرتب‌سازی بازیکنان بر اساس امتیاز دستشان (از بیشترین به کمترین)
+        player_hands.sort(key=lambda x: x["score"], reverse=True)
+
+        # تعیین برندگان (ممکن است چند نفر امتیاز برابر داشته باشند)
+        winners = []
+        if player_hands:
+            highest_score = player_hands[0]["score"]
+            winners = [p for p in player_hands if p["score"] == highest_score]
+
+        # تقسیم پات بین برندگان
+        pot_per_winner = game.pot / len(winners)
+        
+        # --- ساخت پیام نهایی ---
+        summary_lines = [
+            f"🏆 *پایان دست! برنده(ها) مشخص شدند!*",
+            f"💰 *مجموع پات: {game.pot}*",
+            "⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯",
+            f"🃏 *کارت‌های میز:*",
+            self._format_cards(game.table_cards),
+            "⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯"
+        ]
+
+        # اطلاعات برندگان
+        for winner_data in winners:
+            player = winner_data['player']
+            hand_type = winner_data['hand_type']
+            hand_info = HAND_NAMES_TRANSLATIONS[hand_type]
+            
+            summary_lines.append(
+                f"🥇 *برنده: {player.name}* (برد: {pot_per_winner:.0f})"
+            )
+            summary_lines.append(
+                f"    {hand_info['emoji']} دست: *{hand_info['fa']}*"
+            )
+            summary_lines.append(
+                f"    {self._format_cards(player.cards)}"
+            )
+            summary_lines.append("") # خط خالی برای جداسازی
+
+        # اطلاعات بازندگان (کسانی که در شوداون بودند)
+        losers = [p for p in player_hands if p not in winners]
+        if losers:
+            summary_lines.append("*سایر بازیکنان:*")
+            for loser_data in losers:
+                player = loser_data['player']
+                hand_type = loser_data['hand_type']
+                hand_info = HAND_NAMES_TRANSLATIONS[hand_type]
+                
+                summary_lines.append(f"    - {player.name}: {hand_info['fa']}")
+                summary_lines.append(f"      {self._format_cards(player.cards)}")
+
+        final_message = "\n".join(summary_lines)
+
+        # ارسال پیام و رفتن به دست بعدی
+        context.bot.send_message(
+            chat_id,
+            final_message,
+            parse_mode=ParseMode.MARKDOWN_V2
         )
-    
-        # پاک کردن تمام پیام‌های نوبت و کارت‌های قبلی
-        self._clear_game_messages(game, chat_id)
-    
-        # فراخوانی مستقیم و تمیز متد نهایی برای تعیین برنده، تقسیم جوایز و اتمام دست
-        self._finish(game, chat_id, context)
+
+        self._end_hand(game, context)
+
 
 class RoundRateModel:
     def __init__(self, view: PokerBotViewer, kv: redis.Redis, model: "PokerBotModel"):
