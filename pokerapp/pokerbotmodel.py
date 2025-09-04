@@ -834,9 +834,9 @@ class PokerBotModel:
             highest_score = player_hands[0]["score"]
             winners = [p for p in player_hands if p["score"] == highest_score]
 
-        # تقسیم پات بین برندگان
+        # تقسیم پات بین برندگان (با جلوگیری از تقسیم بر صفر)
         pot_per_winner = game.pot / len(winners) if winners else 0
-        
+
         # --- ساخت پیام نهایی ---
         summary_lines = [
             f"🏆 *پایان دست! برنده(ها) مشخص شدند!*",
@@ -852,7 +852,7 @@ class PokerBotModel:
             player = winner_data['player']
             hand_type = winner_data['hand_type']
             hand_info = HAND_NAMES_TRANSLATIONS[hand_type]
-            
+
             summary_lines.append(
                 f"🥇 *برنده: {player.name}* (برد: {pot_per_winner:.0f}$)"
             )
@@ -872,7 +872,7 @@ class PokerBotModel:
                 player = loser_data['player']
                 hand_type = loser_data['hand_type']
                 hand_info = HAND_NAMES_TRANSLATIONS[hand_type]
-                
+
                 summary_lines.append(f"    - {player.name}: {hand_info['fa']}")
                 summary_lines.append(f"      {self._format_cards(player.cards)}")
 
@@ -886,6 +886,7 @@ class PokerBotModel:
         )
 
         self._end_hand(game, context)
+
 
     def _format_cards(self, cards: Cards) -> str:
         """
