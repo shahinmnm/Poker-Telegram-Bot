@@ -816,7 +816,7 @@ class PokerBotModel:
         for player in game.players:
             if player.state != PlayerState.FOLD:
                 hand_type, score, best_5_cards = self._winner_determine.get_hand_value(
-                    player.cards, game.table_cards
+                    player.cards, game.cards_table
                 )
                 player_hands.append({
                     "player": player,
@@ -825,16 +825,16 @@ class PokerBotModel:
                     "best_5_cards": best_5_cards
                 })
 
-        # مرتب‌سازی بازیکنان بر اساس امتیاز دستشان (از بیشترین به کمترین)
+        # مرتب‌سازی بازیکنان بر اساس امتیاز دستشان
         player_hands.sort(key=lambda x: x["score"], reverse=True)
 
-        # تعیین برندگان (ممکن است چند نفر امتیاز برابر داشته باشند)
+        # تعیین برندگان
         winners = []
         if player_hands:
             highest_score = player_hands[0]["score"]
             winners = [p for p in player_hands if p["score"] == highest_score]
 
-        # تقسیم پات بین برندگان (با جلوگیری از تقسیم بر صفر)
+        # تقسیم پات بین برندگان
         pot_per_winner = game.pot / len(winners) if winners else 0
 
         # --- ساخت پیام نهایی ---
@@ -843,7 +843,7 @@ class PokerBotModel:
             f"💰 *مجموع پات: {game.pot}*",
             "⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯",
             f"🃏 *کارت‌های میز:*",
-            self._format_cards(game.table_cards),
+            self._format_cards(game.cards_table),
             "⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯"
         ]
 
