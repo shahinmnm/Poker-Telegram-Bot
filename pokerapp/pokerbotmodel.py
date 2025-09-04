@@ -97,8 +97,36 @@ class PokerBotModel:
             resize_keyboard=True,
             one_time_keyboard=False,
             )
-    def _log_bet_change(player, amount, source):
-        print(f"[DEBUG] {source}: {player.mention_markdown} bet +{amount}, total_bet={player.total_bet}, round_rate={player.round_rate}, pot={game.pot}")
+        
+    def _set_first_player_for_street(self, game: Game):
+        """
+        نوبت اولین بازیکن را برای هر مرحله (خیابان) از بازی تعیین می‌کند.
+        این متد قوانین خاص بازی دو نفره (Heads-Up) را نیز مدیریت می‌کند.
+        """
+        active_players_indices = [i for i, p in enumerate(game.players) if p.state != PlayerState.FOLD]
+        if not active_players_indices:
+            game.current_player_index = -1
+            return
+    
+        num_players = len(game.players)
+    
+        if num_players == 2:
+            # --- منطق مخصوص بازی دو نفره (Heads-Up) ---
+            if game.state == GameState.ROUND_PRE_FLOP:
+                # پری‌فلاپ: نوبت با اسمال بلایند است
+                game.current_player_index = game.small_blind_index
+            else:
+                # فلاپ، ترن، ریور: نوبت با بیگ بلایند است
+                game.current_player_index = game.big_blind_index
+        else:
+            # --- منطق استاندارد برای بازی چند نفره ---
+            # نوبت با اولین بازیکن فعال بعد از دیلر شروع می‌شود
+            start_index = (game.dealer_index + 1) % num_players
+            for i in range(num_players):
+                current_index = (start_index + i) % num_players
+                if current_index in active_players_indices:
+                    game.current_player_index = current_index
+                    return
 
     def show_reopen_keyboard(self, chat_id: ChatId, player_mention: Mention) -> None:
         """کیبورد جایگزین را بعد از پنهان کردن کارت‌ها نمایش می‌دهد."""
@@ -277,22 +305,58 @@ class PokerBotModel:
         """بازی را به صورت دستی شروع می‌کند."""
         game = self._game_from_context(context)
         chat_id = update.effective_chat.id
-
+    
+        # جلوگیری از شروع بازی در حالی که هنوز یک دست در جریان است
         if game.state not in (GameState.INITIAL, GameState.FINISHED):
             self._view.send_message(chat_id, "🎮 یک بازی در حال حاضر در جریان است.")
             return
-
+    
+        # اگر بازی قبلاً تمام شده، ریست کن و بازیکنان قدیمی را نگه دار
         if game.state == GameState.FINISHED:
             game.reset()
-            # بازیکنان قبلی را برای دور جدید نگه دار
             old_players_ids = context.chat_data.get(KEY_OLD_PLAYERS, [])
-            # Re-add players logic would go here if needed.
-            # For now, just resetting allows new players to join.
-
-        if len(game.players) >= self._min_players:
-            self._start_game(context, game, chat_id)
-        else:
-            self._view.send_message(chat_id, f"👤 تعداد بازیکنان برای شروع کافی نیست (حداقل {self._min_players} نفر).")
+            if old_players_ids:
+                # فقط بازیکنان حاضر در old_players_ids که هنوز در چت هستند را بازگردانیم
+                rejoined_players = [
+                    p for p in game.players if p.user_id in old_players_ids
+                ]
+                game.players = rejoined_players
+    
+        # بررسی حداقل بازیکنان
+        if len(game.players) < self._min_players:
+            self._view.send_message(
+                chat_id,
+                f"👤 تعداد بازیکنان برای شروع کافی نیست (حداقل {self._min_players} نفر)."
+            )
+            return
+    
+        # حذف پیام اصلی آماده‌سازی قبل از شروع
+        if game.ready_message_main_id:
+            self._view.remove_message(chat_id, game.ready_message_main_id)
+            game.ready_message_main_id = None
+    
+        # چرخاندن دیلر به بازیکن بعدی
+        if not hasattr(game, 'dealer_index'):
+            game.dealer_index = -1
+        game.dealer_index = (game.dealer_index + 1) % len(game.players)
+    
+        # تغییر وضعیت بازی به پری‌فلاپ
+        game.state = GameState.ROUND_PRE_FLOP
+    
+        # پخش کارت‌ها به بازیکنان
+        self._divide_cards(game, chat_id)
+    
+        # تعیین و پرداخت بلایندها
+        self.set_blinds(game, chat_id)
+    
+        # انتخاب اولین بازیکن برای راند پری‌فلاپ
+        self._set_first_player_for_street(game)
+    
+        # ذخیره بازیکنان برای دست بعد
+        context.chat_data[KEY_OLD_PLAYERS] = [p.user_id for p in game.players]
+    
+        # اعلام شروع بازی
+        self._view.send_message(chat_id, '🚀 !بازی شروع شد!')
 
     def _start_game(self, context: CallbackContext, game: Game, chat_id: ChatId) -> None:
         """مراحل شروع یک دست جدید بازی را انجام می‌دهد."""
@@ -654,79 +718,63 @@ class PokerBotModel:
             
     def _go_to_next_street(self, game: Game, chat_id: ChatId, context: CallbackContext) -> None:
         """
-        بازی را به مرحله بعدی (street) می‌برد.
-        این متد مسئولیت‌های زیر را بر عهده دارد:
-        1. جمع‌آوری شرط‌های این دور و افزودن به پات اصلی.
-        2. ریست کردن وضعیت‌های مربوط به دور (مثل has_acted و round_rate).
-        3. تعیین اینکه آیا باید به مرحله بعد برویم یا بازی با showdown تمام می‌شود.
-        4. پخش کردن کارت‌های جدید روی میز (فلاپ، ترن، ریور).
-        5. پیدا کردن اولین بازیکن فعال برای شروع دور شرط‌بندی جدید.
-        6. اگر فقط یک بازیکن باقی مانده باشد، او را برنده اعلام می‌کند.
+        بازی را به مرحله بعدی (street) می‌برد: فلاپ، ترن، ریور یا در نهایت showdown.
+        این متد مسئولیت‌های _deal_flop و _deal_turn_and_river را یکجا انجام می‌دهد.
         """
-        # ابتدا، تمام پیام‌های نوبت قبلی را پاک می‌کنیم تا چت تمیز بماند
-        if game.turn_message_id:
-            self._view.remove_message(chat_id, game.turn_message_id)
-            game.turn_message_id = None
-    
-        # بررسی می‌کنیم چند بازیکن هنوز در بازی هستند (Active یا All-in)
         contenders = game.players_by(states=(PlayerState.ACTIVE, PlayerState.ALL_IN))
+    
+        # اگر فقط یک نفر باقی مانده، مستقیم به showdown می‌رویم (اما بدون نمایش کارت)
         if len(contenders) <= 1:
-            # اگر فقط یک نفر باقی مانده، مستقیم به showdown می‌رویم تا برنده مشخص شود
-            self._showdown(game, chat_id, context)
+            self._showdown(game, chat_id, contenders)
             return
     
-        # جمع‌آوری پول‌های شرط‌بندی شده در این دور و ریست کردن وضعیت بازیکنان
-        self._round_rate.collect_bets_for_pot(game)
-        for p in game.players:
-            p.has_acted = False # <-- این خط برای دور بعدی حیاتی است
+        # --- منطق پیشروی به خیابان بعدی ---
     
-        # رفتن به مرحله بعدی بر اساس وضعیت فعلی بازی
         if game.state == GameState.ROUND_PRE_FLOP:
+            # مرحله فلاپ
             game.state = GameState.ROUND_FLOP
-            self.add_cards_to_table(3, game, chat_id, "🃏 فلاپ (Flop)")
-        elif game.state == GameState.ROUND_FLOP:
-            game.state = GameState.ROUND_TURN
-            self.add_cards_to_table(1, game, chat_id, "🃏 ترن (Turn)")
-        elif game.state == GameState.ROUND_TURN:
-            game.state = GameState.ROUND_RIVER
-            self.add_cards_to_table(1, game, chat_id, "🃏 ریور (River)")
-        elif game.state == GameState.ROUND_RIVER:
-            # بعد از ریور، دور شرط‌بندی تمام شده و باید showdown انجام شود
-            self._showdown(game, chat_id, context)
-            return # <-- مهم: بعد از فراخوانی showdown، ادامه نمی‌دهیم
+            for _ in range(3):
+                if game.remain_cards:
+                    game.cards_table.append(game.remain_cards.pop())
     
-        # اگر هنوز بازیکنی برای بازی وجود دارد، نوبت را به نفر اول می‌دهیم
-        active_players = game.players_by(states=(PlayerState.ACTIVE,))
-        if not active_players:
-            # اگر هیچ بازیکن فعالی نمانده (همه All-in هستند)، مستقیم به مراحل بعدی می‌رویم
-            # تا همه کارت‌ها رو شوند.
-            self._go_to_next_street(game, chat_id, context)
+            self._view.add_cards_to_table(count=3, game=game, chat_id=chat_id, title="🔥 فلاپ")
+            game.reset_round_rates_and_actions()
+            self._set_first_player_for_street(game)
+    
+        elif game.state == GameState.ROUND_FLOP:
+            # مرحله ترن
+            game.state = GameState.ROUND_TURN
+            if game.remain_cards:
+                game.cards_table.append(game.remain_cards.pop())
+    
+            self._view.add_cards_to_table(count=1, game=game, chat_id=chat_id, title="⚡ ترن")
+            game.reset_round_rates_and_actions()
+            self._set_first_player_for_street(game)
+    
+        elif game.state == GameState.ROUND_TURN:
+            # مرحله ریور
+            game.state = GameState.ROUND_RIVER
+            if game.remain_cards:
+                game.cards_table.append(game.remain_cards.pop())
+    
+            self._view.add_cards_to_table(count=1, game=game, chat_id=chat_id, title="🔚 ریور")
+            game.reset_round_rates_and_actions()
+            self._set_first_player_for_street(game)
+    
+        elif game.state == GameState.ROUND_RIVER:
+            # پایان شرط‌بندی، رفتن به مرحله نمایش کارت‌ها
+            self._showdown(game, chat_id, contenders)
             return
     
-        # پیدا کردن اولین بازیکن برای شروع دور جدید (معمولاً اولین فرد فعال بعد از دیلر)
-        # توجه: شما باید متد _get_first_player_index را داشته باشید.
-        # اگر ندارید، فعلاً از این پیاده‌سازی ساده استفاده کنید:
-        try:
-            # این متد باید ایندکس اولین بازیکن *فعال* بعد از دیلر را پیدا کند
-            game.current_player_index = self._get_first_player_index(game)
-        except AttributeError:
-            # پیاده‌سازی موقت اگر متد بالا وجود ندارد
-            print("WARNING: _get_first_player_index() not found. Using fallback logic.")
-            first_player_index = -1
-            start_index = (game.dealer_index + 1) % len(game.players)
-            for i in range(len(game.players)):
-                idx = (start_index + i) % len(game.players)
-                if game.players[idx].state == PlayerState.ACTIVE:
-                    first_player_index = idx
-                    break
-            game.current_player_index = first_player_index
-    
-        # اگر بازیکنی برای بازی پیدا شد، حلقه بازی را مجدداً شروع می‌کنیم
-        if game.current_player_index != -1:
-            self._process_playing(chat_id, game, context)
+        # پس از تعیین نوبت، پیام نوبت را برای بازیکن اول ارسال کن
+        # این کد برای تمام مراحل فلاپ، ترن و ریور مشترک است
+        first_player = self._current_turn_player(game)
+        if first_player and first_player.state == PlayerState.ACTIVE:
+            self._send_turn_message(game, first_player, chat_id)
         else:
-            # اگر به هر دلیلی بازیکنی پیدا نشد، به مرحله بعد می‌رویم
-            self._go_to_next_street(game, chat_id, context)
+            # اگر اولین بازیکن All-in بود، به صورت خودکار به نفر بعدی برو
+            self._process_playing(chat_id, game, context)
+
 
     def _determine_all_scores(self, game: Game) -> List[Dict]:
         """
@@ -964,76 +1012,79 @@ class RoundRateModel:
         return self._find_next_active_player_index(game, game.dealer_index)
 
 
-    # داخل کلاس RoundRateModel
     def set_blinds(self, game: Game, chat_id: ChatId) -> None:
         """
-        بلایند کوچک و بزرگ را برای شروع دور جدید تعیین و از حساب بازیکنان کم می‌کند.
-        این متد برای حالت دو نفره (Heads-up) نیز بهینه شده است.
+        تعیین بلایندها (Small Blind و Big Blind)، بروزرسانی ایندکس‌ها،
+        کم کردن مبلغ از کیف بازیکن‌ها، و تنظیم حداکثر شرط راند فعلی.
         """
         num_players = len(game.players)
-    
         if num_players < 2:
-            # نباید این اتفاق بیفتد، اما برای اطمینان
-            return 
+            raise UserException("بازیکن کافی برای تعیین بلایند وجود ندارد!")
     
-        # --- بلوک اصلاح شده برای تعیین بلایندها ---
+        # --- تعیین ایندکس SB و BB ---
         if num_players == 2:
-            # حالت دو نفره (Heads-up): دیلر اسمال بلایند است و اول بازی می‌کند.
+            # Heads-Up: دیلر = SB ، بازیکن دیگر = BB
             small_blind_index = game.dealer_index
             big_blind_index = (game.dealer_index + 1) % num_players
-            first_action_index = small_blind_index # در pre-flop، اسمال بلایند اول حرکت می‌کند
         else:
-            # حالت استاندارد برای بیش از دو بازیکن
+            # 3+ نفر: نفر بعد از دیلر = SB ، نفر بعدی = BB
             small_blind_index = (game.dealer_index + 1) % num_players
             big_blind_index = (game.dealer_index + 2) % num_players
-            first_action_index = (big_blind_index + 1) % num_players
-        # --- پایان بلوک اصلاح شده ---
     
-        small_blind_player = game.players[small_blind_index]
-        big_blind_player = game.players[big_blind_index]
-        
-        # اعمال بلایندها
-        self._set_player_blind(game, small_blind_player, SMALL_BLIND, "کوچک", chat_id)
-        self._set_player_blind(game, big_blind_player, SMALL_BLIND * 2, "بزرگ", chat_id)
+        # ذخیره ایندکس‌ها در Game
+        game.small_blind_index = small_blind_index
+        game.big_blind_index = big_blind_index
     
-        game.max_round_rate = SMALL_BLIND * 2
-        
-        # تعیین نوبت اولین بازیکن برای اقدام
-        game.current_player_index = first_action_index
-        # بازیکنی که دور شرط‌بندی به او ختم می‌شود، بیگ بلایند است
-        game.trading_end_user_id = big_blind_player.user_id
-        
-        # ارسال پیام نوبت به بازیکن
-        player_turn = game.players[game.current_player_index]
-        self._view.send_turn_actions(
-            chat_id=chat_id,
-            game=game,
-            player=player_turn,
-            money=player_turn.wallet.value()
+        # --- اعمال Small Blind ---
+        sb_player = game.players[small_blind_index]
+        sb_amount = SMALL_BLIND
+        self._set_player_blind(game, sb_player, sb_amount)
+        self._view.send_message(
+            chat_id,
+            f"♣️ {sb_player.mention_markdown} اسمال بلایند ({sb_amount}$) را پرداخت کرد."
         )
+    
+        # --- اعمال Big Blind ---
+        bb_player = game.players[big_blind_index]
+        bb_amount = SMALL_BLIND * 2
+        self._set_player_blind(game, bb_player, bb_amount)
+        self._view.send_message(
+            chat_id,
+            f"♠️ {bb_player.mention_markdown} بیگ بلایند ({bb_amount}$) را پرداخت کرد."
+        )
+    
+        # --- تنظیم حداکثر شرط راند ---
+        game.max_round_rate = bb_amount
+    
+        # توجه: تعیین اولین بازیکن در این مرحله انجام نمی‌شود.
+        # وظیفه‌ی متد جدید `_set_first_player_for_street` است که بعداً فراخوانی شود.
 
-
-    def _set_player_blind(self, game: Game, player: Player, amount: Money, blind_type: str, chat_id: ChatId):
-        try:
-            player.wallet.authorize(game_id=str(chat_id), amount=amount)
-            player.round_rate += amount
-            player.total_bet += amount  # ← این خط اضافه شود
-            game.pot += amount
-            self._view.send_message(
-                chat_id,
-                f"💸 {player.mention_markdown} بلایند {blind_type} به مبلغ {amount}$ را پرداخت کرد."
-            )
-        except UserException as e:
-            available_money = player.wallet.value()
-            player.wallet.authorize(game_id=str(chat_id), amount=available_money)
-            player.round_rate += available_money
-            player.total_bet += available_money  # ← این خط هم اضافه شود
-            game.pot += available_money
+    def _set_player_blind(self, game: Game, player: Player, amount: Money) -> None:
+        """
+        مبلغ بلایند را از موجودی بازیکن کم کرده، وضعیت شرط‌بندی او را آپدیت می‌کند
+        و به پات اضافه می‌کند. اگر مبلغ بلایند باعث آل-این شود، وضعیت بازیکن به ALL_IN تغییر می‌کند.
+        """
+        if amount <= 0:
+            return
+    
+        # بررسی موجودی برای پرداخت
+        wallet_value = player.wallet.value()
+        actual_bet = min(amount, wallet_value)  # اگر پول کمتری دارد، به اندازه موجودی شرط می‌بندد
+    
+        # کسر مبلغ از کیف پول و بروزرسانی
+        player.wallet.authorize(game.id, actual_bet)
+        player.total_bet += actual_bet
+        player.round_rate += actual_bet
+        game.pot += actual_bet
+    
+        # تعیین وضعیت بازیکن در صورت آل-این
+        if actual_bet < amount or wallet_value == actual_bet:
             player.state = PlayerState.ALL_IN
-            self._view.send_message(
-                chat_id,
-                f"⚠️ {player.mention_markdown} موجودی کافی برای بلایند نداشت و All-in شد ({available_money}$)."
-            )
+    
+        # به‌روزرسانی حداکثر شرط راند اگر لازم بود
+        if player.round_rate > game.max_round_rate:
+            game.max_round_rate = player.round_rate
+
 
     def collect_bets_for_pot(self, game: Game):
         # This function resets the round-specific bets for the next street.
@@ -1041,6 +1092,7 @@ class RoundRateModel:
         for player in game.players:
             player.round_rate = 0
         game.max_round_rate = 0
+        
 class WalletManagerModel(Wallet):
     """
     این کلاس مسئولیت مدیریت موجودی (Wallet) هر بازیکن را با استفاده از Redis بر عهده دارد.
