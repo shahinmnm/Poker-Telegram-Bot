@@ -544,21 +544,12 @@ class PokerBotModel:
         self._move_to_next_player_and_process(game, chat_id, context)
     
 
-        
-    def _find_next_active_player_index(self, game: Game, start_index: int) -> int:
-        """از ایندکس مشخص شده، به دنبال بازیکن بعدی که FOLD یا ALL_IN نکرده می‌گردد."""
-        num_players = len(game.players)
-        for i in range(1, num_players + 1):
-            next_index = (start_index + i) % num_players
-            if game.players[next_index].state == PlayerState.ACTIVE:
-                return next_index
-        return -1 # هیچ بازیکن فعالی یافت نشد
 
     def _move_to_next_player_and_process(self, game: Game, chat_id: ChatId, context: CallbackContext):
         """
         ایندکس بازیکن را به نفر فعال بعدی منتقل کرده و حلقه بازی را ادامه می‌دهد.
         """
-        next_player_index = self._find_next_active_player_index(
+        next_player_index = self._round_rate._find_next_active_player_index(
             game, game.current_player_index
         )
         if next_player_index == -1:
@@ -869,6 +860,18 @@ class RoundRateModel:
         self._view = view
         self._kv = kv
         self._model = model # <<< نمونه model ذخیره شد
+        
+    def _find_next_active_player_index(self, game: Game, start_index: int) -> int:
+        num_players = len(game.players)
+        for i in range(1, num_players + 1):
+            next_index = (start_index + i) % num_players
+            if game.players[next_index].state == PlayerState.ACTIVE:
+                return next_index
+        return -1
+        
+    def _get_first_player_index(self, game: Game) -> int:
+        return self._find_next_active_player_index(game, game.dealer_index)
+
 
     # داخل کلاس RoundRateModel
     def set_blinds(self, game: Game, chat_id: ChatId) -> None:
