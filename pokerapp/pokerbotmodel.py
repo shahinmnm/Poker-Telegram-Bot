@@ -814,7 +814,7 @@ class PokerBotModel:
         # ارزیابی دست همه بازیکنانی که فولد نکرده‌اند
         player_hands = []
         for player in game.players:
-            if not player.folded:
+            if player.state != PlayerState.FOLD:
                 hand_type, score, best_5_cards = self._winner_determine.get_hand_value(
                     player.cards, game.table_cards
                 )
