@@ -329,9 +329,7 @@ class PokerBotModel:
 
         # 4. Delegate to the unified `_start_game` method to actually start the hand.
         # This is the core of the fix, ensuring the correct logic is always used.
-        self._start_game(context, game, chat_id)    
-        
-    def _start_game(self, context: CallbackContext, game: Game, chat_id: ChatId) -> None:
+        self._start_game(context, game, chat_id)    def _start_game(self, context: CallbackContext, game: Game, chat_id: ChatId) -> None:
         """مراحل شروع یک دست جدید بازی را انجام می‌دهد."""
         if game.ready_message_main_id:
             self._view.remove_message(chat_id, game.ready_message_main_id)
@@ -985,84 +983,52 @@ class RoundRateModel:
         return self._find_next_active_player_index(game, game.dealer_index)
 
 
-    def set_blinds(self, game: Game, chat_id: ChatId):
+    def set_blinds(self, game: Game, chat_id: ChatId) -> None:
         """
-        دیلر، اسمال بلایند و بیگ بلایند را تعیین کرده، مبلغ را از آن‌ها کسر می‌کند
-        و در نهایت نوبت را به اولین بازیکن برای شروع راند پری‌فلاپ می‌دهد.
+        تعیین بلایندها (Small Blind و Big Blind)، بروزرسانی ایندکس‌ها،
+        کم کردن مبلغ از کیف بازیکن‌ها، و تنظیم حداکثر شرط راند فعلی.
         """
         num_players = len(game.players)
         if num_players < 2:
-            return
+            raise UserException("بازیکن کافی برای تعیین بلایند وجود ندارد!")
     
-        # تعیین موقعیت‌ها
-        dealer_index = game.dealer_index
-        small_blind_index = (dealer_index + 1) % num_players
-        big_blind_index = (dealer_index + 2) % num_players
-    
-        # در بازی دو نفره (Heads-Up)، دیلر همان اسمال بلایند است
+        # --- تعیین ایندکس SB و BB ---
         if num_players == 2:
-            small_blind_index = dealer_index
-            big_blind_index = (dealer_index + 1) % num_players
+            # Heads-Up: دیلر = SB ، بازیکن دیگر = BB
+            small_blind_index = game.dealer_index
+            big_blind_index = (game.dealer_index + 1) % num_players
+        else:
+            # 3+ نفر: نفر بعد از دیلر = SB ، نفر بعدی = BB
+            small_blind_index = (game.dealer_index + 1) % num_players
+            big_blind_index = (game.dealer_index + 2) % num_players
     
+        # ذخیره ایندکس‌ها در Game
         game.small_blind_index = small_blind_index
         game.big_blind_index = big_blind_index
     
+        # --- اعمال Small Blind ---
         sb_player = game.players[small_blind_index]
+        sb_amount = SMALL_BLIND
+        self._set_player_blind(game, sb_player, sb_amount)
+        self._view.send_message(
+            chat_id,
+            f"♣️ {sb_player.mention_markdown} اسمال بلایند ({sb_amount}$) را پرداخت کرد."
+        )
+    
+        # --- اعمال Big Blind ---
         bb_player = game.players[big_blind_index]
+        bb_amount = SMALL_BLIND * 2
+        self._set_player_blind(game, bb_player, bb_amount)
+        self._view.send_message(
+            chat_id,
+            f"♠️ {bb_player.mention_markdown} بیگ بلایند ({bb_amount}$) را پرداخت کرد."
+        )
     
-        # پرداخت بلایندها
-        self._set_player_blind(game, sb_player, SMALL_BLIND, "اسمال بلایند", "♣️", chat_id)
-        self._set_player_blind(game, bb_player, SMALL_BLIND * 2, "بیگ بلایند", "♠️", chat_id)
+        # --- تنظیم حداکثر شرط راند ---
+        game.max_round_rate = bb_amount
     
-        # تعیین اولین بازیکن برای شروع بازی
-        self.model._set_first_player_for_street(game)
-    
-        # --- نقطه کلیدی اصلاح ---
-        # این قسمت فراموش شده بود. بعد از گرفتن بلایندها، باید نوبت را به بازیکن بدهیم.
-        player = self.model._current_turn_player(game)
-        if player:
-            self.model._send_turn_message(game, player, chat_id)
-    # این متد در کلاس RoundRateModel قرار دارد
-    
-    def _set_player_blind(self, game: Game, player: Player, amount: Money, blind_name: str, emoji: str, chat_id: ChatId):
-        """
-        مبلغ بلایند را از بازیکن کسر می‌کند.
-        اگر بازیکن پول کافی نداشته باشد، او را در وضعیت ALL_IN قرار می‌دهد.
-        """
-        try:
-            # حالت عادی: بازیکن پول کافی دارد
-            player.wallet.dec(amount)
-            game.pot += amount
-            player.total_bet += amount
-            player.round_rate = amount
-            game.max_round_rate = max(game.max_round_rate, amount)
-            self.view.send_message(
-                chat_id,
-                f"{emoji} {player.mention_markdown} {blind_name} ({amount}$) را پرداخت کرد."
-            )
-        except UserException:
-            # حالت استثنا: بازیکن پول کافی ندارد و ALL_IN می‌شود
-            all_in_amount = player.wallet.value()
-            if all_in_amount > 0:
-                player.wallet.dec(all_in_amount)
-                game.pot += all_in_amount
-                player.total_bet += all_in_amount
-                player.round_rate = all_in_amount
-                game.max_round_rate = max(game.max_round_rate, all_in_amount)
-                player.state = PlayerState.ALL_IN
-                self.view.send_message(
-                    chat_id,
-                    f"🆘 {player.mention_markdown} با تمام موجودی خود ({all_in_amount}$) به عنوان {blind_name} وارد بازی شد (ALL-IN)!"
-                )
-            else:
-                # اگر بازیکن هیچ پولی ندارد، فقط فولد می‌شود
-                player.state = PlayerState.FOLD
-                self.view.send_message(
-                    chat_id,
-                    f"💸 {player.mention_markdown} پولی برای پرداخت {blind_name} ندارد و از دور کنار می‌رود."
-                )
-    
-
+        # توجه: تعیین اولین بازیکن در این مرحله انجام نمی‌شود.
+        # وظیفه‌ی متد جدید `_set_first_player_for_street` است که بعداً فراخوانی شود.
 
     def _set_player_blind(self, game: Game, player: Player, amount: Money) -> None:
         """
