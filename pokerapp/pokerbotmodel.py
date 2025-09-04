@@ -828,26 +828,28 @@ class PokerBotModel:
             highest_score = player_hands[0]["score"]
             winners_data = [p for p in player_hands if p["score"] == highest_score]
     
-        pot_per_winner = game.pot / len(winners_data) if winners_data else 0
+        # ===== نقطه اصلی اصلاح =====
+        # نتیجه تقسیم رو به int تبدیل می‌کنیم تا Redis خطا نده.
+        pot_per_winner = int(game.pot / len(winners_data)) if winners_data else 0
     
         summary_lines = [
             f"🏆 *پایان دست! برنده(ها) مشخص شدند!*",
             f"💰 *مجموع پات: {game.pot}*",
             "⎯" * 20,
             f"🃏 *کارت‌های میز:*",
-            f"`{self._format_cards(game.cards_table)}`", # <--- برای هم‌ترازی بهتر، داخل backtick گذاشتم
+            f"`{self._format_cards(game.cards_table)}`",
             "⎯" * 20
         ]
     
         for data in winners_data:
             player, hand_type = data['player'], data['hand_type']
             hand_info = HAND_NAMES_TRANSLATIONS[hand_type]
-            player.wallet.inc(pot_per_winner) # <-- پول برنده رو به حسابش اضافه می‌کنیم
+            player.wallet.inc(pot_per_winner) # <-- حالا با یک عدد صحیح فراخوانی می‌شه
             summary_lines.append(
-                f"🥇 *برنده:* {player.mention_markdown} (برد: *{int(pot_per_winner)}* $)"
+                f"🥇 *برنده:* {player.mention_markdown} (برد: *{pot_per_winner}* $)"
             )
             summary_lines.append(f"    {hand_info['emoji']} دست: *{hand_info['fa']}*")
-            summary_lines.append(f"    `{self._format_cards(player.cards)}`") # <-- هم‌ترازی با backtick
+            summary_lines.append(f"    `{self._format_cards(player.cards)}`")
             summary_lines.append("")
     
         losers_data = [p for p in player_hands if p not in winners_data]
@@ -857,17 +859,16 @@ class PokerBotModel:
                 player, hand_type = data['player'], data['hand_type']
                 hand_info = HAND_NAMES_TRANSLATIONS[hand_type]
                 summary_lines.append(f"    - {player.mention_markdown}: {hand_info['fa']}")
-                summary_lines.append(f"      `{self._format_cards(player.cards)}`") # <-- هم‌ترازی
+                summary_lines.append(f"      `{self._format_cards(player.cards)}`")
     
         final_message = "\n".join(summary_lines)
     
         context.bot.send_message(
             chat_id,
             final_message,
-            parse_mode=ParseMode.MARKDOWN  # <-- نکته کلیدی: تغییر به مارک‌داون نسخه ۱
+            parse_mode=ParseMode.MARKDOWN
         )
     
-        # فراخوانی متد جدید با آرگومان‌های صحیح
         self._end_hand(game, chat_id, context)
 
     def _end_hand(self, game: Game, chat_id: ChatId, context: CallbackContext) -> None:
