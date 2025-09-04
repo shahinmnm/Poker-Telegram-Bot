@@ -392,7 +392,44 @@ class PokerBotModel:
         return True
 
 
-# در کلاس PokerBotModel این متد را به طور کامل جایگزین کنید
+    def _determine_winners(self, game: Game, contenders: list[Player]):
+        """
+        با استفاده از WinnerDetermination، برندگان را به تفکیک پات‌ها مشخص می‌کند.
+        خروجی: لیستی از تاپل‌ها -> (pot_info, [winners_info_list])
+        pot_info: {"amount": int}
+        winners_info_list: [{"player": Player, "hand_cards": Cards, "hand_type": HandsOfPoker}]
+        """
+        winners_by_pot = []
+    
+        # کل پات فعلی (در حالت تک پات)
+        total_pot = sum(p.total_bet for p in game.players)
+        if total_pot == 0 or not contenders:
+            return []
+    
+        best_score = 0
+        winners_info = []
+    
+        for player in contenders:
+            hand_type, score, best_hand_cards = self._winner_determine.get_hand_value(
+                player.cards, game.cards_table
+            )
+    
+            if score > best_score:
+                best_score = score
+                winners_info = [{
+                    "player": player,
+                    "hand_cards": best_hand_cards,
+                    "hand_type": hand_type
+                }]
+            elif score == best_score:
+                winners_info.append({
+                    "player": player,
+                    "hand_cards": best_hand_cards,
+                    "hand_type": hand_type
+                })
+    
+        winners_by_pot.append(({"amount": total_pot}, winners_info))
+        return winners_by_pot
 
     def _process_playing(self, chat_id: ChatId, game: Game, context: CallbackContext) -> None:
         """
