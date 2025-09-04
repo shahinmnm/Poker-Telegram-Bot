@@ -805,30 +805,17 @@ class PokerBotModel:
         # ۳. بعد از اتمام کار، لیست را کاملاً خالی می‌کنیم
         game.message_ids_to_delete.clear()
         
-    def _format_cards(self, cards: tuple[Card, ...], separator: str = "  ") -> str:
-        """
-        یک تاپل از کارت‌ها را به یک رشته زیبا و خوانا برای نمایش در تلگرام تبدیل می‌کند.
-        مثال خروجی: `[ A♦️ ]  [ K♣️ ]`
-        """
-        if not cards:
-            return ""
-        
-        # استفاده از فونت monospace برای تراز بودن کارت‌ها
-        return f"`{separator.join(f'[ {str(card)} ]' for card in cards)}`"
-
-    def _showdown(self, game: Game, context: CallbackContext) -> None:
+    def _showdown(self, game: Game, chat_id: ChatId, context: CallbackContext) -> None:
         """
         مرحله نهایی بازی (Showdown).
         کارت‌های همه بازیکنان باقی‌مانده را نمایش داده، برندگان را مشخص کرده
         و پیام نهایی و زیبای خلاصه دست را ارسال می‌کند.
         """
-        chat_id = game.chat_id
-        
         # ارزیابی دست همه بازیکنانی که فولد نکرده‌اند
         player_hands = []
         for player in game.players:
             if not player.folded:
-                hand_type, score, best_5_cards = self.winner_determination.get_hand_value(
+                hand_type, score, best_5_cards = self._winner_determine.get_hand_value(
                     player.cards, game.table_cards
                 )
                 player_hands.append({
@@ -848,7 +835,7 @@ class PokerBotModel:
             winners = [p for p in player_hands if p["score"] == highest_score]
 
         # تقسیم پات بین برندگان
-        pot_per_winner = game.pot / len(winners)
+        pot_per_winner = game.pot / len(winners) if winners else 0
         
         # --- ساخت پیام نهایی ---
         summary_lines = [
@@ -867,7 +854,7 @@ class PokerBotModel:
             hand_info = HAND_NAMES_TRANSLATIONS[hand_type]
             
             summary_lines.append(
-                f"🥇 *برنده: {player.name}* (برد: {pot_per_winner:.0f})"
+                f"🥇 *برنده: {player.name}* (برد: {pot_per_winner:.0f}$)"
             )
             summary_lines.append(
                 f"    {hand_info['emoji']} دست: *{hand_info['fa']}*"
@@ -875,9 +862,9 @@ class PokerBotModel:
             summary_lines.append(
                 f"    {self._format_cards(player.cards)}"
             )
-            summary_lines.append("") # خط خالی برای جداسازی
+            summary_lines.append("")
 
-        # اطلاعات بازندگان (کسانی که در شوداون بودند)
+        # اطلاعات بازندگان
         losers = [p for p in player_hands if p not in winners]
         if losers:
             summary_lines.append("*سایر بازیکنان:*")
@@ -899,6 +886,16 @@ class PokerBotModel:
         )
 
         self._end_hand(game, context)
+
+    def _format_cards(self, cards: Cards) -> str:
+        """
+        کارت‌ها را با فرمت ثابت و زیبای Markdown برمی‌گرداند.
+        برای هماهنگی با نسخه قدیمی، بین کارت‌ها دو اسپیس قرار می‌دهیم.
+        """
+        if not cards:
+            return "??  ??"
+        return "  ".join(str(card) for card in cards)
+
 
 
 class RoundRateModel:
