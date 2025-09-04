@@ -985,52 +985,43 @@ class RoundRateModel:
         return self._find_next_active_player_index(game, game.dealer_index)
 
 
-    def set_blinds(self, game: Game, chat_id: ChatId) -> None:
+    def set_blinds(self, game: Game, chat_id: ChatId):
         """
-        تعیین بلایندها (Small Blind و Big Blind)، بروزرسانی ایندکس‌ها،
-        کم کردن مبلغ از کیف بازیکن‌ها، و تنظیم حداکثر شرط راند فعلی.
+        دیلر، اسمال بلایند و بیگ بلایند را تعیین کرده، مبلغ را از آن‌ها کسر می‌کند
+        و در نهایت نوبت را به اولین بازیکن برای شروع راند پری‌فلاپ می‌دهد.
         """
         num_players = len(game.players)
         if num_players < 2:
-            raise UserException("بازیکن کافی برای تعیین بلایند وجود ندارد!")
+            return
     
-        # --- تعیین ایندکس SB و BB ---
+        # تعیین موقعیت‌ها
+        dealer_index = game.dealer_index
+        small_blind_index = (dealer_index + 1) % num_players
+        big_blind_index = (dealer_index + 2) % num_players
+    
+        # در بازی دو نفره (Heads-Up)، دیلر همان اسمال بلایند است
         if num_players == 2:
-            # Heads-Up: دیلر = SB ، بازیکن دیگر = BB
-            small_blind_index = game.dealer_index
-            big_blind_index = (game.dealer_index + 1) % num_players
-        else:
-            # 3+ نفر: نفر بعد از دیلر = SB ، نفر بعدی = BB
-            small_blind_index = (game.dealer_index + 1) % num_players
-            big_blind_index = (game.dealer_index + 2) % num_players
+            small_blind_index = dealer_index
+            big_blind_index = (dealer_index + 1) % num_players
     
-        # ذخیره ایندکس‌ها در Game
         game.small_blind_index = small_blind_index
         game.big_blind_index = big_blind_index
     
-        # --- اعمال Small Blind ---
         sb_player = game.players[small_blind_index]
-        sb_amount = SMALL_BLIND
-        self._set_player_blind(game, sb_player, sb_amount)
-        self._view.send_message(
-            chat_id,
-            f"♣️ {sb_player.mention_markdown} اسمال بلایند ({sb_amount}$) را پرداخت کرد."
-        )
-    
-        # --- اعمال Big Blind ---
         bb_player = game.players[big_blind_index]
-        bb_amount = SMALL_BLIND * 2
-        self._set_player_blind(game, bb_player, bb_amount)
-        self._view.send_message(
-            chat_id,
-            f"♠️ {bb_player.mention_markdown} بیگ بلایند ({bb_amount}$) را پرداخت کرد."
-        )
     
-        # --- تنظیم حداکثر شرط راند ---
-        game.max_round_rate = bb_amount
+        # پرداخت بلایندها
+        self._set_player_blind(game, sb_player, SMALL_BLIND, "اسمال بلایند", "♣️", chat_id)
+        self._set_player_blind(game, bb_player, SMALL_BLIND * 2, "بیگ بلایند", "♠️", chat_id)
     
-        # توجه: تعیین اولین بازیکن در این مرحله انجام نمی‌شود.
-        # وظیفه‌ی متد جدید `_set_first_player_for_street` است که بعداً فراخوانی شود.
+        # تعیین اولین بازیکن برای شروع بازی
+        self.model._set_first_player_for_street(game)
+    
+        # --- نقطه کلیدی اصلاح ---
+        # این قسمت فراموش شده بود. بعد از گرفتن بلایندها، باید نوبت را به بازیکن بدهیم.
+        player = self.model._current_turn_player(game)
+        if player:
+            self.model._send_turn_message(game, player, chat_id)
 
     def _set_player_blind(self, game: Game, player: Player, amount: Money) -> None:
         """
