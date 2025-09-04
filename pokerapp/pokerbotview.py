@@ -229,7 +229,7 @@ class PokerBotViewer:
 
         # متن پیام با Markdown
         text = (
-            f"🎯 **نوبت بازی {player.mention_markdown}**\n\n"
+            f"🎯 **نوبت بازی {player.mention_markdown} (صندلی {player.seat_index+1})**\n\n"
             f"🃏 **کارت‌های روی میز:** {cards_table}\n"
             f"💰 **پات فعلی:** `{game.pot}$`\n"
             f"💵 **موجودی شما:** `{money}$`\n"
