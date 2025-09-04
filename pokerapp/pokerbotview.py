@@ -321,43 +321,66 @@ class PokerBotViewer:
     def send_showdown_results(self, chat_id: ChatId, game: Game, winners_by_pot: list) -> None:
         """
         پیام نهایی نتایج بازی را با فرمت زیبا ساخته و ارسال می‌کند.
+        این نسخه برای مدیریت ساختار داده جدید Side Pot (لیست دیکشنری‌ها) به‌روز شده است.
         """
         final_message = "🏆 *نتایج نهایی و نمایش کارت‌ها*\n\n"
 
         if not winners_by_pot:
             final_message += "خطایی در تعیین برنده رخ داد. پات تقسیم نشد."
         else:
-            for pot_info, winners_info in winners_by_pot:
-                pot_amount = pot_info.get("amount", 0)
+            # نام‌گذاری پات‌ها برای نمایش بهتر (اصلی، فرعی ۱، فرعی ۲ و...)
+            pot_names = ["*پات اصلی*", "*پات فرعی ۱*", "*پات فرعی ۲*", "*پات فرعی ۳*"]
+            
+            # FIX: حلقه برای پردازش صحیح "لیست دیکشنری‌ها" اصلاح شد
+            for i, pot_data in enumerate(winners_by_pot):
+                pot_amount = pot_data.get("amount", 0)
+                winners_info = pot_data.get("winners", [])
+
                 if pot_amount == 0 or not winners_info:
                     continue
-
-                final_message += f"💰 *پات اصلی: {pot_amount}$*\n"
+                
+                # انتخاب نام پات بر اساس ترتیب آن
+                pot_name = pot_names[i] if i < len(pot_names) else f"*پات فرعی {i}*"
+                final_message += f"💰 {pot_name}: {pot_amount}$\n"
+                
                 win_amount_per_player = pot_amount // len(winners_info)
 
                 for winner in winners_info:
-                    player = winner["player"]
+                    player = winner.get("player")
+                    if not player: continue # اطمینان از وجود بازیکن
+
+                    hand_type = winner.get('hand_type')
+                    hand_cards = winner.get('hand_cards', [])
                     
-                    hand_name_data = HAND_NAMES_TRANSLATIONS.get(winner['hand_type'], {})
+                    hand_name_data = HAND_NAMES_TRANSLATIONS.get(hand_type, {})
                     hand_display_name = f"{hand_name_data.get('emoji', '🃏')} {hand_name_data.get('fa', 'دست نامشخص')}"
 
                     final_message += (
                         f"  - {player.mention_markdown} با دست {hand_display_name} "
                         f"برنده *{win_amount_per_player}$* شد.\n"
                     )
-                    final_message += f"    کارت‌ها: {' '.join(map(str, winner['hand_cards']))}\n"
+                    final_message += f"    کارت‌ها: {' '.join(map(str, hand_cards))}\n"
+                
+                final_message += "\n" # یک خط فاصله برای جداسازی پات‌ها
 
-        final_message += "\n" + "⎯" * 20 + "\n"
+        final_message += "⎯" * 20 + "\n"
         final_message += f"🃏 *کارت‌های روی میز:* {' '.join(map(str, game.cards_table)) if game.cards_table else '🚫'}\n\n"
-        
-        final_message += "🤚 *کارت‌های سایر بازیکنان:*\n"
-        all_players = game.players_by(states=(PlayerState.ACTIVE, PlayerState.ALL_IN, PlayerState.FOLD))
-        
-        winner_user_ids = {w['player'].user_id for pot_winners in winners_by_pot for w in pot_winners[1]}
 
-        for p in all_players:
+        final_message += "🤚 *کارت‌های سایر بازیکنان:*\n"
+        all_players_in_hand = game.players_by(states=(PlayerState.ACTIVE, PlayerState.ALL_IN, PlayerState.FOLD))
+
+        # FIX: استخراج صحیح ID برندگان از ساختار داده جدید
+        winner_user_ids = set()
+        for pot_data in winners_by_pot:
+            for winner_info in pot_data.get("winners", []):
+                if "player" in winner_info:
+                    winner_user_ids.add(winner_info["player"].user_id)
+
+        for p in all_players_in_hand:
             if p.user_id not in winner_user_ids:
-                final_message += f"  - {p.mention_markdown}: {' '.join(map(str, p.cards)) if p.cards else 'کارت‌ها نمایش داده نشد'}\n"
+                card_display = ' '.join(map(str, p.cards)) if p.cards else 'کارت‌ها نمایش داده نشد'
+                state_info = " (فولد)" if p.state == PlayerState.FOLD else ""
+                final_message += f"  - {p.mention_markdown}{state_info}: {card_display}\n"
 
         self.send_message(chat_id=chat_id, text=final_message, parse_mode="Markdown")
 
