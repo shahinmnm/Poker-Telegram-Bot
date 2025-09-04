@@ -76,12 +76,10 @@ class PokerBotModel:
 
     @staticmethod
     def _current_turn_player(game: Game) -> Optional[Player]:
-        if not game.players or game.current_player_index < 0:
+        if game.current_player_index < 0:
             return None
-        # Add boundary check to prevent IndexError
-        if game.current_player_index >= len(game.players):
-            return None
-        return game.players[game.current_player_index]
+        # Use seat-based lookup
+        return game.get_player_by_seat(game.current_player_index)
     @staticmethod
     def _get_cards_markup(cards: Cards) -> ReplyKeyboardMarkup:
         """کیبورد مخصوص نمایش کارت‌های بازیکن و دکمه‌های کنترلی را می‌سازد."""
@@ -231,7 +229,7 @@ class PokerBotModel:
             self._view.send_message_reply(chat_id, update.message.message_id, "⚠️ بازی قبلاً شروع شده است، لطفاً صبر کنید!")
             return
 
-        if len(game.players) >= MAX_PLAYERS:
+        if game.seated_count() >= MAX_PLAYERS:
             self._view.send_message_reply(chat_id, update.message.message_id, "🚪 اتاق پر است!")
             return
 
@@ -246,14 +244,21 @@ class PokerBotModel:
                 mention_markdown=user.mention_markdown(),
                 wallet=wallet,
                 ready_message_id=update.effective_message.message_id, # <-- کد صحیح
+                seat_index=None,
             )
             game.ready_users.add(user.id)
-            game.players.append(player)
+            seat_assigned = game.add_player(player)
+            if seat_assigned == -1:
+                self._view.send_message_reply(chat_id, update.message.message_id, "🚪 اتاق پر است!")
+                return
 
-        ready_list = "\n".join([f"{i+1}. {p.mention_markdown} 🟢" for i, p in enumerate(game.players)])
+        ready_list = "\n".join([
+            f"{idx+1}. (صندلی {idx+1}) {p.mention_markdown} 🟢"
+            for idx, p in enumerate(game.seats) if p
+        ])
         text = (
             f"👥 *لیست بازیکنان آماده*\n\n{ready_list}\n\n"
-            f"📊 {len(game.players)}/{MAX_PLAYERS} بازیکن آماده\n\n"
+            f"📊 {game.seated_count()}/{MAX_PLAYERS} بازیکن آماده\n\n"
             f"🚀 برای شروع بازی /start را بزنید یا منتظر بمانید."
         )
 
@@ -270,7 +275,7 @@ class PokerBotModel:
             if msg: game.ready_message_main_id = msg
 
         # بررسی برای شروع خودکار
-        if len(game.players) >= self._min_players and (len(game.players) == self._bot.get_chat_member_count(chat_id) - 1 or self._cfg.DEBUG):
+        if game.seated_count() >= self._min_players and (game.seated_count() == self._bot.get_chat_member_count(chat_id) - 1 or self._cfg.DEBUG):
             self._start_game(context, game, chat_id)
 
     def start(self, update: Update, context: CallbackContext) -> None:
@@ -289,7 +294,7 @@ class PokerBotModel:
             # Re-add players logic would go here if needed.
             # For now, just resetting allows new players to join.
 
-        if len(game.players) >= self._min_players:
+        if game.seated_count() >= self._min_players:
             self._start_game(context, game, chat_id)
         else:
             self._view.send_message(chat_id, f"👤 تعداد بازیکنان برای شروع کافی نیست (حداقل {self._min_players} نفر).")
@@ -303,7 +308,7 @@ class PokerBotModel:
         # Ensure dealer_index is initialized before use
         if not hasattr(game, 'dealer_index'):
              game.dealer_index = -1
-        game.dealer_index = (game.dealer_index + 1) % len(game.players)
+        game.dealer_index = (game.dealer_index + 1) % game.seated_count()
     
         self._view.send_message(chat_id, '🚀 !بازی شروع شد!')
     
@@ -327,7 +332,7 @@ class PokerBotModel:
         ۱. کارت‌ها را در PV بازیکن ارسال می‌کند.
         ۲. یک پیام در گروه با کیبورد حاوی کارت‌های بازیکن ارسال می‌کند.
         """
-        for player in game.players:
+        for player in game.seated_players():
             if len(game.remain_cards) < 2:
                 self._view.send_message(chat_id, "کارت‌های کافی در دسته وجود ندارد! بازی ریست می‌شود.")
                 game.reset()
@@ -713,9 +718,9 @@ class PokerBotModel:
             # پیاده‌سازی موقت اگر متد بالا وجود ندارد
             print("WARNING: _get_first_player_index() not found. Using fallback logic.")
             first_player_index = -1
-            start_index = (game.dealer_index + 1) % len(game.players)
-            for i in range(len(game.players)):
-                idx = (start_index + i) % len(game.players)
+            start_index = (game.dealer_index + 1) % game.seated_count()
+            for i in range(game.seated_count()):
+                idx = (start_index + i) % game.seated_count()
                 if game.players[idx].state == PlayerState.ACTIVE:
                     first_player_index = idx
                     break
@@ -953,7 +958,7 @@ class RoundRateModel:
         self._model = model # <<< نمونه model ذخیره شد
         
     def _find_next_active_player_index(self, game: Game, start_index: int) -> int:
-        num_players = len(game.players)
+        num_players = game.seated_count()
         for i in range(1, num_players + 1):
             next_index = (start_index + i) % num_players
             if game.players[next_index].state == PlayerState.ACTIVE:
@@ -967,51 +972,51 @@ class RoundRateModel:
     # داخل کلاس RoundRateModel
     def set_blinds(self, game: Game, chat_id: ChatId) -> None:
         """
-        بلایند کوچک و بزرگ را برای شروع دور جدید تعیین و از حساب بازیکنان کم می‌کند.
-        این متد برای حالت دو نفره (Heads-up) نیز بهینه شده است.
+        Determine small/big blinds (using seat indices) and debit the players.
+        Works for heads-up (2-player) and multiplayer by walking occupied seats.
         """
-        num_players = len(game.players)
-    
+        num_players = game.seated_count()
         if num_players < 2:
-            # نباید این اتفاق بیفتد، اما برای اطمینان
-            return 
-    
-        # --- بلوک اصلاح شده برای تعیین بلایندها ---
+            return
+
+        # find next occupied seats for small and big blinds
+        # heads-up special case: dealer is small blind
         if num_players == 2:
-            # حالت دو نفره (Heads-up): دیلر اسمال بلایند است و اول بازی می‌کند.
             small_blind_index = game.dealer_index
-            big_blind_index = (game.dealer_index + 1) % num_players
-            first_action_index = small_blind_index # در pre-flop، اسمال بلایند اول حرکت می‌کند
+            big_blind_index = game.next_occupied_seat(small_blind_index)
+            first_action_index = small_blind_index
         else:
-            # حالت استاندارد برای بیش از دو بازیکن
-            small_blind_index = (game.dealer_index + 1) % num_players
-            big_blind_index = (game.dealer_index + 2) % num_players
-            first_action_index = (big_blind_index + 1) % num_players
-        # --- پایان بلوک اصلاح شده ---
-    
-        small_blind_player = game.players[small_blind_index]
-        big_blind_player = game.players[big_blind_index]
-        
-        # اعمال بلایندها
+            small_blind_index = game.next_occupied_seat(game.dealer_index)
+            big_blind_index = game.next_occupied_seat(small_blind_index)
+            first_action_index = game.next_occupied_seat(big_blind_index)
+
+        # record in game
+        game.small_blind_index = small_blind_index
+        game.big_blind_index = big_blind_index
+
+        small_blind_player = game.get_player_by_seat(small_blind_index)
+        big_blind_player = game.get_player_by_seat(big_blind_index)
+
+        if small_blind_player is None or big_blind_player is None:
+            return
+
+        # apply blinds
         self._set_player_blind(game, small_blind_player, SMALL_BLIND, "کوچک", chat_id)
         self._set_player_blind(game, big_blind_player, SMALL_BLIND * 2, "بزرگ", chat_id)
-    
-        game.max_round_rate = SMALL_BLIND * 2
-        
-        # تعیین نوبت اولین بازیکن برای اقدام
-        game.current_player_index = first_action_index
-        # بازیکنی که دور شرط‌بندی به او ختم می‌شود، بیگ بلایند است
-        game.trading_end_user_id = big_blind_player.user_id
-        
-        # ارسال پیام نوبت به بازیکن
-        player_turn = game.players[game.current_player_index]
-        self._view.send_turn_actions(
-            chat_id=chat_id,
-            game=game,
-            player=player_turn,
-            money=player_turn.wallet.value()
-        )
 
+        game.max_round_rate = SMALL_BLIND * 2
+        game.current_player_index = first_action_index
+        game.trading_end_user_id = big_blind_player.user_id
+
+        player_turn = game.get_player_by_seat(game.current_player_index)
+        if player_turn:
+            self._view.send_turn_actions(
+                chat_id=chat_id,
+                game=game,
+                player=player_turn,
+                money=player_turn.wallet.value()
+            )
+    
 
     def _set_player_blind(self, game: Game, player: Player, amount: Money, blind_type: str, chat_id: ChatId):
         try:
@@ -1038,7 +1043,7 @@ class RoundRateModel:
     def collect_bets_for_pot(self, game: Game):
         # This function resets the round-specific bets for the next street.
         # The money is already in the pot.
-        for player in game.players:
+        for player in game.seated_players():
             player.round_rate = 0
         game.max_round_rate = 0
 class WalletManagerModel(Wallet):
