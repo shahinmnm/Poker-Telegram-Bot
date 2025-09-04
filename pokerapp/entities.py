@@ -95,6 +95,8 @@ class Game:
         self.players: List[Player] = []
         self.cards_table = []
         self.current_player_index = -1
+        self.small_blind_index = -1  # <-- این خط اضافه می‌شود
+        self.big_blind_index = -1    # <-- این خط اضافه می‌شود
         self.remain_cards = get_cards()
         self.trading_end_user_id = 0
         self.ready_users = set()
