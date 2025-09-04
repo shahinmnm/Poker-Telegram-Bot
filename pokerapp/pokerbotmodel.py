@@ -805,86 +805,86 @@ class PokerBotModel:
         # ۳. بعد از اتمام کار، لیست را کاملاً خالی می‌کنیم
         game.message_ids_to_delete.clear()
         
-def _showdown(self, game: Game, chat_id: ChatId, context: CallbackContext) -> None:
-    """
-    مرحله نهایی بازی (Showdown).
-    کارت‌های همه بازیکنان باقی‌مانده را نمایش داده، برندگان را مشخص کرده
-    و پیام نهایی خلاصه دست را ارسال می‌کند.
-    """
-    # ارزیابی دست بازیکنانی که فولد نکرده‌اند
-    player_hands = []
-    for player in game.players:
-        if player.state != PlayerState.FOLD:
-            hand_type, score, best_5_cards = self._winner_determine.get_hand_value(
-                player.cards, game.cards_table
-            )
-            player_hands.append({
-                "player": player,
-                "hand_type": hand_type,
-                "score": score,
-                "best_5_cards": best_5_cards
-            })
-
-    # مرتب‌سازی براساس امتیاز
-    player_hands.sort(key=lambda x: x["score"], reverse=True)
-
-    # برندگان
-    winners = []
-    if player_hands:
-        highest_score = player_hands[0]["score"]
-        winners = [p for p in player_hands if p["score"] == highest_score]
-
-    pot_per_winner = game.pot / len(winners) if winners else 0
-
-    # ساخت پیام نتیجه
-    summary_lines = [
-        f"🏆 *پایان دست! برنده(ها) مشخص شدند!*",
-        f"💰 *مجموع پات: {game.pot}*",
-        "⎯" * 20,
-        f"🃏 *کارت‌های میز:*",
-        self._format_cards(game.cards_table),
-        "⎯" * 20
-    ]
-
-    # نمایش برندگان
-    for winner_data in winners:
-        player = winner_data['player']
-        hand_type = winner_data['hand_type']
-        hand_info = HAND_NAMES_TRANSLATIONS[hand_type]
-
-        summary_lines.append(
-            f"🥇 *برنده:* {player.mention_markdown} (برد: {pot_per_winner:.0f}$)"
-        )
-        summary_lines.append(
-            f"    {hand_info['emoji']} دست: *{hand_info['fa']}*"
-        )
-        summary_lines.append(
-            f"    {self._format_cards(player.cards)}"
-        )
-        summary_lines.append("")
-
-    # نمایش بازندگان
-    losers = [p for p in player_hands if p not in winners]
-    if losers:
-        summary_lines.append("*سایر بازیکنان:*")
-        for loser_data in losers:
-            player = loser_data['player']
-            hand_type = loser_data['hand_type']
+    def _showdown(self, game: Game, chat_id: ChatId, context: CallbackContext) -> None:
+        """
+        مرحله نهایی بازی (Showdown).
+        کارت‌های همه بازیکنان باقی‌مانده را نمایش داده، برندگان را مشخص کرده
+        و پیام نهایی خلاصه دست را ارسال می‌کند.
+        """
+        # ارزیابی دست بازیکنانی که فولد نکرده‌اند
+        player_hands = []
+        for player in game.players:
+            if player.state != PlayerState.FOLD:
+                hand_type, score, best_5_cards = self._winner_determine.get_hand_value(
+                    player.cards, game.cards_table
+                )
+                player_hands.append({
+                    "player": player,
+                    "hand_type": hand_type,
+                    "score": score,
+                    "best_5_cards": best_5_cards
+                })
+    
+        # مرتب‌سازی براساس امتیاز
+        player_hands.sort(key=lambda x: x["score"], reverse=True)
+    
+        # برندگان
+        winners = []
+        if player_hands:
+            highest_score = player_hands[0]["score"]
+            winners = [p for p in player_hands if p["score"] == highest_score]
+    
+        pot_per_winner = game.pot / len(winners) if winners else 0
+    
+        # ساخت پیام نتیجه
+        summary_lines = [
+            f"🏆 *پایان دست! برنده(ها) مشخص شدند!*",
+            f"💰 *مجموع پات: {game.pot}*",
+            "⎯" * 20,
+            f"🃏 *کارت‌های میز:*",
+            self._format_cards(game.cards_table),
+            "⎯" * 20
+        ]
+    
+        # نمایش برندگان
+        for winner_data in winners:
+            player = winner_data['player']
+            hand_type = winner_data['hand_type']
             hand_info = HAND_NAMES_TRANSLATIONS[hand_type]
-
-            summary_lines.append(f"    - {player.mention_markdown}: {hand_info['fa']}")
-            summary_lines.append(f"      {self._format_cards(player.cards)}")
-
-    final_message = "\n".join(summary_lines)
-
-    # ارسال پیام
-    context.bot.send_message(
-        chat_id,
-        final_message,
-        parse_mode=ParseMode.MARKDOWN_V2
-    )
-
-    self._end_hand(game, context)
+    
+            summary_lines.append(
+                f"🥇 *برنده:* {player.mention_markdown} (برد: {pot_per_winner:.0f}$)"
+            )
+            summary_lines.append(
+                f"    {hand_info['emoji']} دست: *{hand_info['fa']}*"
+            )
+            summary_lines.append(
+                f"    {self._format_cards(player.cards)}"
+            )
+            summary_lines.append("")
+    
+        # نمایش بازندگان
+        losers = [p for p in player_hands if p not in winners]
+        if losers:
+            summary_lines.append("*سایر بازیکنان:*")
+            for loser_data in losers:
+                player = loser_data['player']
+                hand_type = loser_data['hand_type']
+                hand_info = HAND_NAMES_TRANSLATIONS[hand_type]
+    
+                summary_lines.append(f"    - {player.mention_markdown}: {hand_info['fa']}")
+                summary_lines.append(f"      {self._format_cards(player.cards)}")
+    
+        final_message = "\n".join(summary_lines)
+    
+        # ارسال پیام
+        context.bot.send_message(
+            chat_id,
+            final_message,
+            parse_mode=ParseMode.MARKDOWN_V2
+        )
+    
+        self._end_hand(game, context)
 
 
     def _format_cards(self, cards: Cards) -> str:
