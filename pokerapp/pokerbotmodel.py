@@ -392,7 +392,8 @@ class PokerBotModel:
         return True
 
 
-# در کلاس PokerBotModel این متد را جایگزین کنید
+# در کلاس PokerBotModel این متد را به طور کامل جایگزین کنید
+
     def _process_playing(self, chat_id: ChatId, game: Game, context: CallbackContext) -> None:
         """
         مغز متفکر و کنترل‌کننده اصلی جریان بازی.
@@ -420,22 +421,20 @@ class PokerBotModel:
     
         # شرط ۳: بازی ادامه دارد، نوبت را به بازیکن بعدی منتقل کن
         # از متدی که از قبل در RoundRateModel وجود داشت استفاده می‌کنیم
-        next_player_index = self._round_rate._find_next_active_player_index(game)
+        # *** تنها خط اصلاح شده اینجاست ***
+        next_player_index = self._round_rate._find_next_active_player_index(game, game.current_player_index)
     
         if next_player_index != -1:
+            # ایندکس بازیکن فعلی را *قبل* از ارسال پیام نوبت آپدیت می‌کنیم
             game.current_player_index = next_player_index
             player = game.players[next_player_index]
-            
+    
             # ارسال پیام نوبت به بازیکن جدید
-            message_id = self._view.send_turn_message(chat_id, game, player)
-            if message_id:
-                game.turn_message_id = message_id
+            self._send_turn_message(game, player, chat_id)
         else:
             # اگر هیچ بازیکن فعالی برای حرکت بعدی وجود ندارد (مثلاً همه All-in هستند)
             # مستقیماً به مرحله بعدی برو
             self._go_to_next_street(game, chat_id, context)
-
-
 
     # FIX 1 (PART 1): Remove the 'money' parameter. The function will fetch the latest wallet value itself.
     def _send_turn_message(self, game: Game, player: Player, chat_id: ChatId):
