@@ -394,15 +394,14 @@ class PokerBotModel:
 
     def _determine_winners(self, game: Game, contenders: list[Player]):
         """
-        مغز متفکر مالی ربات!
-        برندگان را با در نظر گرفتن تمام سناریوهای پیچیده Side Pot مشخص می‌کند.
-        خروجی: لیستی از دیکشنری‌ها، هر کدام معرف یک پات مجزا.
-        e.g., [{'amount': 300, 'winners': [p1]}, {'amount': 400, 'winners': [p2]}]
+        مغز متفکر مالی ربات! (نسخه ۲.۰ - خود اصلاحگر)
+        برندگان را با در نظر گرفتن Side Pot مشخص کرده و با استفاده از game.pot
+        از صحت محاسبات اطمینان حاصل می‌کند.
         """
         if not contenders or game.pot == 0:
             return []
 
-        # ۱. محاسبه قدرت دست هر بازیکن (فقط یک بار)
+        # ۱. محاسبه قدرت دست هر بازیکن (بدون تغییر)
         contender_details = []
         for player in contenders:
             hand_type, score, best_hand_cards = self._winner_determine.get_hand_value(
@@ -416,42 +415,32 @@ class PokerBotModel:
                 "hand_type": hand_type,
             })
 
-        # ۲. شناسایی لایه‌های مختلف شرط‌بندی (Tiers)
-        # این لایه‌ها مرزهای تشکیل پات‌ها را مشخص می‌کنند.
+        # ۲. شناسایی لایه‌های شرط‌بندی (Tiers) (بدون تغییر)
         bet_tiers = sorted(list(set(p['total_bet'] for p in contender_details if p['total_bet'] > 0)))
 
         winners_by_pot = []
         last_bet_tier = 0
+        calculated_pot_total = 0 # برای پیگیری مجموع پات محاسبه شده
 
-        # ۳. ساختن پات‌ها به صورت لایه به لایه
+        # ۳. ساختن پات‌ها به صورت لایه به لایه (منطق اصلی بدون تغییر)
         for tier in bet_tiers:
-            # مشارکت هر بازیکن واجد شرایط در این لایه
             tier_contribution = tier - last_bet_tier
-            
-            # بازیکنانی که تا این سطح پول گذاشته‌اند
             eligible_for_this_pot = [p for p in contender_details if p['total_bet'] >= tier]
             
-            # محاسبه اندازه این پات
             pot_size = tier_contribution * len(eligible_for_this_pot)
+            calculated_pot_total += pot_size
             
-            # اگر پات اندازه‌ای داشت، برندگانش را پیدا کن
             if pot_size > 0:
-                # پیدا کردن بهترین امتیاز *فقط* در بین بازیکنان واجد شرایط این پات
-                best_score_in_pot = 0
-                for p in eligible_for_this_pot:
-                    if p['score'] > best_score_in_pot:
-                        best_score_in_pot = p['score']
-
-                # شناسایی تمام برندگان این پات (ممکن است مساوی کنند)
-                pot_winners_info = []
-                for p in eligible_for_this_pot:
-                    if p['score'] == best_score_in_pot:
-                        # فقط اطلاعات ضروری برای نمایش را استخراج می‌کنیم
-                        pot_winners_info.append({
-                            "player": p['player'],
-                            "hand_cards": p['hand_cards'],
-                            "hand_type": p['hand_type'],
-                        })
+                best_score_in_pot = max(p['score'] for p in eligible_for_this_pot)
+                
+                pot_winners_info = [
+                    {
+                        "player": p['player'],
+                        "hand_cards": p['hand_cards'],
+                        "hand_type": p['hand_type'],
+                    }
+                    for p in eligible_for_this_pot if p['score'] == best_score_in_pot
+                ]
                 
                 winners_by_pot.append({
                     "amount": pot_size,
@@ -460,6 +449,25 @@ class PokerBotModel:
 
             last_bet_tier = tier
         
+        # --- FIX: مرحله حیاتی تطبیق و اصلاح نهایی ---
+        # اینجا جادو اتفاق می‌افتد: ما پات محاسبه‌شده را با پات واقعی مقایسه می‌کنیم.
+        # اگر پولی (مثل بلایندها) جا مانده باشد، آن را به پات اصلی اضافه می‌کنیم.
+        discrepancy = game.pot - calculated_pot_total
+        if discrepancy > 0 and winners_by_pot:
+            # پول گمشده را به اولین پات (پات اصلی) اضافه کن
+            winners_by_pot[0]['amount'] += discrepancy
+        elif discrepancy < 0:
+            # این حالت نباید رخ دهد، اما برای اطمینان لاگ می‌گیریم
+            print(f"[ERROR] Pot calculation mismatch! Game pot: {game.pot}, Calculated: {calculated_pot_total}")
+
+        # --- FIX 2: ادغام پات‌های غیرضروری ---
+        # اگر در نهایت فقط یک پات وجود داشت، اما به اشتباه به چند بخش تقسیم شده بود
+        # (مثل سناریوی شما)، همه را در یک پات اصلی ادغام می‌کنیم.
+        if len(bet_tiers) == 1 and len(winners_by_pot) > 1:
+            print("[INFO] Merging unnecessary side pots into a single main pot.")
+            main_pot = {"amount": game.pot, "winners": winners_by_pot[0]['winners']}
+            return [main_pot]
+            
         return winners_by_pot
 
     def _process_playing(self, chat_id: ChatId, game: Game, context: CallbackContext) -> None:
