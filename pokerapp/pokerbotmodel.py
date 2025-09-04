@@ -468,7 +468,7 @@ class PokerBotModel:
         if game.turn_message_id:
             self._view.remove_markup(chat_id, game.turn_message_id)
     
-        self._process_playing(game, chat_id, context)
+        self._process_playing(chat_id, game, context)
     
     def player_action_call_check(self, update: Update, context: CallbackContext, game: Game) -> None:
         """بازیکن کال (پرداخت) یا چک (عبور) را انجام می‌دهد."""
@@ -498,7 +498,7 @@ class PokerBotModel:
         if game.turn_message_id:
             self._view.remove_markup(chat_id, game.turn_message_id)
     
-        self._process_playing(game, chat_id, context)
+        self._process_playing(chat_id, game, context)
     
     def player_action_raise_bet(self, update: Update, context: CallbackContext, game: Game, raise_amount: int) -> None:
         """بازیکن شرط را افزایش می‌دهد (Raise) یا برای اولین بار شرط می‌بندد (Bet)."""
@@ -537,7 +537,7 @@ class PokerBotModel:
         if game.turn_message_id:
             self._view.remove_markup(chat_id, game.turn_message_id)
     
-        self._process_playing(game, chat_id, context)
+        self._process_playing(chat_id, game, context)
     
     def player_action_all_in(self, update: Update, context: CallbackContext, game: Game) -> None:
         """بازیکن تمام موجودی خود را شرط می‌بندد (All-in)."""
@@ -573,7 +573,7 @@ class PokerBotModel:
         if game.turn_message_id:
             self._view.remove_markup(chat_id, game.turn_message_id)
     
-        self._process_playing(game, chat_id, context)
+        self._process_playing(chat_id, game, context)
             
     def _go_to_next_street(self, game: Game, chat_id: ChatId, context: CallbackContext) -> None:
         """
