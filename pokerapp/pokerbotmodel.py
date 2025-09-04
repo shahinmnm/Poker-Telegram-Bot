@@ -1014,21 +1014,20 @@ class RoundRateModel:
 
 
     def _set_player_blind(self, game: Game, player: Player, amount: Money, blind_type: str, chat_id: ChatId):
-
-        """یک بلایند مشخص را روی بازیکن اعمال می‌کند."""
         try:
             player.wallet.authorize(game_id=str(chat_id), amount=amount)
             player.round_rate += amount
+            player.total_bet += amount  # ← این خط اضافه شود
             game.pot += amount
             self._view.send_message(
                 chat_id,
                 f"💸 {player.mention_markdown} بلایند {blind_type} به مبلغ {amount}$ را پرداخت کرد."
             )
         except UserException as e:
-            # اگر پول کافی نبود، بازیکن آل-این می‌شود
             available_money = player.wallet.value()
             player.wallet.authorize(game_id=str(chat_id), amount=available_money)
             player.round_rate += available_money
+            player.total_bet += available_money  # ← این خط هم اضافه شود
             game.pot += available_money
             player.state = PlayerState.ALL_IN
             self._view.send_message(
