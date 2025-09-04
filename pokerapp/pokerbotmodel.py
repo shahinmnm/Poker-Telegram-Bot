@@ -329,7 +329,8 @@ class PokerBotModel:
 
         # 4. Delegate to the unified `_start_game` method to actually start the hand.
         # This is the core of the fix, ensuring the correct logic is always used.
-        self._start_game(context, game, chat_id)    def _start_game(self, context: CallbackContext, game: Game, chat_id: ChatId) -> None:
+        self._start_game(context, game, chat_id)
+    def _start_game(self, context: CallbackContext, game: Game, chat_id: ChatId) -> None:
         """مراحل شروع یک دست جدید بازی را انجام می‌دهد."""
         if game.ready_message_main_id:
             self._view.remove_message(chat_id, game.ready_message_main_id)
