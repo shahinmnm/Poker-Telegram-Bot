@@ -364,60 +364,59 @@ class PokerBotModel:
             if cards_message_id:
                 game.message_ids_to_delete.append(cards_message_id)
             
-            # --- پایان بلوک اصلاح شده ---
+    def _is_betting_round_over(self, game: Game) -> bool:
+        """
+        بررسی می‌کند که آیا دور شرط‌بندی فعلی به پایان رسیده است یا خیر.
+        یک دور زمانی تمام می‌شود که:
+        1. تمام بازیکنانی که فولد نکرده‌اند، حداقل یک بار حرکت کرده باشند.
+        2. تمام بازیکنانی که فولد نکرده‌اند، مقدار یکسانی پول در این دور گذاشته باشند.
+        """
+        active_players = game.players_by(states=(PlayerState.ACTIVE,))
+    
+        # اگر هیچ بازیکن فعالی وجود ندارد (مثلاً همه all-in یا فولد کرده‌اند)، دور تمام است.
+        if not active_players:
+            return True
+    
+        # شرط اول: آیا همه بازیکنان فعال حرکت کرده‌اند؟
+        # فلگ `has_acted` باید در ابتدای هر street و بعد از هر raise ریست شود.
+        if not all(p.has_acted for p in active_players):
+            return False
+    
+        # شرط دوم: آیا همه بازیکنان فعال مقدار یکسانی شرط بسته‌اند؟
+        # مقدار شرط اولین بازیکن فعال را به عنوان مرجع در نظر می‌گیریم.
+        reference_rate = active_players[0].round_rate
+        if not all(p.round_rate == reference_rate for p in active_players):
+            return False
+    
+        # اگر هر دو شرط برقرار باشد، دور تمام شده است.
+        return True
+
 
     def _process_playing(self, chat_id: ChatId, game: Game, context: CallbackContext) -> None:
         """
-        حلقهٔ اصلی بازی: تصمیم می‌گیرد که آیا دور شرط‌بندی تمام شده
-        یا باید نوبت به بازیکن بعدی داده شود.
-        این نسخه:
-          - context را پاس می‌دهد،
-          - از فراخوانی بازگشتی غیرضروری جلوگیری می‌کند،
-          - و در صورت لزوم به _go_to_next_street می‌رود.
+        حلقه اصلی بازی: وضعیت را ارزیابی کرده و تصمیم می‌گیرد که
+        آیا به مرحله بعد برود یا نوبت را به بازیکن بعدی بدهد.
         """
-        # بازیکنان در دور فعلی (Active یا All-in)
+        # ابتدا پیام نوبت قبلی را حذف می‌کنیم تا صفحه تمیز شود
+        if game.turn_message_id:
+            self._view.remove_message(chat_id, game.turn_message_id)
+            game.turn_message_id = None
+    
+        # بررسی می‌کنیم چند بازیکن هنوز در بازی هستند (برای شرایط خاص مثل برنده شدن پیش از موعد)
         contenders = game.players_by(states=(PlayerState.ACTIVE, PlayerState.ALL_IN))
         if len(contenders) <= 1:
-            # اگر فقط یک نفر یا هیچ کس باقی نمانده، به مرحله بعد / showdown می‌رویم
+            self._go_to_next_street(game, chat_id, context) # این متد خودش showdown را مدیریت می‌کند
+            return
+    
+        # با استفاده از متد کمکی، چک می‌کنیم آیا دور شرط‌بندی تمام شده است
+        if self._is_betting_round_over(game):
             self._go_to_next_street(game, chat_id, context)
             return
     
-        active_players = game.players_by(states=(PlayerState.ACTIVE,))
-        if not active_players:
-            # هیچ بازیکن فعالی نیست — به مرحله بعد می‌رویم
-            self._go_to_next_street(game, chat_id, context)
-            return
-    
-        # بررسی اینکه همه بازیکنان فعال یکبار بازی کرده‌اند یا خیر
-        all_acted = all(p.has_acted for p in active_players)
-        # بررسی برابری مقادیرِ round_rate بین بازیکنان فعال
-        rates_equal = len(set(p.round_rate for p in active_players)) <= 1
-    
-        # استثنا برای گزینه‌ی Big Blind در پری‌فلاپ (قابلیت عمل مجدد در بعضی شرایط)
-        is_preflop_bb_option = (
-            game.state == GameState.ROUND_PRE_FLOP
-            and game.max_round_rate == SMALL_BLIND * 2
-            and not all_acted
-        )
-    
-        # اگر همه بازی کرده‌اند و نرخ‌ها برابر است (و استثناء BB اعمال نمی‌شود)
-        if all_acted and rates_equal and not is_preflop_bb_option:
-            self._go_to_next_street(game, chat_id, context)
-            return
-    
-        # حالا نوبت را به بازیکن جاری می‌دهیم یا به نفر بعدی می‌رویم
-        player = self._current_turn_player(game)
-        if player and player.state == PlayerState.ACTIVE:
-            # پیام نوبت را ارسال کن (این متد خودش وضعیت turn_message_id را مدیریت می‌کند)
-            try:
-                self._send_turn_message(game, player, chat_id)
-            except Exception as e:
-                # محافظتی: اگر ارسال پیام شکست خورد، پیام خطا ثبت شود و نوبت به بعدی برود
-                print(f"ERROR sending turn message for player {player.user_id}: {e}")
-                self._move_to_next_player_and_process(game, chat_id, context)
-        else:
-            # اگر بازیکن فعلی فعال نیست، به بازیکن بعدی می‌رویم
-            self._move_to_next_player_and_process(game, chat_id, context)
+        # اگر به اینجا رسیدیم، یعنی دور هنوز تمام نشده و باید نوبت را حرکت دهیم.
+        # این کار توسط متد زیر انجام می‌شود که بازیکن فعال بعدی را پیدا کرده و پیام نوبت را ارسال می‌کند.
+        self._move_to_next_player_and_process(game, chat_id, context)
+
 
     # FIX 1 (PART 1): Remove the 'money' parameter. The function will fetch the latest wallet value itself.
     def _send_turn_message(self, game: Game, player: Player, chat_id: ChatId):
