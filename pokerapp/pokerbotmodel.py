@@ -301,64 +301,35 @@ class PokerBotModel:
         if len(game.players) >= self._min_players and (len(game.players) == self._bot.get_chat_member_count(chat_id) - 1 or self._cfg.DEBUG):
             self._start_game(context, game, chat_id)
 
+
     def start(self, update: Update, context: CallbackContext) -> None:
-        """بازی را به صورت دستی شروع می‌کند."""
+        """بازی را به صورت دستی شروع می کند."""
         game = self._game_from_context(context)
         chat_id = update.effective_chat.id
-    
-        # جلوگیری از شروع بازی در حالی که هنوز یک دست در جریان است
+
+        # 1. Prevent starting a game if one is already active
         if game.state not in (GameState.INITIAL, GameState.FINISHED):
-            self._view.send_message(chat_id, "🎮 یک بازی در حال حاضر در جریان است.")
+            self._view.send_message(chat_id, "بازی در حال حاضر در جریان است.")
             return
-    
-        # اگر بازی قبلاً تمام شده، ریست کن و بازیکنان قدیمی را نگه دار
+
+        # 2. If a game just finished, reset its state but preserve the players
         if game.state == GameState.FINISHED:
+            players_from_last_hand = [p for p in game.players if p.wallet.value() > 0]
             game.reset()
-            old_players_ids = context.chat_data.get(KEY_OLD_PLAYERS, [])
-            if old_players_ids:
-                # فقط بازیکنان حاضر در old_players_ids که هنوز در چت هستند را بازگردانیم
-                rejoined_players = [
-                    p for p in game.players if p.user_id in old_players_ids
-                ]
-                game.players = rejoined_players
-    
-        # بررسی حداقل بازیکنان
+            game.players = players_from_last_hand
+            game.ready_users = {p.user_id for p in game.players}
+
+        # 3. Check for the minimum number of players
         if len(game.players) < self._min_players:
             self._view.send_message(
                 chat_id,
-                f"👤 تعداد بازیکنان برای شروع کافی نیست (حداقل {self._min_players} نفر)."
+                f"تعداد بازیکنان برای شروع کافی نیست (حداقل {self._min_players} نفر)."
             )
             return
-    
-        # حذف پیام اصلی آماده‌سازی قبل از شروع
-        if game.ready_message_main_id:
-            self._view.remove_message(chat_id, game.ready_message_main_id)
-            game.ready_message_main_id = None
-    
-        # چرخاندن دیلر به بازیکن بعدی
-        if not hasattr(game, 'dealer_index'):
-            game.dealer_index = -1
-        game.dealer_index = (game.dealer_index + 1) % len(game.players)
-    
-        # تغییر وضعیت بازی به پری‌فلاپ
-        game.state = GameState.ROUND_PRE_FLOP
-    
-        # پخش کارت‌ها به بازیکنان
-        self._divide_cards(game, chat_id)
-    
-        # تعیین و پرداخت بلایندها
-        self.set_blinds(game, chat_id)
-    
-        # انتخاب اولین بازیکن برای راند پری‌فلاپ
-        self._set_first_player_for_street(game)
-    
-        # ذخیره بازیکنان برای دست بعد
-        context.chat_data[KEY_OLD_PLAYERS] = [p.user_id for p in game.players]
-    
-        # اعلام شروع بازی
-        self._view.send_message(chat_id, '🚀 !بازی شروع شد!')
 
-    def _start_game(self, context: CallbackContext, game: Game, chat_id: ChatId) -> None:
+        # 4. Delegate to the unified `_start_game` method to actually start the hand.
+        # This is the core of the fix, ensuring the correct logic is always used.
+        self._start_game(context, game, chat_id)    def _start_game(self, context: CallbackContext, game: Game, chat_id: ChatId) -> None:
         """مراحل شروع یک دست جدید بازی را انجام می‌دهد."""
         if game.ready_message_main_id:
             self._view.remove_message(chat_id, game.ready_message_main_id)
