@@ -12,6 +12,7 @@ from telegram import (
 from threading import Timer
 from io import BytesIO
 from typing import List, Optional
+from pokerapp.winnerdetermination import HAND_NAMES_TRANSLATIONS
 from pokerapp.desk import DeskImageGenerator
 from pokerapp.cards import Cards
 from pokerapp.entities import (
@@ -22,6 +23,7 @@ from pokerapp.entities import (
     ChatId,
     Mention,
     Money,
+    PlayerState,
 )
 
 class PokerBotViewer:
@@ -315,3 +317,54 @@ class PokerBotViewer:
                 print(f"Could not delete message {message_id} in chat {chat_id}: {e}")
 
         Timer(delay, _remove).start()
+        
+    def send_showdown_results(self, chat_id: ChatId, game: Game, winners_by_pot: list) -> None:
+        """
+        پیام نهایی نتایج بازی را با فرمت زیبا ساخته و ارسال می‌کند.
+        """
+        final_message = "🏆 *نتایج نهایی و نمایش کارت‌ها*\n\n"
+
+        if not winners_by_pot:
+            final_message += "خطایی در تعیین برنده رخ داد. پات تقسیم نشد."
+        else:
+            for pot_info, winners_info in winners_by_pot:
+                pot_amount = pot_info.get("amount", 0)
+                if pot_amount == 0 or not winners_info:
+                    continue
+
+                final_message += f"💰 *پات اصلی: {pot_amount}$*\n"
+                win_amount_per_player = pot_amount // len(winners_info)
+
+                for winner in winners_info:
+                    player = winner["player"]
+                    
+                    hand_name_data = HAND_NAMES_TRANSLATIONS.get(winner['hand_type'], {})
+                    hand_display_name = f"{hand_name_data.get('emoji', '🃏')} {hand_name_data.get('fa', 'دست نامشخص')}"
+
+                    final_message += (
+                        f"  - {player.mention_markdown} با دست {hand_display_name} "
+                        f"برنده *{win_amount_per_player}$* شد.\n"
+                    )
+                    final_message += f"    کارت‌ها: {' '.join(map(str, winner['hand_cards']))}\n"
+
+        final_message += "\n" + "⎯" * 20 + "\n"
+        final_message += f"🃏 *کارت‌های روی میز:* {' '.join(map(str, game.cards_table)) if game.cards_table else '🚫'}\n\n"
+        
+        final_message += "🤚 *کارت‌های سایر بازیکنان:*\n"
+        all_players = game.players_by(states=(PlayerState.ACTIVE, PlayerState.ALL_IN, PlayerState.FOLD))
+        
+        winner_user_ids = {w['player'].user_id for pot_winners in winners_by_pot for w in pot_winners[1]}
+
+        for p in all_players:
+            if p.user_id not in winner_user_ids:
+                final_message += f"  - {p.mention_markdown}: {' '.join(map(str, p.cards)) if p.cards else 'کارت‌ها نمایش داده نشد'}\n"
+
+        self.send_message(chat_id=chat_id, text=final_message, parse_mode="Markdown")
+
+    def send_new_hand_ready_message(self, chat_id: ChatId) -> None:
+        """پیام آمادگی برای دست جدید را ارسال می‌کند."""
+        message = (
+            "♻️ دست به پایان رسید. بازیکنان باقی‌مانده برای دست بعد حفظ شدند.\n"
+            "برای شروع دست جدید، /start را بزنید یا بازیکنان جدید می‌توانند با /ready اعلام آمادگی کنند."
+        )
+        self.send_message(chat_id, message)
