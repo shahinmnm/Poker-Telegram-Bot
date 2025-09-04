@@ -1022,6 +1022,47 @@ class RoundRateModel:
         player = self.model._current_turn_player(game)
         if player:
             self.model._send_turn_message(game, player, chat_id)
+    # این متد در کلاس RoundRateModel قرار دارد
+    
+    def _set_player_blind(self, game: Game, player: Player, amount: Money, blind_name: str, emoji: str, chat_id: ChatId):
+        """
+        مبلغ بلایند را از بازیکن کسر می‌کند.
+        اگر بازیکن پول کافی نداشته باشد، او را در وضعیت ALL_IN قرار می‌دهد.
+        """
+        try:
+            # حالت عادی: بازیکن پول کافی دارد
+            player.wallet.dec(amount)
+            game.pot += amount
+            player.total_bet += amount
+            player.round_rate = amount
+            game.max_round_rate = max(game.max_round_rate, amount)
+            self.view.send_message(
+                chat_id,
+                f"{emoji} {player.mention_markdown} {blind_name} ({amount}$) را پرداخت کرد."
+            )
+        except UserException:
+            # حالت استثنا: بازیکن پول کافی ندارد و ALL_IN می‌شود
+            all_in_amount = player.wallet.value()
+            if all_in_amount > 0:
+                player.wallet.dec(all_in_amount)
+                game.pot += all_in_amount
+                player.total_bet += all_in_amount
+                player.round_rate = all_in_amount
+                game.max_round_rate = max(game.max_round_rate, all_in_amount)
+                player.state = PlayerState.ALL_IN
+                self.view.send_message(
+                    chat_id,
+                    f"🆘 {player.mention_markdown} با تمام موجودی خود ({all_in_amount}$) به عنوان {blind_name} وارد بازی شد (ALL-IN)!"
+                )
+            else:
+                # اگر بازیکن هیچ پولی ندارد، فقط فولد می‌شود
+                player.state = PlayerState.FOLD
+                self.view.send_message(
+                    chat_id,
+                    f"💸 {player.mention_markdown} پولی برای پرداخت {blind_name} ندارد و از دور کنار می‌رود."
+                )
+    
+
 
     def _set_player_blind(self, game: Game, player: Player, amount: Money) -> None:
         """
