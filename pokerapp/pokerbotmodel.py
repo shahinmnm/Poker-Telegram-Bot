@@ -348,7 +348,7 @@ class PokerBotModel:
     
         # این متد به تنهایی تمام کارهای لازم برای شروع راند را انجام می‌دهد.
         # از جمله تعیین بلایندها، تعیین نوبت اول و ارسال پیام نوبت.
-        self._round_rate.set_blinds(game, chat_id)
+        self._round_rate.set_blinds(game, chat_id, context)
     
         # نیازی به هیچ کد دیگری در اینجا نیست.
         # کدهای اضافی حذف شدند.
@@ -967,103 +967,90 @@ class PokerBotModel:
 
 
 class RoundRateModel:
-    def __init__(self, view: PokerBotViewer, kv: redis.Redis, model: "PokerBotModel"):
+    """
+    Manages betting rounds, blinds, and player turn progression.
+    """
+    def __init__(self, view: PokerBotViewer, kv: redis.Redis, model: 'PokerBotModel'):
         self._view = view
         self._kv = kv
-        self._model = model # <<< نمونه model ذخیره شد
-        
+        self._model = model  # Store a reference to the main model
+
     def _find_next_active_player_index(self, game: Game, start_index: int) -> int:
+        """
+        Finds the index of the next player in ACTIVE state, starting from a given index.
+        """
         num_players = len(game.players)
-        for i in range(1, num_players + 1):
+        for i in range(num_players):
             next_index = (start_index + i) % num_players
             if game.players[next_index].state == PlayerState.ACTIVE:
                 return next_index
-        return -1
-        
-    def _get_first_player_index(self, game: Game) -> int:
-        return self._find_next_active_player_index(game, game.dealer_index)
+        return -1 # Should not happen in a valid game state
 
-
-    def set_blinds(self, game: Game, chat_id: ChatId) -> None:
+    def set_blinds(self, game: Game, chat_id: ChatId, context: CallbackContext):
         """
-        تعیین بلایندها (Small Blind و Big Blind)، بروزرسانی ایندکس‌ها،
-        کم کردن مبلغ از کیف بازیکن‌ها، و تنظیم حداکثر شرط راند فعلی.
+        Sets small and big blinds, then finds the first player to act and starts the game loop.
         """
         num_players = len(game.players)
-        if num_players < 2:
-            raise UserException("بازیکن کافی برای تعیین بلایند وجود ندارد!")
-    
-        # --- تعیین ایندکس SB و BB ---
-        if num_players == 2:
-            # Heads-Up: دیلر = SB ، بازیکن دیگر = BB
-            small_blind_index = game.dealer_index
-            big_blind_index = (game.dealer_index + 1) % num_players
-        else:
-            # 3+ نفر: نفر بعد از دیلر = SB ، نفر بعدی = BB
-            small_blind_index = (game.dealer_index + 1) % num_players
-            big_blind_index = (game.dealer_index + 2) % num_players
-    
-        # ذخیره ایندکس‌ها در Game
-        game.small_blind_index = small_blind_index
-        game.big_blind_index = big_blind_index
-    
-        # --- اعمال Small Blind ---
+        small_blind_index = (game.dealer_index + 1) % num_players
+        big_blind_index = (game.dealer_index + 2) % num_players
+
+        # Set Small Blind
         sb_player = game.players[small_blind_index]
-        sb_amount = SMALL_BLIND
-        self._set_player_blind(game, sb_player, sb_amount)
-        self._view.send_message(
-            chat_id,
-            f"♣️ {sb_player.mention_markdown} اسمال بلایند ({sb_amount}$) را پرداخت کرد."
-        )
-    
-        # --- اعمال Big Blind ---
+        self._set_player_blind(game, sb_player, SMALL_BLIND, "اسمال بلایند", "♣️", chat_id)
+
+        # Set Big Blind
+        # In heads-up (2 players), the dealer is the small blind and the other player is the big blind.
+        if num_players == 2:
+            big_blind_index = game.dealer_index
+        
         bb_player = game.players[big_blind_index]
-        bb_amount = SMALL_BLIND * 2
-        self._set_player_blind(game, bb_player, bb_amount)
-        self._view.send_message(
-            chat_id,
-            f"♠️ {bb_player.mention_markdown} بیگ بلایند ({bb_amount}$) را پرداخت کرد."
-        )
-    
-        # --- تنظیم حداکثر شرط راند ---
-        game.max_round_rate = bb_amount
-    
-        # توجه: تعیین اولین بازیکن در این مرحله انجام نمی‌شود.
-        # وظیفه‌ی متد جدید `_set_first_player_for_street` است که بعداً فراخوانی شود.
+        self._set_player_blind(game, bb_player, SMALL_BLIND * 2, "بیگ بلایند", "♠️", chat_id)
+        
+        game.max_round_rate = SMALL_BLIND * 2
 
-    def _set_player_blind(self, game: Game, player: Player, amount: Money) -> None:
+        # --- THIS IS THE CRITICAL FIX ---
+        # Find the first player to act (UTG - Under the Gun)
+        # This is the player to the left of the Big Blind.
+        first_to_act_index = (big_blind_index + 1) % num_players
+        
+        # Ensure the found player is active (not all-in from blinds)
+        game.current_player_index = self._find_next_active_player_index(game, first_to_act_index)
+
+        # Kick off the game loop by calling the main processing function
+        if game.current_player_index != -1:
+            self._model._process_playing(chat_id, game, context)
+        else:
+            # This case might happen if all players went all-in on blinds.
+            # The game should proceed directly to the next street.
+            self._model._go_to_next_street(game, chat_id, context)
+
+
+    def _set_player_blind(self, game: Game, player: Player, amount: int, blind_name: str, icon: str, chat_id: ChatId):
         """
-        مبلغ بلایند را از موجودی بازیکن کم کرده، وضعیت شرط‌بندی او را آپدیت می‌کند
-        و به پات اضافه می‌کند. اگر مبلغ بلایند باعث آل-این شود، وضعیت بازیکن به ALL_IN تغییر می‌کند.
+        Deducts blind amount from a player's wallet and updates game state.
+        Handles ALL-IN scenarios gracefully.
         """
-        if amount <= 0:
-            return
-    
-        # بررسی موجودی برای پرداخت
-        wallet_value = player.wallet.value()
-        actual_bet = min(amount, wallet_value)  # اگر پول کمتری دارد، به اندازه موجودی شرط می‌بندد
-    
-        # کسر مبلغ از کیف پول و بروزرسانی
-        player.wallet.authorize(game.id, actual_bet)
-        player.total_bet += actual_bet
-        player.round_rate += actual_bet
-        game.pot += actual_bet
-    
-        # تعیین وضعیت بازیکن در صورت آل-این
-        if actual_bet < amount or wallet_value == actual_bet:
-            player.state = PlayerState.ALL_IN
-    
-        # به‌روزرسانی حداکثر شرط راند اگر لازم بود
-        if player.round_rate > game.max_round_rate:
-            game.max_round_rate = player.round_rate
+        player_money = player.wallet.value()
+        bet_amount = min(player_money, amount)
 
+        try:
+            player.wallet.dec(bet_amount)
+            player.round_rate += bet_amount
+            player.total_bet += bet_amount
+            game.pot += bet_amount
 
-    def collect_bets_for_pot(self, game: Game):
-        # This function resets the round-specific bets for the next street.
-        # The money is already in the pot.
-        for player in game.players:
-            player.round_rate = 0
-        game.max_round_rate = 0
+            message = f"{icon} {player.mention_markdown} {blind_name} ({bet_amount}$) را پرداخت کرد."
+            if player_money <= amount:
+                player.state = PlayerState.ALL_IN
+                message += "\n**‼️ آل-این ‼️**"
+
+            self._view.send_message(chat_id, message, parse_mode="Markdown")
+
+        except UserException as e:
+            # This should ideally not happen if wallet.value() is checked first, but as a safeguard:
+            self._view.send_message(chat_id, f"⚠️ خطای داخلی: {player.mention_markdown} موجودی کافی برای پرداخت {blind_name} را ندارد. ({e})")
+            player.state = PlayerState.FOLD # Or handle differently
+
         
 class WalletManagerModel(Wallet):
     """
