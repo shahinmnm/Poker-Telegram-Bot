@@ -625,45 +625,79 @@ class PokerBotModel:
             
     def _go_to_next_street(self, game: Game, chat_id: ChatId, context: CallbackContext) -> None:
         """
-        بازی را به مرحله بعدی (street) می‌برد یا در صورت لزوم به showdown ختم می‌کند.
-        این متد حالا تنها نقطه ورود به پایان دست است.
+        بازی را به مرحله بعدی (street) می‌برد.
+        این متد مسئولیت‌های زیر را بر عهده دارد:
+        1. جمع‌آوری شرط‌های این دور و افزودن به پات اصلی.
+        2. ریست کردن وضعیت‌های مربوط به دور (مثل has_acted و round_rate).
+        3. تعیین اینکه آیا باید به مرحله بعد برویم یا بازی با showdown تمام می‌شود.
+        4. پخش کردن کارت‌های جدید روی میز (فلاپ، ترن، ریور).
+        5. پیدا کردن اولین بازیکن فعال برای شروع دور شرط‌بندی جدید.
+        6. اگر فقط یک بازیکن باقی مانده باشد، او را برنده اعلام می‌کند.
         """
-        # ریست کردن وضعیت "has_acted" برای همه بازیکنان فعال برای شروع دور شرط‌بندی جدید
-        for p in game.players_by(states=(PlayerState.ACTIVE,)):
-            p.has_acted = False
-            p.round_rate = 0  # ریست کردن مبلغ شرط در دور جدید
+        # ابتدا، تمام پیام‌های نوبت قبلی را پاک می‌کنیم تا چت تمیز بماند
+        if game.turn_message_id:
+            self._view.remove_message(chat_id, game.turn_message_id)
+            game.turn_message_id = None
     
-        game.max_round_rate = 0
-        game.turn_message_id = None
-        game.last_raise_player_index = -1 # ریست کردن آخرین نفر افزایش‌دهنده
-    
+        # بررسی می‌کنیم چند بازیکن هنوز در بازی هستند (Active یا All-in)
         contenders = game.players_by(states=(PlayerState.ACTIVE, PlayerState.ALL_IN))
-    
-        # سناریوی ۱: همه فولد کرده‌اند و فقط یک نفر باقی مانده است
         if len(contenders) <= 1:
-            self._showdown(game, chat_id, context) # مستقیم به showdown می‌رویم تا برنده را اعلام کند
-            return # <-- خروج قطعی از متد
-    
-        # سناریوی ۲: دور شرط‌بندی ریور تمام شده و بیش از یک نفر باقی مانده است
-        if game.state == GameState.ROUND_RIVER:
+            # اگر فقط یک نفر باقی مانده، مستقیم به showdown می‌رویم تا برنده مشخص شود
             self._showdown(game, chat_id, context)
-            return # <-- خروج قطعی از متد
+            return
     
-        # سناریوی ۳: بازی در حال پیشرفت است، به مرحله بعد می‌رویم
-        if game.state == GameState.ROUND_TURN:
-            game.state = GameState.ROUND_RIVER
-            self.add_cards_to_table(1, game, chat_id, "🔚 ریور (کارت پنجم)")
+        # جمع‌آوری پول‌های شرط‌بندی شده در این دور و ریست کردن وضعیت بازیکنان
+        self._round_rate.collect_bets_for_pot(game)
+        for p in game.players:
+            p.has_acted = False # <-- این خط برای دور بعدی حیاتی است
+    
+        # رفتن به مرحله بعدی بر اساس وضعیت فعلی بازی
+        if game.state == GameState.ROUND_PRE_FLOP:
+            game.state = GameState.ROUND_FLOP
+            self.add_cards_to_table(3, game, chat_id, "🃏 فلاپ (Flop)")
         elif game.state == GameState.ROUND_FLOP:
             game.state = GameState.ROUND_TURN
-            self.add_cards_to_table(1, game, chat_id, "↪️ ترن (کارت چهارم)")
-        elif game.state == GameState.ROUND_PRE_FLOP:
-            game.state = GameState.ROUND_FLOP
-            self.add_cards_to_table(3, game, chat_id, "🃏 فلاپ (سه کارت اول میز)")
+            self.add_cards_to_table(1, game, chat_id, "🃏 ترن (Turn)")
+        elif game.state == GameState.ROUND_TURN:
+            game.state = GameState.ROUND_RIVER
+            self.add_cards_to_table(1, game, chat_id, "🃏 ریور (River)")
+        elif game.state == GameState.ROUND_RIVER:
+            # بعد از ریور، دور شرط‌بندی تمام شده و باید showdown انجام شود
+            self._showdown(game, chat_id, context)
+            return # <-- مهم: بعد از فراخوانی showdown، ادامه نمی‌دهیم
     
-        # تنظیم نوبت برای شروع دور شرط‌بندی جدید
-        # ✅✅✅ اینجا اصلاح شد ✅✅✅
-        game.current_player_index = self._round_rate._get_first_player_index(game)
-        self._process_playing(chat_id, game, context)
+        # اگر هنوز بازیکنی برای بازی وجود دارد، نوبت را به نفر اول می‌دهیم
+        active_players = game.players_by(states=(PlayerState.ACTIVE,))
+        if not active_players:
+            # اگر هیچ بازیکن فعالی نمانده (همه All-in هستند)، مستقیم به مراحل بعدی می‌رویم
+            # تا همه کارت‌ها رو شوند.
+            self._go_to_next_street(game, chat_id, context)
+            return
+    
+        # پیدا کردن اولین بازیکن برای شروع دور جدید (معمولاً اولین فرد فعال بعد از دیلر)
+        # توجه: شما باید متد _get_first_player_index را داشته باشید.
+        # اگر ندارید، فعلاً از این پیاده‌سازی ساده استفاده کنید:
+        try:
+            # این متد باید ایندکس اولین بازیکن *فعال* بعد از دیلر را پیدا کند
+            game.current_player_index = self._get_first_player_index(game)
+        except AttributeError:
+            # پیاده‌سازی موقت اگر متد بالا وجود ندارد
+            print("WARNING: _get_first_player_index() not found. Using fallback logic.")
+            first_player_index = -1
+            start_index = (game.dealer_index + 1) % len(game.players)
+            for i in range(len(game.players)):
+                idx = (start_index + i) % len(game.players)
+                if game.players[idx].state == PlayerState.ACTIVE:
+                    first_player_index = idx
+                    break
+            game.current_player_index = first_player_index
+    
+        # اگر بازیکنی برای بازی پیدا شد، حلقه بازی را مجدداً شروع می‌کنیم
+        if game.current_player_index != -1:
+            self._process_playing(chat_id, game, context)
+        else:
+            # اگر به هر دلیلی بازیکنی پیدا نشد، به مرحله بعد می‌رویم
+            self._go_to_next_street(game, chat_id, context)
 
     def _determine_all_scores(self, game: Game) -> List[Dict]:
         """
