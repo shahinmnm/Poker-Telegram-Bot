@@ -394,40 +394,72 @@ class PokerBotModel:
 
     def _determine_winners(self, game: Game, contenders: list[Player]):
         """
-        با استفاده از WinnerDetermination، برندگان را به تفکیک پات‌ها مشخص می‌کند.
-        خروجی: لیستی از تاپل‌ها -> (pot_info, [winners_info_list])
+        مغز متفکر مالی ربات!
+        برندگان را با در نظر گرفتن تمام سناریوهای پیچیده Side Pot مشخص می‌کند.
+        خروجی: لیستی از دیکشنری‌ها، هر کدام معرف یک پات مجزا.
+        e.g., [{'amount': 300, 'winners': [p1]}, {'amount': 400, 'winners': [p2]}]
         """
-        winners_by_pot = []
-
-        # --- ✅ اصلاح منطق محاسبه پات ---
-        # به جای محاسبه مجدد و پرخطر، از game.pot که منبع اصلی و صحیح است استفاده می‌کنیم.
-        total_pot = game.pot
-        if total_pot == 0 or not contenders:
+        if not contenders or game.pot == 0:
             return []
 
-        best_score = 0
-        winners_info = []
-
+        # ۱. محاسبه قدرت دست هر بازیکن (فقط یک بار)
+        contender_details = []
         for player in contenders:
             hand_type, score, best_hand_cards = self._winner_determine.get_hand_value(
                 player.cards, game.cards_table
             )
+            contender_details.append({
+                "player": player,
+                "total_bet": player.total_bet,
+                "score": score,
+                "hand_cards": best_hand_cards,
+                "hand_type": hand_type,
+            })
 
-            if score > best_score:
-                best_score = score
-                winners_info = [{
-                    "player": player,
-                    "hand_cards": best_hand_cards,
-                    "hand_type": hand_type
-                }]
-            elif score == best_score:
-                winners_info.append({
-                    "player": player,
-                    "hand_cards": best_hand_cards,
-                    "hand_type": hand_type
+        # ۲. شناسایی لایه‌های مختلف شرط‌بندی (Tiers)
+        # این لایه‌ها مرزهای تشکیل پات‌ها را مشخص می‌کنند.
+        bet_tiers = sorted(list(set(p['total_bet'] for p in contender_details if p['total_bet'] > 0)))
+
+        winners_by_pot = []
+        last_bet_tier = 0
+
+        # ۳. ساختن پات‌ها به صورت لایه به لایه
+        for tier in bet_tiers:
+            # مشارکت هر بازیکن واجد شرایط در این لایه
+            tier_contribution = tier - last_bet_tier
+            
+            # بازیکنانی که تا این سطح پول گذاشته‌اند
+            eligible_for_this_pot = [p for p in contender_details if p['total_bet'] >= tier]
+            
+            # محاسبه اندازه این پات
+            pot_size = tier_contribution * len(eligible_for_this_pot)
+            
+            # اگر پات اندازه‌ای داشت، برندگانش را پیدا کن
+            if pot_size > 0:
+                # پیدا کردن بهترین امتیاز *فقط* در بین بازیکنان واجد شرایط این پات
+                best_score_in_pot = 0
+                for p in eligible_for_this_pot:
+                    if p['score'] > best_score_in_pot:
+                        best_score_in_pot = p['score']
+
+                # شناسایی تمام برندگان این پات (ممکن است مساوی کنند)
+                pot_winners_info = []
+                for p in eligible_for_this_pot:
+                    if p['score'] == best_score_in_pot:
+                        # فقط اطلاعات ضروری برای نمایش را استخراج می‌کنیم
+                        pot_winners_info.append({
+                            "player": p['player'],
+                            "hand_cards": p['hand_cards'],
+                            "hand_type": p['hand_type'],
+                        })
+                
+                winners_by_pot.append({
+                    "amount": pot_size,
+                    "winners": pot_winners_info
                 })
 
-        winners_by_pot.append(({"amount": total_pot}, winners_info))
+            last_bet_tier = tier
+        
         return winners_by_pot
 
     def _process_playing(self, chat_id: ChatId, game: Game, context: CallbackContext) -> None:
@@ -803,32 +835,44 @@ class PokerBotModel:
         
     def _showdown(self, game: Game, chat_id: ChatId, context: CallbackContext) -> None:
         """
-        فرآیند پایان دست را مدیریت می‌کند:
-        ۱. برندگان را مشخص کرده و پول را تقسیم می‌کند (منطق Model).
-        ۲. به View دستور می‌دهد تا نتایج را نمایش دهد (فراخوانی View).
-        ۳. پیام‌های قدیمی را پاک کرده و بازی را برای دست بعد ریست می‌کند (منطق Model).
+        فرآیند پایان دست را با استفاده از خروجی دقیق _determine_winners مدیریت می‌کند.
         """
         contenders = game.players_by(states=(PlayerState.ACTIVE, PlayerState.ALL_IN))
 
         if not contenders:
-            self._view.send_message(chat_id, "🏆 هیچ بازیکنی در مرحله نهایی باقی نمانده است. پات به دست بعدی منتقل می‌شود.")
+            # سناریوی نادر که همه قبل از showdown فولد کرده‌اند
+            active_players = game.players_by(states=(PlayerState.ACTIVE,))
+            if len(active_players) == 1:
+                winner = active_players[0]
+                winner.wallet.inc(game.pot)
+                self._view.send_message(
+                    chat_id,
+                    f"🏆 تمام بازیکنان دیگر فولد کردند! {winner.mention_markdown} برنده {game.pot}$ شد."
+                )
         else:
-            # ۱. تعیین برندگان و به‌روزرسانی کیف پول (منطق خالص Model)
+            # ۱. تعیین برندگان و تقسیم تمام پات‌ها (اصلی و فرعی)
             winners_by_pot = self._determine_winners(game, contenders)
 
             if winners_by_pot:
-                for pot_info, winners_info in winners_by_pot:
-                    pot_amount = pot_info.get("amount", 0)
+                # این حلقه روی تمام پات‌های ساخته شده (اصلی و فرعی) حرکت می‌کند
+                for pot in winners_by_pot:
+                    pot_amount = pot.get("amount", 0)
+                    winners_info = pot.get("winners", [])
+                    
                     if pot_amount > 0 and winners_info:
                         win_amount_per_player = pot_amount // len(winners_info)
                         for winner in winners_info:
                             player = winner["player"]
                             player.wallet.inc(win_amount_per_player)
+            else:
+                 self._view.send_message(chat_id, "ℹ️ هیچ برنده‌ای در این دست مشخص نشد. مشکلی در منطق بازی رخ داده است.")
+
 
             # ۲. فراخوانی View برای نمایش نتایج
+            # View باید آپدیت شود تا این ساختار داده جدید را به زیبایی نمایش دهد
             self._view.send_showdown_results(chat_id, game, winners_by_pot)
 
-        # ۳. پاکسازی و ریست کردن بازی برای دست بعدی
+        # ۳. پاکسازی و ریست کردن بازی برای دست بعدی (بدون تغییر)
         for msg_id in game.message_ids_to_delete:
             self._view.remove_message(chat_id, msg_id)
         game.message_ids_to_delete.clear()
@@ -840,12 +884,10 @@ class PokerBotModel:
         remaining_players = [p for p in game.players if p.wallet.value() > 0]
         context.chat_data[KEY_OLD_PLAYERS] = [p.user_id for p in remaining_players]
 
-        # --- ✅ اصلاح خطای TypeError ---
-        # آرگومان preserve_players از اینجا حذف شد چون متد reset آن را نمی‌پذیرد.
         game.reset()
 
-        # فراخوانی View برای ارسال پیام آمادگی دست جدید
         self._view.send_new_hand_ready_message(chat_id)
+        
     def _end_hand(self, game: Game, chat_id: ChatId, context: CallbackContext) -> None:
         """
         یک دست از بازی را تمام کرده، پیام‌ها را پاکسازی کرده و برای دست بعدی آماده می‌شود.
