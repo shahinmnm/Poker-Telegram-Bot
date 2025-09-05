@@ -235,17 +235,32 @@ class Game:
         return True
     def is_round_ended(self) -> bool:
         """
-        چک می‌کند آیا راند تمام شده (همه بازیکنان اقدام کرده‌اند، max_round_rate=0 یا all-in covered).
-        تغییرات: متد جدید برای چک اصولی پایان راند (ریشه‌ای).
+        چک می‌کند آیا راند فعلی تمام شده است.
+        شرایط پایان راند: همه بازیکنان فعال اقدام کرده باشند و شرط‌هایشان برابر باشد،
+        یا کمتر از 2 بازیکن فعال باقی مانده باشد.
         """
-        active_players = self.players_by(states=(PlayerState.ACTIVE,))
-        if not active_players:
+        # بازیکنان فعال و آل-این (که هنوز در دست هستند)
+        active_players = self.players_by(states=(PlayerState.ACTIVE, PlayerState.ALL_IN))
+        
+        # اگر کمتر از 2 بازیکن، راند تمام است (نمی‌توان شرط‌بندی ادامه داد)
+        if len(active_players) < 2:
+            print("DEBUG: Round ended - less than 2 active players.")
             return True
-        # چک شرط‌ها: همه has_acted=True، و no pending bets
-        all_acted = all(p.has_acted for p in active_players)
-        no_bets = self.max_round_rate == 0
-        all_in_covered = self.all_in_players_are_covered()
-        return all_acted and no_bets and all_in_covered
+        
+        # پیدا کردن حداکثر شرط در این راند
+        max_rate = max(p.round_rate for p in active_players)
+        
+        # چک همه بازیکنان: آیا اقدام کرده‌اند و شرطشان برابر max است؟
+        for p in active_players:
+            if not p.has_acted:
+                print(f"DEBUG: Round not ended - player {p.user_id} has not acted.")
+                return False
+            if p.round_rate < max_rate and p.state != PlayerState.ALL_IN:
+                print(f"DEBUG: Round not ended - player {p.user_id} bet {p.round_rate} < max {max_rate} and not all-in.")
+                return False
+        
+        print("DEBUG: Round ended - all acted and bets equal.")
+        return True
 
     def __repr__(self):
         return "{}({!r})".format(self.__class__.__name__, self.__dict__)
