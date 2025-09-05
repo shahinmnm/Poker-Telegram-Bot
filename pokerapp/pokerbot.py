@@ -4,7 +4,8 @@ import logging
 import threading
 import time
 import redis
-import traceback  # <--- اضافه شد برای لاگ دقیق‌تر
+import traceback
+from pokerapp.message_delete_manager import MessageDeleteManager
 
 from typing import Callable
 from telegram import Bot
@@ -58,9 +59,7 @@ class PokerBot:
             kv=kv,
             cfg=cfg,
         )
-        self._controller = PokerBotCotroller(self._model, self._updater)
-        from pokerapp.message_delete_manager import MessageDeleteManager  # فایل جدیدی که اضافه می‌کنی
-        
+        self._controller = PokerBotCotroller(self._model, self._updater)        
         self._delete_manager = MessageDeleteManager(bot)
         self._view.set_delete_manager(self._delete_manager)
         self._model.set_delete_manager(self._delete_manager)
