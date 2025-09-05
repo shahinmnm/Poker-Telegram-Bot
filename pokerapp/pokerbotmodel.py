@@ -868,6 +868,17 @@ class PokerBotModel:
         game.message_ids_to_delete.clear()
         
     def _showdown(self, game: Game, chat_id: ChatId, context: CallbackContext) -> None:
+        # === DEBUG START ===
+        print("\n" + "="*50)
+        print(f"[DEBUG] _showdown CALLED at {datetime.datetime.now().isoformat()}")
+        print(f"[DEBUG] game.id: {getattr(game, 'id', None)}")
+        print(f"[DEBUG] game.state(before): {game.state}")
+        # اگر مقادیر دیگری کلیدی است، چاپ کنید
+        print(f"[DEBUG] seated_count: {game.seated_count()}, pot: {game.pot}")
+        print("[DEBUG] CALL STACK:")
+        traceback.print_stack(limit=12)  # محدود به 12 فریم برای شفافیت لاگ
+        print("="*50 + "\n")
+        # === DEBUG END ===
         """
         فرآیند پایان دست را با استفاده از خروجی دقیق _determine_winners مدیریت می‌کند.
         """
