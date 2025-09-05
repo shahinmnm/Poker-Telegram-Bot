@@ -1,11 +1,18 @@
 #!/usr/bin/env python3
+logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %(message)s')
 
 import datetime
 import traceback
 from threading import Timer
 from typing import List, Tuple, Dict, Optional
 
-import datetime, json, traceback, inspect
+import logging
+import sys
+import datetime
+import json
+import traceback
+import inspect
+import threading
 
 import redis
 from telegram import Message, ReplyKeyboardMarkup, Update, Bot, ParseMode
@@ -870,48 +877,52 @@ class PokerBotModel:
         game.message_ids_to_delete.clear()
         
     def _showdown(self, game: Game, chat_id: ChatId, context: CallbackContext) -> None:
+        """
+        فرآیند پایان دست را با استفاده از خروجی دقیق _determine_winners مدیریت می‌کند.
+        شامل لاگ‌گیری پیشرفته برای دیباگ و مدیریت پات‌های اصلی/فرعی.
+        تغییرات: استفاده از logging به جای print برای پایداری، حذف تکرار پاکسازی، و چک اضافی برای contenders.
+        """
+        logger = logging.getLogger(__name__)
         
-        print("\n" + "="*80)
-        print(f"[DEBUG] >>> _showdown CALLED at: {datetime.datetime.now().isoformat()}")
-        print(f"[DEBUG] game.id: {getattr(game, 'id', None)}")
-        print(f"[DEBUG] game.state BEFORE: {getattr(game, 'state', None)}")
-        print(f"[DEBUG] seated_count: {game.seated_count()}, pot: {game.pot}")
-        print(f"[DEBUG] cards_on_table: {getattr(game, 'cards_table', [])}")
+        logger.debug("\n" + "="*80)
+        logger.debug(f"[DEBUG] >>> _showdown CALLED at: {datetime.datetime.now().isoformat()}")
+        logger.debug(f"[DEBUG] game.id: {getattr(game, 'id', None)}")
+        logger.debug(f"[DEBUG] game.state BEFORE: {getattr(game, 'state', None)}")
+        logger.debug(f"[DEBUG] seated_count: {game.seated_count()}, pot: {game.pot}")
+        logger.debug(f"[DEBUG] cards_on_table: {getattr(game, 'cards_table', [])}")
         
         # بازیکنان و وضعیت‌شان
         state_counts = {}
         for st in list(PlayerState):
             state_counts[st.name] = len([p for p in game.players if p.state == st])
-        print(f"[DEBUG] player counts by state: {json.dumps(state_counts, ensure_ascii=False)}")
+        logger.debug(f"[DEBUG] player counts by state: {json.dumps(state_counts, ensure_ascii=False)}")
         
-        print("[DEBUG] ACTIVE players:", [p.mention_markdown for p in game.players if p.state == PlayerState.ACTIVE])
-        print("[DEBUG] ALL_IN players:", [p.mention_markdown for p in game.players if p.state == PlayerState.ALL_IN])
-        print("[DEBUG] FOLDED players:", [p.mention_markdown for p in game.players if p.state == PlayerState.FOLD])
+        logger.debug("[DEBUG] ACTIVE players: %s", [p.mention_markdown for p in game.players if p.state == PlayerState.ACTIVE])
+        logger.debug("[DEBUG] ALL_IN players: %s", [p.mention_markdown for p in game.players if p.state == PlayerState.ALL_IN])
+        logger.debug("[DEBUG] FOLDED players: %s", [p.mention_markdown for p in game.players if p.state == PlayerState.FOLD])
         
         # شناسه‌های پیام آخرین نتیجه و پایان دست
-        print(f"[DEBUG] last_hand_result_message_id: {getattr(game, 'last_hand_result_message_id', None)}")
-        print(f"[DEBUG] last_hand_end_message_id: {getattr(game, 'last_hand_end_message_id', None)}")
+        logger.debug(f"[DEBUG] last_hand_result_message_id: {getattr(game, 'last_hand_result_message_id', None)}")
+        logger.debug(f"[DEBUG] last_hand_end_message_id: {getattr(game, 'last_hand_end_message_id', None)}")
         
         # مسیر فعلی فراخوانی
-        print("[DEBUG] FULL CALL STACK (most recent last):")
+        logger.debug("[DEBUG] FULL CALL STACK (most recent last):")
         for frame in traceback.format_stack(limit=15):
-            print(frame.strip())
+            logger.debug(frame.strip())
         
         # گرفتن اطلاعات از کل استک پایتونی برای تحلیل عمیق‌تر
         caller_functions = [f.function for f in inspect.stack()]
-        print(f"[DEBUG] caller functions chain: {caller_functions}")
+        logger.debug(f"[DEBUG] caller functions chain: {caller_functions}")
         
         # موقعیت متغیرهای Thread (برای دیدن اجراهای موازی احتمالی)
-        import threading
-        print(f"[DEBUG] current thread: {threading.current_thread().name}")
+        logger.debug(f"[DEBUG] current thread: {threading.current_thread().name}")
         
-        print("="*80 + "\n")
-
-        """
-        فرآیند پایان دست را با استفاده از خروجی دقیق _determine_winners مدیریت می‌کند.
-        """
+        logger.debug("="*80 + "\n")
+        sys.stdout.flush()  # اطمینان از فلاش شدن لاگ‌ها به کنسول
+    
         contenders = game.players_by(states=(PlayerState.ACTIVE, PlayerState.ALL_IN))
-
+        logger.debug(f"[DEBUG] Contenders count: {len(contenders)}")  # لاگ اضافی برای دیباگ
+    
         if not contenders:
             # سناریوی نادر که همه قبل از showdown فولد کرده‌اند
             active_players = game.players_by(states=(PlayerState.ACTIVE,))
@@ -922,10 +933,17 @@ class PokerBotModel:
                     chat_id,
                     f"🏆 تمام بازیکنان دیگر فولد کردند! {winner.mention_markdown} برنده {game.pot}$ شد."
                 )
+            else:
+                logger.warning("[WARNING] No contenders and no single active player - possible game state error")
         else:
             # ۱. تعیین برندگان و تقسیم تمام پات‌ها (اصلی و فرعی)
-            winners_by_pot = self._determine_winners(game, contenders)
-
+            try:
+                winners_by_pot = self._determine_winners(game, contenders)
+            except Exception as e:
+                logger.error(f"[ERROR] Exception in _determine_winners: {e}", exc_info=True)
+                self._view.send_message(chat_id, "ℹ️ خطایی در تعیین برنده رخ داد. لطفاً دوباره امتحان کنید.")
+                return  # خروج زود برای جلوگیری از کرش
+    
             if winners_by_pot:
                 # این حلقه روی تمام پات‌های ساخته شده (اصلی و فرعی) حرکت می‌کند
                 for pot in winners_by_pot:
@@ -938,30 +956,16 @@ class PokerBotModel:
                             player = winner["player"]
                             player.wallet.inc(win_amount_per_player)
             else:
-                 self._view.send_message(chat_id, "ℹ️ هیچ برنده‌ای در این دست مشخص نشد. مشکلی در منطق بازی رخ داده است.")
-
-
+                self._view.send_message(chat_id, "ℹ️ هیچ برنده‌ای در این دست مشخص نشد. مشکلی در منطق بازی رخ داده است.")
+    
             # ۲. فراخوانی View برای نمایش نتایج
-            # View باید آپدیت شود تا این ساختار داده جدید را به زیبایی نمایش دهد
             self._view.send_showdown_results(chat_id, game, winners_by_pot)
-            self._cleanup_hand_messages(chat_id, game)
-            self._view.send_new_hand_ready_message(chat_id, game)
-
-
-        # ۳. پاکسازی و ریست کردن بازی برای دست بعدی (بدون تغییر)
-        for msg_id in game.message_ids_to_delete:
-            self._view.remove_message(chat_id, msg_id)
-        game.message_ids_to_delete.clear()
-
-        if game.turn_message_id:
-            self._view.remove_message(chat_id, game.turn_message_id)
-            game.turn_message_id = None
-
+    
+        # ۳. پاکسازی و ریست کردن بازی برای دست بعدی (ادغام و حذف تکرار)
+        self._cleanup_hand_messages(chat_id, game)  # فراخوانی متمرکز پاکسازی
         remaining_players = [p for p in game.players if p.wallet.value() > 0]
         context.chat_data[KEY_OLD_PLAYERS] = [p.user_id for p in remaining_players]
-
         game.reset()
-
         self._view.send_new_hand_ready_message(chat_id, game)
         
     def _end_hand(self, game: Game, chat_id: ChatId, context: CallbackContext) -> None:
