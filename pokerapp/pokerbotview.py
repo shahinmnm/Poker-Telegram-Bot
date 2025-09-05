@@ -30,14 +30,12 @@ class PokerBotViewer:
     def __init__(self, bot: Bot):
         self._bot = bot
         self._desk_generator = DeskImageGenerator()
-
-    def send_message_return_id(
-        self,
-        chat_id: ChatId,
-        text: str,
-        reply_markup: ReplyKeyboardMarkup = None,
-    ) -> Optional[MessageId]:
-        """Sends a message and returns its ID, or None if not applicable."""
+        self._delete_manager = None
+        
+    def set_delete_manager(self, manager):
+        self._delete_manager = manager
+        
+    def send_message_return_id(self, chat_id: ChatId, text: str, reply_markup: ReplyKeyboardMarkup = None, game: Game = None) -> Optional[MessageId]:
         try:
             message = self._bot.send_message(
                 chat_id=chat_id,
@@ -48,29 +46,26 @@ class PokerBotViewer:
                 disable_web_page_preview=True,
             )
             if isinstance(message, Message):
+                if self._delete_manager and game:
+                    self._delete_manager.add_message(game.id, game.id, chat_id, message.message_id, tag="generic_message")
                 return message.message_id
         except Exception as e:
             print(f"Error sending message and returning ID: {e}")
         return None
 
-
-    def send_message(
-        self,
-        chat_id: ChatId,
-        text: str,
-        reply_markup: ReplyKeyboardMarkup = None,
-        parse_mode: str = ParseMode.MARKDOWN,  # <--- پارامتر جدید اضافه شد
-    ) -> Optional[MessageId]:
+    def send_message(self, chat_id: ChatId, text: str, reply_markup: ReplyKeyboardMarkup = None, parse_mode: str = ParseMode.MARKDOWN, game: Game = None) -> Optional[MessageId]:
         try:
             message = self._bot.send_message(
                 chat_id=chat_id,
-                parse_mode=parse_mode,  # <--- از پارامتر ورودی استفاده شد
+                parse_mode=parse_mode,
                 text=text,
                 reply_markup=reply_markup,
                 disable_notification=True,
                 disable_web_page_preview=True,
             )
             if isinstance(message, Message):
+                if self._delete_manager and game:
+                    self._delete_manager.add_message(game.id, game.id, chat_id, message.message_id, tag="plain_message")
                 return message.message_id
         except Exception as e:
             print(f"Error sending message: {e}")
@@ -115,14 +110,7 @@ class PokerBotViewer:
         except Exception as e:
             print(f"Error sending message reply: {e}")
 
-    def send_desk_cards_img(
-        self,
-        chat_id: ChatId,
-        cards: Cards,
-        caption: str = "",
-        disable_notification: bool = True,
-    ) -> Optional[Message]:
-        """Sends desk cards image and returns the message object."""
+    def send_desk_cards_img(self, chat_id: ChatId, cards: Cards, caption: str = "", disable_notification: bool = True, game: Game = None) -> Optional[Message]:
         try:
             im_cards = self._desk_generator.generate_desk(cards)
             bio = BytesIO()
@@ -131,16 +119,14 @@ class PokerBotViewer:
             bio.seek(0)
             messages = self._bot.send_media_group(
                 chat_id=chat_id,
-                media=[
-                    InputMediaPhoto(
-                        media=bio,
-                        caption=caption,
-                    ),
-                ],
+                media=[InputMediaPhoto(media=bio, caption=caption)],
                 disable_notification=disable_notification,
             )
             if messages and isinstance(messages, list) and len(messages) > 0:
-                return messages[0]
+                msg = messages[0]
+                if self._delete_manager and game:
+                    self._delete_manager.add_message(game.id, game.id, chat_id, msg.message_id, tag="desk_cards")
+                return msg
         except Exception as e:
             print(f"Error sending desk cards image: {e}")
         return None
@@ -176,13 +162,7 @@ class PokerBotViewer:
             reply_markup=reopen_keyboard,
         )
 
-    def send_cards(
-            self,
-            chat_id: ChatId,
-            cards: Cards,
-            mention_markdown: Mention,
-            ready_message_id: str,
-    ) -> Optional[MessageId]:
+    def send_cards(self, chat_id: ChatId, cards: Cards, mention_markdown: Mention, ready_message_id: str, game: Game = None) -> Optional[MessageId]:
         markup = self._get_cards_markup(cards)
         try:
             message = self._bot.send_message(
@@ -194,6 +174,8 @@ class PokerBotViewer:
                 disable_notification=True,
             )
             if isinstance(message, Message):
+                if self._delete_manager and game:
+                    self._delete_manager.add_message(game.id, game.id, chat_id, message.message_id, tag="player_cards")
                 return message.message_id
         except Exception as e:
             print(f"Error sending cards: {e}")
@@ -205,7 +187,7 @@ class PokerBotViewer:
             return PlayerAction.CHECK
         return PlayerAction.CALL
 
-    def send_turn_actions(
+    def send_turn_actions(self, chat_id: ChatId, game: Game, player: Player, money: Money) -> Optional[MessageId]:
             self,
             chat_id: ChatId,
             game: Game,
@@ -227,7 +209,6 @@ class PokerBotViewer:
         else:
             call_check_text = call_check_action.value
 
-        # متن پیام با Markdown
         text = (
             f"🎯 **نوبت بازی {player.mention_markdown} (صندلی {player.seat_index+1})**\n\n"
             f"🃏 **کارت‌های روی میز:** {cards_table}\n"
@@ -237,19 +218,18 @@ class PokerBotViewer:
             f"📈 **حداکثر شرط این دور:** `{game.max_round_rate}$`\n\n"
             f"⬇️ حرکت خود را انتخاب کنید:"
         )
-
-        # کیبورد اینلاین
         markup = self._get_turns_markup(call_check_text, call_check_action)
-
         try:
             message = self._bot.send_message(
                 chat_id=chat_id,
                 text=text,
                 reply_markup=markup,
                 parse_mode=ParseMode.MARKDOWN,
-                disable_notification=False,  # player gets notification
+                disable_notification=False,
             )
             if isinstance(message, Message):
+                if self._delete_manager:
+                    self._delete_manager.add_message(game.id, game.id, chat_id, message.message_id, tag="turn_action")
                 return message.message_id
         except Exception as e:
             print(f"Error sending turn actions: {e}")
@@ -319,10 +299,6 @@ class PokerBotViewer:
         Timer(delay, _remove).start()
         
     def send_showdown_results(self, chat_id: ChatId, game: Game, winners_by_pot: list) -> None:
-        """
-        پیام نهایی نتایج بازی را با فرمت زیبا ساخته و ارسال می‌کند.
-        این نسخه برای مدیریت ساختار داده جدید Side Pot (لیست دیکشنری‌ها) به‌روز شده است.
-        """
         final_message = "🏆 *نتایج نهایی و نمایش کارت‌ها*\n\n"
 
         if not winners_by_pot:
@@ -382,12 +358,16 @@ class PokerBotViewer:
                 state_info = " (فولد)" if p.state == PlayerState.FOLD else ""
                 final_message += f"  - {p.mention_markdown}{state_info}: {card_display}\n"
 
-        self.send_message(chat_id=chat_id, text=final_message, parse_mode="Markdown")
+        msg_id = self.send_message(chat_id, final_message, game=game)
+        if self._delete_manager:
+            self._delete_manager.add_message(game.id, game.id, chat_id, msg_id, tag="game_results")
+            self._delete_manager.whitelist_tag("game_results")
+        
+    def send_new_hand_ready_message(self, chat_id: ChatId, game: Game) -> None:
+        if self._delete_manager:
+            self._delete_manager.delete_all_for_hand(game.id, game.id, delay=0.2)
+        # ارسال پیام آماده بعدی
+        msg_id = self.send_message(chat_id, "♻️ آماده برای دست بعد؟", game=game)
+        if self._delete_manager:
+            self._delete_manager.add_message(game.id, game.id, chat_id, msg_id, tag="ready_message")
 
-    def send_new_hand_ready_message(self, chat_id: ChatId) -> None:
-        """پیام آمادگی برای دست جدید را ارسال می‌کند."""
-        message = (
-            "♻️ دست به پایان رسید. بازیکنان باقی‌مانده برای دست بعد حفظ شدند.\n"
-            "برای شروع دست جدید، /start را بزنید یا بازیکنان جدید می‌توانند با /ready اعلام آمادگی کنند."
-        )
-        self.send_message(chat_id, message)
