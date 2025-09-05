@@ -95,9 +95,31 @@ class PokerBotModel:
             resize_keyboard=True,
             one_time_keyboard=False,
             )
-    def _log_bet_change(player, amount, source):
-        print(f"[DEBUG] {source}: {player.mention_markdown} bet +{amount}, total_bet={player.total_bet}, round_rate={player.round_rate}, pot={game.pot}")
+    def _cleanup_hand_messages(self, chat_id: ChatId, game: Game) -> None:
+        """
+        حذف متمرکز همه پیام‌های موقت جز پیام نتیجه و پیام پایان دست.
+        """
+        preserve_ids = set(filter(None, [
+            getattr(game, "last_hand_result_message_id", None),
+            getattr(game, "last_hand_end_message_id", None)
+        ]))
 
+        # حذف همه پیام‌های ذخیره‌شده
+        for msg_id in list(getattr(game, "message_ids_to_delete", [])):
+            if msg_id not in preserve_ids:
+                self._view.remove_message(chat_id, msg_id)
+        game.message_ids_to_delete.clear()
+
+        # حذف دکمه‌های پیام نوبت
+        if getattr(game, "turn_message_id", None) and game.turn_message_id not in preserve_ids:
+            self._view.remove_markup(chat_id, game.turn_message_id)
+        game.turn_message_id = None
+
+        # حذف پیام "♻️" قدیمی در شروع بازی یا بستن میز
+        if getattr(game, "last_hand_end_message_id", None) and game.state == GameState.INITIAL:
+            self._view.remove_message(chat_id, game.last_hand_end_message_id)
+            game.last_hand_end_message_id = None
+            
     def show_reopen_keyboard(self, chat_id: ChatId, player_mention: Mention) -> None:
         """کیبورد جایگزین را بعد از پنهان کردن کارت‌ها نمایش می‌دهد."""
         show_cards_button_text = "🃏 نمایش کارت‌ها"
@@ -199,16 +221,10 @@ class PokerBotModel:
         if cards_message_id:
             game.message_ids_to_delete.append(cards_message_id)
         
-        # حذف پیام "/نمایش کارت‌ها" که بازیکن فرستاده
-        self._view.remove_message_delayed(chat_id, update.message.message_id, delay=1)
-        
     def show_table(self, update: Update, context: CallbackContext):
         """کارت‌های روی میز را به درخواست بازیکن با فرمت جدید نمایش می‌دهد."""
         game = self._game_from_context(context)
         chat_id = update.effective_chat.id
-
-        # پیام درخواست بازیکن را حذف می‌کنیم تا چت تمیز بماند
-        self._view.remove_message_delayed(chat_id, update.message.message_id, delay=1)
 
         if game.state in self.ACTIVE_GAME_STATES and game.cards_table:
             # از متد اصلاح‌شده برای نمایش میز استفاده می‌کنیم
@@ -304,7 +320,10 @@ class PokerBotModel:
         if game.ready_message_main_id:
             self._view.remove_message(chat_id, game.ready_message_main_id)
             game.ready_message_main_id = None
-    
+        if game.last_hand_end_message_id:
+            self._view.remove_message(chat_id, game.last_hand_end_message_id)
+            game.last_hand_end_message_id = None
+
         # Ensure dealer_index is initialized before use
         if not hasattr(game, 'dealer_index'):
              game.dealer_index = -1
@@ -886,6 +905,10 @@ class PokerBotModel:
             # ۲. فراخوانی View برای نمایش نتایج
             # View باید آپدیت شود تا این ساختار داده جدید را به زیبایی نمایش دهد
             self._view.send_showdown_results(chat_id, game, winners_by_pot)
+            self._view.send_showdown_results(chat_id, game, winners_by_pot)
+            self._cleanup_hand_messages(chat_id, game)
+            self._view.send_new_hand_ready_message(chat_id, game)
+
 
         # ۳. پاکسازی و ریست کردن بازی برای دست بعدی (بدون تغییر)
         for msg_id in game.message_ids_to_delete:
