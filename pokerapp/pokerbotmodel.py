@@ -299,15 +299,10 @@ class PokerBotModel:
         else:
             self._view.send_message(chat_id, f"👤 تعداد بازیکنان برای شروع کافی نیست (حداقل {self._min_players} نفر).")
             
-    def set_delete_manager(self, delete_manager) -> None:
-        """
-        اتصال مدیر حذف پیام‌ها به مدل.
-        مدل می‌تواند از این منیجر برای ثبت پیام‌های موقتی جهت حذف استفاده کند.
-        """
-        self._delete_manager = delete_manager
-        # اگر View هم دارای این متد است، آن را نیز ست می‌کنیم
-        if hasattr(self._view, "set_delete_manager"):
-            self._view.set_delete_manager(delete_manager)
+  def set_delete_manager(self, delete_manager):
+    self._delete_manager = delete_manager
+    if hasattr(self._view, "set_delete_manager"):
+        self._view.set_delete_manager(delete_manager)
 
     def _start_game(self, context: CallbackContext, game: Game, chat_id: ChatId) -> None:
         """مراحل شروع یک دست جدید بازی را انجام می‌دهد."""
