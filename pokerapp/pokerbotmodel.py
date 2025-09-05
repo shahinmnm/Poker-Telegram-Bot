@@ -905,7 +905,6 @@ class PokerBotModel:
             # ۲. فراخوانی View برای نمایش نتایج
             # View باید آپدیت شود تا این ساختار داده جدید را به زیبایی نمایش دهد
             self._view.send_showdown_results(chat_id, game, winners_by_pot)
-            self._view.send_showdown_results(chat_id, game, winners_by_pot)
             self._cleanup_hand_messages(chat_id, game)
             self._view.send_new_hand_ready_message(chat_id, game)
 
