@@ -868,20 +868,44 @@ class PokerBotModel:
         game.message_ids_to_delete.clear()
         
     def _showdown(self, game: Game, chat_id: ChatId, context: CallbackContext) -> None:
-        # === DEBUG START ===
-        print("\n" + "="*60)
-        print(f"[DEBUG] _showdown CALLED at {datetime.datetime.now().isoformat()}")
+        import datetime, json, traceback, inspect
+        
+        print("\n" + "="*80)
+        print(f"[DEBUG] >>> _showdown CALLED at: {datetime.datetime.now().isoformat()}")
         print(f"[DEBUG] game.id: {getattr(game, 'id', None)}")
-        print(f"[DEBUG] game.state(before): {game.state}")
+        print(f"[DEBUG] game.state BEFORE: {getattr(game, 'state', None)}")
         print(f"[DEBUG] seated_count: {game.seated_count()}, pot: {game.pot}")
         print(f"[DEBUG] cards_on_table: {getattr(game, 'cards_table', [])}")
-        print(f"[DEBUG] Active players:", [p.mention_markdown for p in game.players if p.state == PlayerState.ACTIVE])
-        print("[DEBUG] All players count by state:",
-              {st: len([p for p in game.players if p.state == st]) for st in PlayerState})
-        print("[DEBUG] CALL STACK:")
-        traceback.print_stack(limit=15)
-        print("="*60 + "\n")
-                # === DEBUG END ===
+        
+        # بازیکنان و وضعیت‌شان
+        state_counts = {}
+        for st in list(PlayerState):
+            state_counts[st.name] = len([p for p in game.players if p.state == st])
+        print(f"[DEBUG] player counts by state: {json.dumps(state_counts, ensure_ascii=False)}")
+        
+        print("[DEBUG] ACTIVE players:", [p.mention_markdown for p in game.players if p.state == PlayerState.ACTIVE])
+        print("[DEBUG] ALL_IN players:", [p.mention_markdown for p in game.players if p.state == PlayerState.ALL_IN])
+        print("[DEBUG] FOLDED players:", [p.mention_markdown for p in game.players if p.state == PlayerState.FOLD])
+        
+        # شناسه‌های پیام آخرین نتیجه و پایان دست
+        print(f"[DEBUG] last_hand_result_message_id: {getattr(game, 'last_hand_result_message_id', None)}")
+        print(f"[DEBUG] last_hand_end_message_id: {getattr(game, 'last_hand_end_message_id', None)}")
+        
+        # مسیر فعلی فراخوانی
+        print("[DEBUG] FULL CALL STACK (most recent last):")
+        for frame in traceback.format_stack(limit=15):
+            print(frame.strip())
+        
+        # گرفتن اطلاعات از کل استک پایتونی برای تحلیل عمیق‌تر
+        caller_functions = [f.function for f in inspect.stack()]
+        print(f"[DEBUG] caller functions chain: {caller_functions}")
+        
+        # موقعیت متغیرهای Thread (برای دیدن اجراهای موازی احتمالی)
+        import threading
+        print(f"[DEBUG] current thread: {threading.current_thread().name}")
+        
+        print("="*80 + "\n")
+
         """
         فرآیند پایان دست را با استفاده از خروجی دقیق _determine_winners مدیریت می‌کند.
         """
