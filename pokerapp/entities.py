@@ -233,6 +233,19 @@ class Game:
                 return False
 
         return True
+    def is_round_ended(self) -> bool:
+        """
+        چک می‌کند آیا راند تمام شده (همه بازیکنان اقدام کرده‌اند، max_round_rate=0 یا all-in covered).
+        تغییرات: متد جدید برای چک اصولی پایان راند (ریشه‌ای).
+        """
+        active_players = self.players_by(states=(PlayerState.ACTIVE,))
+        if not active_players:
+            return True
+        # چک شرط‌ها: همه has_acted=True، و no pending bets
+        all_acted = all(p.has_acted for p in active_players)
+        no_bets = self.max_round_rate == 0
+        all_in_covered = self.all_in_players_are_covered()
+        return all_acted and no_bets and all_in_covered
 
     def __repr__(self):
         return "{}({!r})".format(self.__class__.__name__, self.__dict__)
