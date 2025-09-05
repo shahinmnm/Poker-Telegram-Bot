@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %(message)s')
 
 import datetime
 import traceback
@@ -73,6 +72,8 @@ class PokerBotModel:
         self._kv = kv
         self._winner_determine: WinnerDetermination = WinnerDetermination()
         self._round_rate = RoundRateModel(view=self._view, kv=self._kv, model=self)
+        logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %(message)s')
+
     @property
     def _min_players(self):
         return 1 if self._cfg.DEBUG else MIN_PLAYERS
