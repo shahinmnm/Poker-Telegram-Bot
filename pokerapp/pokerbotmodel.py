@@ -180,7 +180,17 @@ class PokerBotModel:
 
         # حذف پیام دستور کاربر
         self._view.remove_message_delayed(chat_id, update.message.message_id, delay=1)
-
+        
+    def set_delete_manager(self, delete_manager):
+        """
+        اتصال مدیر حذف پیام‌ها به مدل و ویو.
+        این امکان رو میده که مدل هم به این قابلیت دسترسی داشته باشه.
+        """
+        self._delete_manager = delete_manager
+        # اگر View هم متد مشابه داره، بهش پاس می‌دیم
+        if hasattr(self._view, "set_delete_manager"):
+            self._view.set_delete_manager(delete_manager)
+            
     def show_table(self, update: Update, context: CallbackContext):
         """نمایش کارت‌های روی میز بنا به درخواست بازیکن."""
         game = self._game_from_context(context)
