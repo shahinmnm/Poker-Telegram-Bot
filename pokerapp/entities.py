@@ -101,20 +101,23 @@ class Game:
         self.state = GameState.INITIAL
 
         # seats is a fixed-length list representing table seats.
-        # Each element is either a Player or None.
         self.seats: List[Optional[Player]] = [None for _ in range(MAX_PLAYERS)]
 
-        # legacy convenience: current_player_index and blind indices are seat indices
         self.cards_table = []
-        self.current_player_index = -1  # seat index of player whose turn it is
+        self.current_player_index = -1
         self.small_blind_index = -1
         self.big_blind_index = -1
         self.remain_cards = get_cards()
 
-        # housekeeping sets
         self.ready_users = set()
         self.message_ids = {}
         self.last_actions = []
+
+        # 🆕 فیلد جدید برای ذخیره پیام لیست بازیکنان آماده
+        self.ready_message_main_id: Optional[MessageId] = None
+
+        # 🆕 فیلد جدید برای ذخیره پیام‌هایی که باید آخر دست پاک شوند
+        self.message_ids_to_delete: List[MessageId] = []
 
     # --- Seats / players helpers ----------------------------------------
     @property
