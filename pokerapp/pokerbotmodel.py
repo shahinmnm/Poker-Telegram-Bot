@@ -869,15 +869,17 @@ class PokerBotModel:
         
     def _showdown(self, game: Game, chat_id: ChatId, context: CallbackContext) -> None:
         # === DEBUG START ===
-        print("\n" + "="*50)
+        print("\n" + "="*60)
         print(f"[DEBUG] _showdown CALLED at {datetime.datetime.now().isoformat()}")
         print(f"[DEBUG] game.id: {getattr(game, 'id', None)}")
         print(f"[DEBUG] game.state(before): {game.state}")
-        # اگر مقادیر دیگری کلیدی است، چاپ کنید
         print(f"[DEBUG] seated_count: {game.seated_count()}, pot: {game.pot}")
+        print(f"[DEBUG] cards_on_table: {getattr(game, 'cards_table', [])}")
+        print("[DEBUG] Active players:", [p.mention_markdown for p in game.players if p.state == PlayerState.ACTIVE])
+        print("[DEBUG] All players count by state:", {st: len([p for p in game.players if p.state == st]) for st in PlayerState})
         print("[DEBUG] CALL STACK:")
-        traceback.print_stack(limit=12)  # محدود به 12 فریم برای شفافیت لاگ
-        print("="*50 + "\n")
+        traceback.print_stack(limit=12)
+        print("="*60 + "\n")
         # === DEBUG END ===
         """
         فرآیند پایان دست را با استفاده از خروجی دقیق _determine_winners مدیریت می‌کند.
