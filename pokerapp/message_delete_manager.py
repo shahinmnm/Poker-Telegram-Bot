@@ -4,22 +4,23 @@ import time
 import logging
 from typing import Dict, List, Set, Tuple, Optional
 from telegram.error import BadRequest, Unauthorized
-from pokerapp.entities import ChatId, MessageId, GameId  # فرض بر اینکه GameId در entities تعریف شده باشد
+from pokerapp.entities import ChatId, MessageId, GameId
 
 class MessageDeleteManager:
     """
-    کلاس مرکزی برای مدیریت و حذف پیام‌ها با قابلیت فازبندی، 
-    برچسب‌گذاری و حذف امن.
+    Manager برای حذف متمرکز پیام‌ها در طول بازی و دست‌ها.
     """
 
     def __init__(self, bot):
         self._bot = bot
+        # key: (game_id, hand_id)
+        # value: list of (chat_id, message_id, tag)
         self._store: Dict[Tuple[GameId, GameId], List[Tuple[ChatId, MessageId, str]]] = {}
         self._whitelist_tags: Set[str] = set()
         self._lock = threading.Lock()
 
     def whitelist_tag(self, tag: str) -> None:
-        """tag‌ پیام‌هایی که نباید حذف شوند را whitelisted می‌کند."""
+        """tag‌ها خاص را در whitelist می‌گذارد تا حذف نشوند."""
         with self._lock:
             self._whitelist_tags.add(tag)
 
@@ -29,9 +30,9 @@ class MessageDeleteManager:
         hand_id: GameId,
         chat_id: ChatId,
         msg_id: MessageId,
-        tag: Optional[str] = None
+        tag: Optional[str] = ""
     ) -> None:
-        """ثبت پیام جدید برای دست خاص."""
+        """یک پیام را برای مدیریت حذف ثبت می‌کند."""
         key = (game_id, hand_id)
         with self._lock:
             if key not in self._store:
@@ -45,8 +46,8 @@ class MessageDeleteManager:
         delay: float = 0.0
     ) -> None:
         """
-        حذف همه پیام‌های مربوط به یک دست خاص، 
-        بجز پیام‌هایی که tag آنها در whitelist است.
+        حذف همه پیام‌های ذخیره شده برای یک دست خاص به جز پیام‌های whitelist شده.
+        delay بین پاک کردن هر پیام اعمال می‌شود.
         """
         key = (game_id, hand_id)
         with self._lock:
@@ -56,13 +57,12 @@ class MessageDeleteManager:
             logging.debug(f"No messages stored for game={game_id}, hand={hand_id}")
             return
 
-        # مرتب‌سازی از قدیمی به جدید
+        # مرتب‌سازی ascending توسط message_id
         messages.sort(key=lambda x: x[1])
 
         for chat_id, msg_id, tag in messages:
             if tag in self._whitelist_tags:
                 continue
-            # استفاده از صف Task Manager
             self._bot._add_task(
                 chat_id,
                 lambda cid=chat_id, mid=msg_id: self._safe_delete(cid, mid),
@@ -72,7 +72,7 @@ class MessageDeleteManager:
                 time.sleep(delay)
 
     def _safe_delete(self, chat_id: ChatId, message_id: MessageId) -> None:
-        """حذف پیام با هندل خطاهای رایج."""
+        """حذف ایمن پیام با هندل خطاهای رایج تلگرام."""
         try:
             self._bot.delete_message(chat_id=chat_id, message_id=message_id)
         except BadRequest as e:
@@ -82,10 +82,10 @@ class MessageDeleteManager:
                 "message can't be deleted",
                 "message identifier is not specified"
             ]):
-                logging.info(f"Message {message_id} in chat {chat_id} already deleted or cannot be deleted.")
+                logging.info(f"Message {message_id} in chat {chat_id} already deleted or not deletable.")
             else:
                 logging.warning(f"BadRequest deleting message {message_id} in chat {chat_id}: {e}")
         except Unauthorized as e:
-            logging.info(f"Bot is unauthorized to delete message {message_id} in chat {chat_id}: {e}")
+            logging.info(f"Unauthorized to delete message {message_id} in {chat_id}: {e}")
         except Exception as e:
-            logging.error(f"Unexpected error deleting message {message_id} in chat {chat_id}: {e}")
+            logging.error(f"Unexpected error deleting message {message_id} in {chat_id}: {e}")
