@@ -28,7 +28,6 @@ from pokerapp.pokerbotcontrol import PokerBotCotroller
 from pokerapp.pokerbotmodel import PokerBotModel
 from pokerapp.pokerbotview import PokerBotViewer
 from pokerapp.entities import ChatId
-)
 
 class PokerBot:
     def __init__(
