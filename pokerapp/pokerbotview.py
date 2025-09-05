@@ -324,6 +324,10 @@ class PokerBotViewer:
         این نسخه برای مدیریت ساختار داده جدید Side Pot (لیست دیکشنری‌ها) به‌روز شده است.
         """
         final_message = "🏆 *نتایج نهایی و نمایش کارت‌ها*\n\n"
+        
+        msg_id = self.send_message(chat_id=chat_id, text=final_message, parse_mode="Markdown")
+        if msg_id:
+            game.last_hand_result_message_id = msg_id
 
         if not winners_by_pot:
             final_message += "خطایی در تعیین برنده رخ داد. پات تقسیم نشد."
@@ -384,10 +388,11 @@ class PokerBotViewer:
 
         self.send_message(chat_id=chat_id, text=final_message, parse_mode="Markdown")
 
-    def send_new_hand_ready_message(self, chat_id: ChatId) -> None:
-        """پیام آمادگی برای دست جدید را ارسال می‌کند."""
-        message = (
-            "♻️ دست به پایان رسید. بازیکنان باقی‌مانده برای دست بعد حفظ شدند.\n"
-            "برای شروع دست جدید، /start را بزنید یا بازیکنان جدید می‌توانند با /ready اعلام آمادگی کنند."
-        )
-        self.send_message(chat_id, message)
+def send_new_hand_ready_message(self, chat_id: ChatId, game: Game) -> None:
+    message = (
+        "♻️ دست به پایان رسید. بازیکنان باقی‌مانده برای دست بعد حفظ شدند.\n"
+        "برای شروع دست جدید، /start را بزنید یا بازیکنان جدید می‌توانند با /ready اعلام آمادگی کنند."
+    )
+    msg_id = self.send_message(chat_id, message)
+    if msg_id:
+        game.last_hand_end_message_id = msg_id
