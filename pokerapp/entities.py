@@ -17,6 +17,7 @@ UserId = str
 Mention = str
 Score = int
 Money = int
+GameId = str
 
 @abstractmethod
 class Wallet:
