@@ -875,12 +875,13 @@ class PokerBotModel:
         print(f"[DEBUG] game.state(before): {game.state}")
         print(f"[DEBUG] seated_count: {game.seated_count()}, pot: {game.pot}")
         print(f"[DEBUG] cards_on_table: {getattr(game, 'cards_table', [])}")
-        print("[DEBUG] Active players:", [p.mention_markdown for p in game.players if p.state == PlayerState.ACTIVE])
-        print("[DEBUG] All players count by state:", {st: len([p for p in game.players if p.state == st]) for st in PlayerState})
+        print(f"[DEBUG] Active players:", [p.mention_markdown for p in game.players if p.state == PlayerState.ACTIVE])
+        print("[DEBUG] All players count by state:",
+              {st: len([p for p in game.players if p.state == st]) for st in PlayerState})
         print("[DEBUG] CALL STACK:")
-        traceback.print_stack(limit=12)
+        traceback.print_stack(limit=15)
         print("="*60 + "\n")
-        # === DEBUG END ===
+                # === DEBUG END ===
         """
         فرآیند پایان دست را با استفاده از خروجی دقیق _determine_winners مدیریت می‌کند.
         """
