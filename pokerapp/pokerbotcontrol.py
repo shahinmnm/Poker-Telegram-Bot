@@ -10,10 +10,8 @@ from telegram.ext import (
     Filters,
 )
 import traceback  # <--- برای لاگ دقیق خطا اضافه شد
-import threading  # اضافه کردن برای Lock
 
-
-from pokerapp.entities import PlayerAction, UserException, Game, GameState  # <--- اضافه کردن GameState برای رفع NameError
+from pokerapp.entities import PlayerAction, UserException, Game
 from pokerapp.pokerbotmodel import PokerBotModel
 
 KEY_CHAT_DATA_GAME = "game" # <--- این متغیر برای دسترسی به بازی اضافه شد
@@ -22,7 +20,6 @@ class PokerBotCotroller:
     def __init__(self, model: PokerBotModel, updater: Updater):
         self._model = model
         self._view = model._view # <--- دسترسی به view برای ارسال پیام خطا
-        self._processing_lock = threading.Lock()  # Lock جهانی برای atomic کردن پردازش callbackها
 
         # تعریف متون دکمه به عنوان متغیر برای جلوگیری از خطا
         SHOW_CARDS_TEXT = "🃏 نمایش کارت‌ها"
@@ -66,7 +63,6 @@ class PokerBotCotroller:
         """
         این میدل‌ور قبل از اجرای هر دستور دکمه اینلاین، نوبت بازیکن را چک می‌کند
         و لاگ‌های دقیقی برای دیباگ ثبت می‌کند.
-        حالا با Lock برای جلوگیری از race condition.
         """
         chat_id = update.effective_chat.id
         user_id = update.effective_user.id
@@ -74,7 +70,7 @@ class PokerBotCotroller:
 
         print(f"\nDEBUG: Callback received from user {user_id} in chat {chat_id}.")
 
-        if not game or game.state not in self._model.ACTIVE_GAME_STATES or game.state == GameState.FINISHED:
+        if not game or game.state not in self._model.ACTIVE_GAME_STATES:
             print("DEBUG: Game not active or finished. Ignoring callback.")
             # می‌توانید یک پیام به کاربر بدهید که بازی فعال نیست
             query = update.callback_query
@@ -94,21 +90,9 @@ class PokerBotCotroller:
                 query.answer(text="☝️ نوبت شما نیست!", show_alert=True)
             return
 
-        # استفاده از Lock برای atomic کردن پردازش
-        with self._processing_lock:
-            # چک دوباره وضعیت برای جلوگیری از race condition (double-check)
-            if game.state not in self._model.ACTIVE_GAME_STATES or game.state == GameState.FINISHED:
-                print("DEBUG: Game state changed during lock wait. Ignoring.")
-                return
-
-            current_player = self._model._current_turn_player(game)
-            if not current_player or current_player.user_id != user_id:
-                print("DEBUG: Turn changed during lock wait. Ignoring.")
-                return
-
-            # اگر نوبت کاربر بود، به متد اصلی برای پردازش دکمه برو
-            print("DEBUG: User's turn confirmed under lock. Proceeding to _handle_button_clicked.")
-            self._handle_button_clicked(update, context)
+        # اگر نوبت کاربر بود، به متد اصلی برای پردازش دکمه برو
+        print("DEBUG: User's turn confirmed. Proceeding to _handle_button_clicked.")
+        self._handle_button_clicked(update, context)
 
     def _handle_text_buttons(self, update: Update, context: CallbackContext) -> None:
         """Handles clicks on custom reply keyboard buttons."""
@@ -123,7 +107,9 @@ class PokerBotCotroller:
         elif text == SHOW_CARDS_TEXT:
             self._model.send_cards_to_user(update, context)
         elif text == SHOW_TABLE_TEXT:
-            self._model.show_table(update, context)
+            # تغییر: جایگزینی show_table با _advance_round
+            game = self._model._game_from_context(context)
+            self._model._advance_round(game, update.effective_chat.id)
 
     def _handle_ready(self, update: Update, context: CallbackContext) -> None:
         self._model.ready(update, context)
@@ -148,44 +134,35 @@ class PokerBotCotroller:
         update: Update,
         context: CallbackContext,
     ) -> None:
-        """
-        تغییرات: 
-        - اضافه کردن چک atomic برای پایان راند پس از هر اقدام (ریشه‌ای برای جلوگیری از race condition).
-        - بروزرسانی has_acted برای بازیکن فعلی.
-        - چک is_round_ended برای تصمیم‌گیری فراخوانی _showdown یا پیشرفت راند.
-        - محاسبه نوبت بعدی اگر راند تمام نشده باشد.
-        - لاگ بیشتر برای دیباگ.
-        - حفظ کد موجود برای اجرای اقدامات و حذف مارک‌آپ (با فرض وجود آن).
-        """
+        # ... (کدهای دیباگ و حذف مارک‌آپ که قبلاً داشتیم)
         chat_id = update.effective_chat.id
         game: Game = context.chat_data.get(KEY_CHAT_DATA_GAME)
 
-        # بخش حذف مارک‌آپ (کد موجود - اگر دارید، نگه دارید؛ در غیر این صورت، کامنت کنید)
-        # ... (بخش حذف مارک‌آپ، مثل self._view.remove_markup(chat_id, game.turn_message_id))
+        # ... (بخش حذف مارک‌آپ) - فرض می‌کنیم این بخش وجود دارد، اما در استخراج ناقص است. اگر لازم است، اضافه کنید.
 
-        # گرفتن بازیکن فعلی (برای بروزرسانی has_acted)
-        current_player = self._model._current_turn_player(game)
-        if not current_player:
-            print("WARNING: No current player found in _handle_button_clicked.")
-            return
-
-        # ۲. اجرای اکشن بازیکن (کد موجود بدون تغییر)
+        # ۲. اجرای اکشن بازیکن
         try:
-            query_data = update.callback_query.data  # <--- دریافت دیتا از کوئری
+            query_data = update.callback_query.data # <--- دریافت دیتا از کوئری
 
-            # --- شروع بلوک اصلاح شده (کد موجود) ---
+            # --- شروع بلوک اصلاح شده ---
             if query_data == PlayerAction.CHECK.value or query_data == PlayerAction.CALL.value:
-                self._model.player_action_call_check(update, context, game)  # <--- نام صحیح جدید
+                # self._model.call_check(update, context)  # <--- این متد دیگر وجود ندارد
+                self._model.player_action_call_check(update, context, game) # <--- نام صحیح جدید
             elif query_data == PlayerAction.FOLD.value:
-                self._model.player_action_fold(update, context, game)  # <--- نام صحیح جدید
+                # self._model.fold(update, context) # <--- این متد دیگر وجود ندارد
+                self._model.player_action_fold(update, context, game) # <--- نام صحیح جدید
             elif query_data == str(PlayerAction.SMALL.value):
-                self._model.player_action_raise_bet(update, context, game, PlayerAction.SMALL.value)  # <--- نام صحیح جدید
+                # self._model.raise_rate_bet(update, context, PlayerAction.SMALL.value) # <--- این متد دیگر وجود ندارد
+                self._model.player_action_raise_bet(update, context, game, PlayerAction.SMALL.value) # <--- نام صحیح جدید
             elif query_data == str(PlayerAction.NORMAL.value):
-                self._model.player_action_raise_bet(update, context, game, PlayerAction.NORMAL.value)  # <--- نام صحیح جدید
+                # self._model.raise_rate_bet(update, context, PlayerAction.NORMAL.value) # <--- این متد دیگر وجود ندارد
+                self._model.player_action_raise_bet(update, context, game, PlayerAction.NORMAL.value) # <--- نام صحیح جدید
             elif query_data == str(PlayerAction.BIG.value):
-                self._model.player_action_raise_bet(update, context, game, PlayerAction.BIG.value)  # <--- نام صحیح جدید
+                # self._model.raise_rate_bet(update, context, PlayerAction.BIG.value) # <--- این متد دیگر وجود ندارد
+                self._model.player_action_raise_bet(update, context, game, PlayerAction.BIG.value) # <--- نام صحیح جدید
             elif query_data == PlayerAction.ALL_IN.value:
-                self._model.player_action_all_in(update, context, game)  # <--- نام صحیح جدید
+                # self._model.all_in(update, context) # <--- این متد دیگر وجود ندارد
+                self._model.player_action_all_in(update, context, game) # <--- نام صحیح جدید
             # --- پایان بلوک اصلاح شده ---
             else:
                 print(f"WARNING: Unknown callback query data: {query_data}")
@@ -196,39 +173,14 @@ class PokerBotCotroller:
         except Exception:
             # گرفتن تمام خطاهای دیگر برای دیباگ
             print(f"FATAL ERROR: Unexpected exception in player_action.")
-            traceback.print_exc()  # چاپ کامل خطا
+            traceback.print_exc() # چاپ کامل خطا
             self._view.send_message(chat_id, "یک خطای بحرانی در پردازش حرکت رخ داد. بازی ریست می‌شود.")
             if game:
-                game.reset()  # ریست کردن بازی برای جلوگیری از قفل شدن
-            return  # زود خارج شوید تا ادامه ندهد
+                game.reset() # ریست کردن بازی برای جلوگیری از قفل شدن
 
-        # --- بخش جدید: بروزرسانی state پس از اقدام (ریشه‌ای برای جلوگیری از تکرار) ---
-        print(f"DEBUG: Action processed for player {current_player.user_id}. Updating state...")
-
-        # مارک بازیکن به عنوان اقدام‌کرده
-        current_player.has_acted = True
-
-        # چک پایان راند
+        # تغییر جدید: چک پایان راند و پیشرفت به راند بعدی
         if game.is_round_ended():
-            print("DEBUG: Round ended detected.")
-            if game.state == GameState.ROUND_RIVER:
-                print("DEBUG: Calling _showdown.")
-                self._model._showdown(game, chat_id, context)
-            else:
-                # پیشرفت به راند بعدی (مثل flop به turn)
-                print("DEBUG: Advancing to next round.")
-                self._model._advance_round(game, chat_id)
-        else:
-            # نوبت به بازیکن بعدی (با استفاده از next_occupied_seat)
-            next_index = game.next_occupied_seat(game.current_player_index)
-            if next_index != -1:
-                game.current_player_index = next_index
-                print(f"DEBUG: Advancing turn to next player at seat {next_index}.")
-                # بروزرسانی view برای نوبت جدید (مثل ارسال پیام نوبت)
-                next_player = game.get_player_by_seat(next_index)
-                if next_player:
-                    self._model._send_turn_message(chat_id, game, next_player)  # فرض: متدی برای ارسال پیام نوبت
-            else:
-                print("WARNING: No next player found - possible game state error.")
+            print("DEBUG: Round ended. Advancing to next round.")
+            self._model._advance_round(game, chat_id)
 
-        print("DEBUG: _handle_button_clicked completed.")
+        # ==================== پایان بلوک اصلی دیباگ و اصلاح ====================
