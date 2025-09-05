@@ -99,25 +99,28 @@ class Game:
         self.pot = 0
         self.max_round_rate = 0
         self.state = GameState.INITIAL
-
+    
         # seats is a fixed-length list representing table seats.
         self.seats: List[Optional[Player]] = [None for _ in range(MAX_PLAYERS)]
-
+    
         self.cards_table = []
         self.current_player_index = -1
         self.small_blind_index = -1
         self.big_blind_index = -1
         self.remain_cards = get_cards()
-
+    
         self.ready_users = set()
         self.message_ids = {}
         self.last_actions = []
-
-        # 🆕 فیلد جدید برای ذخیره پیام لیست بازیکنان آماده
+    
+        # 🆕 اضافه شده: پیام لیست آماده‌ها
         self.ready_message_main_id: Optional[MessageId] = None
-
-        # 🆕 فیلد جدید برای ذخیره پیام‌هایی که باید آخر دست پاک شوند
+    
+        # 🆕 اضافه شده: آرایه پیام‌هایی که باید پاک شوند
         self.message_ids_to_delete: List[MessageId] = []
+    
+        # 🆕 اضافه شده: پیام نوبت فعلی
+        self.turn_message_id: Optional[MessageId] = None
 
     # --- Seats / players helpers ----------------------------------------
     @property
