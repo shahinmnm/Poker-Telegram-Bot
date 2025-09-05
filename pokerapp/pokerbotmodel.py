@@ -5,6 +5,8 @@ import traceback
 from threading import Timer
 from typing import List, Tuple, Dict, Optional
 
+import datetime, json, traceback, inspect
+
 import redis
 from telegram import Message, ReplyKeyboardMarkup, Update, Bot, ParseMode
 from telegram.ext import Handler, CallbackContext
@@ -868,7 +870,6 @@ class PokerBotModel:
         game.message_ids_to_delete.clear()
         
     def _showdown(self, game: Game, chat_id: ChatId, context: CallbackContext) -> None:
-        import datetime, json, traceback, inspect
         
         print("\n" + "="*80)
         print(f"[DEBUG] >>> _showdown CALLED at: {datetime.datetime.now().isoformat()}")
