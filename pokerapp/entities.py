@@ -121,6 +121,11 @@ class Game:
     
         # 🆕 اضافه شده: پیام نوبت فعلی
         self.turn_message_id: Optional[MessageId] = None
+        # --- فیلدهای حذف پیام ---
+        self.message_ids_to_delete: List[MessageId] = []
+        self.turn_message_id: Optional[MessageId] = None
+        self.last_hand_result_message_id: Optional[MessageId] = None
+        self.last_hand_end_message_id: Optional[MessageId] = None
 
     # --- Seats / players helpers ----------------------------------------
     @property
