@@ -3,17 +3,14 @@
 from abc import abstractmethod
 import enum
 import datetime
-from typing import Tuple, List, Optional, Dict
+from typing import Tuple, List, Optional
 from uuid import uuid4
-from pokerapp.cards import get_cards  # Assuming cards.py exists with get_cards function
-
-# Constants
+from pokerapp.cards import get_cards
 MAX_PLAYERS = 8
 MIN_PLAYERS = 2
 SMALL_BLIND = 5
 DEFAULT_MONEY = 1000
 
-# Type Aliases
 MessageId = str
 ChatId = str
 UserId = str
@@ -21,94 +18,72 @@ Mention = str
 Score = int
 Money = int
 
-# Abstract Wallet class
+@abstractmethod
 class Wallet:
-    @abstractmethod
-    def value(self) -> Money:
-        """Returns the current balance."""
+    @staticmethod
+    def _prefix(id: int, suffix: str = ""):
         pass
 
-    @abstractmethod
-    def inc(self, amount: Money) -> Money:
-        """Increases the balance by the given amount."""
-        pass
-
-    @abstractmethod
-    def dec(self, amount: Money) -> Money:
-        """Decreases the balance by the given amount if sufficient funds."""
-        pass
-
-    @abstractmethod
-    def has_daily_bonus(self) -> bool:
-        """Checks if the daily bonus has been claimed."""
-        pass
-
-    @abstractmethod
     def add_daily(self, amount: Money) -> Money:
-        """Adds daily bonus if not already claimed."""
         pass
 
-    @abstractmethod
-    def authorize(self, game_id: str, amount: Money) -> None:
-        """Authorizes (reserves) money for a game transaction."""
+    def has_daily_bonus(self) -> bool:
         pass
 
-    @abstractmethod
-    def approve(self, game_id: str) -> None:
-        """Approves a successful game transaction."""
+    def inc(self, amount: Money = 0) -> None:
         pass
 
-    @abstractmethod
-    def cancel(self, game_id: str) -> None:
-        """Cancels a failed game transaction and returns reserved money."""
-        pass
-
-    @abstractmethod
-    def authorized_money(self, game_id: str) -> Money:
-        """Returns the authorized amount for a specific game."""
-        pass
-
-    @abstractmethod
     def inc_authorized_money(self, game_id: str, amount: Money) -> None:
-        """Increases the authorized amount for a game."""
         pass
 
-    @abstractmethod
+    def authorized_money(self, game_id: str) -> Money:
+        pass
+
+    def authorize(self, game_id: str, amount: Money) -> None:
+        pass
+
     def authorize_all(self, game_id: str) -> Money:
-        """Authorizes all remaining money for the game."""
         pass
 
-# Player class
+    def value(self) -> Money:
+        pass
+
+    def approve(self, game_id: str) -> None:
+        pass
+
+    def cancel(self, game_id: str) -> None:
+        pass
+
 class Player:
     def __init__(
         self,
         user_id: UserId,
         mention_markdown: Mention,
         wallet: Wallet,
-        ready_message_id: Optional[MessageId] = None,
+        ready_message_id: str,
         seat_index: Optional[int] = None,
     ):
         self.user_id = user_id
         self.mention_markdown = mention_markdown
         self.state = PlayerState.ACTIVE
         self.wallet = wallet
-        self.cards: List[str] = []  # Player's hole cards
-        self.round_rate: Money = 0  # Bet in the current betting round
-        self.total_bet: Money = 0  # Total bet in the hand (for side pots)
-        self.has_acted: bool = False  # Has the player acted in this round?
+        self.cards = []
+        self.round_rate = 0
         self.ready_message_id = ready_message_id
+        # --- ویژگی‌های اضافه شده ---
+        self.total_bet = 0  # کل مبلغ شرط‌بندی شده در یک دست
+        self.has_acted = False # آیا در راند فعلی نوبت خود را بازی کرده؟
         self.seat_index = seat_index
+        # -------------------------
+def __repr__(self):
+        return "{}({!r})".format(self.__class__.__name__, self.__dict__)
 
-    def __repr__(self):
-        return f"{self.__class__.__name__}({self.__dict__!r})"
-
-# PlayerState Enum
 class PlayerState(enum.Enum):
     ACTIVE = 1
     FOLD = 0
     ALL_IN = 10
 
-# Game class
+
 class Game:
     def __init__(self):
         # dealer_index is a seat index into self.seats (0..MAX_PLAYERS-1)
@@ -121,32 +96,31 @@ class Game:
         represent table seats so players keep their seat between hands.
         """
         self.id = str(uuid4())
-        self.pot: Money = 0
-        self.max_round_rate: Money = 0
+        self.pot = 0
+        self.max_round_rate = 0
         self.state = GameState.INITIAL
-
+    
         # seats is a fixed-length list representing table seats.
         self.seats: List[Optional[Player]] = [None for _ in range(MAX_PLAYERS)]
-
-        self.cards_table: List[str] = []  # Community cards
-        self.current_player_index: int = -1  # Current turn seat index
-        self.small_blind_index: int = -1
-        self.big_blind_index: int = -1
-        self.remain_cards: List[str] = get_cards()  # Deck of cards
-
-        self.ready_users: set = set()  # Users ready to play
-        self.message_ids: Dict = {}  # Stored message IDs
-        self.last_actions: List = []  # Last player actions
-
-        # Additional fields for message management
+    
+        self.cards_table = []
+        self.current_player_index = -1
+        self.small_blind_index = -1
+        self.big_blind_index = -1
+        self.remain_cards = get_cards()
+    
+        self.ready_users = set()
+        self.message_ids = {}
+        self.last_actions = []
+    
+        # 🆕 اضافه شده: پیام لیست آماده‌ها
         self.ready_message_main_id: Optional[MessageId] = None
+    
+        # 🆕 اضافه شده: آرایه پیام‌هایی که باید پاک شوند
         self.message_ids_to_delete: List[MessageId] = []
+    
+        # 🆕 اضافه شده: پیام نوبت فعلی
         self.turn_message_id: Optional[MessageId] = None
-        self.last_hand_result_message_id: Optional[MessageId] = None
-        self.last_hand_end_message_id: Optional[MessageId] = None
-
-        # For trading end
-        self.trading_end_user_id: Optional[UserId] = None
 
     # --- Seats / players helpers ----------------------------------------
     @property
@@ -186,7 +160,7 @@ class Game:
             if seat_index == -1:
                 return -1
         if self.seats[seat_index] is not None:
-            raise UserException(f"Seat {seat_index} already occupied")
+            raise UserException("Seat %s already occupied" % seat_index)
         player.seat_index = seat_index
         self.seats[seat_index] = player
         return seat_index
@@ -229,7 +203,7 @@ class Game:
         nxt = self.next_occupied_seat(self.dealer_index)
         self.dealer_index = nxt if nxt != -1 else -1
 
-    def players_by(self, states: Tuple[PlayerState, ...]) -> List[Player]:
+    def players_by(self, states: Tuple) -> List[Player]:
         """Return players whose state is in states (search seats)."""
         return [p for p in self.players if p.state in states]
 
@@ -255,27 +229,8 @@ class Game:
 
         return True
 
-    def is_round_ended(self) -> bool:
-        """
-        Checks if the current betting round is over.
-        All active players must have acted, and all bets must be equal.
-        """
-        active_players = self.players_by(states=(PlayerState.ACTIVE,))
-        if not active_players:
-            return True  # No active players left, round is over
-
-        # Check if all have acted
-        if not all(p.has_acted for p in active_players):
-            return False
-
-        # Check if all have the same round_rate
-        rates = {p.round_rate for p in active_players}
-        return len(rates) == 1
-
     def __repr__(self):
-        return f"{self.__class__.__name__}({self.__dict__!r})"
-
-# GameState Enum
+        return "{}({!r})".format(self.__class__.__name__, self.__dict__)
 class GameState(enum.Enum):
     INITIAL = 0
     ROUND_PRE_FLOP = 1  # No cards on the table.
@@ -284,7 +239,6 @@ class GameState(enum.Enum):
     ROUND_RIVER = 4  # Five cards.
     FINISHED = 5  # The end.
 
-# PlayerAction Enum
 class PlayerAction(enum.Enum):
     CHECK = "✋ چک"
     CALL = "🎯 کال"
@@ -296,6 +250,6 @@ class PlayerAction(enum.Enum):
     NORMAL = 25
     BIG = 50
 
-# UserException
 class UserException(Exception):
     pass
+

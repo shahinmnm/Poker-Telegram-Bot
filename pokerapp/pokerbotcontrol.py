@@ -59,6 +59,7 @@ class PokerBotCotroller:
         )
         # ==================== پایان بلوک اصلاح شده اصلی ====================
 
+
     def middleware_user_turn(self, update: Update, context: CallbackContext) -> None:
         """
         این میدل‌ور قبل از اجرای هر دستور دکمه اینلاین، نوبت بازیکن را چک می‌کند
@@ -94,6 +95,7 @@ class PokerBotCotroller:
         print("DEBUG: User's turn confirmed. Proceeding to _handle_button_clicked.")
         self._handle_button_clicked(update, context)
 
+
     def _handle_text_buttons(self, update: Update, context: CallbackContext) -> None:
         """Handles clicks on custom reply keyboard buttons."""
         text = update.message.text
@@ -107,9 +109,7 @@ class PokerBotCotroller:
         elif text == SHOW_CARDS_TEXT:
             self._model.send_cards_to_user(update, context)
         elif text == SHOW_TABLE_TEXT:
-            # تغییر: جایگزینی show_table با _advance_round
-            game = self._model._game_from_context(context)
-            self._model._advance_round(game, update.effective_chat.id)
+            self._model.show_table(update, context)
 
     def _handle_ready(self, update: Update, context: CallbackContext) -> None:
         self._model.ready(update, context)
@@ -138,7 +138,7 @@ class PokerBotCotroller:
         chat_id = update.effective_chat.id
         game: Game = context.chat_data.get(KEY_CHAT_DATA_GAME)
 
-        # ... (بخش حذف مارک‌آپ) - فرض می‌کنیم این بخش وجود دارد، اما در استخراج ناقص است. اگر لازم است، اضافه کنید.
+        # ... (بخش حذف مارک‌آپ)
 
         # ۲. اجرای اکشن بازیکن
         try:
@@ -177,10 +177,5 @@ class PokerBotCotroller:
             self._view.send_message(chat_id, "یک خطای بحرانی در پردازش حرکت رخ داد. بازی ریست می‌شود.")
             if game:
                 game.reset() # ریست کردن بازی برای جلوگیری از قفل شدن
-
-        # تغییر جدید: چک پایان راند و پیشرفت به راند بعدی
-        if game.is_round_ended():
-            print("DEBUG: Round ended. Advancing to next round.")
-            self._model._advance_round(game, chat_id)
 
         # ==================== پایان بلوک اصلی دیباگ و اصلاح ====================
