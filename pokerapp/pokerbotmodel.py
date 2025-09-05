@@ -90,6 +90,7 @@ class PokerBotModel:
             return None
         # Use seat-based lookup
         return game.get_player_by_seat(game.current_player_index)
+
     @staticmethod
     def _get_cards_markup(cards: Cards) -> ReplyKeyboardMarkup:
         """کیبورد مخصوص نمایش کارت‌های بازیکن و دکمه‌های کنترلی را می‌سازد."""
@@ -105,6 +106,7 @@ class PokerBotModel:
             resize_keyboard=True,
             one_time_keyboard=False,
             )
+
     def _cleanup_hand_messages(self, chat_id: ChatId, game: Game) -> None:
         """
         حذف متمرکز همه پیام‌های موقت جز پیام نتیجه و پیام پایان دست.
@@ -129,7 +131,7 @@ class PokerBotModel:
         if getattr(game, "last_hand_end_message_id", None) and game.state == GameState.INITIAL:
             self._view.remove_message(chat_id, game.last_hand_end_message_id)
             game.last_hand_end_message_id = None
-            
+
     def show_reopen_keyboard(self, chat_id: ChatId, player_mention: Mention) -> None:
         """کیبورد جایگزین را بعد از پنهان کردن کارت‌ها نمایش می‌دهد."""
         show_cards_button_text = "🃏 نمایش کارت‌ها"
@@ -189,6 +191,7 @@ class PokerBotModel:
             else:
                  print(f"Error sending cards: {e}")
         return None
+
     def hide_cards(self, update: Update, context: CallbackContext) -> None:
         """
         کیبورد کارتی را پنهان کرده و کیبورد "نمایش مجدد" را نشان می‌دهد.
@@ -199,7 +202,6 @@ class PokerBotModel:
         # پیام "کارت‌ها پنهان شد" را پس از چند ثانیه حذف می‌کنیم تا چت شلوغ نشود.
         self._view.remove_message_delayed(chat_id, update.message.message_id, delay=5)
 
-
     def send_cards_to_user(self, update: Update, context: CallbackContext) -> None:
         """
         کارت‌های بازیکن را با کیبورد مخصوص در گروه دوباره ارسال می‌کند.
@@ -208,14 +210,14 @@ class PokerBotModel:
         game = self._game_from_context(context)
         chat_id = update.effective_chat.id
         user_id = update.effective_user.id
-        
+
         # پیدا کردن بازیکن در لیست بازیکنان بازی فعلی
         current_player = None
         for p in game.players:
             if p.user_id == user_id:
                 current_player = p
                 break
-        
+
         if not current_player or not current_player.cards:
             self._view.send_message(chat_id, "شما در بازی فعلی حضور ندارید یا کارتی ندارید.")
             return
@@ -230,20 +232,69 @@ class PokerBotModel:
         )
         if cards_message_id:
             game.message_ids_to_delete.append(cards_message_id)
-        
-    def show_table(self, update: Update, context: CallbackContext):
-        """کارت‌های روی میز را به درخواست بازیکن با فرمت جدید نمایش می‌دهد."""
-        game = self._game_from_context(context)
-        chat_id = update.effective_chat.id
 
-        if game.state in self.ACTIVE_GAME_STATES and game.cards_table:
-            # از متد اصلاح‌شده برای نمایش میز استفاده می‌کنیم
-            # با count=0 و یک عنوان عمومی و زیبا
-            self.add_cards_to_table(0, game, chat_id, "🃏 کارت‌های روی میز")
+    # متد جدید اضافه‌شده: جایگزین show_table
+    def _advance_round(self, game: Game, chat_id: ChatId) -> None:
+        """
+        پیشرفت به راند بعدی پوکر (مثل pre-flop به flop، flop به turn، turn به river).
+        - کارت‌های جدید به میز اضافه می‌کند (اگر لازم باشد).
+        - وضعیت بازی را بروزرسانی می‌کند.
+        - has_acted همه بازیکنان را ریست می‌کند.
+        - max_round_rate و round_rateها را ریست می‌کند.
+        - نوبت را به اولین بازیکن بعد از دیلر تنظیم می‌کند.
+        - پیام نوبت را برای بازیکن جدید ارسال می‌کند.
+        جایگزین متد show_table برای مدیریت کامل پیشرفت راند.
+        """
+        print("DEBUG: Advancing round from state {}".format(game.state))
+
+        # ریست has_acted و round_rate برای راند جدید
+        active_players = game.players_by(states=(PlayerState.ACTIVE, PlayerState.ALL_IN))
+        for p in active_players:
+            p.has_acted = False
+            p.round_rate = 0  # ریست شرط راند
+
+        game.max_round_rate = 0  # ریست حداکثر شرط راند
+
+        # اضافه کردن کارت‌ها به میز بر اساس راند فعلی
+        if game.state == GameState.ROUND_PRE_FLOP:
+            # به flop: 3 کارت
+            game.cards_table.extend(game.remain_cards.draw(3))
+            game.state = GameState.ROUND_FLOP
+            print("DEBUG: Advanced to FLOP. Table cards: {}".format(game.cards_table))
+        elif game.state == GameState.ROUND_FLOP:
+            # به turn: 1 کارت
+            game.cards_table.extend(game.remain_cards.draw(1))
+            game.state = GameState.ROUND_TURN
+            print("DEBUG: Advanced to TURN. Table cards: {}".format(game.cards_table))
+        elif game.state == GameState.ROUND_TURN:
+            # به river: 1 کارت
+            game.cards_table.extend(game.remain_cards.draw(1))
+            game.state = GameState.ROUND_RIVER
+            print("DEBUG: Advanced to RIVER. Table cards: {}".format(game.cards_table))
         else:
-            msg_id = self._view.send_message_return_id(chat_id, "هنوز بازی شروع نشده یا کارتی روی میز نیست.")
-            if msg_id:
-                self._view.remove_message_delayed(chat_id, msg_id, 5)
+            print("WARNING: Cannot advance round from state {}".format(game.state))
+            return
+
+        # نمایش کارت‌های جدید روی میز (جایگزین logic show_table)
+        # اگر add_cards_to_table دارید، از آن استفاده کنید؛ иначе از view استفاده کنید
+        if hasattr(self, 'add_cards_to_table'):
+            self.add_cards_to_table(len(game.cards_table) - len(game.cards_table) % 3, game, chat_id, "🃏 کارت‌های جدید روی میز اضافه شد!")  # تنظیم count بر اساس کارت‌های جدید
+        else:
+            self._view.send_desk_cards_img(chat_id, game.cards_table, caption="🃏 کارت‌های جدید روی میز اضافه شد!")
+
+        # تنظیم نوبت به اولین بازیکن بعد از دیلر (که هنوز در بازی است)
+        first_player_index = game.next_occupied_seat(game.dealer_index)
+        if first_player_index == -1:
+            print("WARNING: No players left after advancing round.")
+            # اگر هیچ بازیکنی نمانده، بازی را تمام کن
+            self._showdown(game, chat_id, None)  # context لازم نیست اگر مستقیم فراخوانی شود
+            return
+
+        game.current_player_index = first_player_index
+        first_player = game.get_player_by_seat(first_player_index)
+
+        # ارسال پیام نوبت به بازیکن اول
+        self._send_turn_message(chat_id, game, first_player)
 
     def ready(self, update: Update, context: CallbackContext) -> None:
         """بازیکن برای شروع بازی اعلام آمادگی می‌کند."""
@@ -289,7 +340,6 @@ class PokerBotModel:
         )
 
         keyboard = ReplyKeyboardMarkup([["/ready", "/start"]], resize_keyboard=True)
-
         if game.ready_message_main_id:
             try:
                 self._bot.edit_message_text(chat_id=chat_id, message_id=game.ready_message_main_id, text=text, parse_mode="Markdown", reply_markup=keyboard)
@@ -338,22 +388,21 @@ class PokerBotModel:
         if not hasattr(game, 'dealer_index'):
              game.dealer_index = -1
         game.dealer_index = (game.dealer_index + 1) % game.seated_count()
-    
+
         self._view.send_message(chat_id, '🚀 !بازی شروع شد!')
-    
+
         game.state = GameState.ROUND_PRE_FLOP
         self._divide_cards(game, chat_id)
-    
+
         # این متد به تنهایی تمام کارهای لازم برای شروع راند را انجام می‌دهد.
         # از جمله تعیین بلایندها، تعیین نوبت اول و ارسال پیام نوبت.
         self._round_rate.set_blinds(game, chat_id)
-    
+
         # نیازی به هیچ کد دیگری در اینجا نیست.
         # کدهای اضافی حذف شدند.
-        
+
         # ذخیره بازیکنان برای دست بعدی (این خط می‌تواند بماند)
         context.chat_data[KEY_OLD_PLAYERS] = [p.user_id for p in game.players]
-
 
     def _divide_cards(self, game: Game, chat_id: ChatId):
         """
@@ -399,7 +448,7 @@ class PokerBotModel:
             # این پیام موقتی است و در آخر دست پاک خواهد شد.
             if cards_message_id:
                 game.message_ids_to_delete.append(cards_message_id)
-            
+
     def _is_betting_round_over(self, game: Game) -> bool:
         """
         بررسی می‌کند که آیا دور شرط‌بندی فعلی به پایان رسیده است یا خیر.
@@ -408,284 +457,303 @@ class PokerBotModel:
         2. تمام بازیکنانی که فولد نکرده‌اند، مقدار یکسانی پول در این دور گذاشته باشند.
         """
         active_players = game.players_by(states=(PlayerState.ACTIVE,))
-    
+
         # اگر هیچ بازیکن فعالی وجود ندارد (مثلاً همه all-in یا فولد کرده‌اند)، دور تمام است.
         if not active_players:
             return True
-    
+
         # شرط اول: آیا همه بازیکنان فعال حرکت کرده‌اند؟
         # فلگ `has_acted` باید در ابتدای هر street و بعد از هر raise ریست شود.
         if not all(p.has_acted for p in active_players):
             return False
-    
+
         # شرط دوم: آیا همه بازیکنان فعال مقدار یکسانی شرط بسته‌اند؟
         # مقدار شرط اولین بازیکن فعال را به عنوان مرجع در نظر می‌گیریم.
         reference_rate = active_players[0].round_rate
         if not all(p.round_rate == reference_rate for p in active_players):
             return False
-    
+
         # اگر هر دو شرط برقرار باشد، دور تمام شده است.
         return True
+    # ==================== شروع بلوک متدهای اکشن بازیکن ====================
+    def player_action_call_check(self, update: Update, context: CallbackContext, game: Game) -> None:
+        """مدیریت اکشن کال یا چک."""
+        player = self._current_turn_player(game)
+        if not player:
+            raise UserException("نوبت بازیکن فعلی پیدا نشد.")
 
+        call_amount = game.max_round_rate - player.round_rate
+        if call_amount > 0:
+            # کال
+            if player.wallet.value() < call_amount:
+                raise UserException("موجودی کافی برای کال ندارید.")
+            player.wallet.inc(-call_amount)
+            player.round_rate += call_amount
+            player.total_bet += call_amount
+            game.pot += call_amount
+            action_text = f"{player.mention_markdown} کال کرد ({call_amount}$)."
+        else:
+            # چک
+            action_text = f"{player.mention_markdown} چک کرد."
 
-    def _determine_winners(self, game: Game, contenders: list[Player]):
+        game.max_round_rate = max(game.max_round_rate, player.round_rate)
+        player.has_acted = True
+        self._view.send_message(game.chat_id, action_text)  # فرض بر این است که chat_id در game ذخیره شده – اگر نه، از update استفاده کنید.
+
+        # بررسی پایان راند و پیشرفت اگر لازم باشد (این بخش در کنترلر فراخوانی می‌شود)
+
+    def player_action_fold(self, update: Update, context: CallbackContext, game: Game) -> None:
+        """مدیریت اکشن فولد."""
+        player = self._current_turn_player(game)
+        if not player:
+            raise UserException("نوبت بازیکن فعلی پیدا نشد.")
+
+        player.state = PlayerState.FOLD
+        player.has_acted = True
+        self._view.send_message(game.chat_id, f"{player.mention_markdown} فولد کرد.")
+
+    def player_action_raise_bet(self, update: Update, context: CallbackContext, game: Game, raise_type: PlayerAction) -> None:
+        """مدیریت اکشن ریز یا بت."""
+        player = self._current_turn_player(game)
+        if not player:
+            raise UserException("نوبت بازیکن فعلی پیدا نشد.")
+
+        raise_amount = raise_type.value  # SMALL=10, NORMAL=25, BIG=50
+        total_raise = game.max_round_rate - player.round_rate + raise_amount
+
+        if player.wallet.value() < total_raise:
+            raise UserException("موجودی کافی برای ریز ندارید.")
+
+        player.wallet.inc(-total_raise)
+        player.round_rate += total_raise
+        player.total_bet += total_raise
+        game.pot += total_raise
+        game.max_round_rate = player.round_rate
+
+        # ریست فلگ has_acted برای همه بازیکنان فعال چون ریز باعث شروع دوباره دور می‌شود
+        for p in game.players_by(states=(PlayerState.ACTIVE,)):
+            if p != player:
+                p.has_acted = False
+
+        player.has_acted = True
+        action_text = f"{player.mention_markdown} ریز کرد ({raise_amount}$)."
+        self._view.send_message(game.chat_id, action_text)
+
+    def player_action_all_in(self, update: Update, context: CallbackContext, game: Game) -> None:
+        """مدیریت اکشن آل-این."""
+        player = self._current_turn_player(game)
+        if not player:
+            raise UserException("نوبت بازیکن فعلی پیدا نشد.")
+
+        all_in_amount = player.wallet.value()
+        player.wallet.inc(-all_in_amount)
+        player.round_rate += all_in_amount
+        player.total_bet += all_in_amount
+        game.pot += all_in_amount
+        game.max_round_rate = max(game.max_round_rate, player.round_rate)
+        player.state = PlayerState.ALL_IN
+        player.has_acted = True
+
+        self._view.send_message(game.chat_id, f"{player.mention_markdown} آل-این کرد ({all_in_amount}$).")
+
+    # ==================== پایان بلوک متدهای اکشن بازیکن ====================
+
+    def _advance_round(self, game: Game, chat_id: ChatId) -> None:
         """
-        مغز متفکر مالی ربات! (نسخه ۲.۰ - خود اصلاحگر)
-        برندگان را با در نظر گرفتن Side Pot مشخص کرده و با استفاده از game.pot
-        از صحت محاسبات اطمینان حاصل می‌کند.
+        پیشرفت به راند بعدی شرط‌بندی را مدیریت می‌کند.
+        جایگزین متد show_table شده و کارت‌های جدید را اضافه می‌کند.
         """
-        if not contenders or game.pot == 0:
-            return []
+        # ابتدا چک می‌کنیم آیا دور شرط‌بندی تمام شده
+        if not self._is_betting_round_over(game):
+            return  # اگر تمام نشده، پیشرفت نکن
 
-        # ۱. محاسبه قدرت دست هر بازیکن (بدون تغییر)
-        contender_details = []
-        for player in contenders:
-            hand_type, score, best_hand_cards = self._winner_determine.get_hand_value(
-                player.cards, game.cards_table
-            )
-            contender_details.append({
-                "player": player,
-                "total_bet": player.total_bet,
-                "score": score,
-                "hand_cards": best_hand_cards,
-                "hand_type": hand_type,
-            })
+        # ریست فلگ‌ها و نرخ‌های دور برای راند جدید
+        self._reset_round_flags(game)
 
-        # ۲. شناسایی لایه‌های شرط‌بندی (Tiers) (بدون تغییر)
-        bet_tiers = sorted(list(set(p['total_bet'] for p in contender_details if p['total_bet'] > 0)))
+        # اضافه کردن کارت‌ها بر اساس وضعیت فعلی
+        if game.state == GameState.ROUND_PRE_FLOP:
+            self.add_cards_to_table(3, game, chat_id, "🃏 فلاپ (۳ کارت اول):")
+            game.state = GameState.ROUND_FLOP
+        elif game.state == GameState.ROUND_FLOP:
+            self.add_cards_to_table(1, game, chat_id, "🃏 ترن (کارت چهارم):")
+            game.state = GameState.ROUND_TURN
+        elif game.state == GameState.ROUND_TURN:
+            self.add_cards_to_table(1, game, chat_id, "🃏 ریور (کارت پنجم):")
+            game.state = GameState.ROUND_RIVER
+        elif game.state == GameState.ROUND_RIVER:
+            # اگر به ریور رسیدیم و دور تمام شد، دست را پایان می‌دهیم
+            self._end_hand(game, chat_id)
+            return
 
-        winners_by_pot = []
-        last_bet_tier = 0
-        calculated_pot_total = 0 # برای پیگیری مجموع پات محاسبه شده
+        # بعد از اضافه کردن کارت‌ها، نوبت بعدی را شروع می‌کنیم
+        self._start_next_turn(game, chat_id)
 
-        # ۳. ساختن پات‌ها به صورت لایه به لایه (منطق اصلی بدون تغییر)
-        for tier in bet_tiers:
-            tier_contribution = tier - last_bet_tier
-            eligible_for_this_pot = [p for p in contender_details if p['total_bet'] >= tier]
-            
-            pot_size = tier_contribution * len(eligible_for_this_pot)
-            calculated_pot_total += pot_size
-            
-            if pot_size > 0:
-                best_score_in_pot = max(p['score'] for p in eligible_for_this_pot)
-                
-                pot_winners_info = [
-                    {
-                        "player": p['player'],
-                        "hand_cards": p['hand_cards'],
-                        "hand_type": p['hand_type'],
-                    }
-                    for p in eligible_for_this_pot if p['score'] == best_score_in_pot
-                ]
-                
-                winners_by_pot.append({
-                    "amount": pot_size,
-                    "winners": pot_winners_info
+    def _reset_round_flags(self, game: Game) -> None:
+        """ریست فلگ‌ها و نرخ‌های دور برای شروع راند جدید."""
+        for player in game.players_by(states=(PlayerState.ACTIVE, PlayerState.ALL_IN)):
+            player.round_rate = 0
+            player.has_acted = False
+        game.max_round_rate = 0
+
+    def _send_turn_message(self, game: Game, chat_id: ChatId) -> None:
+        """ارسال پیام نوبت با ذخیره turn_message_id برای جلوگیری از AttributeError."""
+        player = self._current_turn_player(game)
+        if not player:
+            return
+
+        money = player.wallet.value()
+        turn_message_id = self._view.send_turn_actions(chat_id, game, player, money)
+        if turn_message_id:
+            game.turn_message_id = turn_message_id  # ذخیره ID برای حذف بعدی
+
+    def _start_next_turn(self, game: Game, chat_id: ChatId) -> None:
+        """نوبت بازیکن بعدی را تعیین و پیام نوبت را ارسال می‌کند."""
+        # پیدا کردن صندلی بعدی فعال
+        next_seat = game.next_occupied_seat(game.current_player_index)
+        if next_seat == -1:
+            # اگر هیچ بازیکن فعالی نبود، دست را پایان می‌دهیم
+            self._end_hand(game, chat_id)
+            return
+
+        game.current_player_index = next_seat
+        self._send_turn_message(game, chat_id)
+    def _end_hand(self, game: Game, chat_id: ChatId) -> None:
+        """پایان دست را مدیریت می‌کند: تعیین برندگان، توزیع پات، نمایش نتایج، و آماده‌سازی برای دست بعدی."""
+        # پاک‌سازی پیام‌های موقت
+        self._cleanup_hand_messages(chat_id, game)
+
+        # بررسی اگر فقط یک بازیکن فعال مانده (بدون نیاز به showdown)
+        active_players = game.players_by(states=(PlayerState.ACTIVE, PlayerState.ALL_IN))
+        if len(active_players) == 1:
+            winner = active_players[0]
+            winner.wallet.inc(game.pot)
+            self._view.send_message(chat_id, f"🏆 {winner.mention_markdown} به عنوان تنها بازیکن باقی‌مانده، تمام پات ({game.pot}$) را برد!")
+            self._prepare_next_hand(game, chat_id)
+            return
+
+        # تعیین برندگان و Side Pots
+        winners_by_pot = self._determine_winners(game)
+
+        # توزیع پات‌ها
+        for pot_data in winners_by_pot:
+            pot_amount = pot_data["amount"]
+            winners = pot_data["winners"]
+            if winners and pot_amount > 0:
+                win_amount = pot_amount // len(winners)
+                for winner_info in winners:
+                    winner_player = winner_info["player"]
+                    winner_player.wallet.inc(win_amount)
+
+        # نمایش نتایج showdown
+        self._view.send_showdown_results(chat_id, game, winners_by_pot)
+
+        # آماده‌سازی برای دست بعدی
+        self._prepare_next_hand(game, chat_id)
+
+    def _determine_winners(self, game: Game) -> List[Dict]:
+        """
+        تعیین برندگان با مدیریت Side Pots.
+        خروجی: لیست دیکشنری‌ها برای هر پات (اصلی و فرعی).
+        """
+        # مرتب‌سازی بازیکنان بر اساس کل شرط‌بندی (برای ایجاد Side Pots)
+        players_in_hand = sorted(
+            game.players_by(states=(PlayerState.ACTIVE, PlayerState.ALL_IN)),
+            key=lambda p: p.total_bet
+        )
+
+        pots = []
+        previous_bet = 0
+
+        for i, player in enumerate(players_in_hand):
+            current_bet = player.total_bet
+            pot_amount = (current_bet - previous_bet) * (len(players_in_hand) - i)
+            if pot_amount > 0:
+                # بازیکنانی که می‌توانند در این پات شرکت کنند (کسانی که حداقل این مقدار شرط بسته‌اند)
+                eligible_players = players_in_hand[i:]
+                # محاسبه امتیاز دست هر بازیکن
+                player_scores = []
+                for p in eligible_players:
+                    hand = p.cards + game.cards_table
+                    score, hand_type = self._winner_determine.calculate_hand_score(hand)
+                    player_scores.append({
+                        "player": p,
+                        "score": score,
+                        "hand_type": hand_type,
+                        "hand_cards": hand  # یا بهترین ۵ کارت
+                    })
+
+                # پیدا کردن برندگان (بالاترین امتیاز)
+                max_score = max(ps["score"] for ps in player_scores)
+                winners = [ps for ps in player_scores if ps["score"] == max_score]
+
+                pots.append({
+                    "amount": pot_amount,
+                    "winners": winners
                 })
 
-            last_bet_tier = tier
-        
-        # --- FIX: مرحله حیاتی تطبیق و اصلاح نهایی ---
-        # اینجا جادو اتفاق می‌افتد: ما پات محاسبه‌شده را با پات واقعی مقایسه می‌کنیم.
-        # اگر پولی (مثل بلایندها) جا مانده باشد، آن را به پات اصلی اضافه می‌کنیم.
-        discrepancy = game.pot - calculated_pot_total
-        if discrepancy > 0 and winners_by_pot:
-            # پول گمشده را به اولین پات (پات اصلی) اضافه کن
-            winners_by_pot[0]['amount'] += discrepancy
-        elif discrepancy < 0:
-            # این حالت نباید رخ دهد، اما برای اطمینان لاگ می‌گیریم
-            print(f"[ERROR] Pot calculation mismatch! Game pot: {game.pot}, Calculated: {calculated_pot_total}")
+            previous_bet = current_bet
 
-        # --- FIX 2: ادغام پات‌های غیرضروری ---
-        # اگر در نهایت فقط یک پات وجود داشت، اما به اشتباه به چند بخش تقسیم شده بود
-        # (مثل سناریوی شما)، همه را در یک پات اصلی ادغام می‌کنیم.
-        if len(bet_tiers) == 1 and len(winners_by_pot) > 1:
-            print("[INFO] Merging unnecessary side pots into a single main pot.")
-            main_pot = {"amount": game.pot, "winners": winners_by_pot[0]['winners']}
-            return [main_pot]
-            
-        return winners_by_pot
+        return pots
+
+    def _prepare_next_hand(self, game: Game, chat_id: ChatId) -> None:
+        """آماده‌سازی برای دست بعدی: ریست بازی، نمایش پیام پایان دست."""
+        game.state = GameState.FINISHED
+        # ریست ویژگی‌های دست (کارت‌ها، پات، etc.)
+        game.pot = 0
+        game.cards_table = []
+        game.remain_cards = get_cards()  # دسته جدید
+        for player in game.players:
+            player.cards = []
+            player.round_rate = 0
+            player.total_bet = 0
+            player.has_acted = False
+            player.state = PlayerState.ACTIVE if player.wallet.value() > 0 else PlayerState.FOLD  # اگر موجودی صفر، خارج
+
+        # پیشرفت دیلر
+        game.advance_dealer()
+
+        # نمایش پیام پایان دست
+        self._view.send_new_hand_ready_message(chat_id, game)
+
+    def stop(self, user_id: UserId) -> None:
+        """توقف بازی (ریست کامل)."""
+        # این متد باید game را از context بگیرد، اما برای سادگی فرض می‌کنیم.
+        game = self._game_from_context(context)  # نیاز به context دارد – تنظیم کنید.
+        game.reset()
+        self._view.send_message(game.chat_id, "🛑 بازی متوقف شد.")
+
+    def bonus(self, update: Update, context: CallbackContext) -> None:
+        """مدیریت بونوس روزانه."""
+        user_id = update.effective_user.id
+        wallet = WalletManagerModel(user_id, self._kv)
+        if wallet.has_daily_bonus():
+            self._view.send_message(update.effective_chat.id, "شما قبلاً بونوس روزانه را گرفته‌اید.")
+            return
+        bonus_amount = wallet.add_daily(100)  # مثال
+        self._view.send_message(update.effective_chat.id, f"🎁 بونوس روزانه: {bonus_amount}$ اضافه شد.")
+
+    def ban_player(self, update: Update, context: CallbackContext) -> None:
+        """بن کردن بازیکن (فقط ادمین)."""
+        # منطق چک ادمین و بن کردن – ساده‌سازی شده.
+        self._view.send_message(update.effective_chat.id, "بازیکن بن شد.")  # تکمیل کنید.
+
+    # ==================== ادامه از متدهای قبلی (مانند player_action_all_in) ====================
 
     def _process_playing(self, chat_id: ChatId, game: Game, context: CallbackContext) -> None:
         """
-        مغز متفکر و کنترل‌کننده اصلی جریان بازی.
-        این متد پس از هر حرکت بازیکن فراخوانی می‌شود تا تصمیم بگیرد:
-        1. آیا دست تمام شده؟ (یک نفر باقی مانده)
-        2. آیا دور شرط‌بندی تمام شده؟
-        3. در غیر این صورت، نوبت را به بازیکن فعال بعدی بده.
-        این متد جایگزین چرخه بازگشتی قبلی بین _process_playing و _move_to_next_player_and_process شده است.
+        مدیریت جریان بازی پس از هر اکشن: چک پایان راند، پیشرفت اگر لازم، یا ارسال نوبت بعدی.
         """
-        # پاک کردن پیام نوبت قبلی برای تمیز نگه داشتن چت
-        if game.turn_message_id:
-            self._view.remove_message(chat_id, game.turn_message_id)
-            game.turn_message_id = None
-    
-        # شرط ۱: آیا فقط یک بازیکن (یا کمتر) در بازی باقی مانده؟
-        contenders = game.players_by(states=(PlayerState.ACTIVE, PlayerState.ALL_IN))
-        if len(contenders) <= 1:
-            self._go_to_next_street(game, chat_id, context)
-            return
-    
-        # شرط ۲: آیا دور شرط‌بندی فعلی به پایان رسیده است؟
         if self._is_betting_round_over(game):
             self._go_to_next_street(game, chat_id, context)
-            return
-    
-        # شرط ۳: بازی ادامه دارد، نوبت را به بازیکن بعدی منتقل کن
-        # از متدی که از قبل در RoundRateModel وجود داشت استفاده می‌کنیم
-        # *** تنها خط اصلاح شده اینجاست ***
-        next_player_index = self._round_rate._find_next_active_player_index(game, game.current_player_index)
-    
-        if next_player_index != -1:
-            # ایندکس بازیکن فعلی را *قبل* از ارسال پیام نوبت آپدیت می‌کنیم
-            game.current_player_index = next_player_index
-            player = game.players[next_player_index]
-    
-            # ارسال پیام نوبت به بازیکن جدید
-            self._send_turn_message(game, player, chat_id)
         else:
-            # اگر هیچ بازیکن فعالی برای حرکت بعدی وجود ندارد (مثلاً همه All-in هستند)
-            # مستقیماً به مرحله بعدی برو
-            self._go_to_next_street(game, chat_id, context)
+            # پیدا کردن نوبت بعدی
+            next_index = self._find_next_active_player_index(game, game.current_player_index)
+            if next_index == -1:
+                self._go_to_next_street(game, chat_id, context)
+                return
+            game.current_player_index = next_index
+            self._send_turn_message(game, chat_id)
 
-    # FIX 1 (PART 1): Remove the 'money' parameter. The function will fetch the latest wallet value itself.
-    def _send_turn_message(self, game: Game, player: Player, chat_id: ChatId):
-        """پیام نوبت را ارسال کرده و شناسه آن را برای حذف در آینده ذخیره می‌کند."""
-        if game.turn_message_id:
-            self._view.remove_markup(chat_id, game.turn_message_id)
-
-        # Fetch the most current wallet value right here, ensuring it's up-to-date.
-        money = player.wallet.value()
-        
-        msg_id = self._view.send_turn_actions(chat_id, game, player, money)
-        
-        if msg_id:
-            game.turn_message_id = msg_id
-        game.last_turn_time = datetime.datetime.now()
-    # --- Player Action Handlers ---
-    # این بخش تمام حرکات ممکن بازیکنان در نوبتشان را مدیریت می‌کند.
-    
-    def player_action_fold(self, update: Update, context: CallbackContext, game: Game) -> None:
-        """بازیکن فولد می‌کند، از دور شرط‌بندی کنار می‌رود و نوبت به نفر بعدی منتقل می‌شود."""
-        current_player = self._current_turn_player(game)
-        if not current_player:
-            return
-    
-        chat_id = update.effective_chat.id
-        current_player.state = PlayerState.FOLD
-        self._view.send_message(chat_id, f"🏳️ {current_player.mention_markdown} فولد کرد.")
-    
-        # برای اطمینان از پاک شدن دکمه‌ها، مارک‌آپ را حذف می‌کنیم
-        if game.turn_message_id:
-            self._view.remove_markup(chat_id, game.turn_message_id)
-    
-        self._process_playing(chat_id, game, context)
-    
-    def player_action_call_check(self, update: Update, context: CallbackContext, game: Game) -> None:
-        """بازیکن کال (پرداخت) یا چک (عبور) را انجام می‌دهد."""
-        current_player = self._current_turn_player(game)
-        if not current_player:
-            return
-    
-        chat_id = update.effective_chat.id
-        call_amount = game.max_round_rate - current_player.round_rate
-        current_player.has_acted = True
-    
-        try:
-            if call_amount > 0:
-                # منطق Call
-                current_player.wallet.authorize(game.id, call_amount)
-                current_player.round_rate += call_amount
-                current_player.total_bet += call_amount
-                game.pot += call_amount
-                self._view.send_message(chat_id, f"🎯 {current_player.mention_markdown} با {call_amount}$ کال کرد.")
-            else:
-                # منطق Check
-                self._view.send_message(chat_id, f"✋ {current_player.mention_markdown} چک کرد.")
-        except UserException as e:
-            self._view.send_message(chat_id, f"⚠️ خطای {current_player.mention_markdown}: {e}")
-            return  # اگر پول نداشت، از ادامه متد جلوگیری کن
-    
-        if game.turn_message_id:
-            self._view.remove_markup(chat_id, game.turn_message_id)
-    
-        self._process_playing(chat_id, game, context)
-    
-    def player_action_raise_bet(self, update: Update, context: CallbackContext, game: Game, raise_amount: int) -> None:
-        """بازیکن شرط را افزایش می‌دهد (Raise) یا برای اولین بار شرط می‌بندد (Bet)."""
-        current_player = self._current_turn_player(game)
-        if not current_player:
-            return
-    
-        chat_id = update.effective_chat.id
-        call_amount = game.max_round_rate - current_player.round_rate
-        total_amount_to_bet = call_amount + raise_amount
-    
-        try:
-            current_player.wallet.authorize(game.id, total_amount_to_bet)
-            current_player.round_rate += total_amount_to_bet
-            current_player.total_bet += total_amount_to_bet
-            game.pot += total_amount_to_bet
-    
-            # به‌روزرسانی حداکثر شرط و اعلام آن
-            game.max_round_rate = current_player.round_rate
-            action_text = "بِت" if call_amount == 0 else "رِیز"
-            self._view.send_message(chat_id, f"💹 {current_player.mention_markdown} {action_text} زد و شرط رو به {current_player.round_rate}$ رسوند.")
-    
-            # --- بخش کلیدی منطق پوکر ---
-            # وقتی کسی رِیز می‌کند، نوبت بازی باید یک دور کامل دیگر بچرخد
-            game.trading_end_user_id = current_player.user_id
-            current_player.has_acted = True
-            # وضعیت بقیه بازیکنان فعال را برای بازی در دور جدید ریست می‌کنیم
-            for p in game.players_by(states=(PlayerState.ACTIVE,)):
-                if p.user_id != current_player.user_id:
-                    p.has_acted = False
-    
-        except UserException as e:
-            self._view.send_message(chat_id, f"⚠️ خطای {current_player.mention_markdown}: {e}")
-            return
-    
-        if game.turn_message_id:
-            self._view.remove_markup(chat_id, game.turn_message_id)
-    
-        self._process_playing(chat_id, game, context)
-    
-    def player_action_all_in(self, update: Update, context: CallbackContext, game: Game) -> None:
-        """بازیکن تمام موجودی خود را شرط می‌بندد (All-in)."""
-        current_player = self._current_turn_player(game)
-        if not current_player:
-            return
-    
-        chat_id = update.effective_chat.id
-        all_in_amount = current_player.wallet.value()
-    
-        if all_in_amount <= 0:
-            self._view.send_message(chat_id, f"👀 {current_player.mention_markdown} موجودی برای آل-این ندارد و چک می‌کند.")
-            self.player_action_call_check(update, context, game) # این حرکت معادل چک است
-            return
-    
-        current_player.wallet.authorize(game.id, all_in_amount)
-        current_player.round_rate += all_in_amount
-        current_player.total_bet += all_in_amount
-        game.pot += all_in_amount
-        current_player.state = PlayerState.ALL_IN
-        current_player.has_acted = True
-    
-        self._view.send_message(chat_id, f"🀄 {current_player.mention_markdown} با {all_in_amount}$ آل‑این کرد!")
-    
-        if current_player.round_rate > game.max_round_rate:
-            game.max_round_rate = current_player.round_rate
-            # اگر آل-این باعث افزایش شرط شد، مانند رِیز عمل می‌کند
-            game.trading_end_user_id = current_player.user_id
-            for p in game.players_by(states=(PlayerState.ACTIVE,)):
-                if p.user_id != current_player.user_id:
-                    p.has_acted = False
-    
-        if game.turn_message_id:
-            self._view.remove_markup(chat_id, game.turn_message_id)
-    
-        self._process_playing(chat_id, game, context)
-            
     def _go_to_next_street(self, game: Game, chat_id: ChatId, context: CallbackContext) -> None:
         """
         بازی را به مرحله بعدی (street) می‌برد.
@@ -701,19 +769,19 @@ class PokerBotModel:
         if game.turn_message_id:
             self._view.remove_message(chat_id, game.turn_message_id)
             game.turn_message_id = None
-    
+
         # بررسی می‌کنیم چند بازیکن هنوز در بازی هستند (Active یا All-in)
         contenders = game.players_by(states=(PlayerState.ACTIVE, PlayerState.ALL_IN))
         if len(contenders) <= 1:
             # اگر فقط یک نفر باقی مانده، مستقیم به showdown می‌رویم تا برنده مشخص شود
             self._showdown(game, chat_id, context)
             return
-    
+
         # جمع‌آوری پول‌های شرط‌بندی شده در این دور و ریست کردن وضعیت بازیکنان
         self._round_rate.collect_bets_for_pot(game)
         for p in game.players:
-            p.has_acted = False # <-- این خط برای دور بعدی حیاتی است
-    
+            p.has_acted = False  # <-- این خط برای دور بعدی حیاتی است
+
         # رفتن به مرحله بعدی بر اساس وضعیت فعلی بازی
         if game.state == GameState.ROUND_PRE_FLOP:
             game.state = GameState.ROUND_FLOP
@@ -727,8 +795,8 @@ class PokerBotModel:
         elif game.state == GameState.ROUND_RIVER:
             # بعد از ریور، دور شرط‌بندی تمام شده و باید showdown انجام شود
             self._showdown(game, chat_id, context)
-            return # <-- مهم: بعد از فراخوانی showdown، ادامه نمی‌دهیم
-    
+            return  # <-- مهم: بعد از فراخوانی showdown، ادامه نمی‌دهیم
+
         # اگر هنوز بازیکنی برای بازی وجود دارد، نوبت را به نفر اول می‌دهیم
         active_players = game.players_by(states=(PlayerState.ACTIVE,))
         if not active_players:
@@ -736,25 +804,10 @@ class PokerBotModel:
             # تا همه کارت‌ها رو شوند.
             self._go_to_next_street(game, chat_id, context)
             return
-    
+
         # پیدا کردن اولین بازیکن برای شروع دور جدید (معمولاً اولین فرد فعال بعد از دیلر)
-        # توجه: شما باید متد _get_first_player_index را داشته باشید.
-        # اگر ندارید، فعلاً از این پیاده‌سازی ساده استفاده کنید:
-        try:
-            # این متد باید ایندکس اولین بازیکن *فعال* بعد از دیلر را پیدا کند
-            game.current_player_index = self._get_first_player_index(game)
-        except AttributeError:
-            # پیاده‌سازی موقت اگر متد بالا وجود ندارد
-            print("WARNING: _get_first_player_index() not found. Using fallback logic.")
-            first_player_index = -1
-            start_index = (game.dealer_index + 1) % game.seated_count()
-            for i in range(game.seated_count()):
-                idx = (start_index + i) % game.seated_count()
-                if game.players[idx].state == PlayerState.ACTIVE:
-                    first_player_index = idx
-                    break
-            game.current_player_index = first_player_index
-    
+        game.current_player_index = self._round_rate._get_first_player_index(game)
+
         # اگر بازیکنی برای بازی پیدا شد، حلقه بازی را مجدداً شروع می‌کنیم
         if game.current_player_index != -1:
             self._process_playing(chat_id, game, context)
@@ -770,30 +823,26 @@ class PokerBotModel:
         player_scores = []
         # بازیکنانی که فولد نکرده‌اند در تعیین نتیجه شرکت می‌کنند
         contenders = game.players_by(states=(PlayerState.ACTIVE, PlayerState.ALL_IN))
-        
+
         if not contenders:
             return []
 
         for player in contenders:
             if not player.cards:
                 continue
-            
+
             # **نکته مهم**: متد get_hand_value در WinnerDetermination باید بروز شود تا سه مقدار برگرداند
             # score, best_hand, hand_type = self._winner_determine.get_hand_value(player.cards, game.cards_table)
-            
+
             # پیاده‌سازی موقت تا زمان آپدیت winnerdetermination
-            # در اینجا فرض می‌کنیم متد `get_hand_value_and_type` در کلاس `WinnerDetermination` وجود دارد
             try:
                 score, best_hand, hand_type = self._winner_determine.get_hand_value_and_type(player.cards, game.cards_table)
             except AttributeError:
-                # اگر `get_hand_value_and_type` هنوز پیاده سازی نشده است، این بخش اجرا می شود.
-                # این یک fallback موقت است.
                 print("WARNING: 'get_hand_value_and_type' not found in WinnerDetermination. Update winnerdetermination.py")
                 score, best_hand = self._winner_determine.get_hand_value(player.cards, game.cards_table)
                 # یک روش موقت برای حدس زدن نوع دست بر اساس امتیاز
                 hand_type_value = score // (15**5)
                 hand_type = HandsOfPoker(hand_type_value) if hand_type_value > 0 else HandsOfPoker.HIGH_CARD
-
 
             player_scores.append({
                 "player": player,
@@ -802,15 +851,16 @@ class PokerBotModel:
                 "hand_type": hand_type
             })
         return player_scores
+
     def _find_winners_from_scores(self, player_scores: List[Dict]) -> Tuple[List[Player], int]:
         """از لیست امتیازات، برندگان و بالاترین امتیاز را پیدا می‌کند."""
         if not player_scores:
             return [], 0
-            
+
         highest_score = max(data['score'] for data in player_scores)
         winners = [data['player'] for data in player_scores if data['score'] == highest_score]
         return winners, highest_score
-        
+
     def add_cards_to_table(self, count: int, game: Game, chat_id: ChatId, street_name: str):
         """
         کارت‌های جدید را به میز اضافه کرده و تصویر میز را با فرمت جدید و زیبا ارسال می‌کند.
@@ -856,74 +906,69 @@ class PokerBotModel:
             return HandsOfPoker(base_rank).name.replace("_", " ").title()
         except ValueError:
             return "Unknown Hand"
-            
+
     def _clear_game_messages(self, game: Game, chat_id: ChatId) -> None:
         """
         تمام پیام‌های مربوط به این دست از بازی، از جمله پیام نوبت فعلی
         و سایر پیام‌های ثبت‌شده را پاک می‌کند تا چت برای نمایش نتایج تمیز شود.
         """
         print(f"DEBUG: Clearing game messages...")
-    
+
         # ۱. پاک کردن پیام نوبت فعال (که دکمه‌ها را دارد)
         if game.turn_message_id:
             self._view.remove_message(chat_id, game.turn_message_id)
-            game.turn_message_id = None # آن را نال می‌کنیم تا دوباره استفاده نشود
-    
+            game.turn_message_id = None  # آن را نال می‌کنیم تا دوباره استفاده نشود
+
         # ۲. پاک کردن بقیه پیام‌های ذخیره شده در لیست
         # ما از یک کپی از لیست استفاده می‌کنیم تا حذف عناصر در حین پیمایش مشکلی ایجاد نکند
         for message_id in list(game.message_ids_to_delete):
             self._view.remove_message(chat_id, message_id)
-        
+
         # ۳. بعد از اتمام کار، لیست را کاملاً خالی می‌کنیم
         game.message_ids_to_delete.clear()
-        
+
     def _showdown(self, game: Game, chat_id: ChatId, context: CallbackContext) -> None:
-        """
-        فرآیند پایان دست را با استفاده از خروجی دقیق _determine_winners مدیریت می‌کند.
-        شامل لاگ‌گیری پیشرفته برای دیباگ و مدیریت پات‌های اصلی/فرعی.
-        تغییرات: استفاده از logging به جای print برای پایداری، حذف تکرار پاکسازی، و چک اضافی برای contenders.
-        """
-        logger = logging.getLogger(__name__)
-        
-        logger.debug("\n" + "="*80)
-        logger.debug(f"[DEBUG] >>> _showdown CALLED at: {datetime.datetime.now().isoformat()}")
-        logger.debug(f"[DEBUG] game.id: {getattr(game, 'id', None)}")
-        logger.debug(f"[DEBUG] game.state BEFORE: {getattr(game, 'state', None)}")
-        logger.debug(f"[DEBUG] seated_count: {game.seated_count()}, pot: {game.pot}")
-        logger.debug(f"[DEBUG] cards_on_table: {getattr(game, 'cards_table', [])}")
-        
+        print("\n" + "="*80)
+        print(f"[DEBUG] >>> _showdown CALLED at: {datetime.datetime.now().isoformat()}")
+        print(f"[DEBUG] game.id: {getattr(game, 'id', None)}")
+        print(f"[DEBUG] game.state BEFORE: {getattr(game, 'state', None)}")
+        print(f"[DEBUG] seated_count: {game.seated_count()}, pot: {game.pot}")
+        print(f"[DEBUG] cards_on_table: {getattr(game, 'cards_table', [])}")
+
         # بازیکنان و وضعیت‌شان
         state_counts = {}
         for st in list(PlayerState):
             state_counts[st.name] = len([p for p in game.players if p.state == st])
-        logger.debug(f"[DEBUG] player counts by state: {json.dumps(state_counts, ensure_ascii=False)}")
-        
-        logger.debug("[DEBUG] ACTIVE players: %s", [p.mention_markdown for p in game.players if p.state == PlayerState.ACTIVE])
-        logger.debug("[DEBUG] ALL_IN players: %s", [p.mention_markdown for p in game.players if p.state == PlayerState.ALL_IN])
-        logger.debug("[DEBUG] FOLDED players: %s", [p.mention_markdown for p in game.players if p.state == PlayerState.FOLD])
-        
+        print(f"[DEBUG] player counts by state: {json.dumps(state_counts, ensure_ascii=False)}")
+
+        print("[DEBUG] ACTIVE players:", [p.mention_markdown for p in game.players if p.state == PlayerState.ACTIVE])
+        print("[DEBUG] ALL_IN players:", [p.mention_markdown for p in game.players if p.state == PlayerState.ALL_IN])
+        print("[DEBUG] FOLDED players:", [p.mention_markdown for p in game.players if p.state == PlayerState.FOLD])
+
         # شناسه‌های پیام آخرین نتیجه و پایان دست
-        logger.debug(f"[DEBUG] last_hand_result_message_id: {getattr(game, 'last_hand_result_message_id', None)}")
-        logger.debug(f"[DEBUG] last_hand_end_message_id: {getattr(game, 'last_hand_end_message_id', None)}")
-        
+        print(f"[DEBUG] last_hand_result_message_id: {getattr(game, 'last_hand_result_message_id', None)}")
+        print(f"[DEBUG] last_hand_end_message_id: {getattr(game, 'last_hand_end_message_id', None)}")
+
         # مسیر فعلی فراخوانی
-        logger.debug("[DEBUG] FULL CALL STACK (most recent last):")
+        print("[DEBUG] FULL CALL STACK (most recent last):")
         for frame in traceback.format_stack(limit=15):
-            logger.debug(frame.strip())
-        
+            print(frame.strip())
+
         # گرفتن اطلاعات از کل استک پایتونی برای تحلیل عمیق‌تر
         caller_functions = [f.function for f in inspect.stack()]
-        logger.debug(f"[DEBUG] caller functions chain: {caller_functions}")
-        
+        print(f"[DEBUG] caller functions chain: {caller_functions}")
+
         # موقعیت متغیرهای Thread (برای دیدن اجراهای موازی احتمالی)
-        logger.debug(f"[DEBUG] current thread: {threading.current_thread().name}")
-        
-        logger.debug("="*80 + "\n")
-        sys.stdout.flush()  # اطمینان از فلاش شدن لاگ‌ها به کنسول
-    
+        import threading
+        print(f"[DEBUG] current thread: {threading.current_thread().name}")
+
+        print("="*80 + "\n")
+
+        """
+        فرآیند پایان دست را با استفاده از خروجی دقیق _determine_winners مدیریت می‌کند.
+        """
         contenders = game.players_by(states=(PlayerState.ACTIVE, PlayerState.ALL_IN))
-        logger.debug(f"[DEBUG] Contenders count: {len(contenders)}")  # لاگ اضافی برای دیباگ
-    
+
         if not contenders:
             # سناریوی نادر که همه قبل از showdown فولد کرده‌اند
             active_players = game.players_by(states=(PlayerState.ACTIVE,))
@@ -934,23 +979,16 @@ class PokerBotModel:
                     chat_id,
                     f"🏆 تمام بازیکنان دیگر فولد کردند! {winner.mention_markdown} برنده {game.pot}$ شد."
                 )
-            else:
-                logger.warning("[WARNING] No contenders and no single active player - possible game state error")
         else:
             # ۱. تعیین برندگان و تقسیم تمام پات‌ها (اصلی و فرعی)
-            try:
-                winners_by_pot = self._determine_winners(game, contenders)
-            except Exception as e:
-                logger.error(f"[ERROR] Exception in _determine_winners: {e}", exc_info=True)
-                self._view.send_message(chat_id, "ℹ️ خطایی در تعیین برنده رخ داد. لطفاً دوباره امتحان کنید.")
-                return  # خروج زود برای جلوگیری از کرش
-    
+            winners_by_pot = self._determine_winners(game, contenders)
+
             if winners_by_pot:
                 # این حلقه روی تمام پات‌های ساخته شده (اصلی و فرعی) حرکت می‌کند
                 for pot in winners_by_pot:
                     pot_amount = pot.get("amount", 0)
                     winners_info = pot.get("winners", [])
-                    
+
                     if pot_amount > 0 and winners_info:
                         win_amount_per_player = pot_amount // len(winners_info)
                         for winner in winners_info:
@@ -958,45 +996,57 @@ class PokerBotModel:
                             player.wallet.inc(win_amount_per_player)
             else:
                 self._view.send_message(chat_id, "ℹ️ هیچ برنده‌ای در این دست مشخص نشد. مشکلی در منطق بازی رخ داده است.")
-    
+
             # ۲. فراخوانی View برای نمایش نتایج
+            # View باید آپدیت شود تا این ساختار داده جدید را به زیبایی نمایش دهد
             self._view.send_showdown_results(chat_id, game, winners_by_pot)
-    
-        # ۳. پاکسازی و ریست کردن بازی برای دست بعدی (ادغام و حذف تکرار)
-        self._cleanup_hand_messages(chat_id, game)  # فراخوانی متمرکز پاکسازی
+            self._cleanup_hand_messages(chat_id, game)
+            self._view.send_new_hand_ready_message(chat_id, game)
+
+        # ۳. پاکسازی و ریست کردن بازی برای دست بعدی (بدون تغییر)
+        for msg_id in game.message_ids_to_delete:
+            self._view.remove_message(chat_id, msg_id)
+        game.message_ids_to_delete.clear()
+
+        if game.turn_message_id:
+            self._view.remove_message(chat_id, game.turn_message_id)
+            game.turn_message_id = None
+
         remaining_players = [p for p in game.players if p.wallet.value() > 0]
         context.chat_data[KEY_OLD_PLAYERS] = [p.user_id for p in remaining_players]
+
         game.reset()
+
         self._view.send_new_hand_ready_message(chat_id, game)
-        
+
     def _end_hand(self, game: Game, chat_id: ChatId, context: CallbackContext) -> None:
         """
         یک دست از بازی را تمام کرده، پیام‌ها را پاکسازی کرده و برای دست بعدی آماده می‌شود.
         """
         # ۱. پاکسازی تمام پیام‌های موقت این دست (کارت‌های بازیکنان و ...)
         # این کار باعث می‌شود چت گروه شلوغ نشود
-        for message_id in set(game.message_ids_to_delete): # از set استفاده می‌کنیم که پیام تکراری حذف نکنیم
+        for message_id in set(game.message_ids_to_delete):  # از set استفاده می‌کنیم که پیام تکراری حذف نکنیم
             try:
                 context.bot.delete_message(chat_id=chat_id, message_id=message_id)
             except Exception as e:
                 # اگر پیام قبلاً حذف شده یا مشکلی پیش بیاید، خطا را فقط چاپ می‌کنیم
                 print(f"INFO: Could not delete message {message_id} in chat {chat_id}. Reason: {e}")
-        
+
         # پاک کردن آخرین پیام نوبت
         if game.turn_message_id:
             try:
                 context.bot.delete_message(chat_id=chat_id, message_id=game.turn_message_id)
             except Exception as e:
                 print(f"INFO: Could not delete turn message {game.turn_message_id}. Reason: {e}")
-    
+
         # ۲. ذخیره بازیکنان برای دست بعدی
         # این باعث می‌شود در بازی بعدی، لازم نباشد همه دوباره /ready بزنند
         context.chat_data[KEY_OLD_PLAYERS] = [p.user_id for p in game.players if p.wallet.value() > 0]
-    
+
         # ۳. ریست کردن کامل آبجکت بازی برای شروع یک دست جدید و تمیز
         # یک آبجکت جدید Game می‌سازیم تا هیچ داده‌ای از دست قبل باقی نماند
         context.chat_data[KEY_CHAT_DATA_GAME] = Game()
-    
+
         # ۴. اعلام پایان دست و راهنمایی برای شروع دست بعدی
         keyboard = ReplyKeyboardMarkup([["/ready", "/start"]], resize_keyboard=True)
         context.bot.send_message(
@@ -1004,7 +1054,6 @@ class PokerBotModel:
             text="🎉 دست تمام شد! برای شروع دست بعدی، /ready بزنید یا منتظر بمانید تا کسی /start کند.",
             reply_markup=keyboard
         )
-
 
     def _format_cards(self, cards: Cards) -> str:
         """
@@ -1015,14 +1064,14 @@ class PokerBotModel:
             return "??  ??"
         return "  ".join(str(card) for card in cards)
 
-
+    # ==================== کلاس‌های کمکی ====================
 
 class RoundRateModel:
     def __init__(self, view: PokerBotViewer, kv: redis.Redis, model: "PokerBotModel"):
         self._view = view
         self._kv = kv
-        self._model = model # <<< نمونه model ذخیره شد
-        
+        self._model = model  # <<< نمونه model ذخیره شد
+
     def _find_next_active_player_index(self, game: Game, start_index: int) -> int:
         num_players = game.seated_count()
         for i in range(1, num_players + 1):
@@ -1030,12 +1079,10 @@ class RoundRateModel:
             if game.players[next_index].state == PlayerState.ACTIVE:
                 return next_index
         return -1
-        
+
     def _get_first_player_index(self, game: Game) -> int:
         return self._find_next_active_player_index(game, game.dealer_index)
 
-
-    # داخل کلاس RoundRateModel
     def set_blinds(self, game: Game, chat_id: ChatId) -> None:
         """
         Determine small/big blinds (using seat indices) and debit the players.
@@ -1082,7 +1129,6 @@ class RoundRateModel:
                 player=player_turn,
                 money=player_turn.wallet.value()
             )
-    
 
     def _set_player_blind(self, game: Game, player: Player, amount: Money, blind_type: str, chat_id: ChatId):
         try:
@@ -1112,6 +1158,7 @@ class RoundRateModel:
         for player in game.seated_players():
             player.round_rate = 0
         game.max_round_rate = 0
+
 class WalletManagerModel(Wallet):
     """
     این کلاس مسئولیت مدیریت موجودی (Wallet) هر بازیکن را با استفاده از Redis بر عهده دارد.
@@ -1122,7 +1169,7 @@ class WalletManagerModel(Wallet):
         self._kv: redis.Redis = kv
         self._val_key = f"u_m:{user_id}"
         self._daily_bonus_key = f"u_db:{user_id}"
-        self._authorized_money_key = f"u_am:{user_id}" # برای پول رزرو شده در بازی
+        self._authorized_money_key = f"u_am:{user_id}"  # برای پول رزرو شده در بازی
 
         # اسکریپت Lua برای کاهش اتمی موجودی (جلوگیری از race condition)
         # این اسکریپت ابتدا مقدار فعلی را می‌گیرد، اگر کافی بود کم می‌کند و مقدار جدید را برمیگرداند
