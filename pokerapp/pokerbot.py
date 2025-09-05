@@ -27,10 +27,6 @@ from pokerapp.pokerbotcontrol import PokerBotCotroller
 from pokerapp.pokerbotmodel import PokerBotModel
 from pokerapp.pokerbotview import PokerBotViewer
 from pokerapp.entities import ChatId
-
-logging.basicConfig(
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    level=logging.INFO
 )
 
 class PokerBot:
@@ -63,6 +59,12 @@ class PokerBot:
             cfg=cfg,
         )
         self._controller = PokerBotCotroller(self._model, self._updater)
+        from pokerapp.message_delete_manager import MessageDeleteManager  # فایل جدیدی که اضافه می‌کنی
+        
+        self._delete_manager = MessageDeleteManager(bot)
+        self._view.set_delete_manager(self._delete_manager)
+        self._model.set_delete_manager(self._delete_manager)
+
 
     def run(self) -> None:
         self._updater.start_polling()
