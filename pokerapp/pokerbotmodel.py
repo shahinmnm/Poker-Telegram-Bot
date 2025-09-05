@@ -911,7 +911,7 @@ class PokerBotModel:
 
         game.reset()
 
-        self._view.send_new_hand_ready_message(chat_id)
+        self._view.send_new_hand_ready_message(chat_id, game)
         
     def _end_hand(self, game: Game, chat_id: ChatId, context: CallbackContext) -> None:
         """
