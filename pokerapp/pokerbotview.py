@@ -389,6 +389,7 @@ class PokerBotViewer:
     def send_new_hand_ready_message(self, chat_id: ChatId, game: Game) -> None:
         """
         پیام پایان دست و آماده‌سازی دست جدید را ارسال می‌کند.
+        همچنین ID پیام را در game.last_hand_end_message_id ذخیره می‌کند تا بعداً بتوان آن را مدیریت یا حذف کرد.
         """
         message = (
             "♻️ دست به پایان رسید. بازیکنان باقی‌مانده برای دست بعد حفظ شدند.\n"
