@@ -298,11 +298,6 @@ class PokerBotModel:
             self._start_game(context, game, chat_id)
         else:
             self._view.send_message(chat_id, f"👤 تعداد بازیکنان برای شروع کافی نیست (حداقل {self._min_players} نفر).")
-            
-  def set_delete_manager(self, delete_manager):
-    self._delete_manager = delete_manager
-    if hasattr(self._view, "set_delete_manager"):
-        self._view.set_delete_manager(delete_manager)
 
     def _start_game(self, context: CallbackContext, game: Game, chat_id: ChatId) -> None:
         """مراحل شروع یک دست جدید بازی را انجام می‌دهد."""
@@ -906,7 +901,7 @@ class PokerBotModel:
 
         game.reset()
 
-        self._view.send_new_hand_ready_message(chat_id, game)
+        self._view.send_new_hand_ready_message(chat_id)
         
     def _end_hand(self, game: Game, chat_id: ChatId, context: CallbackContext) -> None:
         """

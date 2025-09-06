@@ -4,8 +4,7 @@ import logging
 import threading
 import time
 import redis
-import traceback
-from pokerapp.message_delete_manager import MessageDeleteManager
+import traceback  # <--- اضافه شد برای لاگ دقیق‌تر
 
 from typing import Callable
 from telegram import Bot
@@ -28,6 +27,11 @@ from pokerapp.pokerbotcontrol import PokerBotCotroller
 from pokerapp.pokerbotmodel import PokerBotModel
 from pokerapp.pokerbotview import PokerBotViewer
 from pokerapp.entities import ChatId
+
+logging.basicConfig(
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    level=logging.INFO
+)
 
 class PokerBot:
     def __init__(
@@ -58,11 +62,7 @@ class PokerBot:
             kv=kv,
             cfg=cfg,
         )
-        self._controller = PokerBotCotroller(self._model, self._updater)        
-        self._delete_manager = MessageDeleteManager(bot)
-        self._view.set_delete_manager(self._delete_manager)
-        self._model.set_delete_manager(self._delete_manager)
-
+        self._controller = PokerBotCotroller(self._model, self._updater)
 
     def run(self) -> None:
         self._updater.start_polling()
