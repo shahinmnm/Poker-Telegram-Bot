@@ -14,7 +14,7 @@ ContextKey = Tuple[Optional[GameId], Optional[int]]
 MessageKey = Tuple[ChatId, MessageId]
 
 class MessageDeleteManager:
-    def __init__(self, bot: Bot, job_queue=None, default_ttl: Optional[int] = None, delete_delay: float = 0.2) -> None:
+    def __init__(self, bot, job_queue=None, default_ttl=None, delete_delay: float = 0.2) -> None:
         self._bot = bot
         self._job_queue = job_queue
         self._default_ttl = default_ttl
@@ -23,38 +23,16 @@ class MessageDeleteManager:
         self._meta = {}
         self._by_ctx = {}
         self._by_tag = {}
+        self._by_chat = {}
 
-    def register(
-        self,
-        *,
-        chat_id: ChatId,
-        message_id: MessageId,
-        game_id: Optional[GameId] = None,
-        hand_id: Optional[int] = None,
-        tag: str = "generic",
-        protected: bool = False,
-        ttl: Optional[int] = None,
-    ) -> None:
-        """ثبت پیام + زمان‌بندی حذف (اختیاری)."""
-        mk: MessageKey = (chat_id, message_id)
-        ctx: ContextKey = (game_id, hand_id)
-        with self._lock:
-            self._meta[mk] = {"ctx": ctx, "tag": tag, "protected": protected}
-            self._by_ctx.setdefault(ctx, set()).add(mk)
-            self._by_tag.setdefault((game_id, hand_id, tag), set()).add(mk)
-
-        # حذف خودکار در صورت وجود ttl و job_queue
-        if ttl is None:
-            ttl = self._default_ttl
-        if ttl and self._job_queue:
-            self._job_queue.run_once(
-                self._job_delete_job,
-                when=ttl,
-                context={"chat_id": chat_id, "message_id": message_id},
-                name=f"del:{chat_id}:{message_id}",
-            )
-
-    # ---------- حذف تکی/گروهی ----------
+def register(self, *, chat_id, message_id, game_id=None, hand_id=None, tag="generic", protected=False, ttl=None):
+    key = (chat_id, message_id)
+    with self._lock:
+        self._meta[key] = {"game_id": game_id, "hand_id": hand_id, "tag": tag, "protected": protected, "ttl": ttl}
+        ctx = (game_id, hand_id)
+        self._by_ctx.setdefault(ctx, set()).add((chat_id, message_id))
+        self._by_tag.setdefault((game_id, hand_id, tag), set()).add((chat_id, message_id))
+        self._by_chat.setdefault(chat_id, set()).add((chat_id, message_id))
 
     def delete(self, chat_id: ChatId, message_id: MessageId, reason: str = "manual") -> bool:
         """حذف تکی پیام و پاک‌سازی رجیستری‌ها."""
@@ -81,11 +59,11 @@ class MessageDeleteManager:
                         self._by_tag.pop((ctx[0], ctx[1], tag), None)
         return ok
 
-    def delete_by_tag(self, *, game_id: Optional[GameId], hand_id: Optional[int], tag: str, include_protected: bool = False, reason: str = "by_tag") -> int:
+    def delete_by_tag(self, *, game_id, hand_id, tag, include_protected=False, reason="by_tag") -> int:
         key = (game_id, hand_id, tag)
         with self._lock:
             targets = list(self._by_tag.get(key, set()))
-        deleted = 0
+        cnt = 0
         for chat_id, message_id in targets:
             with self._lock:
                 meta = self._meta.get((chat_id, message_id))
@@ -94,17 +72,16 @@ class MessageDeleteManager:
                 if meta.get("protected") and not include_protected:
                     continue
             if self.delete(chat_id, message_id, reason=reason):
-                deleted += 1
+                cnt += 1
             if self._delete_delay:
                 time.sleep(self._delete_delay)
-        return deleted
-
-
-    def purge_context(self, *, game_id: Optional[GameId], hand_id: Optional[int], include_protected: bool = False, reason: str = "purge_ctx") -> int:
-        ctx: ContextKey = (game_id, hand_id)
+        return cnt
+    
+    def purge_context(self, *, game_id, hand_id, include_protected=False, reason="purge_ctx") -> int:
+        ctx = (game_id, hand_id)
         with self._lock:
             targets = list(self._by_ctx.get(ctx, set()))
-        deleted = 0
+        cnt = 0
         for chat_id, message_id in targets:
             with self._lock:
                 meta = self._meta.get((chat_id, message_id))
@@ -113,10 +90,28 @@ class MessageDeleteManager:
                 if meta.get("protected") and not include_protected:
                     continue
             if self.delete(chat_id, message_id, reason=reason):
-                deleted += 1
+                cnt += 1
             if self._delete_delay:
                 time.sleep(self._delete_delay)
-        return deleted
+        return cnt
+    
+    def purge_chat(self, *, chat_id, include_protected=False, reason="purge_chat") -> int:
+        with self._lock:
+            targets = list(self._by_chat.get(chat_id, set()))
+        cnt = 0
+        for c_id, message_id in targets:
+            with self._lock:
+                meta = self._meta.get((c_id, message_id))
+                if not meta:
+                    continue
+                if meta.get("protected") and not include_protected:
+                    continue
+            if self.delete(c_id, message_id, reason=reason):
+                cnt += 1
+            if self._delete_delay:
+                time.sleep(self._delete_delay)
+        return cnt
+
 
     def _job_delete_job(self, context) -> None:
         job = getattr(context, "job", None)
