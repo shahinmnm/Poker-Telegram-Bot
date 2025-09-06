@@ -262,6 +262,7 @@ class PokerBotModel:
         if game.state == GameState.FINISHED:
             try:
                 if self._mdm:
+                    logging.debug("[MDM] delete_by_tag start_next_hand")
                     self._mdm.delete_by_tag(
                         game_id=game.id,
                         hand_id=None,
@@ -269,6 +270,7 @@ class PokerBotModel:
                         include_protected=True,
                         reason="start_new_hand"
                     )
+                    logging.debug("[MDM] purge_context prev hand")
                     self._mdm.purge_context(
                         game_id=game.id,
                         hand_id=None,
@@ -276,7 +278,7 @@ class PokerBotModel:
                         reason="start_new_hand_purge_prev"
                     )
             except Exception as e:
-                print(f"INFO: could not cleanup previous hand start messages: {e}")
+                logging.info(f"[MDM] cleanup prev hand failed: {e}")
 
             game.reset()
             old_players_ids = context.chat_data.get(KEY_OLD_PLAYERS, [])
@@ -766,30 +768,30 @@ class PokerBotModel:
 
         self._view.send_new_hand_ready_message(chat_id)
         
-    def _end_hand(self, game: Game, chat_id: ChatId, context: CallbackContext) -> None:
+    def _end_hand(self, game, chat_id, context):
         try:
             if hasattr(self._view, "purge_hand_messages"):
+                logging.debug("[MDM] purge_hand_messages called")
                 self._view.purge_hand_messages(game=game)
             elif self._mdm:
-                self._mdm.purge_context(game_id=game.id, hand_id=None, include_protected=False)
+                logging.debug("[MDM] purge_context called")
+                self._mdm.purge_context(game_id=game.id, hand_id=None, include_protected=False, reason="purge_ctx")
         except Exception as e:
-            print(f"INFO: purge_hand_messages failed for game {game.id}: {e}")
+            logging.info(f"[MDM] purge failed: {e}")
     
-        context.chat_data[KEY_OLD_PLAYERS] = [p.user_id for p in game.players if p.wallet.value() > 0]
+        try:
+            context.chat_data[KEY_OLD_PLAYERS] = [p.user_id for p in game.players if p.wallet.value() > 0]
+        except Exception as e:
+            logging.info(f"[MDM] save old players failed: {e}")
     
         try:
             start_next_ttl = getattr(self._cfg, "START_NEXT_TTL_SECONDS", None)
             if hasattr(self._view, "send_start_next_hand"):
+                logging.debug("[MDM] send_start_next_hand")
                 self._view.send_start_next_hand(chat_id=chat_id, game=game, ttl=start_next_ttl)
-            else:
-                keyboard = ReplyKeyboardMarkup([["/ready", "/start"]], resize_keyboard=True)
-                context.bot.send_message(
-                    chat_id=chat_id,
-                    text="🎉 دست تمام شد! برای شروع دست بعدی، /ready بزنید یا منتظر بمانید تا کسی /start کند.",
-                    reply_markup=keyboard
-                )
         except Exception as e:
-            print(f"INFO: could not send start-next-hand message: {e}")
+            logging.info(f"[MDM] send start-next failed: {e}")
+    
         context.chat_data[KEY_CHAT_DATA_GAME] = Game()
 
     def _format_cards(self, cards: Cards) -> str:
