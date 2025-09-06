@@ -27,11 +27,8 @@ from pokerapp.pokerbotcontrol import PokerBotCotroller
 from pokerapp.pokerbotmodel import PokerBotModel
 from pokerapp.pokerbotview import PokerBotViewer
 from pokerapp.entities import ChatId
+from pokerapp.message_delete_manager import MessageDeleteManager
 
-logging.basicConfig(
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    level=logging.INFO
-)
 
 class PokerBot:
     def __init__(
@@ -54,15 +51,22 @@ class PokerBot:
             db=cfg.REDIS_DB,
             password=cfg.REDIS_PASS if cfg.REDIS_PASS != "" else None
         )
+        # MessageDeleteManager: مدیریت متمرکز حذف پیام‌ها
+        self._mdm = MessageDeleteManager(
+            bot=bot,
+            job_queue=self._updater.job_queue,
+            default_ttl=getattr(cfg, "DEFAULT_DELETE_TTL_SECONDS", None),
+        )
 
-        self._view = PokerBotViewer(bot=bot)
+        self._view = PokerBotViewer(bot=bot, mdm=self._mdm, cfg=cfg)  # ← mdm و cfg به View
         self._model = PokerBotModel(
             view=self._view,
             bot=bot,
             kv=kv,
             cfg=cfg,
+            mdm=self._mdm,  # ← عبور mdm به Model
         )
-        self._controller = PokerBotCotroller(self._model, self._updater)
+        self._controller = PokerBotCotroller(self._model, self._updater, mdm=self._mdm)  # ← mdm به Controller
 
     def run(self) -> None:
         self._updater.start_polling()
