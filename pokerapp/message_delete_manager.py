@@ -1,151 +1,107 @@
-# pokerapp/message_delete_manager.py
-#!/usr/bin/env python3
+from collections import defaultdict, deque
 import time
-from typing import Dict, Optional, Set, Tuple
-import threading
-import logging
-from telegram import Bot
-from telegram.error import BadRequest, Unauthorized
-
-GameId = int
-ChatId = int
-MessageId = int
-ContextKey = Tuple[Optional[GameId], Optional[int]]
-MessageKey = Tuple[ChatId, MessageId]
+from typing import Optional, Deque, Dict, Any
 
 class MessageDeleteManager:
-    def __init__(self, bot, job_queue=None, default_ttl=None, delete_delay: float = 0.2) -> None:
+    def __init__(self, max_per_chat: int = 500):
+        self._bot = None
+        self._max_per_chat = max_per_chat
+        self._store: Dict[int, Deque[Dict[str, Any]]] = defaultdict(deque)
+
+    def set_bot(self, bot):
         self._bot = bot
-        self._job_queue = job_queue
-        self._default_ttl = default_ttl
-        self._delete_delay = delete_delay
-        self._lock = threading.RLock()
-        self._meta = {}
-        self._by_ctx = {}
-        self._by_tag = {}
-        self._by_chat = {}
 
-def register(self, *, chat_id, message_id, game_id=None, hand_id=None, tag="generic", protected=False, ttl=None):
-    key = (chat_id, message_id)
-    with self._lock:
-        self._meta[key] = {"game_id": game_id, "hand_id": hand_id, "tag": tag, "protected": protected, "ttl": ttl}
-        ctx = (game_id, hand_id)
-        self._by_ctx.setdefault(ctx, set()).add((chat_id, message_id))
-        self._by_tag.setdefault((game_id, hand_id, tag), set()).add((chat_id, message_id))
-        self._by_chat.setdefault(chat_id, set()).add((chat_id, message_id))
-
-    def delete(self, chat_id: ChatId, message_id: MessageId, reason: str = "manual") -> bool:
-        """حذف تکی پیام و پاک‌سازی رجیستری‌ها."""
-        mk: MessageKey = (chat_id, message_id)
-        with self._lock:
-            meta = self._meta.get(mk)
-
-        ok = self._try_delete_telegram(chat_id, message_id, reason=reason)
-
-        if meta:
-            with self._lock:
-                self._meta.pop(mk, None)
-                ctx = meta["ctx"]
-                tag = meta["tag"]
-                s = self._by_ctx.get(ctx)
-                if s:
-                    s.discard(mk)
-                    if not s:
-                        self._by_ctx.pop(ctx, None)
-                st = self._by_tag.get((ctx[0], ctx[1], tag))
-                if st:
-                    st.discard(mk)
-                    if not st:
-                        self._by_tag.pop((ctx[0], ctx[1], tag), None)
-        return ok
-
-    def delete_by_tag(self, *, game_id, hand_id, tag, include_protected=False, reason="by_tag") -> int:
-        key = (game_id, hand_id, tag)
-        with self._lock:
-            targets = list(self._by_tag.get(key, set()))
-        cnt = 0
-        for chat_id, message_id in targets:
-            with self._lock:
-                meta = self._meta.get((chat_id, message_id))
-                if not meta:
-                    continue
-                if meta.get("protected") and not include_protected:
-                    continue
-            if self.delete(chat_id, message_id, reason=reason):
-                cnt += 1
-            if self._delete_delay:
-                time.sleep(self._delete_delay)
-        return cnt
-    
-    def purge_context(self, *, game_id, hand_id, include_protected=False, reason="purge_ctx") -> int:
-        ctx = (game_id, hand_id)
-        with self._lock:
-            targets = list(self._by_ctx.get(ctx, set()))
-        cnt = 0
-        for chat_id, message_id in targets:
-            with self._lock:
-                meta = self._meta.get((chat_id, message_id))
-                if not meta:
-                    continue
-                if meta.get("protected") and not include_protected:
-                    continue
-            if self.delete(chat_id, message_id, reason=reason):
-                cnt += 1
-            if self._delete_delay:
-                time.sleep(self._delete_delay)
-        return cnt
-    
-    def purge_chat(self, *, chat_id, include_protected=False, reason="purge_chat") -> int:
-        with self._lock:
-            targets = list(self._by_chat.get(chat_id, set()))
-        cnt = 0
-        for c_id, message_id in targets:
-            with self._lock:
-                meta = self._meta.get((c_id, message_id))
-                if not meta:
-                    continue
-                if meta.get("protected") and not include_protected:
-                    continue
-            if self.delete(c_id, message_id, reason=reason):
-                cnt += 1
-            if self._delete_delay:
-                time.sleep(self._delete_delay)
-        return cnt
-
-
-    def _job_delete_job(self, context) -> None:
-        job = getattr(context, "job", None)
-        data = job.context if job else context
-        chat_id = data.get("chat_id")
-        message_id = data.get("message_id")
-        if chat_id is None or message_id is None:
-            return
-        self.delete(chat_id, message_id, reason="ttl")
-
-    # ---------- تلگرام + لاگ ----------
-
-    def _try_delete_telegram(self, chat_id: ChatId, message_id: MessageId, reason: str) -> bool:
-        try:
-            self._bot.delete_message(chat_id=chat_id, message_id=message_id)
-            logging.debug("Deleted message %s in chat %s (%s)", message_id, chat_id, reason)
-            return True
-        except BadRequest as e:
-            # نمونه پیام‌ها: "message to delete not found", "message can't be deleted"
-            logging.info("Skip deleting %s in %s: %s (%s)", message_id, chat_id, e, reason)
-            return False
-        except Unauthorized as e:
-            logging.info("Unauthorized to delete %s in %s: %s (%s)", message_id, chat_id, e, reason)
-            return False
-        except Exception as e:
-            logging.error("Unexpected delete error %s in %s: %s (%s)", message_id, chat_id, e, reason)
-            return False
-
-    # ---------- دیباگ ----------
-
-    def get_stats(self) -> Dict:
-        with self._lock:
-            return {
-                "messages_tracked": len(self._meta),
-                "contexts": {str(k): len(v) for k, v in self._by_ctx.items()},
-                "tags": {str(k): len(v) for k, v in self._by_tag.items()},
+    def register(
+        self,
+        chat_id: int,
+        message_id: int,
+        game_id: Optional[int] = None,
+        hand_id: Optional[int] = None,
+        tag: Optional[str] = None,
+        protected: bool = False,
+        ttl: Optional[int] = None,
+    ):
+        now = int(time.time())
+        exp = now + ttl if ttl else None
+        q = self._store[chat_id]
+        q.append(
+            {
+                "message_id": message_id,
+                "game_id": game_id,
+                "hand_id": hand_id,
+                "tag": tag,
+                "protected": protected,
+                "expires_at": exp,
+                "ts": now,
             }
+        )
+        while len(q) > self._max_per_chat:
+            q.popleft()
+
+    def purge_context(
+        self,
+        chat_id: Optional[int] = None,
+        game_id: Optional[int] = None,
+        hand_id: Optional[int] = None,
+        include_protected: bool = False,
+        reason: str = "",
+    ):
+        if self._bot is None:
+            return
+        chats = [chat_id] if chat_id is not None else list(self._store.keys())
+        for cid in chats:
+            if cid not in self._store:
+                continue
+            kept: Deque[Dict[str, Any]] = deque()
+            for item in self._store[cid]:
+                if not include_protected and item.get("protected"):
+                    kept.append(item)
+                    continue
+                if game_id is not None and item.get("game_id") != game_id:
+                    kept.append(item)
+                    continue
+                if hand_id is not None and item.get("hand_id") != hand_id:
+                    kept.append(item)
+                    continue
+                try:
+                    self._bot.delete_message(cid, item["message_id"])
+                except Exception:
+                    pass
+            self._store[cid] = kept
+
+    def purge_by_tag(
+        self, chat_id: int, tag: str, include_protected: bool = False
+    ):
+        if self._bot is None or chat_id not in self._store:
+            return
+        kept: Deque[Dict[str, Any]] = deque()
+        for item in self._store[chat_id]:
+            if item.get("tag") != tag:
+                kept.append(item)
+                continue
+            if not include_protected and item.get("protected"):
+                kept.append(item)
+                continue
+            try:
+                self._bot.delete_message(chat_id, item["message_id"])
+            except Exception:
+                pass
+        self._store[chat_id] = kept
+
+    def purge_expired(self, chat_id: Optional[int] = None):
+        now = int(time.time())
+        chats = [chat_id] if chat_id is not None else list(self._store.keys())
+        for cid in chats:
+            if cid not in self._store:
+                continue
+            kept: Deque[Dict[str, Any]] = deque()
+            for item in self._store[cid]:
+                exp = item.get("expires_at")
+                if exp and exp <= now:
+                    try:
+                        self._bot.delete_message(cid, item["message_id"])
+                    except Exception:
+                        pass
+                else:
+                    kept.append(item)
+            self._store[cid] = kept
