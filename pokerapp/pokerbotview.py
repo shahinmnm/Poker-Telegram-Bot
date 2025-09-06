@@ -28,39 +28,17 @@ from pokerapp.entities import (
 
 class PokerBotViewer:
     def __init__(self, bot: Bot, mdm=None, cfg=None):
-        """
-        سازنده‌ی View.
-        :param bot: نمونه Bot (MessageDelayBot)
-        :param mdm: MessageDeleteManager یا None
-        :param cfg: شیء تنظیمات (اختیاری)
-        """
         self._bot = bot
         self._desk_generator = DeskImageGenerator()
         self._mdm = mdm
         self._cfg = cfg
 
-    def send_message_return_id(
-        self,
-        chat_id: ChatId,
-        text: str,
-        reply_markup: ReplyKeyboardMarkup = None,
-    ) -> Optional[MessageId]:
-        """Sends a message and returns its ID, or None if not applicable."""
-        try:
-            message = self._bot.send_message(
-                chat_id=chat_id,
-                parse_mode=ParseMode.MARKDOWN,
-                text=text,
-                reply_markup=reply_markup,
-                disable_notification=True,
-                disable_web_page_preview=True,
-            )
-            if isinstance(message, Message):
-                return message.message_id
-        except Exception as e:
-            print(f"Error sending message and returning ID: {e}")
-        return None
-        
+    def send_message_return_id(self, chat_id: int, text: str, reply_markup: Optional[ReplyKeyboardMarkup] = None) -> int:
+        msg = self._bot.send_message(chat_id, text, reply_markup=reply_markup)
+        if msg and self._mdm:
+            self._mdm.register(chat_id=chat_id, message_id=msg.message_id, game_id=None, hand_id=None, tag="generic", protected=False, ttl=None)
+        return msg.message_id
+  
     def send_text_tracked(
         self,
         chat_id: int,
@@ -183,27 +161,11 @@ class PokerBotViewer:
         )
 
 
-    def send_message(
-        self,
-        chat_id: ChatId,
-        text: str,
-        reply_markup: ReplyKeyboardMarkup = None,
-        parse_mode: str = ParseMode.MARKDOWN,  # <--- پارامتر جدید اضافه شد
-    ) -> Optional[MessageId]:
-        try:
-            message = self._bot.send_message(
-                chat_id=chat_id,
-                parse_mode=parse_mode,  # <--- از پارامتر ورودی استفاده شد
-                text=text,
-                reply_markup=reply_markup,
-                disable_notification=True,
-                disable_web_page_preview=True,
-            )
-            if isinstance(message, Message):
-                return message.message_id
-        except Exception as e:
-            print(f"Error sending message: {e}")
-        return None
+    def send_message(self, chat_id: int, text: str, reply_markup: Optional[ReplyKeyboardMarkup] = None) -> None:
+        msg = self._bot.send_message(chat_id, text, reply_markup=reply_markup)
+        if msg and self._mdm:
+            self._mdm.register(chat_id=chat_id, message_id=msg.message_id, game_id=None, hand_id=None, tag="generic", protected=False, ttl=None)
+
 
     def send_photo(self, chat_id: ChatId) -> None:
         try:
@@ -230,19 +192,13 @@ class PokerBotViewer:
             print(f"Error sending dice reply: {e}")
             return None
 
-    def send_message_reply(
-        self, chat_id: ChatId, message_id: MessageId, text: str
-    ) -> None:
-        try:
-            self._bot.send_message(
-                reply_to_message_id=message_id,
-                chat_id=chat_id,
-                parse_mode=ParseMode.MARKDOWN,
-                text=text,
-                disable_notification=True,
-            )
-        except Exception as e:
-            print(f"Error sending message reply: {e}")
+    def send_message_reply(self, update, text: str, reply_markup: Optional[ReplyKeyboardMarkup] = None) -> None:
+        msg = update.message.reply_text(text, reply_markup=reply_markup)
+        if msg and self._mdm:
+            chat_id = update.effective_chat.id if update and update.effective_chat else None
+            if chat_id is not None:
+                self._mdm.register(chat_id=chat_id, message_id=msg.message_id, game_id=None, hand_id=None, tag="generic", protected=False, ttl=None)
+
 
     def send_desk_cards_img(
         self,
