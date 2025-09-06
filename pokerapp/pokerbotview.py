@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+import re
+from telegram.parsemode import ParseMode
 
 from telegram import (
     Message,
@@ -33,11 +35,15 @@ class PokerBotViewer:
         self._mdm = mdm
         self._cfg = cfg
 
-    def send_message_return_id(self, chat_id: int, text: str, reply_markup: Optional[ReplyKeyboardMarkup] = None) -> int:
+    def send_message_return_id(self, chat_id: int, text: str, reply_markup=None) -> int:
+        if not text:
+            return None
+        text = re.sub(r'\[([^\]]+)\]\(tg://user\?id=\d+\)', r'\1', text)
         msg = self._bot.send_message(chat_id=chat_id, text=text, reply_markup=reply_markup)
         if msg and self._mdm:
             self._mdm.register(chat_id=chat_id, message_id=msg.message_id, game_id=None, hand_id=None, tag="generic", protected=False, ttl=None)
         return msg.message_id if msg else None
+
   
     def send_text_tracked(
         self,
@@ -116,27 +122,33 @@ class PokerBotViewer:
             return None
     
     
-    def send_hand_result(self, chat_id: int, result_text: str, *, game) -> Optional[int]:
-        """
-        پیام نتایج دست: protected=True تا با purge حذف نشود.
-        """
-        return self.send_text_tracked(
+    def send_hand_result(self, chat_id: int, result_text: str, *, game):
+        if not result_text:
+            return None
+        result_text = re.sub(r'\[([^\]]+)\]\(tg://user\?id=\d+\)', r'\1', result_text)
+        msg = self._bot.send_message(
             chat_id=chat_id,
             text=result_text,
-            game=game,
-            tag="result",
-            protected=True,   # ← مهم: نتایج باقی بماند
-            ttl=None,         # نتایج را زمان‌بندی برای حذف نمی‌کنیم
-            reply_markup=None,
+            parse_mode=ParseMode.MARKDOWN,
+            disable_web_page_preview=True,
         )
+        if msg and self._mdm:
+            self._mdm.register(
+                chat_id=chat_id,
+                message_id=msg.message_id,
+                game_id=(game.id if game else None),
+                hand_id=(game.hand_id if game else None),
+                tag="result",
+                protected=True,
+                ttl=None,
+            )
+        return msg.message_id if msg else None
+
     
     
     def send_start_next_hand(self, chat_id: int, *, game, ttl: Optional[int] = None) -> Optional[int]:
-        """
-        پیام «شروع دست بعدی» که باید پس از شروع دست جدید حذف شود.
-        """
+
         text = "♻️ برای شروع دست بعدی آماده‌اید؟ /ready"
-        # می‌توانی متن/Markup واقعی پروژه‌ات را جایگزین کنی
         return self.send_text_tracked(
             chat_id=chat_id,
             text=text,
@@ -159,10 +171,14 @@ class PokerBotViewer:
             hand_id=game.hand_id,
             include_protected=False
             )
-    def send_message(self, chat_id: int, text: str, reply_markup: Optional[ReplyKeyboardMarkup] = None) -> None:
+    def send_message(self, chat_id: int, text: str, reply_markup=None) -> None:
+        if not text:
+            return
+        text = re.sub(r'\[([^\]]+)\]\(tg://user\?id=\d+\)', r'\1', text)
         msg = self._bot.send_message(chat_id=chat_id, text=text, reply_markup=reply_markup)
         if msg and self._mdm:
             self._mdm.register(chat_id=chat_id, message_id=msg.message_id, game_id=None, hand_id=None, tag="generic", protected=False, ttl=None)
+
 
     def send_photo(self, chat_id: ChatId) -> None:
         try:
@@ -188,12 +204,16 @@ class PokerBotViewer:
         except Exception as e:
             print(f"Error sending dice reply: {e}")
             return None
-    def send_message_reply(self, update, text: str, reply_markup: Optional[ReplyKeyboardMarkup] = None) -> None:
+    def send_message_reply(self, update, text: str, reply_markup=None) -> None:
+        if not text:
+            return
+        text = re.sub(r'\[([^\]]+)\]\(tg://user\?id=\d+\)', r'\1', text)
         msg = update.message.reply_text(text=text, reply_markup=reply_markup)
         if msg and self._mdm:
             chat_id = update.effective_chat.id if update and update.effective_chat else None
             if chat_id is not None:
                 self._mdm.register(chat_id=chat_id, message_id=msg.message_id, game_id=None, hand_id=None, tag="generic", protected=False, ttl=None)
+
 
     def send_desk_cards_img(
         self,
