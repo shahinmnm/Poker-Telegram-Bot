@@ -1,5 +1,5 @@
+# pokerapp/pokerbot.py
 #!/usr/bin/env python3
-
 import logging
 import threading
 import time
@@ -16,9 +16,7 @@ from telegram.error import (
     NetworkError,
     RetryAfter,
     BadRequest,
-    ChatMigrated,
     Conflict,
-    InvalidToken,
     TelegramError,
     Unauthorized,
 )
@@ -32,8 +30,7 @@ from pokerapp.message_delete_manager import MessageDeleteManager
 
 
 class PokerBot:
-    def __init__(self, token, mdm: Optional[MessageDeleteManager] = None, **kw):
-        cfg = Config()
+    def __init__(self, token: str, cfg: Config, mdm: Optional[MessageDeleteManager] = None, **kw):
         req = Request(con_pool_size=8)
         bot = MessageDelayBot(token=token, request=req)
         bot.run_tasks_manager()
@@ -44,16 +41,15 @@ class PokerBot:
             host=cfg.REDIS_HOST,
             port=cfg.REDIS_PORT,
             db=cfg.REDIS_DB,
-            password=cfg.REDIS_PASS if cfg.REDIS_PASS != "" else None
+            password=cfg.REDIS_PASS if cfg.REDIS_PASS != "" else None,
         )
 
         self._mdm = mdm or MessageDeleteManager(
-            bot=bot,
             job_queue=self._updater.job_queue,
             default_ttl=getattr(cfg, "DEFAULT_DELETE_TTL_SECONDS", None),
         )
-        bot._mdm = self._mdm
 
+        bot._mdm = self._mdm
         self._view = PokerBotViewer(bot=bot, mdm=self._mdm, cfg=cfg)
         self._model = PokerBotModel(view=self._view, bot=bot, kv=kv, cfg=cfg, mdm=self._mdm)
         self._controller = PokerBotCotroller(self._model, self._updater, mdm=self._mdm)
@@ -93,7 +89,7 @@ class MessageDelayBot(Bot):
                 tasks.pop(0)
             except (TimedOut, NetworkError, RetryAfter) as e:
                 logging.warning(f"Network error on task for chat {chat_id}: {e}. Retrying later.")
-            except (BadRequest, Unauthorized, Conflict) as e:
+            except (BadRequest, Unauthorized, Conflict, TelegramError) as e:
                 logging.error(f"Telegram API error for chat {chat_id}. Dropping task. Error: {e}")
                 traceback.print_exc()
                 tasks.pop(0)
@@ -115,14 +111,6 @@ class MessageDelayBot(Bot):
                     traceback.print_exc()
             time.sleep(0.1)
 
-    def send_message_sync(self, *args, **kwargs):
-        try:
-            return super(MessageDelayBot, self).send_message(*args, **kwargs)
-        except Exception as e:
-            logging.error(f"Error in send_message_sync: {e}")
-            traceback.print_exc()
-            return None
-
     def __del__(self):
         try:
             self._stop_chat_tasks.set()
@@ -142,35 +130,72 @@ class MessageDelayBot(Bot):
             return text
         return re.sub(r'\[([^\]]+)\]\(tg://user\?id=\d+\)', r'\1', text)
 
-    def _mdm_register_safe(self, msg, *, chat_id, mdm_game_id, mdm_hand_id, mdm_tag, mdm_protected):
+    def _mdm_register_safe(
+        self,
+        *,
+        chat_id: int,
+        message_id: int,
+        game_id=None,
+        hand_id=None,
+        tag="generic",
+        protected=False,
+        ttl=None,
+    ) -> None:
         mdm = getattr(self, "_mdm", None)
-        if not (mdm and msg):
+        if not mdm:
             return
         try:
-            if hasattr(mdm, "register_message"):
-                mdm.register_message(chat_id=chat_id, message_id=msg.message_id, game_id=mdm_game_id, hand_id=mdm_hand_id, tag=mdm_tag, protected=mdm_protected, ttl=None)
-            elif hasattr(mdm, "add_message"):
-                mdm.add_message(chat_id=chat_id, message_id=msg.message_id, game_id=mdm_game_id, hand_id=mdm_hand_id, tag=mdm_tag, protected=mdm_protected, ttl=None)
-            elif hasattr(mdm, "track_message"):
-                mdm.track_message(chat_id=chat_id, message_id=msg.message_id, game_id=mdm_game_id, hand_id=mdm_hand_id, tag=mdm_tag, protected=mdm_protected, ttl=None)
-            elif hasattr(mdm, "add"):
-                mdm.add(chat_id=chat_id, message_id=msg.message_id, game_id=mdm_game_id, hand_id=mdm_hand_id, tag=mdm_tag, protected=mdm_protected, ttl=None)
-            else:
-                logging.info("MDM has no known register method; skipping.")
+            if hasattr(mdm, "register"):
+                mdm.register(chat_id=chat_id, message_id=message_id, game_id=game_id, hand_id=hand_id, tag=tag, protected=protected, ttl=ttl)
+                return
+            if hasattr(mdm, "add"):
+                mdm.add(chat_id=chat_id, message_id=message_id, game_id=game_id, hand_id=hand_id, tag=tag, protected=protected, ttl=ttl)
+                return
+            if hasattr(mdm, "track"):
+                mdm.track(chat_id=chat_id, message_id=message_id, game_id=game_id, hand_id=hand_id, tag=tag, protected=protected, ttl=ttl)
+                return
+            if hasattr(mdm, "remember"):
+                mdm.remember(chat_id=chat_id, message_id=message_id, game_id=game_id, hand_id=hand_id, tag=tag, protected=protected, ttl=ttl)
+                return
         except Exception as e:
-            logging.info(f"MDM register failed: {e}")
+            logging.info(f"[MDM] register skipped: {e}")
 
+    def send_message_sync(self, *args, **kwargs):
+        chat_id = kwargs.get("chat_id")
+        text = kwargs.get("text")
+        if chat_id is None or text is None:
+            return None
+        mdm_protected = kwargs.pop("mdm_protected", False)
+        mdm_tag = kwargs.pop("mdm_tag", "generic")
+        mdm_game_id = kwargs.pop("mdm_game_id", None)
+        mdm_hand_id = kwargs.pop("mdm_hand_id", None)
+        text = self._sanitize_text(text)
         try:
-            if hasattr(mdm, "register_message"):
-                mdm.register_message(chat_id=chat_id, message_id=msg.message_id, game_id=None, hand_id=None, tag="chat_buffer", protected=mdm_protected, ttl=None)
-            elif hasattr(mdm, "add_message"):
-                mdm.add_message(chat_id=chat_id, message_id=msg.message_id, game_id=None, hand_id=None, tag="chat_buffer", protected=mdm_protected, ttl=None)
-            elif hasattr(mdm, "track_message"):
-                mdm.track_message(chat_id=chat_id, message_id=msg.message_id, game_id=None, hand_id=None, tag="chat_buffer", protected=mdm_protected, ttl=None)
-            elif hasattr(mdm, "add"):
-                mdm.add(chat_id=chat_id, message_id=msg.message_id, game_id=None, hand_id=None, tag="chat_buffer", protected=mdm_protected, ttl=None)
+            msg = super(MessageDelayBot, self).send_message(*args, text=text, **kwargs)
+            if msg:
+                self._mdm_register_safe(
+                    chat_id=chat_id,
+                    message_id=msg.message_id,
+                    game_id=mdm_game_id,
+                    hand_id=mdm_hand_id,
+                    tag=mdm_tag,
+                    protected=mdm_protected,
+                    ttl=None,
+                )
+                self._mdm_register_safe(
+                    chat_id=chat_id,
+                    message_id=msg.message_id,
+                    game_id=None,
+                    hand_id=None,
+                    tag="chat_buffer",
+                    protected=mdm_protected,
+                    ttl=None,
+                )
+            return msg
         except Exception as e:
-            logging.info(f"MDM register(chat_buffer) failed: {e}")
+            logging.error(f"Error in send_message_sync: {e}")
+            traceback.print_exc()
+            return None
 
     def send_message(self, *, chat_id=None, text=None, reply_markup=None, parse_mode=None, **kwargs):
         if text is None or chat_id is None:
@@ -181,7 +206,25 @@ class MessageDelayBot(Bot):
         mdm_hand_id = kwargs.pop("mdm_hand_id", None)
         text = self._sanitize_text(text)
         msg = super().send_message(chat_id=chat_id, text=text, reply_markup=reply_markup, parse_mode=parse_mode, **kwargs)
-        self._mdm_register_safe(msg, chat_id=chat_id, mdm_game_id=mdm_game_id, mdm_hand_id=mdm_hand_id, mdm_tag=mdm_tag, mdm_protected=mdm_protected)
+        if msg:
+            self._mdm_register_safe(
+                chat_id=chat_id,
+                message_id=msg.message_id,
+                game_id=mdm_game_id,
+                hand_id=mdm_hand_id,
+                tag=mdm_tag,
+                protected=mdm_protected,
+                ttl=None,
+            )
+            self._mdm_register_safe(
+                chat_id=chat_id,
+                message_id=msg.message_id,
+                game_id=None,
+                hand_id=None,
+                tag="chat_buffer",
+                protected=mdm_protected,
+                ttl=None,
+            )
         return msg
 
     def send_photo(self, *args, **kwargs) -> None:
