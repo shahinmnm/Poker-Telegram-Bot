@@ -1,10 +1,6 @@
 # pokerapp/message_delete_manager.py
 #!/usr/bin/env python3
-"""
-MessageDeleteManager: ثبت و پاک‌سازی متمرکز پیام‌ها بر اساس (game_id, hand_id, tag).
-- استفاده از JobQueue برای حذف زمان‌بندی‌شده (غیربلاکینگ و قابل اطمینان).
-- پیام‌های protected (مثل نتایج) با purge معمولی حذف نمی‌شوند.
-"""
+import time
 from typing import Dict, Optional, Set, Tuple
 import threading
 import logging
@@ -18,23 +14,15 @@ ContextKey = Tuple[Optional[GameId], Optional[int]]
 MessageKey = Tuple[ChatId, MessageId]
 
 class MessageDeleteManager:
-    """مدیر مرکزی حذف پیام‌ها با API ساده و ایمن."""
-
-    def __init__(self, bot: Bot, job_queue=None, default_ttl: Optional[int] = None) -> None:
+    def __init__(self, bot: Bot, job_queue=None, default_ttl: Optional[int] = None, delete_delay: float = 0.2) -> None:
         self._bot = bot
-        self._job_queue = job_queue  # telegram.ext.JobQueue (در v13)
+        self._job_queue = job_queue
         self._default_ttl = default_ttl
+        self._delete_delay = delete_delay
         self._lock = threading.RLock()
-
-        # رجیستری‌ها
-        # (chat_id, message_id) -> {"ctx": (game_id, hand_id), "tag": str, "protected": bool}
-        self._meta: Dict[MessageKey, Dict] = {}
-        # (game_id, hand_id) -> set((chat_id, message_id))
-        self._by_ctx: Dict[ContextKey, Set[MessageKey]] = {}
-        # (game_id, hand_id, tag) -> set((chat_id, message_id))
-        self._by_tag: Dict[Tuple[Optional[GameId], Optional[int], str], Set[MessageKey]] = {}
-
-    # ---------- ثبت ----------
+        self._meta = {}
+        self._by_ctx = {}
+        self._by_tag = {}
 
     def register(
         self,
@@ -93,20 +81,10 @@ class MessageDeleteManager:
                         self._by_tag.pop((ctx[0], ctx[1], tag), None)
         return ok
 
-    def delete_by_tag(
-        self,
-        *,
-        game_id: Optional[GameId],
-        hand_id: Optional[int],
-        tag: str,
-        include_protected: bool = False,
-        reason: str = "by_tag",
-    ) -> int:
-        """حذف همه‌ی پیام‌های یک تگ در (game_id, hand_id)."""
+    def delete_by_tag(self, *, game_id: Optional[GameId], hand_id: Optional[int], tag: str, include_protected: bool = False, reason: str = "by_tag") -> int:
         key = (game_id, hand_id, tag)
         with self._lock:
             targets = list(self._by_tag.get(key, set()))
-
         deleted = 0
         for chat_id, message_id in targets:
             with self._lock:
@@ -117,21 +95,15 @@ class MessageDeleteManager:
                     continue
             if self.delete(chat_id, message_id, reason=reason):
                 deleted += 1
+            if self._delete_delay:
+                time.sleep(self._delete_delay)
         return deleted
 
-    def purge_context(
-        self,
-        *,
-        game_id: Optional[GameId],
-        hand_id: Optional[int],
-        include_protected: bool = False,
-        reason: str = "purge_ctx",
-    ) -> int:
-        """حذف همۀ پیام‌های وابسته به یک دست/بازی (protected را نگه می‌دارد مگر اینکه True شود)."""
+
+    def purge_context(self, *, game_id: Optional[GameId], hand_id: Optional[int], include_protected: bool = False, reason: str = "purge_ctx") -> int:
         ctx: ContextKey = (game_id, hand_id)
         with self._lock:
             targets = list(self._by_ctx.get(ctx, set()))
-
         deleted = 0
         for chat_id, message_id in targets:
             with self._lock:
@@ -142,9 +114,9 @@ class MessageDeleteManager:
                     continue
             if self.delete(chat_id, message_id, reason=reason):
                 deleted += 1
+            if self._delete_delay:
+                time.sleep(self._delete_delay)
         return deleted
-
-    # ---------- JobQueue callback ----------
 
     def _job_delete_job(self, context) -> None:
         job = getattr(context, "job", None)
