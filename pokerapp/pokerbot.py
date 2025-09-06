@@ -4,7 +4,9 @@ import logging
 import threading
 import time
 import redis
-import traceback  # <--- اضافه شد برای لاگ دقیق‌تر
+import traceback
+import re
+
 
 from typing import Callable
 from telegram import Bot
@@ -57,7 +59,7 @@ class PokerBot:
             job_queue=self._updater.job_queue,
             default_ttl=getattr(cfg, "DEFAULT_DELETE_TTL_SECONDS", None),
         )
-
+        bot._mdm = self._mdm
         self._view = PokerBotViewer(bot=bot, mdm=self._mdm, cfg=cfg)  # ← mdm و cfg به View
         self._model = PokerBotModel(
             view=self._view,
@@ -171,18 +173,27 @@ class MessageDelayBot(Bot):
             # Append to the end, process from the beginning (FIFO)
             self._chat_tasks[chat_id]["tasks"].append((task, task_type))
 
-    # ==================== متدهای اصلاح شده ====================
+    def _sanitize_text(self, text: str) -> str:
+        if not text:
+            return text
+        text = re.sub(r'\[([^\]]+)\]\(tg://user\?id=\d+\)', r'\1', text)
+        return text
+    
+    def send_message(self, *, chat_id=None, text=None, reply_markup=None, parse_mode=None, **kwargs):
+        if text is None or chat_id is None:
+            return None
+        mdm_protected = kwargs.pop("mdm_protected", False)
+        mdm_tag = kwargs.pop("mdm_tag", "generic")
+        mdm_game_id = kwargs.pop("mdm_game_id", None)
+        mdm_hand_id = kwargs.pop("mdm_hand_id", None)
+        text = self._sanitize_text(text)
+        msg = super().send_message(chat_id=chat_id, text=text, reply_markup=reply_markup, parse_mode=parse_mode, **kwargs)
+        mdm = getattr(self, "_mdm", None)
+        if mdm and msg:
+            mdm.register(chat_id=chat_id, message_id=msg.message_id, game_id=mdm_game_id, hand_id=mdm_hand_id, tag=mdm_tag, protected=mdm_protected, ttl=None)
+            mdm.register(chat_id=chat_id, message_id=msg.message_id, game_id=None, hand_id=None, tag="chat_buffer", protected=mdm_protected, ttl=None)
+        return msg
 
-    def send_message(self, *args, **kwargs) -> None:
-        # Ensure text is present before adding the task
-        if 'text' not in kwargs or kwargs['text'] is None:
-            logging.error("send_message called without 'text'. Ignoring.")
-            traceback.print_stack() # Print stack to find the caller
-            return
-
-        chat_id = kwargs.get("chat_id", 0)
-        task = lambda: super(MessageDelayBot, self).send_message(*args, **kwargs)
-        self._add_task(chat_id, task, "send")
 
     def send_photo(self, *args, **kwargs) -> None:
         chat_id = kwargs.get("chat_id", 0)
