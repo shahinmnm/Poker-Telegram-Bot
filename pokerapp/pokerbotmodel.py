@@ -780,6 +780,12 @@ class PokerBotModel:
             logging.info(f"[MDM] purge failed: {e}")
     
         try:
+            if self._mdm:
+                self._mdm.purge_chat(chat_id=chat_id, include_protected=False, reason="purge_chat_end_hand")
+        except Exception as e:
+            logging.info(f"[MDM] purge chat failed: {e}")
+    
+        try:
             context.chat_data[KEY_OLD_PLAYERS] = [p.user_id for p in game.players if p.wallet.value() > 0]
         except Exception as e:
             logging.info(f"[MDM] save old players failed: {e}")
@@ -793,6 +799,7 @@ class PokerBotModel:
             logging.info(f"[MDM] send start-next failed: {e}")
     
         context.chat_data[KEY_CHAT_DATA_GAME] = Game()
+
 
     def _format_cards(self, cards: Cards) -> str:
         if not cards:
