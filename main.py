@@ -13,11 +13,6 @@ logging.basicConfig(
     level=logging.DEBUG
 )
 
-if __name__ == "__main__":
-    cfg = Config()
-    bot = PokerBot(cfg)
-    bot.run()
-
 def main() -> None:
     load_dotenv()
     cfg: Config = Config()
