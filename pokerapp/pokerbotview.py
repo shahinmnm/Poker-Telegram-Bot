@@ -27,9 +27,17 @@ from pokerapp.entities import (
 )
 
 class PokerBotViewer:
-    def __init__(self, bot: Bot):
+    def __init__(self, bot: Bot, mdm=None, cfg=None):
+        """
+        سازنده‌ی View.
+        :param bot: نمونه Bot (MessageDelayBot)
+        :param mdm: MessageDeleteManager یا None
+        :param cfg: شیء تنظیمات (اختیاری)
+        """
         self._bot = bot
         self._desk_generator = DeskImageGenerator()
+        self._mdm = mdm
+        self._cfg = cfg
 
     def send_message_return_id(
         self,
@@ -52,6 +60,127 @@ class PokerBotViewer:
         except Exception as e:
             print(f"Error sending message and returning ID: {e}")
         return None
+        
+    def send_text_tracked(
+        self,
+        chat_id: int,
+        text: str,
+        *,
+        game=None,
+        tag: str = "generic",
+        ttl: Optional[int] = None,
+        protected: bool = False,
+        reply_markup=None,
+    ) -> Optional[int]:
+        """
+        ارسال پیام متنی + ثبت در MessageDeleteManager با متادیتا (game_id, hand_id, tag).
+        """
+        try:
+            message = self._bot.send_message(
+                chat_id=chat_id,
+                text=text,
+                parse_mode=ParseMode.MARKDOWN,
+                reply_markup=reply_markup,
+                disable_notification=True,
+                disable_web_page_preview=True,
+            )
+            if message and self._mdm:
+                self._mdm.register(
+                    chat_id=chat_id,
+                    message_id=message.message_id,
+                    game_id=(game.id if game else None),
+                    hand_id=(game.hand_id if game else None),
+                    tag=tag,
+                    protected=protected,
+                    ttl=ttl,
+                )
+            return message.message_id if message else None
+        except Exception as e:
+            print(f"send_text_tracked failed: {e}")
+            return None
+    
+    
+    def send_photo_tracked(
+        self,
+        chat_id: int,
+        photo_bytes: bytes,
+        *,
+        caption: str = "",
+        game=None,
+        tag: str = "desk",
+        ttl: Optional[int] = None,
+        protected: bool = False,
+    ) -> Optional[int]:
+        """
+        ارسال عکس/میز + ثبت برای حذف.
+        """
+        try:
+            message = self._bot.send_photo(
+                chat_id=chat_id,
+                photo=photo_bytes,
+                caption=(caption or None),
+                parse_mode=ParseMode.MARKDOWN,
+                disable_notification=True,
+            )
+            if message and self._mdm:
+                self._mdm.register(
+                    chat_id=chat_id,
+                    message_id=message.message_id,
+                    game_id=(game.id if game else None),
+                    hand_id=(game.hand_id if game else None),
+                    tag=tag,
+                    protected=protected,
+                    ttl=ttl,
+                )
+            return message.message_id if message else None
+        except Exception as e:
+            print(f"send_photo_tracked failed: {e}")
+            return None
+    
+    
+    def send_hand_result(self, chat_id: int, result_text: str, *, game) -> Optional[int]:
+        """
+        پیام نتایج دست: protected=True تا با purge حذف نشود.
+        """
+        return self.send_text_tracked(
+            chat_id=chat_id,
+            text=result_text,
+            game=game,
+            tag="result",
+            protected=True,   # ← مهم: نتایج باقی بماند
+            ttl=None,         # نتایج را زمان‌بندی برای حذف نمی‌کنیم
+            reply_markup=None,
+        )
+    
+    
+    def send_start_next_hand(self, chat_id: int, *, game, ttl: Optional[int] = None) -> Optional[int]:
+        """
+        پیام «شروع دست بعدی» که باید پس از شروع دست جدید حذف شود.
+        """
+        text = "♻️ برای شروع دست بعدی آماده‌اید؟ /ready"
+        # می‌توانی متن/Markup واقعی پروژه‌ات را جایگزین کنی
+        return self.send_text_tracked(
+            chat_id=chat_id,
+            text=text,
+            game=game,
+            tag="start_next_hand",  # ← تا بعداً با delete_by_tag پاک شود
+            protected=False,
+            ttl=ttl,
+            reply_markup=None,
+        )
+    
+    
+    def purge_hand_messages(self, *, game) -> int:
+        """
+        پاک‌سازی همه پیام‌های دست جاری (protectedها مانند 'result' باقی می‌مانند).
+        """
+        if not (self._mdm and game):
+            return 0
+        return self._mdm.purge_context(
+            game_id=game.id,
+            hand_id=game.hand_id,
+            include_protected=False
+        )
 
 
     def send_message(
