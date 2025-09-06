@@ -126,25 +126,12 @@ class PokerBotViewer:
         if not result_text:
             return None
         result_text = re.sub(r'\[([^\]]+)\]\(tg://user\?id=\d+\)', r'\1', result_text)
-        msg = self._bot.send_message(
-            chat_id=chat_id,
-            text=result_text,
-            parse_mode=ParseMode.MARKDOWN,
-            disable_web_page_preview=True,
-        )
+        msg = self._bot.send_message(chat_id=chat_id, text=result_text)
         if msg and self._mdm:
-            self._mdm.register(
-                chat_id=chat_id,
-                message_id=msg.message_id,
-                game_id=(game.id if game else None),
-                hand_id=(game.hand_id if game else None),
-                tag="result",
-                protected=True,
-                ttl=None,
-            )
+            self._mdm.register(chat_id=chat_id, message_id=msg.message_id, game_id=(game.id if game else None), hand_id=(game.hand_id if game else None), tag="result", protected=True, ttl=None)
+            self._mdm.register(chat_id=chat_id, message_id=msg.message_id, game_id=None, hand_id=None, tag="chat_buffer", protected=True, ttl=None)
         return msg.message_id if msg else None
 
-    
     
     def send_start_next_hand(self, chat_id: int, *, game, ttl: Optional[int] = None) -> Optional[int]:
 
