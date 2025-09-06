@@ -34,10 +34,10 @@ class PokerBotViewer:
         self._cfg = cfg
 
     def send_message_return_id(self, chat_id: int, text: str, reply_markup: Optional[ReplyKeyboardMarkup] = None) -> int:
-        msg = self._bot.send_message(chat_id, text, reply_markup=reply_markup)
+        msg = self._bot.send_message(chat_id=chat_id, text=text, reply_markup=reply_markup)
         if msg and self._mdm:
             self._mdm.register(chat_id=chat_id, message_id=msg.message_id, game_id=None, hand_id=None, tag="generic", protected=False, ttl=None)
-        return msg.message_id
+        return msg.message_id if msg else None
   
     def send_text_tracked(
         self,
@@ -158,14 +158,11 @@ class PokerBotViewer:
             game_id=game.id,
             hand_id=game.hand_id,
             include_protected=False
-        )
-
-
+            )
     def send_message(self, chat_id: int, text: str, reply_markup: Optional[ReplyKeyboardMarkup] = None) -> None:
-        msg = self._bot.send_message(chat_id, text, reply_markup=reply_markup)
+        msg = self._bot.send_message(chat_id=chat_id, text=text, reply_markup=reply_markup)
         if msg and self._mdm:
             self._mdm.register(chat_id=chat_id, message_id=msg.message_id, game_id=None, hand_id=None, tag="generic", protected=False, ttl=None)
-
 
     def send_photo(self, chat_id: ChatId) -> None:
         try:
@@ -191,14 +188,12 @@ class PokerBotViewer:
         except Exception as e:
             print(f"Error sending dice reply: {e}")
             return None
-
     def send_message_reply(self, update, text: str, reply_markup: Optional[ReplyKeyboardMarkup] = None) -> None:
-        msg = update.message.reply_text(text, reply_markup=reply_markup)
+        msg = update.message.reply_text(text=text, reply_markup=reply_markup)
         if msg and self._mdm:
             chat_id = update.effective_chat.id if update and update.effective_chat else None
             if chat_id is not None:
                 self._mdm.register(chat_id=chat_id, message_id=msg.message_id, game_id=None, hand_id=None, tag="generic", protected=False, ttl=None)
-
 
     def send_desk_cards_img(
         self,
