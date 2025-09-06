@@ -16,6 +16,19 @@ def main() -> None:
 
     bot = PokerBot(token=cfg.TOKEN, cfg=cfg)
     bot.run()
+    import logging
+    from pokerapp.pokerbot import PokerBot
+    from pokerapp.config import Config
+    
+    logging.basicConfig(
+        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+        level=logging.DEBUG
+    )
+    
+    if __name__ == "__main__":
+        cfg = Config()
+        bot = PokerBot(cfg)
+        bot.run()
 
 
 if __name__ == "__main__":
