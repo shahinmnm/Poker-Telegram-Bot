@@ -11,6 +11,7 @@ from telegram import (
     Bot,
     InputMediaPhoto,
 )
+from pokerapp.message_delete_manager import MessageDeleteManager  # اضافه کردن import
 from threading import Timer
 from io import BytesIO
 from typing import List, Optional
