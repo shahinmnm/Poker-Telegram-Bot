@@ -417,49 +417,45 @@ class PokerBotModel:
         return winners_by_pot
 
     def _process_playing(self, chat_id: ChatId, game: Game, context: CallbackContext) -> None:
-
+        # پاک کردن پیام نوبت قبلی (اگه هنوز هست)
         if game.turn_message_id:
             self._view.remove_message(chat_id, game.turn_message_id)
             game.turn_message_id = None
     
+        # اگر فقط یک مدعی (ACTIVE/ALL_IN) یا کمتر باقی‌مانده، برو به مرحله بعد (یا شو‌دان)
         contenders = game.players_by(states=(PlayerState.ACTIVE, PlayerState.ALL_IN))
         if len(contenders) <= 1:
             self._go_to_next_street(game, chat_id, context)
             return
     
+        # اتمام راند بت؟ برو کارت بعدی/شو‌دان
         if self._is_betting_round_over(game):
             self._go_to_next_street(game, chat_id, context)
             return
-
+    
+        # نوبت بازیکن بعدی
         next_player_index = self._round_rate._find_next_active_player_index(game, game.current_player_index)
     
         if next_player_index != -1:
             game.current_player_index = next_player_index
             player = game.players[next_player_index]
-    
             self._send_turn_message(game, player, chat_id)
         else:
             self._go_to_next_street(game, chat_id, context)
 
+
     def _send_turn_message(self, game: Game, player: Player, chat_id: ChatId):
-        # 1) اگر پیام نوبت قبلی هست: اول دکمه‌ها را بردار، بعد خود پیام را پاک کن
+        # اگر پیام نوبت قبلی هنوز کیبورد دارد، کیبوردش را بردار
         if game.turn_message_id:
             self._view.remove_markup(chat_id, game.turn_message_id)
-            self._view.remove_message(chat_id, game.turn_message_id)
-            game.turn_message_id = None
     
-        # 2) اگر پیام اطلاع‌رسانی حرکت قبلی هنوز مانده، پاکش کن
-        if getattr(game, "last_action_message_id", None):
-            self._view.remove_message(chat_id, game.last_action_message_id)
-            game.last_action_message_id = None
-    
-        # 3) ارسال پیام نوبت جدید
         money = player.wallet.value()
         msg_id = self._view.send_turn_actions(chat_id, game, player, money)
+    
         if msg_id:
             game.turn_message_id = msg_id
-    
         game.last_turn_time = datetime.datetime.now()
+
 
     
     def player_action_fold(self, update: Update, context: CallbackContext, game: Game) -> None:
@@ -469,26 +465,18 @@ class PokerBotModel:
     
         chat_id = update.effective_chat.id
         current_player.state = PlayerState.FOLD
-        
-        # پاک کردن اطلاع قبلی (اگر مانده)
-        if getattr(game, "last_action_message_id", None):
-            self._view.remove_message(chat_id, game.last_action_message_id)
-            game.last_action_message_id = None
-        
-        # ارسال اطلاع جدید و ذخیره آی‌دی
-        ann_id = self._view.send_action_announce(
-            chat_id, f"🏳️ {current_player.mention_markdown} فولد کرد.", game=game
-        )
-        if ann_id:
-            game.last_action_message_id = ann_id
-        
-        # حذف دکمه‌های پیام نوبت فعلی (اگر هست)
+        self._view.send_message(chat_id, f"🏳️ {current_player.mention_markdown} فولد کرد.")
+    
+        # نوبت قبلی را ببند (کیبورد را حذف کن)
         if game.turn_message_id:
             self._view.remove_markup(chat_id, game.turn_message_id)
-        
+    
+        # ادامه‌ی جریان بازی
         self._process_playing(chat_id, game, context)
+
     
     def player_action_call_check(self, update: Update, context: CallbackContext, game: Game) -> None:
+        """بازیکن کال (پرداخت) یا چک (عبور) را انجام می‌دهد."""
         current_player = self._current_turn_player(game)
         if not current_player:
             return
@@ -497,36 +485,28 @@ class PokerBotModel:
         call_amount = game.max_round_rate - current_player.round_rate
         current_player.has_acted = True
     
-        if getattr(game, "last_action_message_id", None):
-            self._view.remove_message(chat_id, game.last_action_message_id)
-            game.last_action_message_id = None
-    
         try:
             if call_amount > 0:
+                # CALL
                 current_player.wallet.authorize(game.id, call_amount)
                 current_player.round_rate += call_amount
                 current_player.total_bet += call_amount
                 game.pot += call_amount
-                ann_text = f"🎯 {current_player.mention_markdown} با {call_amount}$ کال کرد."
+                self._view.send_message(chat_id, f"🎯 {current_player.mention_markdown} با {call_amount}$ کال کرد.")
             else:
-                ann_text = f"✋ {current_player.mention_markdown} چک کرد."
+                # CHECK
+                self._view.send_message(chat_id, f"✋ {current_player.mention_markdown} چک کرد.")
         except UserException as e:
             self._view.send_message(chat_id, f"⚠️ خطای {current_player.mention_markdown}: {e}")
             return
     
-        ann_id = self._view.send_action_announce(chat_id, ann_text, game=game)
-        if ann_id:
-            game.last_action_message_id = ann_id
-    
+        # نوبت قبلی را ببند (کیبورد را حذف کن)
         if game.turn_message_id:
             self._view.remove_markup(chat_id, game.turn_message_id)
-            self._view.remove_message(chat_id, game.turn_message_id)
-            game.turn_message_id = None
     
+        # ادامه‌ی جریان بازی
         self._process_playing(chat_id, game, context)
-
-
-    
+ 
     def player_action_raise_bet(self, update: Update, context: CallbackContext, game: Game, raise_amount: int) -> None:
         """بازیکن شرط را افزایش می‌دهد (Raise) یا برای اولین بار شرط می‌بندد (Bet)."""
         current_player = self._current_turn_player(game)
@@ -545,28 +525,27 @@ class PokerBotModel:
     
             game.max_round_rate = current_player.round_rate
             action_text = "بِت" if call_amount == 0 else "رِیز"
-            
-            # پاک کردن اطلاع قبلی
-            if getattr(game, "last_action_message_id", None):
-                self._view.remove_message(chat_id, game.last_action_message_id)
-                game.last_action_message_id = None
-            
-            # اطلاع جدید
-            ann_id = self._view.send_action_announce(
+            self._view.send_message(
                 chat_id,
-                f"💹 {current_player.mention_markdown} {action_text} زد و شرط رو به {current_player.round_rate}$ رسوند.",
-                game=game
+                f"💹 {current_player.mention_markdown} {action_text} زد و شرط رو به {current_player.round_rate}$ رسوند."
             )
-            if ann_id:
-                game.last_action_message_id = ann_id
-            
-            # حذف دکمه‌های پیام نوبت فعلی (اگر هست)
-            if game.turn_message_id:
-                self._view.remove_markup(chat_id, game.turn_message_id)
-            
-            self._process_playing(chat_id, game, context)
-
     
+            # آغازگر دور جدید بت‌گذاری
+            game.trading_end_user_id = current_player.user_id
+            current_player.has_acted = True
+            for p in game.players_by(states=(PlayerState.ACTIVE,)):
+                if p.user_id != current_player.user_id:
+                    p.has_acted = False
+    
+        except UserException as e:
+            self._view.send_message(chat_id, f"⚠️ خطای {current_player.mention_markdown}: {e}")
+            return
+    
+        if game.turn_message_id:
+            self._view.remove_markup(chat_id, game.turn_message_id)
+    
+        self._process_playing(chat_id, game, context)
+
     def player_action_all_in(self, update: Update, context: CallbackContext, game: Game) -> None:
         current_player = self._current_turn_player(game)
         if not current_player:
@@ -576,13 +555,12 @@ class PokerBotModel:
         all_in_amount = current_player.wallet.value()
     
         if all_in_amount <= 0:
+            # اگر پولی ندارد، عملاً چک می‌کند
+            self._view.send_message(chat_id, f"👀 {current_player.mention_markdown} موجودی برای آل-این ندارد و چک می‌کند.")
             self.player_action_call_check(update, context, game)
             return
     
-        if getattr(game, "last_action_message_id", None):
-            self._view.remove_message(chat_id, game.last_action_message_id)
-            game.last_action_message_id = None
-    
+        # برداشت کل موجودی
         current_player.wallet.authorize(game.id, all_in_amount)
         current_player.round_rate += all_in_amount
         current_player.total_bet += all_in_amount
@@ -590,12 +568,9 @@ class PokerBotModel:
         current_player.state = PlayerState.ALL_IN
         current_player.has_acted = True
     
-        ann_id = self._view.send_action_announce(
-            chat_id, f"🀄 {current_player.mention_markdown} با {all_in_amount}$ آل-این کرد!", game=game
-        )
-        if ann_id:
-            game.last_action_message_id = ann_id
+        self._view.send_message(chat_id, f"🀄 {current_player.mention_markdown} با {all_in_amount}$ آل-این کرد!")
     
+        # اگر آل-این باعث شد بیشینه‌ی شرط بالا برود، آغازگر دور جدید شو
         if current_player.round_rate > game.max_round_rate:
             game.max_round_rate = current_player.round_rate
             game.trading_end_user_id = current_player.user_id
@@ -603,14 +578,13 @@ class PokerBotModel:
                 if p.user_id != current_player.user_id:
                     p.has_acted = False
     
+        # بستن پیام نوبت قبلی
         if game.turn_message_id:
             self._view.remove_markup(chat_id, game.turn_message_id)
-            self._view.remove_message(chat_id, game.turn_message_id)
-            game.turn_message_id = None
     
+        # ادامه‌ی جریان بازی
         self._process_playing(chat_id, game, context)
-
-            
+       
     def _go_to_next_street(self, game: Game, chat_id: ChatId, context: CallbackContext) -> None:
         if game.turn_message_id:
             self._view.remove_message(chat_id, game.turn_message_id)
@@ -830,15 +804,15 @@ class PokerBotModel:
                     message_id=msg.message_id,
                     game_id=game.id,
                     hand_id=game.hand_id,
-                    tag="RESULT",  # برای پیام نتایج
-                    protected=True,  # پیام نتایج محافظت شده است
+                    tag="RESULT",      # برچسب پیام نتیجه
+                    protected=True,    # نتایج محافظت‌شده بمانند
                     ttl=None
                 )
             return msg.message_id if msg else None
         except Exception as e:
             logging.error(f"Error sending hand result: {e}")
         return None
-
+    
     def purge_hand_messages(self, *, game):
         try:
             if not self._mdm:
@@ -846,7 +820,7 @@ class PokerBotModel:
             return self._mdm.purge_context(
                 game_id=game.id,
                 hand_id=game.hand_id,
-                include_protected=False  # تنها پیام‌های غیرprotected پاک شوند
+                include_protected=False  # تنها پیام‌های غیرمحافظت‌شده پاک شوند
             )
         except Exception as e:
             logging.error(f"Error purging hand messages: {e}")
@@ -862,19 +836,19 @@ class PokerBotModel:
                 self._mdm.purge_context(game_id=game.id, hand_id=game.hand_id, include_protected=False, reason="purge_ctx")
         except Exception as e:
             logging.info(f"[MDM] purge failed: {e}")
-        
+    
         try:
-            # Purge the chat for all non-protected messages
+            # پاکسازی چت برای پیام‌های غیرمحافظت‌شده
             if self._mdm:
                 self._mdm.purge_chat(chat_id=chat_id, include_protected=False, reason="purge_chat_end_hand")
         except Exception as e:
             logging.info(f"[MDM] purge chat failed: {e}")
-        
+    
         try:
             context.chat_data[KEY_OLD_PLAYERS] = [p.user_id for p in game.players if p.wallet.value() > 0]
         except Exception as e:
             logging.info(f"[MDM] save old players failed: {e}")
-        
+    
         try:
             start_next_ttl = getattr(self._cfg, "START_NEXT_TTL_SECONDS", None)
             if hasattr(self._view, "send_start_next_hand"):
@@ -882,10 +856,8 @@ class PokerBotModel:
                 self._view.send_start_next_hand(chat_id=chat_id, game=game, ttl=start_next_ttl)
         except Exception as e:
             logging.info(f"[MDM] send start-next failed: {e}")
-        
+    
         context.chat_data[KEY_CHAT_DATA_GAME] = Game()
-
-
 
     def _format_cards(self, cards: Cards) -> str:
         if not cards:
@@ -911,13 +883,13 @@ class RoundRateModel:
 
     def set_blinds(self, game: Game, chat_id: ChatId) -> None:
         """
-        Determine small/big blinds (using seat indices) and debit the players.
-        Works for heads-up (2-player) and multiplayer by walking occupied seats.
+        تعیین بلایند کوچک/بزرگ و کسر از والت بازیکنان.
+        برای ۲-نفره (Heads-up) و بیشتر.
         """
         num_players = game.seated_count()
         if num_players < 2:
             return
-
+    
         if num_players == 2:
             small_blind_index = game.dealer_index
             big_blind_index = game.next_occupied_seat(small_blind_index)
@@ -926,23 +898,22 @@ class RoundRateModel:
             small_blind_index = game.next_occupied_seat(game.dealer_index)
             big_blind_index = game.next_occupied_seat(small_blind_index)
             first_action_index = game.next_occupied_seat(big_blind_index)
-
+    
         game.small_blind_index = small_blind_index
         game.big_blind_index = big_blind_index
-
+    
         small_blind_player = game.get_player_by_seat(small_blind_index)
         big_blind_player = game.get_player_by_seat(big_blind_index)
-
         if small_blind_player is None or big_blind_player is None:
             return
-
+    
         self._set_player_blind(game, small_blind_player, SMALL_BLIND, "کوچک", chat_id)
         self._set_player_blind(game, big_blind_player, SMALL_BLIND * 2, "بزرگ", chat_id)
-
+    
         game.max_round_rate = SMALL_BLIND * 2
         game.current_player_index = first_action_index
         game.trading_end_user_id = big_blind_player.user_id
-
+    
         player_turn = game.get_player_by_seat(game.current_player_index)
         if player_turn:
             self._view.send_turn_actions(
@@ -952,27 +923,27 @@ class RoundRateModel:
                 money=player_turn.wallet.value()
             )
     
-
     def _set_player_blind(self, game: Game, player: Player, amount: Money, blind_type: str, chat_id: ChatId):
         try:
             player.wallet.authorize(game_id=str(chat_id), amount=amount)
             player.round_rate += amount
-            player.total_bet += amount 
+            player.total_bet += amount
             game.pot += amount
             self._view.send_message(
                 chat_id,
                 f"💸 {player.mention_markdown} بلایند {blind_type} به مبلغ {amount}$ را پرداخت کرد."
             )
         except UserException as e:
+            # اگر بازیکن پول کافی نداشت، تا سقف موجودی‌اش را آل-این می‌کنیم
             available_money = player.wallet.value()
             player.wallet.authorize(game_id=str(chat_id), amount=available_money)
             player.round_rate += available_money
-            player.total_bet += available_money 
+            player.total_bet += available_money
             game.pot += available_money
             player.state = PlayerState.ALL_IN
             self._view.send_message(
                 chat_id,
-                f"⚠️ {player.mention_markdown} موجودی کافی برای بلایند نداشت و All-in شد ({available_money}$)."
+                f"⚠️ {player.mention_markdown} به اندازه‌ی موجودی‌اش ({available_money}$) پرداخت کرد و آل-این شد."
             )
 
     def collect_bets_for_pot(self, game: Game):
