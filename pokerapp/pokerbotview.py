@@ -92,9 +92,6 @@ class PokerBotViewer:
         return None 
     
     def send_hand_result(self, chat_id, result_text, *, game):
-        """
-        ارسال نتایج دست به چت
-        """
         if not result_text:
             return None
         result_text = self._sanitize_text(result_text)
@@ -106,13 +103,14 @@ class PokerBotViewer:
                 disable_web_page_preview=True,
             )
             if msg and self._mdm:
+                # ثبت پیام با mdm_protected=True برای جلوگیری از پاک شدن آن در پایان دست
                 self._mdm.register(
                     chat_id=chat_id,
                     message_id=msg.message_id,
                     game_id=game.id,
                     hand_id=game.hand_id,
-                    tag="RESULT",  # Protected message
-                    protected=True,
+                    tag="RESULT",  # برای نشان دادن پیام نتایج
+                    protected=True,  # پیام نتایج محافظت شده است
                     ttl=None
                 )
             return msg.message_id if msg else None
@@ -120,24 +118,27 @@ class PokerBotViewer:
             logging.error(f"Error sending hand result: {e}")
         return None
 
+
     def send_start_next_hand(self, chat_id, *, game, ttl: Optional[int] = None):
         """
-        ارسال پیام شروع دست بعدی به چت
+        ارسال پیام شروع دست بعدی به چت با TTL و protected=True
         """
         if not ttl:
-            ttl = self._cfg.START_NEXT_TTL_SECONDS  # Get TTL from config
+            ttl = self._cfg.START_NEXT_TTL_SECONDS  # از تنظیمات کانفیگ استفاده می‌کنیم
+    
         text = "♻️ برای شروع دست بعدی آماده‌اید؟ /ready"
+        
+        # ارسال پیام با protected=True و TTL مشخص
         return self.send_message(
             chat_id=chat_id,
             text=text,
             mdm_game_id=game.id,
             mdm_hand_id=game.hand_id,
-            mdm_tag="NEXT_BANNER",
-            mdm_protected=True,
+            mdm_tag="NEXT_BANNER",  # برچسب دست بعدی
+            mdm_protected=True,  # پیام شروع دست بعدی محافظت‌شده است
             ttl=ttl
         )
-    
-    
+
     def purge_hand_messages(self, *, game):
         """
         پاک‌سازی پیام‌های مربوط به دست جاری (به‌جز protected ها مثل نتایج)
