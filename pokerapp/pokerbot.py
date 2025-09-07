@@ -71,6 +71,29 @@ class PokerBot:
 
     def run(self) -> None:
         self._updater.start_polling()
+        
+    def send_media_group(self, *args, **kwargs):
+        mdm = getattr(self, "_mdm", None)
+        mdm_protected = kwargs.pop("mdm_protected", False)
+        mdm_tag = kwargs.pop("mdm_tag", "generic")
+        mdm_game_id = kwargs.pop("mdm_game_id", None)
+        mdm_hand_id = kwargs.pop("mdm_hand_id", None)
+        msgs = super(MessageDelayBot, self).send_media_group(*args, **kwargs)
+        if mdm and msgs:
+            for m in msgs:
+                mdm.register(chat_id=m.chat_id, message_id=m.message_id, game_id=mdm_game_id, hand_id=mdm_hand_id, tag=mdm_tag, protected=mdm_protected, ttl=None)
+        return msgs
+    
+    def send_photo(self, *args, **kwargs):
+        mdm = getattr(self, "_mdm", None)
+        mdm_protected = kwargs.pop("mdm_protected", False)
+        mdm_tag = kwargs.pop("mdm_tag", "generic")
+        mdm_game_id = kwargs.pop("mdm_game_id", None)
+        mdm_hand_id = kwargs.pop("mdm_hand_id", None)
+        msg = super(MessageDelayBot, self).send_photo(*args, **kwargs)
+        if mdm and msg:
+            mdm.register(chat_id=msg.chat_id, message_id=msg.message_id, game_id=mdm_game_id, hand_id=mdm_hand_id, tag=mdm_tag, protected=mdm_protected, ttl=None)
+        return msg
 
 
 class MessageDelayBot(Bot):
