@@ -442,16 +442,25 @@ class PokerBotModel:
             self._go_to_next_street(game, chat_id, context)
 
     def _send_turn_message(self, game: Game, player: Player, chat_id: ChatId):
+        # 1) اگر پیام نوبت قبلی هست: اول دکمه‌ها را بردار، بعد خود پیام را پاک کن
         if game.turn_message_id:
             self._view.remove_markup(chat_id, game.turn_message_id)
-
+            self._view.remove_message(chat_id, game.turn_message_id)
+            game.turn_message_id = None
+    
+        # 2) اگر پیام اطلاع‌رسانی حرکت قبلی هنوز مانده، پاکش کن
+        if getattr(game, "last_action_message_id", None):
+            self._view.remove_message(chat_id, game.last_action_message_id)
+            game.last_action_message_id = None
+    
+        # 3) ارسال پیام نوبت جدید
         money = player.wallet.value()
-        
         msg_id = self._view.send_turn_actions(chat_id, game, player, money)
-        
         if msg_id:
             game.turn_message_id = msg_id
+    
         game.last_turn_time = datetime.datetime.now()
+
     
     def player_action_fold(self, update: Update, context: CallbackContext, game: Game) -> None:
         current_player = self._current_turn_player(game)
@@ -460,15 +469,26 @@ class PokerBotModel:
     
         chat_id = update.effective_chat.id
         current_player.state = PlayerState.FOLD
-        self._view.send_message(chat_id, f"🏳️ {current_player.mention_markdown} فولد کرد.")
-    
+        
+        # پاک کردن اطلاع قبلی (اگر مانده)
+        if getattr(game, "last_action_message_id", None):
+            self._view.remove_message(chat_id, game.last_action_message_id)
+            game.last_action_message_id = None
+        
+        # ارسال اطلاع جدید و ذخیره آی‌دی
+        ann_id = self._view.send_action_announce(
+            chat_id, f"🏳️ {current_player.mention_markdown} فولد کرد.", game=game
+        )
+        if ann_id:
+            game.last_action_message_id = ann_id
+        
+        # حذف دکمه‌های پیام نوبت فعلی (اگر هست)
         if game.turn_message_id:
             self._view.remove_markup(chat_id, game.turn_message_id)
-    
+        
         self._process_playing(chat_id, game, context)
     
     def player_action_call_check(self, update: Update, context: CallbackContext, game: Game) -> None:
-        """بازیکن کال (پرداخت) یا چک (عبور) را انجام می‌دهد."""
         current_player = self._current_turn_player(game)
         if not current_player:
             return
@@ -477,23 +497,35 @@ class PokerBotModel:
         call_amount = game.max_round_rate - current_player.round_rate
         current_player.has_acted = True
     
+        if getattr(game, "last_action_message_id", None):
+            self._view.remove_message(chat_id, game.last_action_message_id)
+            game.last_action_message_id = None
+    
         try:
             if call_amount > 0:
                 current_player.wallet.authorize(game.id, call_amount)
                 current_player.round_rate += call_amount
                 current_player.total_bet += call_amount
                 game.pot += call_amount
-                self._view.send_message(chat_id, f"🎯 {current_player.mention_markdown} با {call_amount}$ کال کرد.")
+                ann_text = f"🎯 {current_player.mention_markdown} با {call_amount}$ کال کرد."
             else:
-                self._view.send_message(chat_id, f"✋ {current_player.mention_markdown} چک کرد.")
+                ann_text = f"✋ {current_player.mention_markdown} چک کرد."
         except UserException as e:
             self._view.send_message(chat_id, f"⚠️ خطای {current_player.mention_markdown}: {e}")
-            return 
+            return
+    
+        ann_id = self._view.send_action_announce(chat_id, ann_text, game=game)
+        if ann_id:
+            game.last_action_message_id = ann_id
     
         if game.turn_message_id:
             self._view.remove_markup(chat_id, game.turn_message_id)
+            self._view.remove_message(chat_id, game.turn_message_id)
+            game.turn_message_id = None
     
         self._process_playing(chat_id, game, context)
+
+
     
     def player_action_raise_bet(self, update: Update, context: CallbackContext, game: Game, raise_amount: int) -> None:
         """بازیکن شرط را افزایش می‌دهد (Raise) یا برای اولین بار شرط می‌بندد (Bet)."""
@@ -513,23 +545,27 @@ class PokerBotModel:
     
             game.max_round_rate = current_player.round_rate
             action_text = "بِت" if call_amount == 0 else "رِیز"
-            self._view.send_message(chat_id, f"💹 {current_player.mention_markdown} {action_text} زد و شرط رو به {current_player.round_rate}$ رسوند.")
-    
+            
+            # پاک کردن اطلاع قبلی
+            if getattr(game, "last_action_message_id", None):
+                self._view.remove_message(chat_id, game.last_action_message_id)
+                game.last_action_message_id = None
+            
+            # اطلاع جدید
+            ann_id = self._view.send_action_announce(
+                chat_id,
+                f"💹 {current_player.mention_markdown} {action_text} زد و شرط رو به {current_player.round_rate}$ رسوند.",
+                game=game
+            )
+            if ann_id:
+                game.last_action_message_id = ann_id
+            
+            # حذف دکمه‌های پیام نوبت فعلی (اگر هست)
+            if game.turn_message_id:
+                self._view.remove_markup(chat_id, game.turn_message_id)
+            
+            self._process_playing(chat_id, game, context)
 
-            game.trading_end_user_id = current_player.user_id
-            current_player.has_acted = True
-            for p in game.players_by(states=(PlayerState.ACTIVE,)):
-                if p.user_id != current_player.user_id:
-                    p.has_acted = False
-    
-        except UserException as e:
-            self._view.send_message(chat_id, f"⚠️ خطای {current_player.mention_markdown}: {e}")
-            return
-    
-        if game.turn_message_id:
-            self._view.remove_markup(chat_id, game.turn_message_id)
-    
-        self._process_playing(chat_id, game, context)
     
     def player_action_all_in(self, update: Update, context: CallbackContext, game: Game) -> None:
         current_player = self._current_turn_player(game)
@@ -540,9 +576,12 @@ class PokerBotModel:
         all_in_amount = current_player.wallet.value()
     
         if all_in_amount <= 0:
-            self._view.send_message(chat_id, f"👀 {current_player.mention_markdown} موجودی برای آل-این ندارد و چک می‌کند.")
-            self.player_action_call_check(update, context, game) 
+            self.player_action_call_check(update, context, game)
             return
+    
+        if getattr(game, "last_action_message_id", None):
+            self._view.remove_message(chat_id, game.last_action_message_id)
+            game.last_action_message_id = None
     
         current_player.wallet.authorize(game.id, all_in_amount)
         current_player.round_rate += all_in_amount
@@ -551,7 +590,11 @@ class PokerBotModel:
         current_player.state = PlayerState.ALL_IN
         current_player.has_acted = True
     
-        self._view.send_message(chat_id, f"🀄 {current_player.mention_markdown} با {all_in_amount}$ آل‑این کرد!")
+        ann_id = self._view.send_action_announce(
+            chat_id, f"🀄 {current_player.mention_markdown} با {all_in_amount}$ آل-این کرد!", game=game
+        )
+        if ann_id:
+            game.last_action_message_id = ann_id
     
         if current_player.round_rate > game.max_round_rate:
             game.max_round_rate = current_player.round_rate
@@ -562,8 +605,11 @@ class PokerBotModel:
     
         if game.turn_message_id:
             self._view.remove_markup(chat_id, game.turn_message_id)
+            self._view.remove_message(chat_id, game.turn_message_id)
+            game.turn_message_id = None
     
         self._process_playing(chat_id, game, context)
+
             
     def _go_to_next_street(self, game: Game, chat_id: ChatId, context: CallbackContext) -> None:
         if game.turn_message_id:
