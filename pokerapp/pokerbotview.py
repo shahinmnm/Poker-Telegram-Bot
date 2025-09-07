@@ -328,32 +328,24 @@ class PokerBotViewer:
             return PlayerAction.CHECK
         return PlayerAction.CALL
     def send_turn_actions(
-            self,
-            chat_id: ChatId,
-            game: Game,
-            player: Player,
-            money: Money,
-    ) -> Optional[MessageId]:
-        if hasattr(game, "message_ids_to_delete") and isinstance(game.message_ids_to_delete, list):
-            for mid in list(game.message_ids_to_delete):
-                self.remove_message(chat_id, mid)
-            game.message_ids_to_delete.clear()
-        if getattr(game, "turn_message_id", None):
-            self.remove_message(chat_id, game.turn_message_id)
-            game.turn_message_id = None
-    
+        self,
+        chat_id,
+        game,
+        player,
+        money,
+    ) -> Optional[int]:
         if not game.cards_table:
             cards_table = "🚫 کارتی روی میز نیست"
         else:
             cards_table = " ".join(game.cards_table)
-    
+
         call_amount = game.max_round_rate - player.round_rate
         call_check_action = self.define_check_call_action(game, player)
         if call_check_action == PlayerAction.CALL:
             call_check_text = f"{call_check_action.value} ({call_amount}$)"
         else:
             call_check_text = call_check_action.value
-    
+
         text = (
             f"🎯 **نوبت بازی {player.mention_markdown} (صندلی {player.seat_index+1})**\n\n"
             f"🃏 **کارت‌های روی میز:** {cards_table}\n"
@@ -363,23 +355,22 @@ class PokerBotViewer:
             f"📈 **حداکثر شرط این دور:** `{game.max_round_rate}$`\n\n"
             f"⬇️ حرکت خود را انتخاب کنید:"
         )
-    
-        markup = self._get_turns_markup(call_check_text, call_check_action)
-    
-        msg = self.send_message(
-            chat_id=chat_id,
-            text=text,
-            reply_markup=markup,
-            mdm_tag="turn",
-            mdm_protected=False,
-            ttl=None,
-            parse_mode=ParseMode.MARKDOWN,
-        )
-        if isinstance(msg, Message):
-            game.turn_message_id = msg.message_id
-            return msg.message_id
-        return None
 
+        markup = self._get_turns_markup(call_check_text, call_check_action)
+
+        try:
+            msg = self._bot.send_message(
+                chat_id=chat_id,
+                text=text,
+                reply_markup=markup,
+                parse_mode=ParseMode.MARKDOWN,
+                disable_notification=False,
+            )
+            if isinstance(msg, Message):
+                return msg.message_id
+        except Exception:
+            pass
+        return None
     @staticmethod
     def _get_turns_markup(check_call_text: str, check_call_action: PlayerAction) -> InlineKeyboardMarkup:
         keyboard = [[
@@ -396,46 +387,33 @@ class PokerBotViewer:
 
     from telegram.error import BadRequest, Unauthorized  # اضافه کردن بالای فایل
     
-    def remove_markup(self, chat_id: ChatId, message_id: MessageId) -> None:
-        if not message_id:
-            return
+
+    def remove_markup(self, chat_id: int, message_id: int) -> None:
         try:
-            self._bot.edit_message_reply_markup(chat_id=chat_id, message_id=message_id)
+            self._bot.edit_message_reply_markup(chat_id=chat_id, message_id=message_id, reply_markup=None)
         except Exception:
             pass
 
     
-    def remove_message(self, chat_id: ChatId, message_id: MessageId) -> None:
-        if not message_id:
-            return
+    def remove_message(self, chat_id: int, message_id: int) -> None:
         try:
             self._bot.delete_message(chat_id=chat_id, message_id=message_id)
         except Exception:
             pass
-    def send_action_announce(
-        self,
-        chat_id: ChatId,
-        game: Game,
-        text: str,
-        *,
-        mdm_protected: bool = False,
-        ttl: Optional[int] = None,
-    ) -> Optional[MessageId]:
-        msg = self.send_message(
-            chat_id=chat_id,
-            text=text,
-            mdm_tag="action",
-            mdm_protected=mdm_protected,
-            ttl=ttl,
-            parse_mode=ParseMode.MARKDOWN,
-        )
-        if isinstance(msg, Message):
-            mid = msg.message_id
-            if hasattr(game, "message_ids_to_delete") and isinstance(game.message_ids_to_delete, list):
-                game.message_ids_to_delete.append(mid)
-            return mid
-        return None
 
+    def send_action_announce(self, chat_id: int, text: str, *, game) -> Optional[int]:
+        try:
+            msg = self._bot.send_message(
+                chat_id=chat_id,
+                text=text,
+                parse_mode=ParseMode.MARKDOWN,
+                disable_web_page_preview=True,
+            )
+            if isinstance(msg, Message):
+                return msg.message_id
+        except Exception:
+            pass
+        return None
             
     def remove_message_delayed(self, chat_id: ChatId, message_id: MessageId, delay: float = 3.0) -> None:
         """حذف پیام با تأخیر برحسب ثانیه."""
