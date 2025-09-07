@@ -29,12 +29,10 @@ from pokerapp.entities import (
 )
 
 class PokerBotViewer:
-    def __init__(self, bot: Bot, mdm=None, cfg=None):
+    def __init__(self, bot: Bot, mdm: Optional[MessageDeleteManager] = None, cfg=None):
         self._bot = bot
-        self._desk_generator = DeskImageGenerator()
         self._mdm = mdm
         self._cfg = cfg
-
     def send_message_return_id(self, chat_id: int, text: str, reply_markup=None) -> int:
         if not text:
             return None
@@ -45,126 +43,150 @@ class PokerBotViewer:
         return msg.message_id if msg else None
 
   
-    def send_text_tracked(
-        self,
-        chat_id: int,
-        text: str,
-        *,
-        game=None,
-        tag: str = "generic",
-        ttl: Optional[int] = None,
-        protected: bool = False,
-        reply_markup=None,
-    ) -> Optional[int]:
+    def send_text_tracked(self, chat_id, text, *, game=None, tag="generic", ttl=None, protected=False, reply_markup=None):
         """
-        ارسال پیام متنی + ثبت در MessageDeleteManager با متادیتا (game_id, hand_id, tag).
+        ارسال پیام با ردیابی برای حذف خودکار
         """
         try:
-            message = self._bot.send_message(
+            msg = self.send_message(
                 chat_id=chat_id,
                 text=text,
-                parse_mode=ParseMode.MARKDOWN,
-                reply_markup=reply_markup,
-                disable_notification=True,
-                disable_web_page_preview=True,
+                game=game,
+                tag=tag,
+                ttl=ttl,
+                protected=protected,
+                reply_markup=reply_markup
             )
-            if message and self._mdm:
-                self._mdm.register(
-                    chat_id=chat_id,
-                    message_id=message.message_id,
-                    game_id=(game.id if game else None),
-                    hand_id=(game.hand_id if game else None),
-                    tag=tag,
-                    protected=protected,
-                    ttl=ttl,
-                )
-            return message.message_id if message else None
+            return msg
         except Exception as e:
-            print(f"send_text_tracked failed: {e}")
-            return None
+            logging.error(f"Error sending tracked message: {e}")
+        return None
     
-    
-    def send_photo_tracked(
-        self,
-        chat_id: int,
-        photo_bytes: bytes,
-        *,
-        caption: str = "",
-        game=None,
-        tag: str = "desk",
-        ttl: Optional[int] = None,
-        protected: bool = False,
-    ) -> Optional[int]:
+
+    def send_photo_tracked(self, chat_id, photo_bytes, *, caption="", game=None, tag="desk", ttl=None, protected=False):
         """
-        ارسال عکس/میز + ثبت برای حذف.
+        ارسال عکس با ردیابی برای حذف خودکار
         """
         try:
-            message = self._bot.send_photo(
+            msg = self._bot.send_photo(
                 chat_id=chat_id,
                 photo=photo_bytes,
-                caption=(caption or None),
+                caption=caption,
                 parse_mode=ParseMode.MARKDOWN,
                 disable_notification=True,
             )
-            if message and self._mdm:
+            if msg and self._mdm:
                 self._mdm.register(
                     chat_id=chat_id,
-                    message_id=message.message_id,
+                    message_id=msg.message_id,
                     game_id=(game.id if game else None),
                     hand_id=(game.hand_id if game else None),
                     tag=tag,
                     protected=protected,
-                    ttl=ttl,
+                    ttl=ttl
                 )
-            return message.message_id if message else None
+            return msg.message_id if msg else None
         except Exception as e:
-            print(f"send_photo_tracked failed: {e}")
-            return None
+            logging.error(f"Error sending photo tracked: {e}")
+        return None 
     
-    
-    def send_hand_result(self, chat_id: int, result_text: str, *, game):
+    def send_hand_result(self, chat_id, result_text, *, game):
+        """
+        ارسال نتایج دست به چت
+        """
         if not result_text:
             return None
-        result_text = re.sub(r'\[([^\]]+)\]\(tg://user\?id=\d+\)', r'\1', result_text)
-        msg = self._bot.send_message(chat_id=chat_id, text=result_text)
-        if msg and self._mdm:
-            self._mdm.register(chat_id=chat_id, message_id=msg.message_id, game_id=(game.id if game else None), hand_id=(game.hand_id if game else None), tag="result", protected=True, ttl=None)
-            self._mdm.register(chat_id=chat_id, message_id=msg.message_id, game_id=None, hand_id=None, tag="chat_buffer", protected=True, ttl=None)
-        return msg.message_id if msg else None
+        result_text = self._sanitize_text(result_text)
+        try:
+            msg = self._bot.send_message(
+                chat_id=chat_id,
+                text=result_text,
+                parse_mode=ParseMode.MARKDOWN,
+                disable_web_page_preview=True,
+            )
+            if msg and self._mdm:
+                self._mdm.register(
+                    chat_id=chat_id,
+                    message_id=msg.message_id,
+                    game_id=game.id,
+                    hand_id=game.hand_id,
+                    tag="RESULT",  # Protected message
+                    protected=True,
+                    ttl=None
+                )
+            return msg.message_id if msg else None
+        except Exception as e:
+            logging.error(f"Error sending hand result: {e}")
+        return None
 
-    
-    def send_start_next_hand(self, chat_id: int, *, game, ttl: Optional[int] = None) -> Optional[int]:
-
+    def send_start_next_hand(self, chat_id, *, game, ttl: Optional[int] = None):
+        """
+        ارسال پیام شروع دست بعدی به چت
+        """
+        if not ttl:
+            ttl = self._cfg.START_NEXT_TTL_SECONDS  # Get TTL from config
         text = "♻️ برای شروع دست بعدی آماده‌اید؟ /ready"
-        return self.send_text_tracked(
+        return self.send_message(
             chat_id=chat_id,
             text=text,
-            game=game,
-            tag="start_next_hand",  # ← تا بعداً با delete_by_tag پاک شود
-            protected=False,
-            ttl=ttl,
-            reply_markup=None,
+            mdm_game_id=game.id,
+            mdm_hand_id=game.hand_id,
+            mdm_tag="NEXT_BANNER",
+            mdm_protected=True,
+            ttl=ttl
         )
     
     
-    def purge_hand_messages(self, *, game) -> int:
+    def purge_hand_messages(self, *, game):
         """
-        پاک‌سازی همه پیام‌های دست جاری (protectedها مانند 'result' باقی می‌مانند).
+        پاک‌سازی پیام‌های مربوط به دست جاری (به‌جز protected ها مثل نتایج)
         """
-        if not (self._mdm and game):
-            return 0
-        return self._mdm.purge_context(
-            game_id=game.id,
-            hand_id=game.hand_id,
-            include_protected=False
+        try:
+            if not self._mdm:
+                return 0
+            return self._mdm.purge_context(
+                game_id=game.id,
+                hand_id=game.hand_id,
+                include_protected=False
             )
-    def send_message(self, chat_id: int, text: str, reply_markup=None) -> None:
+        except Exception as e:
+            logging.error(f"Error purging hand messages: {e}")
+        return 0
+        
+    def _sanitize_text(self, text: str) -> str:
+        """
+        پاک‌سازی متن از لینک‌های غیرضروری
+        """
         if not text:
-            return
+            return text
         text = re.sub(r'\[([^\]]+)\]\(tg://user\?id=\d+\)', r'\1', text)
-        msg = self._bot.send_message(chat_id=chat_id, text=text, reply_markup=reply_markup)
-        if msg and self._mdm:
-            self._mdm.register(chat_id=chat_id, message_id=msg.message_id, game_id=None, hand_id=None, tag="generic", protected=False, ttl=None)
+        return text
+        
+    def send_message(self, chat_id, text, reply_markup=None, mdm_tag=None, mdm_protected=False, ttl=None):
+        """
+        ارسال پیام به چت و ثبت آن در MDM برای پاکسازی
+        """
+        try:
+            text = self._sanitize_text(text)
+            msg = self._bot.send_message(
+                chat_id=chat_id,
+                text=text,
+                reply_markup=reply_markup,
+                parse_mode=ParseMode.MARKDOWN  # Always use Markdown
+            )
+            if msg and self._mdm:
+                # ثبت پیام در سیستم مدیریت پیام برای حذف
+                self._mdm.register(
+                    chat_id=chat_id,
+                    message_id=msg.message_id,
+                    tag=mdm_tag,
+                    protected=mdm_protected,
+                    ttl=ttl
+                )
+            return msg
+        except Exception as e:
+            logging.error(f"Error sending message: {e}")
+        return None
 
 
     def send_photo(self, chat_id: ChatId) -> None:
