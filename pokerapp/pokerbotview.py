@@ -308,7 +308,6 @@ class PokerBotViewer:
         if player.round_rate >= game.max_round_rate:
             return PlayerAction.CHECK
         return PlayerAction.CALL
-
     def send_turn_actions(
             self,
             chat_id: ChatId,
@@ -346,13 +345,12 @@ class PokerBotViewer:
         # کیبورد اینلاین
         markup = self._get_turns_markup(call_check_text, call_check_action)
     
-        # حذف پیام نوبت قبلی اگر وجود داشته باشد
+        # حذف پیام نوبت قبلی
         if self._mdm:
-            self._mdm.delete_by_tag(
+            self._mdm.purge_context(
                 game_id=game.id,
                 hand_id=game.hand_id,
-                tag="TURN_PROMPT",
-                include_protected=False
+                include_protected=False  # پیام‌های غیرprotected حذف شوند
             )
     
         try:
@@ -381,7 +379,6 @@ class PokerBotViewer:
             print(f"Error sending turn actions: {e}")
     
         return None
-
 
     @staticmethod
     def _get_turns_markup(check_call_text: str, check_call_action: PlayerAction) -> InlineKeyboardMarkup:
