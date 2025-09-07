@@ -770,8 +770,6 @@ class PokerBotModel:
 
         self._view.send_new_hand_ready_message(chat_id)
     def send_hand_result(self, chat_id, result_text, *, game):
-        if not result_text:
-            return None
         result_text = self._sanitize_text(result_text)
         try:
             msg = self._bot.send_message(
@@ -786,14 +784,15 @@ class PokerBotModel:
                     message_id=msg.message_id,
                     game_id=game.id,
                     hand_id=game.hand_id,
-                    tag="RESULT",  # Protected message
-                    protected=True,
+                    tag="RESULT",  # برای پیام نتایج
+                    protected=True,  # پیام نتایج محافظت شده است
                     ttl=None
                 )
             return msg.message_id if msg else None
         except Exception as e:
             logging.error(f"Error sending hand result: {e}")
         return None
+
     def purge_hand_messages(self, *, game):
         try:
             if not self._mdm:
