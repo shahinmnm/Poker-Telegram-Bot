@@ -99,7 +99,8 @@ class Game:
         self.pot = 0
         self.max_round_rate = 0
         self.state = GameState.INITIAL
-    
+        self.hand_id = str(uuid4())  # اضافه کردن ویژگی hand_id
+
         # seats is a fixed-length list representing table seats.
         self.seats: List[Optional[Player]] = [None for _ in range(MAX_PLAYERS)]
     
