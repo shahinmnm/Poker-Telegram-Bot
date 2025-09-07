@@ -334,14 +334,19 @@ class PokerBotViewer:
             player: Player,
             money: Money,
     ) -> Optional[MessageId]:
-        """ارسال پیام نوبت بازیکن با فرمت فارسی/ایموجی؛ بدون purge عمومی."""
-        # نمایش کارت‌های میز
+        if hasattr(game, "message_ids_to_delete") and isinstance(game.message_ids_to_delete, list):
+            for mid in list(game.message_ids_to_delete):
+                self.remove_message(chat_id, mid)
+            game.message_ids_to_delete.clear()
+        if getattr(game, "turn_message_id", None):
+            self.remove_message(chat_id, game.turn_message_id)
+            game.turn_message_id = None
+    
         if not game.cards_table:
             cards_table = "🚫 کارتی روی میز نیست"
         else:
             cards_table = " ".join(game.cards_table)
     
-        # محاسبه CALL یا CHECK
         call_amount = game.max_round_rate - player.round_rate
         call_check_action = self.define_check_call_action(game, player)
         if call_check_action == PlayerAction.CALL:
@@ -349,7 +354,6 @@ class PokerBotViewer:
         else:
             call_check_text = call_check_action.value
     
-        # متن پیام با Markdown
         text = (
             f"🎯 **نوبت بازی {player.mention_markdown} (صندلی {player.seat_index+1})**\n\n"
             f"🃏 **کارت‌های روی میز:** {cards_table}\n"
@@ -360,33 +364,20 @@ class PokerBotViewer:
             f"⬇️ حرکت خود را انتخاب کنید:"
         )
     
-        # کیبورد اینلاین
         markup = self._get_turns_markup(call_check_text, call_check_action)
     
-        try:
-            # ارسال پیام نوبت جدید (بدون purge_context سنگین)
-            message = self._bot.send_message(
-                chat_id=chat_id,
-                text=text,
-                reply_markup=markup,
-                parse_mode=ParseMode.MARKDOWN,
-                disable_notification=False,
-            )
-            # ثبت برای mdm (برچسب اختصاصی نوبت)
-            if isinstance(message, Message) and self._mdm:
-                self._mdm.register(
-                    chat_id=chat_id,
-                    message_id=message.message_id,
-                    game_id=game.id,
-                    hand_id=game.hand_id,
-                    tag="TURN_PROMPT",
-                    protected=False,
-                    ttl=None
-                )
-                return message.message_id
-        except Exception as e:
-            print(f"Error sending turn actions: {e}")
-    
+        msg = self.send_message(
+            chat_id=chat_id,
+            text=text,
+            reply_markup=markup,
+            mdm_tag="turn",
+            mdm_protected=False,
+            ttl=None,
+            parse_mode=ParseMode.MARKDOWN,
+        )
+        if isinstance(msg, Message):
+            game.turn_message_id = msg.message_id
+            return msg.message_id
         return None
 
     @staticmethod
@@ -406,38 +397,45 @@ class PokerBotViewer:
     from telegram.error import BadRequest, Unauthorized  # اضافه کردن بالای فایل
     
     def remove_markup(self, chat_id: ChatId, message_id: MessageId) -> None:
-        """حذف دکمه‌های اینلاین از یک پیام و فیلتر کردن ارورهای رایج."""
         if not message_id:
             return
         try:
             self._bot.edit_message_reply_markup(chat_id=chat_id, message_id=message_id)
-        except BadRequest as e:
-            err = str(e).lower()
-            if "message to edit not found" in err or "message is not modified" in err:
-                print(f"[INFO] Markup already removed or message not found (ID={message_id}).")
-            else:
-                print(f"[WARNING] BadRequest removing markup (ID={message_id}): {e}")
-        except Unauthorized as e:
-            print(f"[INFO] Cannot edit markup, bot unauthorized in chat {chat_id}: {e}")
-        except Exception as e:
-            print(f"[ERROR] Unexpected error removing markup (ID={message_id}): {e}")
+        except Exception:
+            pass
+
     
     def remove_message(self, chat_id: ChatId, message_id: MessageId) -> None:
-        """حذف پیام از چت و فیلتر کردن ارورهای بی‌خطر."""
         if not message_id:
             return
         try:
             self._bot.delete_message(chat_id=chat_id, message_id=message_id)
-        except BadRequest as e:
-            err = str(e).lower()
-            if "message to delete not found" in err or "message can't be deleted" in err:
-                print(f"[INFO] Message already deleted or too old (ID={message_id}).")
-            else:
-                print(f"[WARNING] BadRequest deleting message (ID={message_id}): {e}")
-        except Unauthorized as e:
-            print(f"[INFO] Cannot delete message, bot unauthorized in chat {chat_id}: {e}")
-        except Exception as e:
-            print(f"[ERROR] Unexpected error deleting message (ID={message_id}): {e}")
+        except Exception:
+            pass
+    def send_action_announce(
+        self,
+        chat_id: ChatId,
+        game: Game,
+        text: str,
+        *,
+        mdm_protected: bool = False,
+        ttl: Optional[int] = None,
+    ) -> Optional[MessageId]:
+        msg = self.send_message(
+            chat_id=chat_id,
+            text=text,
+            mdm_tag="action",
+            mdm_protected=mdm_protected,
+            ttl=ttl,
+            parse_mode=ParseMode.MARKDOWN,
+        )
+        if isinstance(msg, Message):
+            mid = msg.message_id
+            if hasattr(game, "message_ids_to_delete") and isinstance(game.message_ids_to_delete, list):
+                game.message_ids_to_delete.append(mid)
+            return mid
+        return None
+
             
     def remove_message_delayed(self, chat_id: ChatId, message_id: MessageId, delay: float = 3.0) -> None:
         """حذف پیام با تأخیر برحسب ثانیه."""
