@@ -254,11 +254,11 @@ class PokerBotModel:
     def start(self, update: Update, context: CallbackContext) -> None:
         game = self._game_from_context(context)
         chat_id = update.effective_chat.id
-
+    
         if game.state not in (GameState.INITIAL, GameState.FINISHED):
             self._view.send_message(chat_id, "🎮 یک بازی در حال حاضر در جریان است.")
             return
-
+    
         if game.state == GameState.FINISHED:
             try:
                 if self._mdm:
@@ -279,14 +279,15 @@ class PokerBotModel:
                     )
             except Exception as e:
                 logging.info(f"[MDM] cleanup prev hand failed: {e}")
-
+    
             game.reset()
             old_players_ids = context.chat_data.get(KEY_OLD_PLAYERS, [])
-
+    
         if game.seated_count() >= self._min_players:
             self._start_game(context, game, chat_id)
         else:
             self._view.send_message(chat_id, f"👤 تعداد بازیکنان برای شروع کافی نیست (حداقل {self._min_players} نفر).")
+
 
     def _start_game(self, context: CallbackContext, game: Game, chat_id: ChatId) -> None:
         if game.ready_message_main_id:
@@ -294,15 +295,15 @@ class PokerBotModel:
             game.ready_message_main_id = None
     
         if not hasattr(game, 'dealer_index'):
-             game.dealer_index = -1
+            game.dealer_index = -1
         game.dealer_index = (game.dealer_index + 1) % game.seated_count()
     
-        self._view.send_message(chat_id, '🚀 !بازی شروع شد!')
+        self._view.send_message(chat_id, '🚀 بازی شروع شد!')
     
         game.state = GameState.ROUND_PRE_FLOP
-        self._divide_cards(game, chat_id)
         self._round_rate.set_blinds(game, chat_id)
         context.chat_data[KEY_OLD_PLAYERS] = [p.user_id for p in game.players]
+
 
     def _divide_cards(self, game: Game, chat_id: ChatId):
         for player in game.seated_players():
@@ -700,18 +701,19 @@ class PokerBotModel:
         """
         print(f"DEBUG: Clearing game messages...")
     
-        # ۱. پاک کردن پیام نوبت فعال (که دکمه‌ها را دارد)
         if game.turn_message_id:
             self._view.remove_message(chat_id, game.turn_message_id)
-            game.turn_message_id = None # آن را نال می‌کنیم تا دوباره استفاده نشود
+            game.turn_message_id = None
     
-        # ۲. پاک کردن بقیه پیام‌های ذخیره شده در لیست
-        # ما از یک کپی از لیست استفاده می‌کنیم تا حذف عناصر در حین پیمایش مشکلی ایجاد نکند
         for message_id in list(game.message_ids_to_delete):
             self._view.remove_message(chat_id, message_id)
-        
-        # ۳. بعد از اتمام کار، لیست را کاملاً خالی می‌کنیم
+    
         game.message_ids_to_delete.clear()
+        
+        if game.turn_message_id:
+            self._view.remove_message(chat_id, game.turn_message_id)
+            game.turn_message_id = None
+
         
     def _showdown(self, game: Game, chat_id: ChatId, context: CallbackContext) -> None:
         """
@@ -767,7 +769,44 @@ class PokerBotModel:
         game.reset()
 
         self._view.send_new_hand_ready_message(chat_id)
-        
+    def send_hand_result(self, chat_id, result_text, *, game):
+        if not result_text:
+            return None
+        result_text = self._sanitize_text(result_text)
+        try:
+            msg = self._bot.send_message(
+                chat_id=chat_id,
+                text=result_text,
+                parse_mode=ParseMode.MARKDOWN,
+                disable_web_page_preview=True,
+            )
+            if msg and self._mdm:
+                self._mdm.register(
+                    chat_id=chat_id,
+                    message_id=msg.message_id,
+                    game_id=game.id,
+                    hand_id=game.hand_id,
+                    tag="RESULT",  # Protected message
+                    protected=True,
+                    ttl=None
+                )
+            return msg.message_id if msg else None
+        except Exception as e:
+            logging.error(f"Error sending hand result: {e}")
+        return None
+    def purge_hand_messages(self, *, game):
+        try:
+            if not self._mdm:
+                return 0
+            return self._mdm.purge_context(
+                game_id=game.id,
+                hand_id=game.hand_id,
+                include_protected=False
+            )
+        except Exception as e:
+            logging.error(f"Error purging hand messages: {e}")
+        return 0
+  
     def _end_hand(self, game, chat_id, context):
         try:
             if hasattr(self._view, "purge_hand_messages"):
@@ -775,21 +814,22 @@ class PokerBotModel:
                 self._view.purge_hand_messages(game=game)
             elif self._mdm:
                 logging.debug("[MDM] purge_context called")
-                self._mdm.purge_context(game_id=game.id, hand_id=None, include_protected=False, reason="purge_ctx")
+                self._mdm.purge_context(game_id=game.id, hand_id=game.hand_id, include_protected=False, reason="purge_ctx")
         except Exception as e:
             logging.info(f"[MDM] purge failed: {e}")
-    
+        
         try:
+            # Purge the chat for all non-protected messages
             if self._mdm:
                 self._mdm.purge_chat(chat_id=chat_id, include_protected=False, reason="purge_chat_end_hand")
         except Exception as e:
             logging.info(f"[MDM] purge chat failed: {e}")
-    
+        
         try:
             context.chat_data[KEY_OLD_PLAYERS] = [p.user_id for p in game.players if p.wallet.value() > 0]
         except Exception as e:
             logging.info(f"[MDM] save old players failed: {e}")
-    
+        
         try:
             start_next_ttl = getattr(self._cfg, "START_NEXT_TTL_SECONDS", None)
             if hasattr(self._view, "send_start_next_hand"):
@@ -797,8 +837,9 @@ class PokerBotModel:
                 self._view.send_start_next_hand(chat_id=chat_id, game=game, ttl=start_next_ttl)
         except Exception as e:
             logging.info(f"[MDM] send start-next failed: {e}")
-    
+        
         context.chat_data[KEY_CHAT_DATA_GAME] = Game()
+
 
 
     def _format_cards(self, cards: Cards) -> str:
