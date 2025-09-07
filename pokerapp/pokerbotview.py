@@ -217,6 +217,25 @@ class PokerBotViewer:
             chat_id = update.effective_chat.id if update and update.effective_chat else None
             if chat_id is not None:
                 self._mdm.register(chat_id=chat_id, message_id=msg.message_id, game_id=None, hand_id=None, tag="generic", protected=False, ttl=None)
+                
+    def send_action_announce(self, chat_id: ChatId, text: str, *, game: Game) -> Optional[MessageId]:
+        """ارسال پیام اطلاع‌رسانی حرکت (مثل چک/کال/ریز/فولد) با ثبت MDM."""
+        try:
+            msg = self._bot.send_message(chat_id=chat_id, text=text, parse_mode=ParseMode.MARKDOWN)
+            if msg and self._mdm:
+                self._mdm.register(
+                    chat_id=chat_id,
+                    message_id=msg.message_id,
+                    game_id=game.id,
+                    hand_id=game.hand_id,
+                    tag="ACTION_ANNOUNCE",
+                    protected=False,
+                    ttl=None
+                )
+            return msg.message_id if msg else None
+        except Exception as e:
+            print(f"Error sending action announce: {e}")
+        return None
 
 
     def send_desk_cards_img(
@@ -315,8 +334,7 @@ class PokerBotViewer:
             player: Player,
             money: Money,
     ) -> Optional[MessageId]:
-        """ارسال پیام نوبت بازیکن با فرمت فارسی/ایموجی و استفاده از delay جدید 0.5s."""
-        
+        """ارسال پیام نوبت بازیکن با فرمت فارسی/ایموجی؛ بدون purge عمومی."""
         # نمایش کارت‌های میز
         if not game.cards_table:
             cards_table = "🚫 کارتی روی میز نیست"
@@ -345,33 +363,24 @@ class PokerBotViewer:
         # کیبورد اینلاین
         markup = self._get_turns_markup(call_check_text, call_check_action)
     
-        # حذف پیام نوبت قبلی
-        if self._mdm:
-            self._mdm.purge_context(
-                game_id=game.id,
-                hand_id=game.hand_id,
-                include_protected=False  # پیام‌های غیرprotected حذف شوند
-            )
-    
         try:
-            # ارسال پیام نوبت جدید
+            # ارسال پیام نوبت جدید (بدون purge_context سنگین)
             message = self._bot.send_message(
                 chat_id=chat_id,
                 text=text,
                 reply_markup=markup,
                 parse_mode=ParseMode.MARKDOWN,
-                disable_notification=False,  # player gets notification
+                disable_notification=False,
             )
-    
-            # ثبت پیام در MDM
-            if isinstance(message, Message):
+            # ثبت برای mdm (برچسب اختصاصی نوبت)
+            if isinstance(message, Message) and self._mdm:
                 self._mdm.register(
                     chat_id=chat_id,
                     message_id=message.message_id,
                     game_id=game.id,
                     hand_id=game.hand_id,
-                    tag="TURN_PROMPT",  # برای پیام نوبت
-                    protected=False,  # پیام نوبت غیرprotected است
+                    tag="TURN_PROMPT",
+                    protected=False,
                     ttl=None
                 )
                 return message.message_id
