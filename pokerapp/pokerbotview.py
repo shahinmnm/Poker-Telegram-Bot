@@ -140,20 +140,18 @@ class PokerBotViewer:
         )
 
     def purge_hand_messages(self, *, game):
-        """
-        پاک‌سازی پیام‌های مربوط به دست جاری (به‌جز protected ها مثل نتایج)
-        """
         try:
             if not self._mdm:
                 return 0
             return self._mdm.purge_context(
                 game_id=game.id,
                 hand_id=game.hand_id,
-                include_protected=False
+                include_protected=False  # تنها پیام‌های غیرprotected پاک شوند
             )
         except Exception as e:
             logging.error(f"Error purging hand messages: {e}")
         return 0
+
         
     def _sanitize_text(self, text: str) -> str:
         """
@@ -165,20 +163,15 @@ class PokerBotViewer:
         return text
         
     def send_message(self, chat_id, text, reply_markup=None, mdm_tag=None, mdm_protected=False, ttl=None, parse_mode=None):
-        """
-        ارسال پیام به چت و ثبت آن در MDM برای پاکسازی خودکار.
-        حالا از پارامتر `parse_mode` پشتیبانی می‌کند.
-        """
         try:
             text = self._sanitize_text(text)
             msg = self._bot.send_message(
                 chat_id=chat_id,
                 text=text,
                 reply_markup=reply_markup,
-                parse_mode=parse_mode  # اکنون این پارامتر پذیرفته می‌شود
+                parse_mode=parse_mode
             )
             if msg and self._mdm:
-                # ثبت پیام در سیستم مدیریت پیام برای حذف خودکار
                 self._mdm.register(
                     chat_id=chat_id,
                     message_id=msg.message_id,
@@ -190,7 +183,6 @@ class PokerBotViewer:
         except Exception as e:
             logging.error(f"Error sending message: {e}")
         return None
-
 
     def send_photo(self, chat_id: ChatId) -> None:
         try:
@@ -325,12 +317,13 @@ class PokerBotViewer:
             money: Money,
     ) -> Optional[MessageId]:
         """ارسال پیام نوبت بازیکن با فرمت فارسی/ایموجی و استفاده از delay جدید 0.5s."""
+        
         # نمایش کارت‌های میز
         if not game.cards_table:
             cards_table = "🚫 کارتی روی میز نیست"
         else:
             cards_table = " ".join(game.cards_table)
-
+    
         # محاسبه CALL یا CHECK
         call_amount = game.max_round_rate - player.round_rate
         call_check_action = self.define_check_call_action(game, player)
@@ -338,7 +331,7 @@ class PokerBotViewer:
             call_check_text = f"{call_check_action.value} ({call_amount}$)"
         else:
             call_check_text = call_check_action.value
-
+    
         # متن پیام با Markdown
         text = (
             f"🎯 **نوبت بازی {player.mention_markdown} (صندلی {player.seat_index+1})**\n\n"
@@ -349,11 +342,21 @@ class PokerBotViewer:
             f"📈 **حداکثر شرط این دور:** `{game.max_round_rate}$`\n\n"
             f"⬇️ حرکت خود را انتخاب کنید:"
         )
-
+    
         # کیبورد اینلاین
         markup = self._get_turns_markup(call_check_text, call_check_action)
-
+    
+        # حذف پیام نوبت قبلی اگر وجود داشته باشد
+        if self._mdm:
+            self._mdm.delete_by_tag(
+                game_id=game.id,
+                hand_id=game.hand_id,
+                tag="TURN_PROMPT",
+                include_protected=False
+            )
+    
         try:
+            # ارسال پیام نوبت جدید
             message = self._bot.send_message(
                 chat_id=chat_id,
                 text=text,
@@ -361,11 +364,24 @@ class PokerBotViewer:
                 parse_mode=ParseMode.MARKDOWN,
                 disable_notification=False,  # player gets notification
             )
+    
+            # ثبت پیام در MDM
             if isinstance(message, Message):
+                self._mdm.register(
+                    chat_id=chat_id,
+                    message_id=message.message_id,
+                    game_id=game.id,
+                    hand_id=game.hand_id,
+                    tag="TURN_PROMPT",  # برای پیام نوبت
+                    protected=False,  # پیام نوبت غیرprotected است
+                    ttl=None
+                )
                 return message.message_id
         except Exception as e:
             print(f"Error sending turn actions: {e}")
+    
         return None
+
 
     @staticmethod
     def _get_turns_markup(check_call_text: str, check_call_action: PlayerAction) -> InlineKeyboardMarkup:
