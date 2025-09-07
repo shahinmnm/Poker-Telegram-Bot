@@ -163,9 +163,10 @@ class PokerBotViewer:
         text = re.sub(r'\[([^\]]+)\]\(tg://user\?id=\d+\)', r'\1', text)
         return text
         
-    def send_message(self, chat_id, text, reply_markup=None, mdm_tag=None, mdm_protected=False, ttl=None):
+    def send_message(self, chat_id, text, reply_markup=None, mdm_tag=None, mdm_protected=False, ttl=None, parse_mode=None):
         """
-        ارسال پیام به چت و ثبت آن در MDM برای پاکسازی
+        ارسال پیام به چت و ثبت آن در MDM برای پاکسازی خودکار.
+        حالا از پارامتر `parse_mode` پشتیبانی می‌کند.
         """
         try:
             text = self._sanitize_text(text)
@@ -173,10 +174,10 @@ class PokerBotViewer:
                 chat_id=chat_id,
                 text=text,
                 reply_markup=reply_markup,
-                parse_mode=ParseMode.MARKDOWN  # Always use Markdown
+                parse_mode=parse_mode  # اکنون این پارامتر پذیرفته می‌شود
             )
             if msg and self._mdm:
-                # ثبت پیام در سیستم مدیریت پیام برای حذف
+                # ثبت پیام در سیستم مدیریت پیام برای حذف خودکار
                 self._mdm.register(
                     chat_id=chat_id,
                     message_id=msg.message_id,
