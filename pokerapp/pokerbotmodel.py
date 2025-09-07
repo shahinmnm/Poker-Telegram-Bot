@@ -801,12 +801,12 @@ class PokerBotModel:
             return self._mdm.purge_context(
                 game_id=game.id,
                 hand_id=game.hand_id,
-                include_protected=False
+                include_protected=False  # تنها پیام‌های غیرprotected پاک شوند
             )
         except Exception as e:
             logging.error(f"Error purging hand messages: {e}")
         return 0
-  
+
     def _end_hand(self, game, chat_id, context):
         try:
             if hasattr(self._view, "purge_hand_messages"):
