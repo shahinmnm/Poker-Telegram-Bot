@@ -30,6 +30,211 @@ class PokerBotViewer:
     def __init__(self, bot: Bot):
         self._bot = bot
         self._desk_generator = DeskImageGenerator()
+        
+    def _format_last_actions(self, game: Game) -> str:
+        """
+        متن «۳ اکشن اخیر» را به‌صورت لیست گلوله‌ای تولید می‌کند.
+        اگر لیست خالی بود، رشته خالی برمی‌گرداند.
+        """
+        if not game.last_actions:
+            return ""
+        bullets = "\n".join(f"• {a}" for a in game.last_actions)
+        return f"\n📝 آخرین اکشن‌ها:\n{bullets}"
+
+    def _build_hud_text(self, game: Game) -> str:
+        """
+        متن HUD را می‌سازد:
+        - خط اول خلاصه برای نمایش در پین: دست/نوبت/پات
+        - بدنه: کارت‌های میز، پات، سقف دور، نوبت، ۳ اکشن اخیر
+        """
+        # نوبت فعلی به‌صورت امن
+        turn_str = "—"
+        try:
+            if 0 <= game.current_player_index < game.seated_count():
+                p = game.get_player_by_seat(game.current_player_index)
+                if p:
+                    turn_str = p.mention_markdown
+        except Exception:
+            pass
+    
+        # خط اول (برای پین)
+        line1 = f"🃏 دست جاری | نوبت: {turn_str} | پات: {game.pot}$"
+    
+        # کارت‌های روی میز
+        table_cards = "🚫" if not game.cards_table else "  ".join(map(str, game.cards_table))
+        cap = game.max_round_rate
+    
+        body = (
+            f"\n\n"
+            f"🃏 کارت‌های روی میز:\n{table_cards}\n\n"
+            f"💰 پات: `{game.pot}$` | 🪙 سقف این دور: `{cap}$`\n"
+            f"▶️ نوبت: {turn_str}\n"
+        )
+        last_actions_text = self._format_last_actions(game)
+        return line1 + body + last_actions_text
+
+    def ensure_hud(self, chat_id: ChatId, game: Game) -> Optional[MessageId]:
+        """
+        اگر پیام HUD موجود نباشد، ایجاد می‌کند و شناسه‌اش را در game.hud_message_id ذخیره می‌کند.
+        اگر موجود باشد، همان را برمی‌گرداند.
+        """
+        if getattr(game, "hud_message_id", None):
+            return game.hud_message_id
+    
+        text = self._build_hud_text(game)
+        msg_id = self.send_message_return_id(
+            chat_id=chat_id,
+            text=text,
+        )  # از متد موجود برای ارسال و دریافت آیدی استفاده می‌کنیم. 
+    
+        if msg_id:
+            game.hud_message_id = msg_id
+            return msg_id
+    
+        # تلاش دومِ امن، اگر به هر دلیل شکست خورد
+        msg_id = self.send_message_return_id(chat_id=chat_id, text="🃏 میز پوکر در حال اجرا…")
+        if msg_id:
+            game.hud_message_id = msg_id
+            return msg_id
+    
+        return None
+
+    def edit_hud(self, chat_id: ChatId, game: Game) -> None:
+        """
+        متن HUD را روی همان پیام ثابت ادیت می‌کند.
+        اگر قبلاً دکمه اینلاین روی HUD مانده باشد، با remove_markup پاک می‌شود.
+        """
+        if not getattr(game, "hud_message_id", None):
+            # اگر HUD هنوز ساخته نشده، بساز
+            self.ensure_hud(chat_id, game)
+    
+        if not game.hud_message_id:
+            return
+    
+        text = self._build_hud_text(game)
+        try:
+            self._bot.edit_message_text(
+                chat_id=chat_id,
+                message_id=game.hud_message_id,
+                text=text,
+                parse_mode=ParseMode.MARKDOWN,
+                disable_web_page_preview=True,
+            )
+        except Exception as e:
+            print(f"[HUD] edit_message_text error: {e}")
+    
+        # اطمینان از حذف مارک‌آپ اگر قبلاً دکمه‌ای روی این پیام بوده
+        self.remove_markup(chat_id=chat_id, message_id=game.hud_message_id)  # متد موجود و امن برای حذف مارک‌آپ. 
+
+    def _build_turn_text(self, game: Game, player: Player, money: Money) -> str:
+        """
+        متن پیام نوبت (Pinned Turn Message) را می‌سازد.
+        خط اول کوتاه و مناسب نمایش در پین است؛ بدنه جزئیات را می‌دهد.
+        """
+        # خط اول: خلاصه‌ی پین
+        line1 = f"🎯 نوبت: {player.mention_markdown} | پات: {game.pot}$"
+    
+        # کارت‌های میز
+        cards_table = "🚫 کارتی روی میز نیست" if not game.cards_table else " ".join(map(str, game.cards_table))
+    
+        text = (
+            f"{line1}\n\n"
+            f"🃏 کارت‌های روی میز: {cards_table}\n"
+            f"💰 پات: `{game.pot}$`\n"
+            f"💵 موجودی شما: `{money}$`\n"
+            f"🎲 بت فعلی شما: `{player.round_rate}$`\n"
+            f"📈 سقف این دور: `{game.max_round_rate}$`\n\n"
+            f"⬇️ حرکت خود را انتخاب کنید:"
+        )
+        return text
+        
+    def pin_message(self, chat_id: ChatId, message_id: MessageId) -> None:
+        """پین‌کردن پیام با کنترل خطا (بدون قطع جریان بازی)."""
+        try:
+            self._bot.pin_chat_message(chat_id=chat_id, message_id=message_id, disable_notification=True)
+        except Exception as e:
+            print(f"[TURN] pin_message error: {e}")
+    
+    def unpin_message(self, chat_id: ChatId, message_id: MessageId = None) -> None:
+        """
+        آن‌پین پیام. اگر message_id None باشد، طبق رفتار تلگرام آخرین پین را هدف می‌گیرد.
+        """
+        try:
+            if message_id:
+                # Bot API فعلاً آن‌پین بر اساس message_id ندارد؛ پس به‌صورت کلی آن‌پین می‌کنیم.
+                self._bot.unpin_chat_message(chat_id=chat_id)
+            else:
+                self._bot.unpin_chat_message(chat_id=chat_id)
+        except Exception as e:
+            print(f"[TURN] unpin_message error: {e}")
+
+    def ensure_pinned_turn_message(self, chat_id: ChatId, game: Game, player: Player, money: Money) -> Optional[MessageId]:
+        """
+        اگر پیام نوبت (turn_message_id) وجود ندارد:
+          1) یک‌بار پیام نوبت را می‌سازیم (با دکمه‌ها)،
+          2) همان لحظه پین می‌کنیم،
+          3) شناسه‌اش را در game.turn_message_id ذخیره می‌کنیم.
+        اگر وجود دارد، صرفاً همان را برمی‌گردانیم.
+        """
+        if getattr(game, "turn_message_id", None):
+            return game.turn_message_id
+    
+        # ساخت متن و کیبورد
+        call_action = self.define_check_call_action(game, player)  # CHECK یا CALL 
+        call_amount = max(0, game.max_round_rate - player.round_rate)
+        call_text = call_action.value if call_action.name == "CHECK" else f"{call_action.value} ({call_amount}$)"
+        markup = self._get_turns_markup(check_call_text=call_text, check_call_action=call_action)  # 
+    
+        text = self._build_turn_text(game, player, money)
+    
+        try:
+            msg = self._bot.send_message(
+                chat_id=chat_id,
+                text=text,
+                reply_markup=markup,
+                parse_mode=ParseMode.MARKDOWN,
+                disable_notification=False,  # برای جلب توجه بازیکن فعال
+                disable_web_page_preview=True,
+            )
+            if msg and hasattr(msg, "message_id"):
+                game.turn_message_id = msg.message_id
+                # پین‌کردن
+                self.pin_message(chat_id, msg.message_id)
+                return msg.message_id
+        except Exception as e:
+            print(f"[TURN] ensure_pinned_turn_message send error: {e}")
+        return None
+
+    def edit_turn_message_text_and_markup(self, chat_id: ChatId, game: Game, player: Player, money: Money) -> None:
+        """
+        متن و مارک‌آپ پیام نوبت پین‌شده را ادیت می‌کند.
+        اگر پیام از بین رفته باشد (مثلاً توسط ادمین پاک شده)، دوباره می‌سازد و پین می‌کند.
+        """
+        if not getattr(game, "turn_message_id", None):
+            # پیام نوبت وجود ندارد؛ بساز و پین کن
+            self.ensure_pinned_turn_message(chat_id, game, player, money)
+            return
+    
+        call_action = self.define_check_call_action(game, player)
+        call_amount = max(0, game.max_round_rate - player.round_rate)
+        call_text = call_action.value if call_action.name == "CHECK" else f"{call_action.value} ({call_amount}$)"
+        markup = self._get_turns_markup(check_call_text=call_text, check_call_action=call_action)
+    
+        text = self._build_turn_text(game, player, money)
+    
+        try:
+            self._bot.edit_message_text(
+                chat_id=chat_id,
+                message_id=game.turn_message_id,
+                text=text,
+                parse_mode=ParseMode.MARKDOWN,
+                disable_web_page_preview=True,
+                reply_markup=markup,
+            )
+        except Exception as e:
+            print(f"[TURN] edit_message_text error: {e}")
+            # تلاش برای بازسازی پیام در صورت حذف/خطای ادیت
+            self.ensure_pinned_turn_message(chat_id, game, player, money)
 
     def send_message_return_id(
         self,
