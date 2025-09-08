@@ -111,18 +111,33 @@ class Game:
     
         self.ready_users = set()
         self.message_ids = {}
-        self.last_actions = []
+        self.last_actions = []  # تاریخچه اکشن‌ها برای HUD
     
-        # 🆕 اضافه شده: پیام لیست آماده‌ها
+        # 🆕 پیام لیست آماده‌ها
         self.ready_message_main_id: Optional[MessageId] = None
     
-        # 🆕 اضافه شده: آرایه پیام‌هایی که باید پاک شوند
+        # 🆕 پیام‌هایی که انتهای دست باید پاک شوند
         self.message_ids_to_delete: List[MessageId] = []
     
-        # 🆕 اضافه شده: پیام نوبت فعلی
+        # 🆕 پیام نوبت فعلی (پیام جدا و پین‌شونده برای دکمه‌ها)
         self.turn_message_id: Optional[MessageId] = None
+    
+        # 🆕 پیام HUD (ثابت و ادیت‌شونده؛ پین نمی‌شود)
+        self.hud_message_id: Optional[MessageId] = None
+        
+    def add_last_action(self, text: str) -> None:
+        """
+        یک اکشن جدید را به لیست آخرین اکشن‌ها اضافه می‌کند و طول
+        لیست را حداکثر به ۳ مورد محدود نگه می‌دارد (FIFO).
+        این متد صرفاً برای نمایش در HUD است و در منطق بازی دخالت ندارد.
+        """
+        if text is None:
+            return
+        self.last_actions.append(text)
+        if len(self.last_actions) > 3:
+            self.last_actions = self.last_actions[-3:]
 
-    # --- Seats / players helpers ----------------------------------------
+
     @property
     def players(self) -> List[Player]:
         """Return a compact list of players currently seated (order is seat ascending)."""
