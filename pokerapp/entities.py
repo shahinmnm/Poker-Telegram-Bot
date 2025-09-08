@@ -89,13 +89,13 @@ class Game:
         # dealer_index is a seat index into self.seats (0..MAX_PLAYERS-1)
         self.dealer_index = 0
         self.reset()
+
     def reset(self):
         """
         Initialize or reset the game. We use a fixed-size seats array to
         represent table seats so players keep their seat between hands.
         """
         self.id = str(uuid4())
-        self.hand_id = str(uuid4())  # 🆕 هر دست یک شناسه‌ی مجزا
         self.pot = 0
         self.max_round_rate = 0
         self.state = GameState.INITIAL
@@ -113,18 +113,16 @@ class Game:
         self.message_ids = {}
         self.last_actions = []
     
-        # 🆕 پیام لیست آماده‌ها
+        # 🆕 اضافه شده: پیام لیست آماده‌ها
         self.ready_message_main_id: Optional[MessageId] = None
     
-        # 🆕 لیست پیام‌های قابل حذف انتهای دست
+        # 🆕 اضافه شده: آرایه پیام‌هایی که باید پاک شوند
         self.message_ids_to_delete: List[MessageId] = []
     
-        # 🆕 پیام نوبت فعلی
+        # 🆕 اضافه شده: پیام نوبت فعلی
         self.turn_message_id: Optional[MessageId] = None
-    
-        # 🆕 آخرین پیام اطلاع‌رسانی حرکت (مثل "✋ ... چک کرد")
-        self.last_action_message_id: Optional[MessageId] = None
 
+    # --- Seats / players helpers ----------------------------------------
     @property
     def players(self) -> List[Player]:
         """Return a compact list of players currently seated (order is seat ascending)."""

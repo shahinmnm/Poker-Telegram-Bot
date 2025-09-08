@@ -1,6 +1,4 @@
 #!/usr/bin/env python3
-import re
-from telegram.parsemode import ParseMode
 
 from telegram import (
     Message,
@@ -11,7 +9,6 @@ from telegram import (
     Bot,
     InputMediaPhoto,
 )
-from pokerapp.message_delete_manager import MessageDeleteManager  # اضافه کردن import
 from threading import Timer
 from io import BytesIO
 from typing import List, Optional
@@ -30,158 +27,53 @@ from pokerapp.entities import (
 )
 
 class PokerBotViewer:
-    def __init__(self, bot: Bot, mdm: Optional[MessageDeleteManager] = None, cfg=None):
+    def __init__(self, bot: Bot):
         self._bot = bot
-        self._mdm = mdm
-        self._cfg = cfg
-    def send_message_return_id(self, chat_id: int, text: str, reply_markup=None) -> int:
-        if not text:
-            return None
-        text = re.sub(r'\[([^\]]+)\]\(tg://user\?id=\d+\)', r'\1', text)
-        msg = self._bot.send_message(chat_id=chat_id, text=text, reply_markup=reply_markup)
-        if msg and self._mdm:
-            self._mdm.register(chat_id=chat_id, message_id=msg.message_id, game_id=None, hand_id=None, tag="generic", protected=False, ttl=None)
-        return msg.message_id if msg else None
+        self._desk_generator = DeskImageGenerator()
 
-  
-    def send_text_tracked(self, chat_id, text, *, game=None, tag="generic", ttl=None, protected=False, reply_markup=None):
-        """
-        ارسال پیام با ردیابی برای حذف خودکار
-        """
+    def send_message_return_id(
+        self,
+        chat_id: ChatId,
+        text: str,
+        reply_markup: ReplyKeyboardMarkup = None,
+    ) -> Optional[MessageId]:
+        """Sends a message and returns its ID, or None if not applicable."""
         try:
-            msg = self.send_message(
+            message = self._bot.send_message(
                 chat_id=chat_id,
-                text=text,
-                game=game,
-                tag=tag,
-                ttl=ttl,
-                protected=protected,
-                reply_markup=reply_markup
-            )
-            return msg
-        except Exception as e:
-            logging.error(f"Error sending tracked message: {e}")
-        return None
-    
-
-    def send_photo_tracked(self, chat_id, photo_bytes, *, caption="", game=None, tag="desk", ttl=None, protected=False):
-        """
-        ارسال عکس با ردیابی برای حذف خودکار
-        """
-        try:
-            msg = self._bot.send_photo(
-                chat_id=chat_id,
-                photo=photo_bytes,
-                caption=caption,
                 parse_mode=ParseMode.MARKDOWN,
-                disable_notification=True,
-            )
-            if msg and self._mdm:
-                self._mdm.register(
-                    chat_id=chat_id,
-                    message_id=msg.message_id,
-                    game_id=(game.id if game else None),
-                    hand_id=(game.hand_id if game else None),
-                    tag=tag,
-                    protected=protected,
-                    ttl=ttl
-                )
-            return msg.message_id if msg else None
-        except Exception as e:
-            logging.error(f"Error sending photo tracked: {e}")
-        return None 
-    
-    def send_hand_result(self, chat_id, result_text, *, game):
-        if not result_text:
-            return None
-        result_text = self._sanitize_text(result_text)
-        try:
-            msg = self._bot.send_message(
-                chat_id=chat_id,
-                text=result_text,
-                parse_mode=ParseMode.MARKDOWN,
-                disable_web_page_preview=True,
-            )
-            if msg and self._mdm:
-                # ثبت پیام با mdm_protected=True برای جلوگیری از پاک شدن آن در پایان دست
-                self._mdm.register(
-                    chat_id=chat_id,
-                    message_id=msg.message_id,
-                    game_id=game.id,
-                    hand_id=game.hand_id,
-                    tag="RESULT",  # برای نشان دادن پیام نتایج
-                    protected=True,  # پیام نتایج محافظت شده است
-                    ttl=None
-                )
-            return msg.message_id if msg else None
-        except Exception as e:
-            logging.error(f"Error sending hand result: {e}")
-        return None
-
-
-    def send_start_next_hand(self, chat_id, *, game, ttl: Optional[int] = None):
-        """
-        ارسال پیام شروع دست بعدی به چت با TTL و protected=True
-        """
-        if not ttl:
-            ttl = self._cfg.START_NEXT_TTL_SECONDS  # از تنظیمات کانفیگ استفاده می‌کنیم
-    
-        text = "♻️ برای شروع دست بعدی آماده‌اید؟ /ready"
-        
-        # ارسال پیام با protected=True و TTL مشخص
-        return self.send_message(
-            chat_id=chat_id,
-            text=text,
-            mdm_game_id=game.id,
-            mdm_hand_id=game.hand_id,
-            mdm_tag="NEXT_BANNER",  # برچسب دست بعدی
-            mdm_protected=True,  # پیام شروع دست بعدی محافظت‌شده است
-            ttl=ttl
-        )
-
-    def purge_hand_messages(self, *, game):
-        try:
-            if not self._mdm:
-                return 0
-            return self._mdm.purge_context(
-                game_id=game.id,
-                hand_id=game.hand_id,
-                include_protected=False  # تنها پیام‌های غیرprotected پاک شوند
-            )
-        except Exception as e:
-            logging.error(f"Error purging hand messages: {e}")
-        return 0
-
-        
-    def _sanitize_text(self, text: str) -> str:
-        """
-        پاک‌سازی متن از لینک‌های غیرضروری
-        """
-        if not text:
-            return text
-        text = re.sub(r'\[([^\]]+)\]\(tg://user\?id=\d+\)', r'\1', text)
-        return text
-        
-    def send_message(self, chat_id, text, reply_markup=None, mdm_tag=None, mdm_protected=False, ttl=None, parse_mode=None):
-        try:
-            text = self._sanitize_text(text)
-            msg = self._bot.send_message(
-                chat_id=chat_id,
                 text=text,
                 reply_markup=reply_markup,
-                parse_mode=parse_mode
+                disable_notification=True,
+                disable_web_page_preview=True,
             )
-            if msg and self._mdm:
-                self._mdm.register(
-                    chat_id=chat_id,
-                    message_id=msg.message_id,
-                    tag=mdm_tag,
-                    protected=mdm_protected,
-                    ttl=ttl
-                )
-            return msg
+            if isinstance(message, Message):
+                return message.message_id
         except Exception as e:
-            logging.error(f"Error sending message: {e}")
+            print(f"Error sending message and returning ID: {e}")
+        return None
+
+
+    def send_message(
+        self,
+        chat_id: ChatId,
+        text: str,
+        reply_markup: ReplyKeyboardMarkup = None,
+        parse_mode: str = ParseMode.MARKDOWN,  # <--- پارامتر جدید اضافه شد
+    ) -> Optional[MessageId]:
+        try:
+            message = self._bot.send_message(
+                chat_id=chat_id,
+                parse_mode=parse_mode,  # <--- از پارامتر ورودی استفاده شد
+                text=text,
+                reply_markup=reply_markup,
+                disable_notification=True,
+                disable_web_page_preview=True,
+            )
+            if isinstance(message, Message):
+                return message.message_id
+        except Exception as e:
+            print(f"Error sending message: {e}")
         return None
 
     def send_photo(self, chat_id: ChatId) -> None:
@@ -208,35 +100,20 @@ class PokerBotViewer:
         except Exception as e:
             print(f"Error sending dice reply: {e}")
             return None
-    def send_message_reply(self, update, text: str, reply_markup=None) -> None:
-        if not text:
-            return
-        text = re.sub(r'\[([^\]]+)\]\(tg://user\?id=\d+\)', r'\1', text)
-        msg = update.message.reply_text(text=text, reply_markup=reply_markup)
-        if msg and self._mdm:
-            chat_id = update.effective_chat.id if update and update.effective_chat else None
-            if chat_id is not None:
-                self._mdm.register(chat_id=chat_id, message_id=msg.message_id, game_id=None, hand_id=None, tag="generic", protected=False, ttl=None)
-                
-    def send_action_announce(self, chat_id: ChatId, text: str, *, game: Game) -> Optional[MessageId]:
-        """ارسال پیام اطلاع‌رسانی حرکت (مثل چک/کال/ریز/فولد) با ثبت MDM."""
-        try:
-            msg = self._bot.send_message(chat_id=chat_id, text=text, parse_mode=ParseMode.MARKDOWN)
-            if msg and self._mdm:
-                self._mdm.register(
-                    chat_id=chat_id,
-                    message_id=msg.message_id,
-                    game_id=game.id,
-                    hand_id=game.hand_id,
-                    tag="ACTION_ANNOUNCE",
-                    protected=False,
-                    ttl=None
-                )
-            return msg.message_id if msg else None
-        except Exception as e:
-            print(f"Error sending action announce: {e}")
-        return None
 
+    def send_message_reply(
+        self, chat_id: ChatId, message_id: MessageId, text: str
+    ) -> None:
+        try:
+            self._bot.send_message(
+                reply_to_message_id=message_id,
+                chat_id=chat_id,
+                parse_mode=ParseMode.MARKDOWN,
+                text=text,
+                disable_notification=True,
+            )
+        except Exception as e:
+            print(f"Error sending message reply: {e}")
 
     def send_desk_cards_img(
         self,
@@ -327,18 +204,22 @@ class PokerBotViewer:
         if player.round_rate >= game.max_round_rate:
             return PlayerAction.CHECK
         return PlayerAction.CALL
+
     def send_turn_actions(
-        self,
-        chat_id,
-        game,
-        player,
-        money,
-    ) -> Optional[int]:
+            self,
+            chat_id: ChatId,
+            game: Game,
+            player: Player,
+            money: Money,
+    ) -> Optional[MessageId]:
+        """ارسال پیام نوبت بازیکن با فرمت فارسی/ایموجی و استفاده از delay جدید 0.5s."""
+        # نمایش کارت‌های میز
         if not game.cards_table:
             cards_table = "🚫 کارتی روی میز نیست"
         else:
             cards_table = " ".join(game.cards_table)
 
+        # محاسبه CALL یا CHECK
         call_amount = game.max_round_rate - player.round_rate
         call_check_action = self.define_check_call_action(game, player)
         if call_check_action == PlayerAction.CALL:
@@ -346,6 +227,7 @@ class PokerBotViewer:
         else:
             call_check_text = call_check_action.value
 
+        # متن پیام با Markdown
         text = (
             f"🎯 **نوبت بازی {player.mention_markdown} (صندلی {player.seat_index+1})**\n\n"
             f"🃏 **کارت‌های روی میز:** {cards_table}\n"
@@ -356,21 +238,23 @@ class PokerBotViewer:
             f"⬇️ حرکت خود را انتخاب کنید:"
         )
 
+        # کیبورد اینلاین
         markup = self._get_turns_markup(call_check_text, call_check_action)
 
         try:
-            msg = self._bot.send_message(
+            message = self._bot.send_message(
                 chat_id=chat_id,
                 text=text,
                 reply_markup=markup,
                 parse_mode=ParseMode.MARKDOWN,
-                disable_notification=False,
+                disable_notification=False,  # player gets notification
             )
-            if isinstance(msg, Message):
-                return msg.message_id
-        except Exception:
-            pass
+            if isinstance(message, Message):
+                return message.message_id
+        except Exception as e:
+            print(f"Error sending turn actions: {e}")
         return None
+
     @staticmethod
     def _get_turns_markup(check_call_text: str, check_call_action: PlayerAction) -> InlineKeyboardMarkup:
         keyboard = [[
@@ -387,33 +271,39 @@ class PokerBotViewer:
 
     from telegram.error import BadRequest, Unauthorized  # اضافه کردن بالای فایل
     
-
-    def remove_markup(self, chat_id: int, message_id: int) -> None:
+    def remove_markup(self, chat_id: ChatId, message_id: MessageId) -> None:
+        """حذف دکمه‌های اینلاین از یک پیام و فیلتر کردن ارورهای رایج."""
+        if not message_id:
+            return
         try:
-            self._bot.edit_message_reply_markup(chat_id=chat_id, message_id=message_id, reply_markup=None)
-        except Exception:
-            pass
-
+            self._bot.edit_message_reply_markup(chat_id=chat_id, message_id=message_id)
+        except BadRequest as e:
+            err = str(e).lower()
+            if "message to edit not found" in err or "message is not modified" in err:
+                print(f"[INFO] Markup already removed or message not found (ID={message_id}).")
+            else:
+                print(f"[WARNING] BadRequest removing markup (ID={message_id}): {e}")
+        except Unauthorized as e:
+            print(f"[INFO] Cannot edit markup, bot unauthorized in chat {chat_id}: {e}")
+        except Exception as e:
+            print(f"[ERROR] Unexpected error removing markup (ID={message_id}): {e}")
     
-    def remove_message(self, chat_id: int, message_id: int) -> None:
+    def remove_message(self, chat_id: ChatId, message_id: MessageId) -> None:
+        """حذف پیام از چت و فیلتر کردن ارورهای بی‌خطر."""
+        if not message_id:
+            return
         try:
             self._bot.delete_message(chat_id=chat_id, message_id=message_id)
-        except Exception:
-            pass
-
-    def send_action_announce(self, chat_id: int, text: str, *, game) -> Optional[int]:
-        try:
-            msg = self._bot.send_message(
-                chat_id=chat_id,
-                text=text,
-                parse_mode=ParseMode.MARKDOWN,
-                disable_web_page_preview=True,
-            )
-            if isinstance(msg, Message):
-                return msg.message_id
-        except Exception:
-            pass
-        return None
+        except BadRequest as e:
+            err = str(e).lower()
+            if "message to delete not found" in err or "message can't be deleted" in err:
+                print(f"[INFO] Message already deleted or too old (ID={message_id}).")
+            else:
+                print(f"[WARNING] BadRequest deleting message (ID={message_id}): {e}")
+        except Unauthorized as e:
+            print(f"[INFO] Cannot delete message, bot unauthorized in chat {chat_id}: {e}")
+        except Exception as e:
+            print(f"[ERROR] Unexpected error deleting message (ID={message_id}): {e}")
             
     def remove_message_delayed(self, chat_id: ChatId, message_id: MessageId, delay: float = 3.0) -> None:
         """حذف پیام با تأخیر برحسب ثانیه."""
