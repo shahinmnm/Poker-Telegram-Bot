@@ -997,7 +997,7 @@ class RoundRateModel:
         if small_blind_player is None or big_blind_player is None:
             return
     
-        # apply blinds (بدون پیام گروهی؛ فقط HUD)
+        # ✅ اعمال بلایند بدون تولید پیام گروهی؛ فقط HUD
         self._set_player_blind(game, small_blind_player, SMALL_BLIND, "کوچک", chat_id)
         self._set_player_blind(game, big_blind_player, SMALL_BLIND * 2, "بزرگ", chat_id)
     
@@ -1005,14 +1005,18 @@ class RoundRateModel:
         game.current_player_index = first_action_index
         game.trading_end_user_id = big_blind_player.user_id
     
-        # 🎯 پیام نوبتِ پین‌شونده (یک‌بار ساخته یا ادیت می‌شود) + HUD آپدیت
+        # ✅ پیام نوبتِ پین‌شونده (یک‌بار ساخته یا ادیت می‌شود)
         player_turn = game.get_player_by_seat(game.current_player_index)
         if player_turn:
-            self._model._send_turn_message(game, player_turn, chat_id) 
-
+            # از مدل برای تضمین/ادیت پیام نوبت استفاده می‌کنیم (بدون پیام جدید)
+            self._model._send_turn_message(game, player_turn, chat_id)
+    
+    
     def _set_player_blind(self, game: Game, player: Player, amount: Money, blind_type: str, chat_id: ChatId):
         """
-        اعمال بلایند بدون پیام گروهی؛ فقط ثبت در ۳ اکشن اخیر HUD و ادیت HUD.
+        اعمال بلایند برای بازیکن:
+        - کم‌کردن پول و آپدیت round_rate/total_bet/pot
+        - ثبت رویداد در «۳ اکشن اخیر» HUD (بدون ارسال پیام جدا در گروه)
         """
         try:
             player.wallet.authorize(game_id=str(chat_id), amount=amount)
@@ -1020,11 +1024,13 @@ class RoundRateModel:
             player.total_bet += amount
             game.pot += amount
     
+            # فقط ثبت در ۳ اکشن اخیر + ادیت HUD
             game.add_last_action(f"{player.mention_markdown} بلایند {blind_type} پرداخت کرد ({amount}$)")
             self._view.ensure_hud(chat_id, game)
             self._view.edit_hud(chat_id, game)
     
         except UserException:
+            # موجودی ناکافی → به اندازه موجودی برداشت و ALL_IN
             available_money = player.wallet.value()
             player.wallet.authorize(game_id=str(chat_id), amount=available_money)
             player.round_rate += available_money
@@ -1032,9 +1038,13 @@ class RoundRateModel:
             game.pot += available_money
             player.state = PlayerState.ALL_IN
     
-            game.add_last_action(f"{player.mention_markdown} برای بلایند موجودی کافی نداشت و ALL-IN شد ({available_money}$)")
+            # باز هم فقط در HUD ثبت شود
+            game.add_last_action(
+                f"⚠️ {player.mention_markdown} موجودی کافی برای بلایند نداشت و ALL-IN شد ({available_money}$)"
+            )
             self._view.ensure_hud(chat_id, game)
             self._view.edit_hud(chat_id, game)
+
 
     def collect_bets_for_pot(self, game: Game):
         # This function resets the round-specific bets for the next street.
