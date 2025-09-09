@@ -66,6 +66,14 @@ class PokerBotCotroller:
         و لاگ‌های دقیقی برای دیباگ ثبت می‌کند.
         """
         chat_id = update.effective_chat.id
+        now = datetime.datetime.utcnow().timestamp()
+        last = context.chat_data.get("_last_cb_ts", 0.0)
+        if now - last < 1.0:  # 1 ثانیه پنجره‌ی دیباونس
+            # جلوگیری از دوباره‌پردازی
+            if update.callback_query:
+                update.callback_query.answer(text="لطفاً صبر کنید…", show_alert=False)
+            return
+        context.chat_data["_last_cb_ts"] = now
         user_id = update.effective_user.id
         game: Game = context.chat_data.get(KEY_CHAT_DATA_GAME)
 
