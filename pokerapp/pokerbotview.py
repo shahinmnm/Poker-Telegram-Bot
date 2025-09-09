@@ -207,7 +207,7 @@ class PokerBotViewer:
             call_text = call_action.value if call_action.name == "CHECK" else f"{call_action.value} ({call_amount}$)"
             markup = self._get_turns_markup(check_call_text=call_text, check_call_action=call_action)
     
-            msg = self._bot.send_message(
+            msg = self._bot.send_message_sync(
                 chat_id=chat_id,
                 text=text,
                 reply_markup=markup,
@@ -252,16 +252,17 @@ class PokerBotViewer:
         except Exception as e:
             print(f"[TURN] edit_turn_message error: {e}")
 
-
     def send_message_return_id(
-        self,
-        chat_id: ChatId,
-        text: str,
-        reply_markup: ReplyKeyboardMarkup = None,
-    ) -> Optional[MessageId]:
-        """Sends a message and returns its ID, or None if not applicable."""
+            self,
+            chat_id: ChatId,
+            text: str,
+            reply_markup: ReplyKeyboardMarkup = None,
+        ) -> Optional[MessageId]:
+        """Sends a message and returns its ID, or None if not applicable.
+        ⚠️ از مسیر همزمان استفاده می‌کنیم تا بلافاصله message_id داشته باشیم.
+        """
         try:
-            message = self._bot.send_message(
+            message = self._bot.send_message_sync(
                 chat_id=chat_id,
                 parse_mode=ParseMode.MARKDOWN,
                 text=text,
@@ -274,7 +275,6 @@ class PokerBotViewer:
         except Exception as e:
             print(f"Error sending message and returning ID: {e}")
         return None
-
 
     def send_message(
         self,
@@ -407,7 +407,7 @@ class PokerBotViewer:
     ) -> Optional[MessageId]:
         markup = self._get_cards_markup(cards)
         try:
-            message = self._bot.send_message(
+            message = self._bot.send_message_sync(
                 chat_id=chat_id,
                 text="کارت‌های شما " + mention_markdown,
                 reply_markup=markup,
