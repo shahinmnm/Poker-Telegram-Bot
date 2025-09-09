@@ -497,27 +497,14 @@ class PokerBotModel:
         else:
             self._go_to_next_street(game, chat_id, context)
 
-
-    def _send_turn_message(self, game: Game, player: Player, chat_id: ChatId):
+    def _send_turn_message(self, game: Game, player: Player, chat_id: ChatId) -> None:
         """
-        نوبت بازیکن را روی «پیام نوبتِ پین‌شده» ادیت/ایجاد می‌کند
-        و HUD را هم‌زمان بدون دکمه به‌روز می‌نماید.
+        تضمین پیام نوبت پین‌شونده و سپس ادیت آن (بدون ایجاد پیام جدید).
         """
-        # HUD همیشه باید وجود داشته باشد (بدون دکمه)
-        self._view.ensure_hud(chat_id, game)
-        self._view.edit_hud(chat_id, game)
-    
-        # متن و دکمه‌ها روی پیام نوبتِ پین‌شده
         money = player.wallet.value()
-        if getattr(game, "turn_message_id", None):
-            # ادیت پیام نوبت موجود
-            self._view.edit_turn_message_text_and_markup(chat_id, game, player, money)
-        else:
-            # ایجاد + پین اولین پیام نوبت
-            self._view.ensure_pinned_turn_message(chat_id, game, player, money)
-    
-        # سازگاری با منطق زمان‌سنج
-        game.last_turn_time = datetime.datetime.now()
+        self._view.ensure_pinned_turn_message(chat_id, game, player, money)
+        self._view.edit_turn_message_text_and_markup(chat_id, game, player, money)
+
 
     
     def player_action_fold(self, update: Update, context: CallbackContext, game: Game) -> None:
@@ -1025,9 +1012,7 @@ class RoundRateModel:
 
     def _set_player_blind(self, game: Game, player: Player, amount: Money, blind_type: str, chat_id: ChatId):
         """
-        اعمال بلایند برای بازیکن:
-        - کم‌کردن پول و آپدیت round_rate/total_bet/pot (منطق مالی بدون تغییر)
-        - ثبت رویداد در «۳ اکشن اخیر» HUD (بدون ارسال پیام جدا در گروه)
+        اعمال بلایند بدون پیام گروهی؛ فقط ثبت در ۳ اکشن اخیر HUD و ادیت HUD.
         """
         try:
             player.wallet.authorize(game_id=str(chat_id), amount=amount)
@@ -1035,22 +1020,19 @@ class RoundRateModel:
             player.total_bet += amount
             game.pot += amount
     
-            # ✅ به‌جای پیام گروهی: ثبت در ۳ اکشن اخیر + ادیت HUD
             game.add_last_action(f"{player.mention_markdown} بلایند {blind_type} پرداخت کرد ({amount}$)")
             self._view.ensure_hud(chat_id, game)
             self._view.edit_hud(chat_id, game)
     
         except UserException:
             available_money = player.wallet.value()
-            # هرچه دارد All-in کند
             player.wallet.authorize(game_id=str(chat_id), amount=available_money)
             player.round_rate += available_money
             player.total_bet += available_money
             game.pot += available_money
             player.state = PlayerState.ALL_IN
     
-            # ✅ به‌جای پیام گروهی: ثبت در ۳ اکشن اخیر + ادیت HUD
-            game.add_last_action(f"⚠️ {player.mention_markdown} موجودی کافی برای بلایند نداشت → ALL-IN ({available_money}$)")
+            game.add_last_action(f"{player.mention_markdown} برای بلایند موجودی کافی نداشت و ALL-IN شد ({available_money}$)")
             self._view.ensure_hud(chat_id, game)
             self._view.edit_hud(chat_id, game)
 
