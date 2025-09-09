@@ -44,34 +44,50 @@ class PokerBotViewer:
     def _build_hud_text(self, game: Game) -> str:
         """
         متن HUD را می‌سازد:
-        - خط اول خلاصه برای نمایش در پین: دست/نوبت/پات
-        - بدنه: کارت‌های میز، پات، سقف دور، نوبت، ۳ اکشن اخیر
+        - خط اول کوتاه و مناسب پین: میز/پات/نوبت (با 🔴 اگر ALL-IN)
+        - بدنه: کارت‌های میز، پات، سقف دور، نوبت (با 🔴)،
+          و «۳ اکشن اخیر». اگر بازیکن(هایی) ALL-IN باشند، یک خط جمع‌وجور نشان می‌دهد.
         """
-        # نوبت فعلی به‌صورت امن
+        # --- نوبت فعلی به‌صورت امن + برچسب ALL-IN ---
         turn_str = "—"
         try:
             if 0 <= game.current_player_index < game.seated_count():
                 p = game.get_player_by_seat(game.current_player_index)
                 if p:
-                    turn_str = p.mention_markdown
+                    turn_str = p.mention_markdown if p.state != PlayerState.ALL_IN else f"{p.mention_markdown} (🔴 ALL-IN)"
         except Exception:
             pass
     
-        # خط اول (برای پین)
-        line1 = f"🃏 دست جاری | نوبت: {turn_str} | پات: {game.pot}$"
+        # --- خط اول کوتاه برای پین (یک‌خطه و پرمعنا) ---
+        # مثال خروجی: "🃏 میز | پات: 120$ | نوبت: @Alice (🔴 ALL-IN)"
+        line1 = f"🃏 میز | پات: {game.pot}$ | نوبت: {turn_str}"
     
-        # کارت‌های روی میز
+        # --- کارت‌های روی میز ---
         table_cards = "🚫" if not game.cards_table else "  ".join(map(str, game.cards_table))
         cap = game.max_round_rate
     
+        # --- فهرست ALL-INها (اختیاری، جمع‌وجور) ---
+        try:
+            all_in_players = game.players_by(states=(PlayerState.ALL_IN,))
+            all_in_line = ""
+            if all_in_players:
+                mentions = ", ".join(p.mention_markdown for p in all_in_players)
+                all_in_line = f"\n🔴 ALL-IN: {mentions}"
+        except Exception:
+            all_in_line = ""
+    
+        # --- بدنه اصلی ---
         body = (
             f"\n\n"
             f"🃏 کارت‌های روی میز:\n{table_cards}\n\n"
             f"💰 پات: `{game.pot}$` | 🪙 سقف این دور: `{cap}$`\n"
-            f"▶️ نوبت: {turn_str}\n"
+            f"▶️ نوبت: {turn_str}"
+            f"{all_in_line}\n"
         )
         last_actions_text = self._format_last_actions(game)
         return line1 + body + last_actions_text
+
+
 
     def ensure_hud(self, chat_id: ChatId, game: Game) -> Optional[MessageId]:
         """
@@ -129,14 +145,19 @@ class PokerBotViewer:
     def _build_turn_text(self, game: Game, player: Player, money: Money) -> str:
         """
         متن پیام نوبت (Pinned Turn Message) را می‌سازد.
-        خط اول کوتاه و مناسب نمایش در پین است؛ بدنه جزئیات را می‌دهد.
+        خط اول کوتاه و مناسب نمایش در پین است؛ اگر بازیکن ALL-IN باشد، نشانک 🔴 می‌آید.
         """
-        # خط اول: خلاصه‌ی پین
-        line1 = f"🎯 نوبت: {player.mention_markdown} | پات: {game.pot}$"
+        # --- خط اول برای پین: نوبت + پات + 🔴 (در صورت ALL-IN) ---
+        is_all_in = (player.state == PlayerState.ALL_IN)
+        turn_title = f"🎯 نوبت: {player.mention_markdown}"
+        if is_all_in:
+            turn_title += " (🔴 ALL-IN)"
+        line1 = f"{turn_title} | پات: {game.pot}$"
     
-        # کارت‌های میز
+        # --- کارت‌های روی میز ---
         cards_table = "🚫 کارتی روی میز نیست" if not game.cards_table else " ".join(map(str, game.cards_table))
     
+        # --- بدنه ---
         text = (
             f"{line1}\n\n"
             f"🃏 کارت‌های روی میز: {cards_table}\n"
@@ -147,6 +168,8 @@ class PokerBotViewer:
             f"⬇️ حرکت خود را انتخاب کنید:"
         )
         return text
+
+
         
     def pin_message(self, chat_id: ChatId, message_id: MessageId) -> None:
         """پین‌کردن پیام با کنترل خطا (بدون قطع جریان بازی)."""
