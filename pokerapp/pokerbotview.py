@@ -192,29 +192,29 @@ class PokerBotViewer:
 
     def ensure_pinned_turn_message(self, chat_id: ChatId, game: Game, player: Player, money: Money) -> Optional[MessageId]:
         """
-        پیام نوبت را اگر وجود نداشت می‌سازد و پین می‌کند؛ وگرنه همان id را برمی‌گرداند.
+        اگر پیام نوبت وجود نداشت، یکی می‌سازد و پین می‌کند؛ در غیر این‌صورت همان id را برمی‌گرداند.
         """
         if getattr(game, "turn_message_id", None):
             return game.turn_message_id
     
+        # متن پیام نوبت (کوتاه برای پین + جزئیات)
+        text = self._build_turn_text(game, player, money)
+    
+        # ساخت کیبورد بر اساس CALL/CHECK فعلی
         call_action = self.define_check_call_action(game, player)
         call_amount = max(0, game.max_round_rate - player.round_rate)
         call_text = call_action.value if call_action.name == "CHECK" else f"{call_action.value} ({call_amount}$)"
         markup = self._get_turns_markup(check_call_text=call_text, check_call_action=call_action)
-    
-        text = self._build_turn_text(game, player, money)
     
         msg = self._bot.send_message(
             chat_id=chat_id,
             text=text,
             reply_markup=markup,
             parse_mode=ParseMode.MARKDOWN,
-            disable_notification=False,
             disable_web_page_preview=True,
         )
-        if msg and hasattr(msg, "message_id"):
-            game.turn_message_id = msg.message_id
-            # پین
+        if isinstance(msg, Message):
+            game.turn_message_id = msg.message_id  # 🔧 بسیار مهم: حتماً ذخیره شود
             try:
                 self._bot.pin_chat_message(chat_id=chat_id, message_id=msg.message_id, disable_notification=True)
             except Exception as e:
@@ -224,18 +224,18 @@ class PokerBotViewer:
 
     def edit_turn_message_text_and_markup(self, chat_id: ChatId, game: Game, player: Player, money: Money) -> None:
         """
-        متن و کیبورد پیام نوبت پین‌شده را ادیت می‌کند.
+        متن و کیبورد پیام نوبتِ پین‌شده را ادیت می‌کند (بدون ساخت پیام جدید).
         """
         if not getattr(game, "turn_message_id", None):
-            # اگر هنوز پیام ساخته نشده، همان لحظه بساز و پین کن
             self.ensure_pinned_turn_message(chat_id, game, player, money)
             return
+    
+        text = self._build_turn_text(game, player, money)
     
         call_action = self.define_check_call_action(game, player)
         call_amount = max(0, game.max_round_rate - player.round_rate)
         call_text = call_action.value if call_action.name == "CHECK" else f"{call_action.value} ({call_amount}$)"
         markup = self._get_turns_markup(check_call_text=call_text, check_call_action=call_action)
-        text = self._build_turn_text(game, player, money)
     
         try:
             self._bot.edit_message_text(
@@ -244,11 +244,10 @@ class PokerBotViewer:
                 text=text,
                 parse_mode=ParseMode.MARKDOWN,
                 disable_web_page_preview=True,
-                reply_markup=markup
+                reply_markup=markup,
             )
         except Exception as e:
             print(f"[TURN] edit_turn_message error: {e}")
-
 
     def send_message_return_id(
         self,
