@@ -139,7 +139,7 @@ class PokerBotViewer:
         """
         متن پیام «نوبت بازیکن» را می‌سازد.
         """
-        table_cards_str = "🚫 کارتی روی میز نیست" if not game.table_cards else " ".join(c.emoji for c in game.table_cards)
+        table_cards_str = "🚫 کارتی روی میز نیست" if not getattr(game, "cards_table", None) else " ".join(map(str, game.cards_table))
         return (
             f"🔴 نوبت: {player.mention_markdown} | پات: {game.pot}$\n\n"
             f"🃏 کارت‌های روی میز: {table_cards_str}\n"
