@@ -106,41 +106,40 @@ class PokerBotViewer:
         if msg_id:
             game.hud_message_id = msg_id
             return msg_id
-    
-        # تلاش دومِ امن، اگر به هر دلیل شکست خورد
-        msg_id = self.send_message_return_id(chat_id=chat_id, text="🃏 میز پوکر در حال اجرا…")
-        if msg_id:
-            game.hud_message_id = msg_id
-            return msg_id
-    
         return None
 
     def edit_hud(self, chat_id: ChatId, game: Game) -> None:
         """
         متن HUD را روی همان پیام ثابت ادیت می‌کند.
-        اگر قبلاً دکمه اینلاین روی HUD مانده باشد، با remove_markup پاک می‌شود.
+        اگر HUD هنوز ساخته نشده باشد، یک‌بار می‌سازد.
+        برای جلوگیری از ادیتِ بی‌فایده، اگر متن تغییری نکرده باشد، ادیت انجام نمی‌شود.
         """
         if not getattr(game, "hud_message_id", None):
-            # اگر HUD هنوز ساخته نشده، بساز
             self.ensure_hud(chat_id, game)
     
         if not game.hud_message_id:
             return
     
-        text = self._build_hud_text(game)
+        new_text = self._build_hud_text(game)
+    
+        # --- Debounce: اگر متن تغییری نکرده، ادیت نزنیم
+        if getattr(game, "_last_hud_text", None) == new_text:
+            return
+    
         try:
             self._bot.edit_message_text(
                 chat_id=chat_id,
                 message_id=game.hud_message_id,
-                text=text,
+                text=new_text,
                 parse_mode=ParseMode.MARKDOWN,
                 disable_web_page_preview=True,
             )
+            game._last_hud_text = new_text  # به خاطر بسپاریم برای دیباونس بعدی
         except Exception as e:
             print(f"[HUD] edit_message_text error: {e}")
     
-        # اطمینان از حذف مارک‌آپ اگر قبلاً دکمه‌ای روی این پیام بوده
-        self.remove_markup(chat_id=chat_id, message_id=game.hud_message_id)  # متد موجود و امن برای حذف مارک‌آپ. 
+        # اطمینان از حذف مارک‌آپ اگر قبلاً دکمه‌ای روی HUD بوده
+        self.remove_markup(chat_id=chat_id, message_id=game.hud_message_id)
 
     def _build_turn_text(self, game: Game, player: Player, money: Money) -> str:
         """
