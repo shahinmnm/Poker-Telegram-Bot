@@ -9,6 +9,7 @@ from telegram import (
     Bot,
     InputMediaPhoto,
 )
+from telegram.error import BadRequest, Unauthorized
 from threading import Timer
 from io import BytesIO
 from typing import List, Optional
@@ -25,7 +26,6 @@ from pokerapp.entities import (
     Money,
     PlayerState,
 )
-
 class PokerBotViewer:
     def __init__(self, bot: Bot):
         self._bot = bot
@@ -44,9 +44,8 @@ class PokerBotViewer:
     def _build_hud_text(self, game: Game) -> str:
         """
         متن HUD را می‌سازد:
-        - خط اول کوتاه و مناسب پین: میز/پات/نوبت (با 🔴 اگر ALL-IN)
-        - بدنه: کارت‌های میز، پات، سقف دور، نوبت (با 🔴)،
-          و «۳ اکشن اخیر». اگر بازیکن(هایی) ALL-IN باشند، یک خط جمع‌وجور نشان می‌دهد.
+        - خط اول کوتاه و مناسب پین: میز/پات/نوبت (برای یک نگاه سریع)
+        - سپس وضعیت کارت‌های رو میز و سقف دور
         """
         # --- نوبت فعلی به‌صورت امن + برچسب ALL-IN ---
         turn_str = "—"
@@ -63,32 +62,26 @@ class PokerBotViewer:
         line1 = f"🃏 میز | پات: {game.pot}$ | نوبت: {turn_str}"
     
         # --- کارت‌های روی میز ---
-        table_cards = "🚫" if not game.cards_table else "  ".join(map(str, game.cards_table))
-        cap = game.max_round_rate
+        if not game.table_cards or len(game.table_cards) == 0:
+            table_cards = "🚫"
+        else:
+            table_cards = " ".join([c.emoji for c in game.table_cards])
     
-        # --- فهرست ALL-INها (اختیاری، جمع‌وجور) ---
-        try:
-            all_in_players = game.players_by(states=(PlayerState.ALL_IN,))
-            all_in_line = ""
-            if all_in_players:
-                mentions = ", ".join(p.mention_markdown for p in all_in_players)
-                all_in_line = f"\n🔴 ALL-IN: {mentions}"
-        except Exception:
-            all_in_line = ""
+        # --- سقف دور ---
+        cap = game.max_round_rate if game.max_round_rate else 0
     
-        # --- بدنه اصلی ---
+        # --- بدنه ---
         body = (
-            f"\n\n"
-            f"🃏 کارت‌های روی میز:\n{table_cards}\n\n"
-            f"💰 پات: `{game.pot}$` | 🪙 سقف این دور: `{cap}$`\n"
+            f"\n\n🃏 کارت‌های روی میز:\n{table_cards}\n\n"
+            f"💰 پات: {game.pot}$ | 🪙 سقف این دور: {cap}$\n"
             f"▶️ نوبت: {turn_str}"
-            f"{all_in_line}\n"
         )
-        last_actions_text = self._format_last_actions(game)
-        return line1 + body + last_actions_text
-
-
-
+    
+        # --- آخرین اکشن‌ها (۳ تای اخیر) ---
+        body += self._format_last_actions(game)
+    
+        header = line1
+        return f"{header}\n\n{body}"
     def ensure_hud(self, chat_id: ChatId, game: Game) -> Optional[MessageId]:
         """
         یک پیام HUD ثابت می‌سازد و آیدی‌اش را در game.hud_message_id ذخیره می‌کند.
@@ -144,36 +137,41 @@ class PokerBotViewer:
         # اطمینان از حذف مارک‌آپ اگر قبلاً دکمه‌ای روی HUD بوده
         self.remove_markup(chat_id=chat_id, message_id=game.hud_message_id)
 
+
     def _build_turn_text(self, game: Game, player: Player, money: Money) -> str:
         """
-        متن پیام نوبت (Pinned Turn Message) را می‌سازد.
-        خط اول کوتاه و مناسب نمایش در پین است؛ بدنه جزئیات را می‌دهد.
+        متن پیام «نوبت بازیکن» را می‌سازد.
         """
-        cards_table = "🚫 کارتی روی میز نیست" if not game.cards_table else " ".join(map(str, game.cards_table))
-        call_action = self.define_check_call_action(game, player)
-        call_amount = max(0, game.max_round_rate - player.round_rate)
-        call_text = call_action.value if call_action.name == "CHECK" else f"{call_action.value} ({call_amount}$)"
-    
-        # سرتیتر کوتاه با نشانک 🔴 برای توجه در پین
-        header = f"🔴 نوبت: {player.mention_markdown} | پات: {game.pot}$"
-    
-        body = (
-            f"🃏 کارت‌های روی میز: {cards_table}\n"
+        table_cards_str = "🚫 کارتی روی میز نیست" if not game.table_cards else " ".join(c.emoji for c in game.table_cards)
+        return (
+            f"🔴 نوبت: {player.mention_markdown} | پات: {game.pot}$\n\n"
+            f"🃏 کارت‌های روی میز: {table_cards_str}\n"
             f"💰 پات: {game.pot}$\n"
-            f"💵 موجودی شما: {money}$\n"
+            f"💵 موجودی شما: {player.money}$\n"
             f"🎲 بت فعلی شما: {player.round_rate}$\n"
             f"📈 سقف این دور: {game.max_round_rate}$\n"
             f"⬇️ حرکت خود را انتخاب کنید:"
         )
-        return f"{header}\n\n{body}"
 
         
     def pin_message(self, chat_id: ChatId, message_id: MessageId) -> None:
         """پین‌کردن پیام با کنترل خطا (بدون قطع جریان بازی)."""
+        if not message_id:
+            return
         try:
             self._bot.pin_chat_message(chat_id=chat_id, message_id=message_id, disable_notification=True)
+        except BadRequest as e:
+            err = str(e).lower()
+            if "not enough rights" in err or "rights" in err:
+                print("[PIN] Bot lacks permission to pin in this chat.")
+            elif "message to pin not found" in err or "message_id" in err:
+                print(f"[PIN] Message not found to pin (id={message_id}).")
+            else:
+                print(f"[PIN] BadRequest pinning message: {e}")
+        except Unauthorized as e:
+            print(f"[PIN] Unauthorized in chat {chat_id}: {e}")
         except Exception as e:
-            print(f"[TURN] pin_message error: {e}")
+            print(f"[PIN] Unexpected error pinning message: {e}")
     
     def unpin_message(self, chat_id: ChatId, message_id: MessageId = None) -> None:
         """
@@ -224,6 +222,7 @@ class PokerBotViewer:
             return None
         finally:
             game._turn_creating = False
+
 
 
     def edit_turn_message_text_and_markup(self, chat_id: ChatId, game: Game, player: Player, money: Money) -> None:
@@ -325,17 +324,21 @@ class PokerBotViewer:
 
     def send_message_reply(
         self, chat_id: ChatId, message_id: MessageId, text: str
-    ) -> None:
+    ) -> Optional[MessageId]:
         try:
-            self._bot.send_message(
-                reply_to_message_id=message_id,
+            message = self._bot.send_message(
                 chat_id=chat_id,
-                parse_mode=ParseMode.MARKDOWN,
+                reply_to_message_id=message_id,
                 text=text,
+                parse_mode=ParseMode.MARKDOWN,
                 disable_notification=True,
+                disable_web_page_preview=True,
             )
+            if isinstance(message, Message):
+                return message.message_id
         except Exception as e:
             print(f"Error sending message reply: {e}")
+        return None
 
     def send_desk_cards_img(
         self,
@@ -398,13 +401,7 @@ class PokerBotViewer:
             reply_markup=reopen_keyboard,
         )
 
-    def send_cards(
-            self,
-            chat_id: ChatId,
-            cards: Cards,
-            mention_markdown: Mention,
-            ready_message_id: str,
-    ) -> Optional[MessageId]:
+    def send_cards(self, chat_id: ChatId, mention_markdown: str, cards: Cards, ready_message_id: MessageId) -> Optional[MessageId]:
         markup = self._get_cards_markup(cards)
         try:
             message = self._bot.send_message_sync(
@@ -422,27 +419,35 @@ class PokerBotViewer:
         return None
 
     @staticmethod
-    def define_check_call_action(game: Game, player: Player) -> PlayerAction:
-        if player.round_rate >= game.max_round_rate:
-            return PlayerAction.CHECK
-        return PlayerAction.CALL
+    def define_check_call_action(self, game: Game, player: Player) -> PlayerAction:
+        """
+        تعیین می‌کند دکمهٔ چک/کال چه باشد.
+        """
+        need = game.max_round_rate - player.round_rate
+        return PlayerAction.CHECK if need <= 0 else PlayerAction.CALL
 
     @staticmethod
-    def _get_turns_markup(check_call_text: str, check_call_action: PlayerAction) -> InlineKeyboardMarkup:
-        keyboard = [[
-            InlineKeyboardButton(text=PlayerAction.FOLD.value, callback_data=PlayerAction.FOLD.value),
-            InlineKeyboardButton(text=PlayerAction.ALL_IN.value, callback_data=PlayerAction.ALL_IN.value),
-            InlineKeyboardButton(text=check_call_text, callback_data=check_call_action.value),
-        ], [
-            InlineKeyboardButton(text=str(PlayerAction.SMALL.value), callback_data=str(PlayerAction.SMALL.value)),
-            InlineKeyboardButton(text=str(PlayerAction.NORMAL.value), callback_data=str(PlayerAction.NORMAL.value)),
-            InlineKeyboardButton(text=str(PlayerAction.BIG.value), callback_data=str(PlayerAction.BIG.value)),
-        ]]
+    def _get_turns_markup(self, check_call_text: str, check_call_action: PlayerAction) -> InlineKeyboardMarkup:
+        """
+        کیبورد اینلاینِ پیام نوبت را می‌سازد.
+        """
+        keyboard = [
+            [
+                InlineKeyboardButton(check_call_text, callback_data=check_call_action.value),
+                InlineKeyboardButton(PlayerAction.FOLD.value, callback_data=PlayerAction.FOLD.value),
+            ],
+            [
+                InlineKeyboardButton("⬆️ 10$", callback_data=str(PlayerAction.SMALL.value)),
+                InlineKeyboardButton("⬆️ 25$", callback_data=str(PlayerAction.NORMAL.value)),
+                InlineKeyboardButton("⬆️ 50$", callback_data=str(PlayerAction.BIG.value)),
+            ],
+            [
+                InlineKeyboardButton(PlayerAction.ALL_IN.value, callback_data=PlayerAction.ALL_IN.value),
+            ],
+        ]
         return InlineKeyboardMarkup(inline_keyboard=keyboard)
-
-
-    from telegram.error import BadRequest, Unauthorized  # اضافه کردن بالای فایل
     
+
     def remove_markup(self, chat_id: ChatId, message_id: MessageId) -> None:
         """حذف دکمه‌های اینلاین از یک پیام و فیلتر کردن ارورهای رایج."""
         if not message_id:
@@ -456,9 +461,9 @@ class PokerBotViewer:
             else:
                 print(f"[WARNING] BadRequest removing markup (ID={message_id}): {e}")
         except Unauthorized as e:
-            print(f"[INFO] Cannot edit markup, bot unauthorized in chat {chat_id}: {e}")
+            print(f"[INFO] Cannot remove markup, bot unauthorized in chat {chat_id}: {e}")
         except Exception as e:
-            print(f"[ERROR] Unexpected error removing markup (ID={message_id}): {e}")
+            print(f"[ERROR] remove_markup unexpected error: {e}")
     
     def remove_message(self, chat_id: ChatId, message_id: MessageId) -> None:
         """حذف پیام از چت و فیلتر کردن ارورهای بی‌خطر."""
@@ -477,18 +482,6 @@ class PokerBotViewer:
         except Exception as e:
             print(f"[ERROR] Unexpected error deleting message (ID={message_id}): {e}")
             
-    def remove_message_delayed(self, chat_id: ChatId, message_id: MessageId, delay: float = 3.0) -> None:
-        """حذف پیام با تأخیر برحسب ثانیه."""
-        if not message_id:
-            return
-
-        def _remove():
-            try:
-                self._bot.delete_message(chat_id=chat_id, message_id=message_id)
-            except Exception as e:
-                print(f"Could not delete message {message_id} in chat {chat_id}: {e}")
-
-        Timer(delay, _remove).start()
         
     def send_showdown_results(self, chat_id: ChatId, game: Game, winners_by_pot: list) -> None:
         """
