@@ -93,12 +93,11 @@ class PokerBotViewer:
         """
         یک پیام HUD ثابت می‌سازد و آیدی‌اش را در game.hud_message_id ذخیره می‌کند.
         اگر موجود باشد، همان را برمی‌گرداند.
-        قفل نرم _hud_creating جلوی ساخت همزمان چند HUD را می‌گیرد.
+        (بدون هیچ fallback متنی که پیام جدید بسازد)
         """
         if getattr(game, "hud_message_id", None):
             return game.hud_message_id
         if getattr(game, "_hud_creating", False):
-            # ساخت در حال انجام است؛ از ساخت جدید صرفنظر می‌کنیم
             return getattr(game, "hud_message_id", None)
     
         game._hud_creating = True
@@ -108,18 +107,9 @@ class PokerBotViewer:
             if msg_id:
                 game.hud_message_id = msg_id
                 return msg_id
-    
-            # تلاش دومِ امن (fallback)
-            msg_id = self.send_message_return_id(chat_id=chat_id, text="🃏 میز پوکر در حال اجرا…")
-            if msg_id:
-                game.hud_message_id = msg_id
-                return msg_id
-    
-            return None
+            return None  # ← هیچ پیام اضافی نساز
         finally:
             game._hud_creating = False
-
-
 
     def edit_hud(self, chat_id: ChatId, game: Game) -> None:
         """
@@ -200,9 +190,8 @@ class PokerBotViewer:
 
     def ensure_pinned_turn_message(self, chat_id: ChatId, game: Game, player: Player, money: Money) -> Optional[MessageId]:
         """
-        پیام نوبت را اگر وجود ندارد می‌سازد، پین می‌کند و آیدی را در game.turn_message_id ذخیره می‌کند.
-        اگر وجود دارد، همان را برمی‌گرداند.
-        قفل نرم _turn_creating جلوی ساخت همزمان چند پیام نوبت را می‌گیرد.
+        اگر پیام نوبت وجود نداشت، یکی می‌سازد و پین می‌کند؛ در غیر این‌صورت همان id را برمی‌گرداند.
+        قفل نرم _turn_creating جلوی ساخت همزمان چند پیام را می‌گیرد.
         """
         if getattr(game, "turn_message_id", None):
             return game.turn_message_id
@@ -211,25 +200,23 @@ class PokerBotViewer:
     
         game._turn_creating = True
         try:
-            # ساخت متن و کیبورد
+            text = self._build_turn_text(game, player, money)
+    
             call_action = self.define_check_call_action(game, player)
             call_amount = max(0, game.max_round_rate - player.round_rate)
             call_text = call_action.value if call_action.name == "CHECK" else f"{call_action.value} ({call_amount}$)"
             markup = self._get_turns_markup(check_call_text=call_text, check_call_action=call_action)
-    
-            text = self._build_turn_text(game, player, money)  # سرتیتر با 🔴 — ببین متد زیر را
     
             msg = self._bot.send_message(
                 chat_id=chat_id,
                 text=text,
                 reply_markup=markup,
                 parse_mode=ParseMode.MARKDOWN,
-                disable_notification=False,   # برای جلب توجه بازیکن فعال
                 disable_web_page_preview=True,
             )
-            if msg and hasattr(msg, "message_id"):
+            if isinstance(msg, Message):
                 game.turn_message_id = msg.message_id
-                self.pin_message(chat_id, msg.message_id)  # پین قطعی
+                self.pin_message(chat_id, msg.message_id)  # ← پین قطعی
                 return msg.message_id
             return None
         except Exception as e:
@@ -237,6 +224,7 @@ class PokerBotViewer:
             return None
         finally:
             game._turn_creating = False
+
 
     def edit_turn_message_text_and_markup(self, chat_id: ChatId, game: Game, player: Player, money: Money) -> None:
         """
@@ -247,7 +235,6 @@ class PokerBotViewer:
             return
     
         text = self._build_turn_text(game, player, money)
-    
         call_action = self.define_check_call_action(game, player)
         call_amount = max(0, game.max_round_rate - player.round_rate)
         call_text = call_action.value if call_action.name == "CHECK" else f"{call_action.value} ({call_amount}$)"
@@ -264,6 +251,7 @@ class PokerBotViewer:
             )
         except Exception as e:
             print(f"[TURN] edit_turn_message error: {e}")
+
 
     def send_message_return_id(
         self,
