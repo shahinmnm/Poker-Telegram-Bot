@@ -62,11 +62,8 @@ class PokerBotViewer:
         line1 = f"🃏 میز | پات: {game.pot}$ | نوبت: {turn_str}"
     
         # --- کارت‌های روی میز ---
-        if not game.table_cards or len(game.table_cards) == 0:
-            table_cards = "🚫"
-        else:
-            table_cards = " ".join([c.emoji for c in game.table_cards])
-    
+        # اسم فیلد درست: cards_table  (لیست از Card که str هم هست)
+        table_cards = "🚫" if not getattr(game, "cards_table", None) else "  ".join(map(str, game.cards_table))   
         # --- سقف دور ---
         cap = game.max_round_rate if game.max_round_rate else 0
     
