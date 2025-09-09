@@ -814,25 +814,25 @@ class PokerBotModel:
         except ValueError:
             return "Unknown Hand"
             
-    def _clear_game_messages(self, game: Game, chat_id: ChatId) -> None:
-        """
-        تمام پیام‌های مربوط به این دست از بازی، از جمله پیام نوبت فعلی
-        و سایر پیام‌های ثبت‌شده را پاک می‌کند تا چت برای نمایش نتایج تمیز شود.
-        """
-        print(f"DEBUG: Clearing game messages...")
+#    def _clear_game_messages(self, game: Game, chat_id: ChatId) -> None:
+ #       """
+   #     تمام پیام‌های مربوط به این دست از بازی، از جمله پیام نوبت فعلی
+    #    و سایر پیام‌های ثبت‌شده را پاک می‌کند تا چت برای نمایش نتایج تمیز شود.
+    #    """
+     #   print(f"DEBUG: Clearing game messages...")
     
         # ۱. پاک کردن پیام نوبت فعال (که دکمه‌ها را دارد)
-        if game.turn_message_id:
-            self._view.remove_message(chat_id, game.turn_message_id)
-            game.turn_message_id = None # آن را نال می‌کنیم تا دوباره استفاده نشود
+     #   if game.turn_message_id:
+       #     self._view.remove_message(chat_id, game.turn_message_id)
+       #     game.turn_message_id = None # آن را نال می‌کنیم تا دوباره استفاده نشود
     
         # ۲. پاک کردن بقیه پیام‌های ذخیره شده در لیست
         # ما از یک کپی از لیست استفاده می‌کنیم تا حذف عناصر در حین پیمایش مشکلی ایجاد نکند
-        for message_id in list(game.message_ids_to_delete):
-            self._view.remove_message(chat_id, message_id)
+      #  for message_id in list(game.message_ids_to_delete):
+       #     self._view.remove_message(chat_id, message_id)
         
         # ۳. بعد از اتمام کار، لیست را کاملاً خالی می‌کنیم
-        game.message_ids_to_delete.clear()
+       # game.message_ids_to_delete.clear()
         
     def _showdown(self, game: Game, chat_id: ChatId, context: CallbackContext) -> None:
         """
@@ -980,7 +980,6 @@ class RoundRateModel:
         return self._find_next_active_player_index(game, game.dealer_index)
 
 
-    # داخل کلاس RoundRateModel
     def set_blinds(self, game: Game, chat_id: ChatId) -> None:
         """
         Determine small/big blinds (using seat indices) and debit the players.
@@ -989,7 +988,7 @@ class RoundRateModel:
         num_players = game.seated_count()
         if num_players < 2:
             return
-
+    
         # find next occupied seats for small and big blinds
         # heads-up special case: dealer is small blind
         if num_players == 2:
@@ -1000,56 +999,60 @@ class RoundRateModel:
             small_blind_index = game.next_occupied_seat(game.dealer_index)
             big_blind_index = game.next_occupied_seat(small_blind_index)
             first_action_index = game.next_occupied_seat(big_blind_index)
-
+    
         # record in game
         game.small_blind_index = small_blind_index
         game.big_blind_index = big_blind_index
-
+    
         small_blind_player = game.get_player_by_seat(small_blind_index)
         big_blind_player = game.get_player_by_seat(big_blind_index)
-
+    
         if small_blind_player is None or big_blind_player is None:
             return
-
-        # apply blinds
+    
+        # apply blinds (بدون پیام گروهی؛ فقط HUD)
         self._set_player_blind(game, small_blind_player, SMALL_BLIND, "کوچک", chat_id)
         self._set_player_blind(game, big_blind_player, SMALL_BLIND * 2, "بزرگ", chat_id)
-
+    
         game.max_round_rate = SMALL_BLIND * 2
         game.current_player_index = first_action_index
         game.trading_end_user_id = big_blind_player.user_id
-
+    
+        # 🎯 پیام نوبتِ پین‌شونده (یک‌بار ساخته یا ادیت می‌شود) + HUD آپدیت
         player_turn = game.get_player_by_seat(game.current_player_index)
         if player_turn:
-            self._view.send_turn_actions(
-                chat_id=chat_id,
-                game=game,
-                player=player_turn,
-                money=player_turn.wallet.value()
-            )
-    
+            self._model._send_turn_message(game, player_turn, chat_id) 
 
     def _set_player_blind(self, game: Game, player: Player, amount: Money, blind_type: str, chat_id: ChatId):
+        """
+        اعمال بلایند برای بازیکن:
+        - کم‌کردن پول و آپدیت round_rate/total_bet/pot (منطق مالی بدون تغییر)
+        - ثبت رویداد در «۳ اکشن اخیر» HUD (بدون ارسال پیام جدا در گروه)
+        """
         try:
             player.wallet.authorize(game_id=str(chat_id), amount=amount)
             player.round_rate += amount
-            player.total_bet += amount  # ← این خط اضافه شود
+            player.total_bet += amount
             game.pot += amount
-            self._view.send_message(
-                chat_id,
-                f"💸 {player.mention_markdown} بلایند {blind_type} به مبلغ {amount}$ را پرداخت کرد."
-            )
-        except UserException as e:
+    
+            # ✅ به‌جای پیام گروهی: ثبت در ۳ اکشن اخیر + ادیت HUD
+            game.add_last_action(f"{player.mention_markdown} بلایند {blind_type} پرداخت کرد ({amount}$)")
+            self._view.ensure_hud(chat_id, game)
+            self._view.edit_hud(chat_id, game)
+    
+        except UserException:
             available_money = player.wallet.value()
+            # هرچه دارد All-in کند
             player.wallet.authorize(game_id=str(chat_id), amount=available_money)
             player.round_rate += available_money
-            player.total_bet += available_money  # ← این خط هم اضافه شود
+            player.total_bet += available_money
             game.pot += available_money
             player.state = PlayerState.ALL_IN
-            self._view.send_message(
-                chat_id,
-                f"⚠️ {player.mention_markdown} موجودی کافی برای بلایند نداشت و All-in شد ({available_money}$)."
-            )
+    
+            # ✅ به‌جای پیام گروهی: ثبت در ۳ اکشن اخیر + ادیت HUD
+            game.add_last_action(f"⚠️ {player.mention_markdown} موجودی کافی برای بلایند نداشت → ALL-IN ({available_money}$)")
+            self._view.ensure_hud(chat_id, game)
+            self._view.edit_hud(chat_id, game)
 
     def collect_bets_for_pot(self, game: Game):
         # This function resets the round-specific bets for the next street.
