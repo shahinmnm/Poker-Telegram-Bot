@@ -1007,7 +1007,6 @@ class RoundRateModel:
         # ✅ اعمال بلایند بدون تولید پیام گروهی؛ فقط HUD
         self._set_player_blind(game, small_blind_player, SMALL_BLIND, "کوچک", chat_id)
         self._set_player_blind(game, big_blind_player, BIG_BLIND, "بزرگ", chat_id)
-        self._view.edit_hud(chat_id, game)
         game.max_round_rate = SMALL_BLIND * 2
         game.current_player_index = first_action_index
         game.trading_end_user_id = big_blind_player.user_id
