@@ -192,48 +192,42 @@ class PokerBotViewer:
 
     def ensure_pinned_turn_message(self, chat_id: ChatId, game: Game, player: Player, money: Money) -> Optional[MessageId]:
         """
-        اگر پیام نوبت (turn_message_id) وجود ندارد:
-          1) یک‌بار پیام نوبت را می‌سازیم (با دکمه‌ها)،
-          2) همان لحظه پین می‌کنیم،
-          3) شناسه‌اش را در game.turn_message_id ذخیره می‌کنیم.
-        اگر وجود دارد، صرفاً همان را برمی‌گردانیم.
+        پیام نوبت را اگر وجود نداشت می‌سازد و پین می‌کند؛ وگرنه همان id را برمی‌گرداند.
         """
         if getattr(game, "turn_message_id", None):
             return game.turn_message_id
     
-        # ساخت متن و کیبورد
-        call_action = self.define_check_call_action(game, player)  # CHECK یا CALL 
+        call_action = self.define_check_call_action(game, player)
         call_amount = max(0, game.max_round_rate - player.round_rate)
         call_text = call_action.value if call_action.name == "CHECK" else f"{call_action.value} ({call_amount}$)"
-        markup = self._get_turns_markup(check_call_text=call_text, check_call_action=call_action)  # 
+        markup = self._get_turns_markup(check_call_text=call_text, check_call_action=call_action)
     
         text = self._build_turn_text(game, player, money)
     
-        try:
-            msg = self._bot.send_message(
-                chat_id=chat_id,
-                text=text,
-                reply_markup=markup,
-                parse_mode=ParseMode.MARKDOWN,
-                disable_notification=False,  # برای جلب توجه بازیکن فعال
-                disable_web_page_preview=True,
-            )
-            if msg and hasattr(msg, "message_id"):
-                game.turn_message_id = msg.message_id
-                # پین‌کردن
-                self.pin_message(chat_id, msg.message_id)
-                return msg.message_id
-        except Exception as e:
-            print(f"[TURN] ensure_pinned_turn_message send error: {e}")
+        msg = self._bot.send_message(
+            chat_id=chat_id,
+            text=text,
+            reply_markup=markup,
+            parse_mode=ParseMode.MARKDOWN,
+            disable_notification=False,
+            disable_web_page_preview=True,
+        )
+        if msg and hasattr(msg, "message_id"):
+            game.turn_message_id = msg.message_id
+            # پین
+            try:
+                self._bot.pin_chat_message(chat_id=chat_id, message_id=msg.message_id, disable_notification=True)
+            except Exception as e:
+                print(f"[TURN] pin_message error: {e}")
+            return msg.message_id
         return None
 
     def edit_turn_message_text_and_markup(self, chat_id: ChatId, game: Game, player: Player, money: Money) -> None:
         """
-        متن و مارک‌آپ پیام نوبت پین‌شده را ادیت می‌کند.
-        اگر پیام از بین رفته باشد (مثلاً توسط ادمین پاک شده)، دوباره می‌سازد و پین می‌کند.
+        متن و کیبورد پیام نوبت پین‌شده را ادیت می‌کند.
         """
         if not getattr(game, "turn_message_id", None):
-            # پیام نوبت وجود ندارد؛ بساز و پین کن
+            # اگر هنوز پیام ساخته نشده، همان لحظه بساز و پین کن
             self.ensure_pinned_turn_message(chat_id, game, player, money)
             return
     
@@ -241,7 +235,6 @@ class PokerBotViewer:
         call_amount = max(0, game.max_round_rate - player.round_rate)
         call_text = call_action.value if call_action.name == "CHECK" else f"{call_action.value} ({call_amount}$)"
         markup = self._get_turns_markup(check_call_text=call_text, check_call_action=call_action)
-    
         text = self._build_turn_text(game, player, money)
     
         try:
@@ -251,12 +244,11 @@ class PokerBotViewer:
                 text=text,
                 parse_mode=ParseMode.MARKDOWN,
                 disable_web_page_preview=True,
-                reply_markup=markup,
+                reply_markup=markup
             )
         except Exception as e:
-            print(f"[TURN] edit_message_text error: {e}")
-            # تلاش برای بازسازی پیام در صورت حذف/خطای ادیت
-            self.ensure_pinned_turn_message(chat_id, game, player, money)
+            print(f"[TURN] edit_turn_message error: {e}")
+
 
     def send_message_return_id(
         self,
@@ -431,56 +423,6 @@ class PokerBotViewer:
         if player.round_rate >= game.max_round_rate:
             return PlayerAction.CHECK
         return PlayerAction.CALL
-
-    def send_turn_actions(
-            self,
-            chat_id: ChatId,
-            game: Game,
-            player: Player,
-            money: Money,
-    ) -> Optional[MessageId]:
-        """ارسال پیام نوبت بازیکن با فرمت فارسی/ایموجی و استفاده از delay جدید 0.5s."""
-        # نمایش کارت‌های میز
-        if not game.cards_table:
-            cards_table = "🚫 کارتی روی میز نیست"
-        else:
-            cards_table = " ".join(game.cards_table)
-
-        # محاسبه CALL یا CHECK
-        call_amount = game.max_round_rate - player.round_rate
-        call_check_action = self.define_check_call_action(game, player)
-        if call_check_action == PlayerAction.CALL:
-            call_check_text = f"{call_check_action.value} ({call_amount}$)"
-        else:
-            call_check_text = call_check_action.value
-
-        # متن پیام با Markdown
-        text = (
-            f"🎯 **نوبت بازی {player.mention_markdown} (صندلی {player.seat_index+1})**\n\n"
-            f"🃏 **کارت‌های روی میز:** {cards_table}\n"
-            f"💰 **پات فعلی:** `{game.pot}$`\n"
-            f"💵 **موجودی شما:** `{money}$`\n"
-            f"🎲 **بِت فعلی شما:** `{player.round_rate}$`\n"
-            f"📈 **حداکثر شرط این دور:** `{game.max_round_rate}$`\n\n"
-            f"⬇️ حرکت خود را انتخاب کنید:"
-        )
-
-        # کیبورد اینلاین
-        markup = self._get_turns_markup(call_check_text, call_check_action)
-
-        try:
-            message = self._bot.send_message(
-                chat_id=chat_id,
-                text=text,
-                reply_markup=markup,
-                parse_mode=ParseMode.MARKDOWN,
-                disable_notification=False,  # player gets notification
-            )
-            if isinstance(message, Message):
-                return message.message_id
-        except Exception as e:
-            print(f"Error sending turn actions: {e}")
-        return None
 
     @staticmethod
     def _get_turns_markup(check_call_text: str, check_call_action: PlayerAction) -> InlineKeyboardMarkup:
