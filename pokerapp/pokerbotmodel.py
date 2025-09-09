@@ -499,11 +499,18 @@ class PokerBotModel:
 
     def _send_turn_message(self, game: Game, player: Player, chat_id: ChatId) -> None:
         """
-        تضمین پیام نوبت پین‌شونده و سپس ادیت آن (بدون ایجاد پیام جدید).
+        تضمین HUD و پیام نوبتِ پین‌شونده و سپس ادیت آن‌ها (بدون ساخت پیام‌های جدید اضافی).
         """
+        # HUD
+        if not getattr(game, "hud_message_id", None):
+            self._view.ensure_hud(chat_id, game)
+        self._view.edit_hud(chat_id, game)
+    
+        # Turn message (Pinned)
         money = player.wallet.value()
         self._view.ensure_pinned_turn_message(chat_id, game, player, money)
         self._view.edit_turn_message_text_and_markup(chat_id, game, player, money)
+
 
 
     
@@ -1013,24 +1020,18 @@ class RoundRateModel:
     
     
     def _set_player_blind(self, game: Game, player: Player, amount: Money, blind_type: str, chat_id: ChatId):
-        """
-        اعمال بلایند برای بازیکن:
-        - کم‌کردن پول و آپدیت round_rate/total_bet/pot
-        - ثبت رویداد در «۳ اکشن اخیر» HUD (بدون ارسال پیام جدا در گروه)
-        """
         try:
             player.wallet.authorize(game_id=str(chat_id), amount=amount)
             player.round_rate += amount
             player.total_bet += amount
             game.pot += amount
     
-            # فقط ثبت در ۳ اکشن اخیر + ادیت HUD
             game.add_last_action(f"{player.mention_markdown} بلایند {blind_type} پرداخت کرد ({amount}$)")
-            self._view.ensure_hud(chat_id, game)
+            if not getattr(game, "hud_message_id", None):
+                self._view.ensure_hud(chat_id, game)
             self._view.edit_hud(chat_id, game)
     
         except UserException:
-            # موجودی ناکافی → به اندازه موجودی برداشت و ALL_IN
             available_money = player.wallet.value()
             player.wallet.authorize(game_id=str(chat_id), amount=available_money)
             player.round_rate += available_money
@@ -1038,12 +1039,11 @@ class RoundRateModel:
             game.pot += available_money
             player.state = PlayerState.ALL_IN
     
-            # باز هم فقط در HUD ثبت شود
-            game.add_last_action(
-                f"⚠️ {player.mention_markdown} موجودی کافی برای بلایند نداشت و ALL-IN شد ({available_money}$)"
-            )
-            self._view.ensure_hud(chat_id, game)
+            game.add_last_action(f"⚠️ {player.mention_markdown} برای بلایند پول کافی نداشت → ALL-IN ({available_money}$)")
+            if not getattr(game, "hud_message_id", None):
+                self._view.ensure_hud(chat_id, game)
             self._view.edit_hud(chat_id, game)
+
 
 
     def collect_bets_for_pot(self, game: Game):
