@@ -30,7 +30,29 @@ class PokerBotViewer:
     def __init__(self, bot: Bot):
         self._bot = bot
         self._desk_generator = DeskImageGenerator()
-        
+
+    # ---------- helpers: stable signatures to avoid no-op edits ----------
+
+    def _markup_signature(self, markup: Optional[InlineKeyboardMarkup]) -> tuple:
+        """Serialize InlineKeyboardMarkup into a hashable structure to compare layouts."""
+        if not markup or not getattr(markup, "inline_keyboard", None):
+            return ()
+        rows_sig = []
+        for row in markup.inline_keyboard:
+            row_sig = []
+            for btn in row:
+                row_sig.append((btn.text, getattr(btn, "callback_data", None), getattr(btn, "url", None)))
+            rows_sig.append(tuple(row_sig))
+        return tuple(rows_sig)
+
+    def _turn_signature(self, text: str, markup: Optional[InlineKeyboardMarkup]) -> tuple:
+        """Signature = (text, markup_sig)."""
+        return (text, self._markup_signature(markup))
+
+    def _hud_signature(self, text: str) -> str:
+        """HUD only has text, so text itself is the signature."""
+        return text
+
     def _format_last_actions(self, game: Game) -> str:
         """
         متن «۳ اکشن اخیر» را به‌صورت لیست گلوله‌ای تولید می‌کند.
@@ -103,36 +125,42 @@ class PokerBotViewer:
 
     def edit_hud(self, chat_id: ChatId, game: Game) -> None:
         """
-        متن HUD را روی همان پیام ثابت ادیت می‌کند.
-        اگر HUD هنوز ساخته نشده باشد، یک‌بار می‌سازد.
-        برای جلوگیری از ادیتِ بی‌فایده، اگر متن تغییری نکرده باشد، ادیت انجام نمی‌شود.
+        به‌روزرسانی HUD فقط وقتی واقعاً تغییر کرده باشد.
+        (HUD کیبورد اینلاین ندارد؛ remove_markup لازم نیست.)
         """
         if not getattr(game, "hud_message_id", None):
             self.ensure_hud(chat_id, game)
-    
-        if not game.hud_message_id:
             return
-    
-        new_text = self._build_hud_text(game)
-    
-        # --- Debounce: اگر متن تغییری نکرده، ادیت نزنیم
-        if getattr(game, "_last_hud_text", None) == new_text:
-            return
-    
+
+        text = self._build_hud_text(game)
+
+        # debounce: اگر متن تغییر نکرده، ادیت نزن
+        try:
+            new_sig = self._hud_signature(text)
+            if getattr(game, "_hud_sig", None) == new_sig:
+                return
+        except Exception:
+            pass
+
         try:
             self._bot.edit_message_text(
                 chat_id=chat_id,
                 message_id=game.hud_message_id,
-                text=new_text,
+                text=text,
                 parse_mode=ParseMode.MARKDOWN,
                 disable_web_page_preview=True,
             )
-            game._last_hud_text = new_text  # به خاطر بسپاریم برای دیباونس بعدی
+            try:
+                game._hud_sig = self._hud_signature(text)
+            except Exception:
+                game._hud_sig = None
+
+        except BadRequest as e:
+            if "message is not modified" in str(e).lower():
+                return
+            print(f"[HUD] edit BadRequest: {e}")
         except Exception as e:
-            print(f"[HUD] edit_message_text error: {e}")
-    
-        # اطمینان از حذف مارک‌آپ اگر قبلاً دکمه‌ای روی HUD بوده
-        self.remove_markup(chat_id=chat_id, message_id=game.hud_message_id)
+            print(f"[HUD] edit error: {e}")
 
 
     def _build_turn_text(self, game: Game, player: Player, money: Money) -> str:
@@ -192,16 +220,15 @@ class PokerBotViewer:
             return game.turn_message_id
         if getattr(game, "_turn_creating", False):
             return getattr(game, "turn_message_id", None)
-    
+
         game._turn_creating = True
         try:
             text = self._build_turn_text(game, player, money)
-    
             call_action = self.define_check_call_action(game, player)
             call_amount = max(0, game.max_round_rate - player.round_rate)
             call_text = call_action.value if call_action.name == "CHECK" else f"{call_action.value} ({call_amount}$)"
             markup = self._get_turns_markup(check_call_text=call_text, check_call_action=call_action)
-    
+
             msg = self._bot.send_message_sync(
                 chat_id=chat_id,
                 text=text,
@@ -211,7 +238,12 @@ class PokerBotViewer:
             )
             if isinstance(msg, Message):
                 game.turn_message_id = msg.message_id
-                self.pin_message(chat_id, msg.message_id)  # ← پین قطعی
+                # ذخیرهٔ امضای فعلی برای ادیت‌های بعدی
+                try:
+                    game._turn_sig = self._turn_signature(text, markup)
+                except Exception:
+                    game._turn_sig = None
+                self.pin_message(chat_id, msg.message_id)
                 return msg.message_id
             return None
         except Exception as e:
@@ -220,22 +252,25 @@ class PokerBotViewer:
         finally:
             game._turn_creating = False
 
-
-
     def edit_turn_message_text_and_markup(self, chat_id: ChatId, game: Game, player: Player, money: Money) -> None:
-        """
-        متن و کیبورد پیام نوبتِ پین‌شده را ادیت می‌کند (بدون ساخت پیام جدید).
-        """
         if not getattr(game, "turn_message_id", None):
             self.ensure_pinned_turn_message(chat_id, game, player, money)
             return
-    
+
         text = self._build_turn_text(game, player, money)
         call_action = self.define_check_call_action(game, player)
         call_amount = max(0, game.max_round_rate - player.round_rate)
         call_text = call_action.value if call_action.name == "CHECK" else f"{call_action.value} ({call_amount}$)"
         markup = self._get_turns_markup(check_call_text=call_text, check_call_action=call_action)
-    
+
+        # --- skip edit if nothing changed
+        try:
+            new_sig = self._turn_signature(text, markup)
+            if getattr(game, "_turn_sig", None) == new_sig:
+                return
+        except Exception:
+            pass
+
         try:
             self._bot.edit_message_text(
                 chat_id=chat_id,
@@ -245,8 +280,18 @@ class PokerBotViewer:
                 disable_web_page_preview=True,
                 reply_markup=markup,
             )
+            try:
+                game._turn_sig = self._turn_signature(text, markup)
+            except Exception:
+                game._turn_sig = None
+
+        except BadRequest as e:
+            if "message is not modified" in str(e).lower():
+                return
+            print(f"[TURN] edit_turn_message BadRequest: {e}")
         except Exception as e:
             print(f"[TURN] edit_turn_message error: {e}")
+
 
     def send_message_return_id(
             self,
