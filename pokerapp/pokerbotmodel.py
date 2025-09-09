@@ -1006,8 +1006,8 @@ class RoundRateModel:
     
         # ✅ اعمال بلایند بدون تولید پیام گروهی؛ فقط HUD
         self._set_player_blind(game, small_blind_player, SMALL_BLIND, "کوچک", chat_id)
-        self._set_player_blind(game, big_blind_player, SMALL_BLIND * 2, "بزرگ", chat_id)
-    
+        self._set_player_blind(game, big_blind_player, BIG_BLIND, "بزرگ", chat_id)
+        self._view.edit_hud(chat_id, game)
         game.max_round_rate = SMALL_BLIND * 2
         game.current_player_index = first_action_index
         game.trading_end_user_id = big_blind_player.user_id
@@ -1029,7 +1029,6 @@ class RoundRateModel:
             game.add_last_action(f"{player.mention_markdown} بلایند {blind_type} پرداخت کرد ({amount}$)")
             if not getattr(game, "hud_message_id", None):
                 self._view.ensure_hud(chat_id, game)
-            self._view.edit_hud(chat_id, game)
     
         except UserException:
             available_money = player.wallet.value()
@@ -1042,8 +1041,6 @@ class RoundRateModel:
             game.add_last_action(f"⚠️ {player.mention_markdown} برای بلایند پول کافی نداشت → ALL-IN ({available_money}$)")
             if not getattr(game, "hud_message_id", None):
                 self._view.ensure_hud(chat_id, game)
-            self._view.edit_hud(chat_id, game)
-
 
 
     def collect_bets_for_pot(self, game: Game):
