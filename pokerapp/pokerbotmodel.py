@@ -957,10 +957,18 @@ class PokerBotModel:
 
 
 class RoundRateModel:
-    def __init__(self, view: PokerBotViewer, kv: redis.Redis, model: "PokerBotModel"):
+    """Model responsible for handling betting rounds and pot distribution."""
+
+    def __init__(
+        self,
+        view: Optional[PokerBotViewer] = None,
+        kv: Optional[redis.Redis] = None,
+        model: Optional["PokerBotModel"] = None,
+    ):
+        """Allow passing dependencies optionally for easier testing."""
         self._view = view
         self._kv = kv
-        self._model = model # <<< نمونه model ذخیره شد
+        self._model = model  # reference to main model if available
         
     def _find_next_active_player_index(self, game: Game, start_index: int) -> int:
         num_players = game.seated_count()
@@ -1048,6 +1056,48 @@ class RoundRateModel:
         for player in game.seated_players():
             player.round_rate = 0
         game.max_round_rate = 0
+
+    def finish_rate(self, game: Game, player_scores: Dict[int, List[Tuple[Player, Cards]]]) -> None:
+        """Distribute the pot among winners based on their bets and ranks.
+
+        Args:
+            game: Current game containing pot and players.
+            player_scores: Mapping of hand ranks to lists of (Player, Cards).
+                Higher keys indicate better hands.
+        """
+        total_players = len(game.players)
+        pot_remaining = game.pot
+
+        for rank in sorted(player_scores.keys(), reverse=True):
+            group = player_scores[rank]
+            players = [p for p, _ in group]
+            if not players:
+                continue
+
+            group_max_payout = sum(
+                p.wallet.authorized_money(game.id) * total_players for p in players
+            )
+
+            if group_max_payout >= pot_remaining:
+                total_auth = sum(p.wallet.authorized_money(game.id) for p in players)
+                if total_auth == 0:
+                    continue
+                distributed = 0
+                for i, p in enumerate(players):
+                    auth = p.wallet.authorized_money(game.id)
+                    share = pot_remaining * auth / total_auth
+                    inc_amount = int(round(share))
+                    distributed += inc_amount
+                    p.wallet.inc(inc_amount)
+                pot_remaining = max(0, pot_remaining - distributed)
+                break
+            else:
+                for p in players:
+                    auth = p.wallet.authorized_money(game.id)
+                    p.wallet.inc(auth * total_players)
+                pot_remaining -= group_max_payout
+
+        game.pot = pot_remaining
 class WalletManagerModel(Wallet):
     """
     این کلاس مسئولیت مدیریت موجودی (Wallet) هر بازیکن را با استفاده از Redis بر عهده دارد.
@@ -1055,30 +1105,42 @@ class WalletManagerModel(Wallet):
     """
     def __init__(self, user_id: UserId, kv: redis.Redis):
         self._user_id = user_id
-        self._kv: redis.Redis = kv
-        self._val_key = f"u_m:{user_id}"
-        self._daily_bonus_key = f"u_db:{user_id}"
-        self._authorized_money_key = f"u_am:{user_id}" # برای پول رزرو شده در بازی
+        self._kv: Optional[redis.Redis] = kv
 
-        # اسکریپت Lua برای کاهش اتمی موجودی (جلوگیری از race condition)
-        # این اسکریپت ابتدا مقدار فعلی را می‌گیرد، اگر کافی بود کم می‌کند و مقدار جدید را برمیگرداند
-        # در غیر این صورت -1 را برمیگرداند.
-        self._LUA_DECR_IF_GE = self._kv.register_script("""
-            local current = tonumber(redis.call('GET', KEYS[1]))
-            if current == nil then
-                redis.call('SET', KEYS[1], ARGV[2])
-                current = tonumber(ARGV[2])
-            end
-            local amount = tonumber(ARGV[1])
-            if current >= amount then
-                return redis.call('DECRBY', KEYS[1], amount)
-            else
-                return -1
-            end
-        """)
+        try:
+            kv.ping()
+        except Exception:
+            # Fallback to in-memory storage if Redis is unavailable
+            self._kv = None
+            self._balance = 0
+            self._authorized: Dict[str, Money] = {}
+            self._daily_bonus_received = False
+        else:
+            self._val_key = f"u_m:{user_id}"
+            self._daily_bonus_key = f"u_db:{user_id}"
+            self._authorized_money_key = f"u_am:{user_id}"  # برای پول رزرو شده در بازی
+
+            # اسکریپت Lua برای کاهش اتمی موجودی (جلوگیری از race condition)
+            # این اسکریپت ابتدا مقدار فعلی را می‌گیرد، اگر کافی بود کم می‌کند و مقدار جدید را برمیگرداند
+            # در غیر این صورت -1 را برمیگرداند.
+            self._LUA_DECR_IF_GE = self._kv.register_script("""
+                local current = tonumber(redis.call('GET', KEYS[1]))
+                if current == nil then
+                    redis.call('SET', KEYS[1], ARGV[2])
+                    current = tonumber(ARGV[2])
+                end
+                local amount = tonumber(ARGV[1])
+                if current >= amount then
+                    return redis.call('DECRBY', KEYS[1], amount)
+                else
+                    return -1
+                end
+            """)
 
     def value(self) -> Money:
         """موجودی فعلی بازیکن را برمی‌گرداند. اگر بازیکن وجود نداشته باشد، با مقدار پیش‌فرض ایجاد می‌شود."""
+        if self._kv is None:
+            return self._balance
         val = self._kv.get(self._val_key)
         if val is None:
             self._kv.set(self._val_key, DEFAULT_MONEY)
@@ -1087,6 +1149,9 @@ class WalletManagerModel(Wallet):
 
     def inc(self, amount: Money = 0) -> Money:
         """موجودی بازیکن را به مقدار مشخص شده افزایش می‌دهد."""
+        if self._kv is None:
+            self._balance += amount
+            return self._balance
         return self._kv.incrby(self._val_key, amount)
 
     def dec(self, amount: Money) -> Money:
@@ -1099,6 +1164,11 @@ class WalletManagerModel(Wallet):
         if amount == 0:
             return self.value()
 
+        if self._kv is None:
+            if self._balance < amount:
+                raise UserException("موجودی شما کافی نیست.")
+            self._balance -= amount
+            return self._balance
         result = self._LUA_DECR_IF_GE(keys=[self._val_key], args=[amount, DEFAULT_MONEY])
         if result == -1:
             raise UserException("موجودی شما کافی نیست.")
@@ -1106,12 +1176,17 @@ class WalletManagerModel(Wallet):
 
     def has_daily_bonus(self) -> bool:
         """چک می‌کند آیا بازیکن پاداش روزانه خود را دریافت کرده است یا خیر."""
+        if self._kv is None:
+            return self._daily_bonus_received
         return self._kv.exists(self._daily_bonus_key) > 0
 
     def add_daily(self, amount: Money) -> Money:
         """پاداش روزانه را به بازیکن می‌دهد و زمان آن را تا روز بعد ثبت می‌کند."""
         if self.has_daily_bonus():
             raise UserException("شما قبلاً پاداش روزانه خود را دریافت کرده‌اید.")
+        if self._kv is None:
+            self._daily_bonus_received = True
+            return self.inc(amount)
 
         now = datetime.datetime.now()
         tomorrow = now.replace(hour=0, minute=0, second=0, microsecond=0) + datetime.timedelta(days=1)
@@ -1121,25 +1196,47 @@ class WalletManagerModel(Wallet):
         return self.inc(amount)
 
     # --- متدهای مربوط به تراکنش‌های بازی (برای تطابق با Wallet ABC) ---
+    def authorized_money(self, game_id: str) -> Money:
+        if self._kv is None:
+            return self._authorized.get(game_id, 0)
+        val = self._kv.hget(self._authorized_money_key, game_id)
+        return int(val) if val else 0
+
+    def inc_authorized_money(self, game_id: str, amount: Money) -> None:
+        if self._kv is None:
+            self._authorized[game_id] = self._authorized.get(game_id, 0) + amount
+        else:
+            self._kv.hincrby(self._authorized_money_key, game_id, amount)
+
+    def authorize_all(self, game_id: str) -> Money:
+        amount = self.authorized_money(game_id)
+        if amount:
+            self.approve(game_id)
+        return amount
+
+    # --- متدهای مربوط به تراکنش‌های بازی (برای تطابق با Wallet ABC) ---
     def authorize(self, game_id: str, amount: Money) -> None:
-        """مبلغی از پول بازیکن را برای یک بازی خاص رزرو (dec) می‌کند."""
-        # در این پیاده‌سازی، ما مستقیماً پول را کم می‌کنیم.
-        # متد dec خودش در صورت کمبود موجودی، خطا می‌دهد.
+        """مبلغی از پول بازیکن را برای یک بازی خاص رزرو می‌کند."""
         self.dec(amount)
-        self._kv.hincrby(self._authorized_money_key, game_id, amount)
+        self.inc_authorized_money(game_id, amount)
 
     def approve(self, game_id: str) -> None:
         """تراکنش موفق یک بازی را تایید می‌کند (پول خرج شده و نیاز به بازگشت نیست)."""
-        # پول قبلاً در authorize/dec کم شده است، فقط مبلغ رزرو شده را پاک می‌کنیم.
-        self._kv.hdel(self._authorized_money_key, game_id)
+        if self._kv is None:
+            self._authorized.pop(game_id, None)
+        else:
+            self._kv.hdel(self._authorized_money_key, game_id)
 
     def cancel(self, game_id: str) -> None:
         """تراکنش ناموفق را لغو و پول رزرو شده را به بازیکن برمی‌گرداند."""
-        # مبلغی که برای این بازی رزرو شده بود را به کیف پول برمی‌گردانیم.
-        # hget returns bytes, so convert to int. Default to 0 if key doesn't exist.
-        amount_to_return_bytes = self._kv.hget(self._authorized_money_key, game_id)
-        if amount_to_return_bytes:
-            amount_to_return = int(amount_to_return_bytes)
-            if amount_to_return > 0:
-                self.inc(amount_to_return)
-                self._kv.hdel(self._authorized_money_key, game_id)
+        if self._kv is None:
+            amount = self._authorized.pop(game_id, 0)
+            if amount > 0:
+                self.inc(amount)
+        else:
+            amount_to_return_bytes = self._kv.hget(self._authorized_money_key, game_id)
+            if amount_to_return_bytes:
+                amount_to_return = int(amount_to_return_bytes)
+                if amount_to_return > 0:
+                    self.inc(amount_to_return)
+                    self._kv.hdel(self._authorized_money_key, game_id)

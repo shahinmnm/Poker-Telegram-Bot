@@ -1,6 +1,7 @@
 python-telegram-bot==13.12
-flake8==4.0.1
+flake8==5.0.4
 pillow==9.3.0
 PySocks==1.7.1
 redis==4.5.4
 python-dotenv==0.20.0
+urllib3==1.26.18
