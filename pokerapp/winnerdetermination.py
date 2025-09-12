@@ -70,6 +70,31 @@ class WinnerDetermination:
         # برگرداندن بهترین دست ممکن از بین تمام ترکیب‌ها
         return best_hand_type, max_score, best_hand_cards
 
+    def _best_hand_score(self, hands: Tuple[Cards, ...]) -> Tuple[Cards, Score]:
+        """Determine the best hand among given 5-card hands.
+
+        Args:
+            hands: A tuple of hands where each hand is a list of five :class:`Card`.
+
+        Returns:
+            A tuple containing the original hand that has the highest score and its
+            numerical score. The order of cards in the returned hand matches the
+            input to ease comparison in tests.
+        """
+
+        best_hand: Cards = []
+        best_score: Score = -1
+
+        for hand in hands:
+            # Sort cards by value for scoring while preserving original order
+            sorted_hand = tuple(sorted(hand, key=lambda c: c.value, reverse=True))
+            score, _ = self._calculate_hand_score(sorted_hand)
+            if score > best_score:
+                best_score = score
+                best_hand = hand
+
+        return best_hand, best_score
+
     def _calculate_hand_score(self, hand: Tuple[Card, ...]) -> Tuple[Score, HandsOfPoker]:
         """
         امتیاز و نوع یک دست ۵ کارتی مشخص را محاسبه می‌کند.
@@ -98,10 +123,10 @@ class WinnerDetermination:
                 hand_type = HandsOfPoker.STRAIGHT_FLUSH
             return self._calculate_score_value(original_values_for_score, hand_type), hand_type
 
-        if grouped_counts == [1, 4]:
+        if grouped_counts == [4, 1]:
             hand_type = HandsOfPoker.FOUR_OF_A_KIND
             return self._calculate_score_value(grouped_keys, hand_type), hand_type
-        if grouped_counts == [2, 3]:
+        if grouped_counts == [3, 2]:
             hand_type = HandsOfPoker.FULL_HOUSE
             return self._calculate_score_value(grouped_keys, hand_type), hand_type
         if is_flush:
@@ -110,13 +135,13 @@ class WinnerDetermination:
         if is_straight:
             hand_type = HandsOfPoker.STRAIGHT
             return self._calculate_score_value(original_values_for_score, hand_type), hand_type
-        if grouped_counts == [1, 1, 3]:
+        if grouped_counts == [3, 1, 1]:
             hand_type = HandsOfPoker.THREE_OF_A_KIND
             return self._calculate_score_value(grouped_keys, hand_type), hand_type
-        if grouped_counts == [1, 2, 2]:
+        if grouped_counts == [2, 2, 1]:
             hand_type = HandsOfPoker.TWO_PAIR
             return self._calculate_score_value(grouped_keys, hand_type), hand_type
-        if grouped_counts == [1, 1, 1, 2]:
+        if grouped_counts == [2, 1, 1, 1]:
             hand_type = HandsOfPoker.PAIR
             return self._calculate_score_value(grouped_keys, hand_type), hand_type
 
@@ -130,11 +155,10 @@ class WinnerDetermination:
         مهم‌تر (مثل کارتِ Pair) وزن بیشتری از کیکرها داشته باشد.
         """
         score = HAND_RANK_MULTIPLIER * hand_type.value
-        power = 0
-        # hand_values باید از قبل بر اساس اهمیت مرتب شده باشد (از کم به زیاد)
-        for val in reversed(hand_values):
+        power = len(hand_values) - 1
+        for val in hand_values:
             score += val * (15 ** power)
-            power += 1
+            power -= 1
         return score
 
     @staticmethod
@@ -148,7 +172,7 @@ class WinnerDetermination:
         for i in hand_values:
             dict_hand[i] = dict_hand.get(i, 0) + 1
         # مرتب‌سازی بر اساس تعداد تکرار، و سپس بر اساس ارزش کارت
-        sorted_dict_items = sorted(dict_hand.items(), key=lambda item: (item[1], item[0]))
+        sorted_dict_items = sorted(dict_hand.items(), key=lambda item: (item[1], item[0]), reverse=True)
         counts = [item[1] for item in sorted_dict_items]
         keys = [item[0] for item in sorted_dict_items]
         return (counts, keys)
