@@ -100,74 +100,86 @@ class Game:
         self.max_round_rate = 0
         self.state = GameState.INITIAL
     
-        # در این نسخه ساده‌شده برای تست‌ها، بازیکنان را در یک لیست ساده نگه می‌داریم
-        self._players: List[Player] = []
-
+        # seats is a fixed-length list representing table seats.
+        self.seats: List[Optional[Player]] = [None for _ in range(MAX_PLAYERS)]
+    
         self.cards_table = []
         self.current_player_index = -1
         self.small_blind_index = -1
         self.big_blind_index = -1
         self.remain_cards = get_cards()
-
+    
         self.ready_users = set()
         self.message_ids = {}
-        self.last_actions = []  # تاریخچه اکشن‌ها برای HUD
+        self.last_actions = []
     
-        # 🆕 پیام لیست آماده‌ها
+        # 🆕 اضافه شده: پیام لیست آماده‌ها
         self.ready_message_main_id: Optional[MessageId] = None
     
-        # 🆕 پیام‌هایی که انتهای دست باید پاک شوند
+        # 🆕 اضافه شده: آرایه پیام‌هایی که باید پاک شوند
         self.message_ids_to_delete: List[MessageId] = []
     
-        # 🆕 پیام نوبت فعلی (پیام جدا و پین‌شونده برای دکمه‌ها)
+        # 🆕 اضافه شده: پیام نوبت فعلی
         self.turn_message_id: Optional[MessageId] = None
-    
-        # 🆕 پیام HUD (ثابت و ادیت‌شونده؛ پین نمی‌شود)
-        self.hud_message_id: Optional[MessageId] = None
-        
-    def add_last_action(self, text: str) -> None:
-        """
-        یک اکشن جدید را به لیست آخرین اکشن‌ها اضافه می‌کند و طول
-        لیست را حداکثر به ۳ مورد محدود نگه می‌دارد (FIFO).
-        این متد صرفاً برای نمایش در HUD است و در منطق بازی دخالت ندارد.
-        """
-        if text is None:
-            return
-        self.last_actions.append(text)
-        if len(self.last_actions) > 3:
-            self.last_actions = self.last_actions[-3:]
 
-
+    # --- Seats / players helpers ----------------------------------------
     @property
     def players(self) -> List[Player]:
-        return self._players
+        """Return a compact list of players currently seated (order is seat ascending)."""
+        return [p for p in self.seats if p is not None]
 
     def seated_players(self) -> List[Player]:
-        return self._players
+        """Alias for players() to make intent clearer in code."""
+        return self.players
 
     def seated_count(self) -> int:
-        return len(self._players)
+        return len(self.players)
 
-    # متدهای زیر برای سازگاری باقی مانده‌اند اما پیاده‌سازی ساده‌ای دارند
+    def assign_seat_for_user(self, user_id: UserId) -> int:
+        """
+        Assign the lowest available seat index to a user and return that index.
+        If user already seated, return existing seat.
+        """
+        # if user is already seated return existing seat
+        for idx, p in enumerate(self.seats):
+            if p is not None and p.user_id == user_id:
+                return idx
+        for i in range(MAX_PLAYERS):
+            if self.seats[i] is None:
+                return i
+        # fallback: no seat free, return -1
+        return -1
+
     def add_player(self, player: Player, seat_index: Optional[int] = None) -> int:
-        self._players.append(player)
-        return len(self._players) - 1
+        """
+        Place player into a seat. If seat_index is None, pick first free seat.
+        Returns the seat index where the player was placed, or -1 if no seat available.
+        """
+        if seat_index is None:
+            seat_index = self.assign_seat_for_user(player.user_id)
+            if seat_index == -1:
+                return -1
+        if self.seats[seat_index] is not None:
+            raise UserException("Seat %s already occupied" % seat_index)
+        player.seat_index = seat_index
+        self.seats[seat_index] = player
+        return seat_index
 
     def remove_player_by_user(self, user_id: UserId) -> bool:
-        for p in list(self._players):
-            if p.user_id == user_id:
-                self._players.remove(p)
+        for idx, p in enumerate(self.seats):
+            if p is not None and p.user_id == user_id:
+                self.seats[idx] = None
                 return True
         return False
 
     def get_player_by_seat(self, seat_idx: int) -> Optional[Player]:
-        if 0 <= seat_idx < len(self._players):
-            return self._players[seat_idx]
+        if 0 <= seat_idx < len(self.seats):
+            return self.seats[seat_idx]
         return None
 
     def seat_index_for_user(self, user_id: UserId) -> int:
-        for idx, p in enumerate(self._players):
-            if p.user_id == user_id:
+        for idx, p in enumerate(self.seats):
+            if p is not None and p.user_id == user_id:
                 return idx
         return -1
 
@@ -240,3 +252,4 @@ class PlayerAction(enum.Enum):
 
 class UserException(Exception):
     pass
+
