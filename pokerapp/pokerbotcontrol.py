@@ -55,7 +55,7 @@ class PokerBotCotroller:
             # می‌توانید یک پیام به کاربر بدهید که بازی فعال نیست
             query = update.callback_query
             if query:
-                query.answer(text="بازی در جریان نیست.", show_alert=False)
+                await query.answer(text="بازی در جریان نیست.", show_alert=False)
             return
 
         current_player = self._model._current_turn_player(game)
@@ -67,7 +67,7 @@ class PokerBotCotroller:
             print(f"DEBUG: Not user's turn. Current turn: {current_player.user_id}, Requester: {user_id}.")
             query = update.callback_query
             if query:
-                query.answer(text="☝️ نوبت شما نیست!", show_alert=True)
+                await query.answer(text="☝️ نوبت شما نیست!", show_alert=True)
             return
 
         # اگر نوبت کاربر بود، به متد اصلی برای پردازش دکمه برو
