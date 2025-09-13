@@ -11,8 +11,8 @@ from telegram.ext import (
 )
 import traceback  # <--- برای لاگ دقیق خطا اضافه شد
 
-from pokerapp.entities import PlayerAction, UserException
-from pokerapp.pokerbotmodel import PokerBotModel
+from pokerapp.entities import PlayerAction, UserException, Game
+from pokerapp.pokerbotmodel import PokerBotModel, KEY_CHAT_DATA_GAME
 
 class PokerBotCotroller:
     def __init__(self, model: PokerBotModel, application: Application):
@@ -26,10 +26,8 @@ class PokerBotCotroller:
         application.add_handler(CommandHandler('ban', self._handle_ban))
         application.add_handler(CommandHandler('cards', self._handle_cards))
 
-        # new table management commands
-        application.add_handler(CommandHandler('newtable', self._handle_new_table))
-        application.add_handler(CommandHandler('join', self._handle_join))
-        application.add_handler(CommandHandler('listtables', self._handle_list_tables))
+        # game management command
+        application.add_handler(CommandHandler('newgame', self._handle_create_game))
 
         application.add_handler(
             MessageHandler(
@@ -106,14 +104,8 @@ class PokerBotCotroller:
     async def _handle_money(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await self._model.bonus(update, context)
 
-    async def _handle_new_table(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        await self._model.new_table(update, context)
-
-    async def _handle_join(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        await self._model.join_table(update, context)
-
-    async def _handle_list_tables(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        await self._model.list_tables(update, context)
+    async def _handle_create_game(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        await self._model.create_game(update, context)
 
     async def _handle_button_clicked(
         self,
