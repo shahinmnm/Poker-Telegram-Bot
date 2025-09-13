@@ -321,7 +321,7 @@ class PokerBotModel:
     
         # این متد به تنهایی تمام کارهای لازم برای شروع راند را انجام می‌دهد.
         # از جمله تعیین بلایندها، تعیین نوبت اول و ارسال پیام نوبت.
-        self._round_rate.set_blinds(game, chat_id)
+        await self._round_rate.set_blinds(game, chat_id)
     
         # نیازی به هیچ کد دیگری در اینجا نیست.
         # کدهای اضافی حذف شدند.
@@ -981,7 +981,7 @@ class RoundRateModel:
 
 
     # داخل کلاس RoundRateModel
-    def set_blinds(self, game: Game, chat_id: ChatId) -> None:
+    async def set_blinds(self, game: Game, chat_id: ChatId) -> None:
         """
         Determine small/big blinds (using seat indices) and debit the players.
         Works for heads-up (2-player) and multiplayer by walking occupied seats.
@@ -1012,8 +1012,8 @@ class RoundRateModel:
             return
 
         # apply blinds
-        self._set_player_blind(game, small_blind_player, SMALL_BLIND, "کوچک", chat_id)
-        self._set_player_blind(game, big_blind_player, SMALL_BLIND * 2, "بزرگ", chat_id)
+        await self._set_player_blind(game, small_blind_player, SMALL_BLIND, "کوچک", chat_id)
+        await self._set_player_blind(game, big_blind_player, SMALL_BLIND * 2, "بزرگ", chat_id)
 
         game.max_round_rate = SMALL_BLIND * 2
         game.current_player_index = first_action_index
@@ -1021,7 +1021,7 @@ class RoundRateModel:
 
         player_turn = game.get_player_by_seat(game.current_player_index)
         if player_turn:
-            self._view.send_turn_actions(
+            await self._view.send_turn_actions(
                 chat_id=chat_id,
                 game=game,
                 player=player_turn,
@@ -1029,13 +1029,13 @@ class RoundRateModel:
             )
     
 
-    def _set_player_blind(self, game: Game, player: Player, amount: Money, blind_type: str, chat_id: ChatId):
+    async def _set_player_blind(self, game: Game, player: Player, amount: Money, blind_type: str, chat_id: ChatId):
         try:
             player.wallet.authorize(game_id=str(chat_id), amount=amount)
             player.round_rate += amount
             player.total_bet += amount  # ← این خط اضافه شود
             game.pot += amount
-            self._view.send_message(
+            await self._view.send_message(
                 chat_id,
                 f"💸 {player.mention_markdown} بلایند {blind_type} به مبلغ {amount}$ را پرداخت کرد."
             )
@@ -1046,7 +1046,7 @@ class RoundRateModel:
             player.total_bet += available_money  # ← این خط هم اضافه شود
             game.pot += available_money
             player.state = PlayerState.ALL_IN
-            self._view.send_message(
+            await self._view.send_message(
                 chat_id,
                 f"⚠️ {player.mention_markdown} موجودی کافی برای بلایند نداشت و All-in شد ({available_money}$)."
             )
