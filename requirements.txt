@@ -1,6 +1,7 @@
-python-telegram-bot==13.12
+python-telegram-bot>=20
 flake8==4.0.1
-pillow==9.3.0
+pillow==10.4.0
 PySocks==1.7.1
 redis==4.5.4
 python-dotenv==0.20.0
+fakeredis==2.19.0
