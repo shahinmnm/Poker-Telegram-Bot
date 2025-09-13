@@ -38,7 +38,7 @@ class PokerBot:
             password=cfg.REDIS_PASS if cfg.REDIS_PASS != "" else None,
         )
 
-        table_manager = TableManager(kv_async)
+        table_manager = TableManager(kv_async, kv_sync)
         view = PokerBotViewer(bot=self._application.bot)
         model = PokerBotModel(
             view=view,
