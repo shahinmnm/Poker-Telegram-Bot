@@ -118,7 +118,7 @@ class PokerBotModel:
             reply_markup=reopen_keyboard,
         )
 
-    def send_cards(
+    async def send_cards(
             self,
             chat_id: ChatId,
             cards: Cards,
@@ -132,7 +132,7 @@ class PokerBotModel:
         try:
             # اینجا ما به جای محتوای کارت‌ها، یک متن عمومی می‌فرستیم
             # و خود کارت‌ها را در کیبورد ReplyKeyboardMarkup قرار می‌دهیم.
-            message = self._bot.send_message(
+            message = await self._bot.send_message(
                 chat_id=chat_id,
                 text="کارت‌های شما " + mention_markdown,
                 reply_markup=markup,
@@ -147,7 +147,7 @@ class PokerBotModel:
             if 'message to be replied not found' in str(e).lower():
                 print(f"INFO: ready_message_id {ready_message_id} not found. Sending cards without reply.")
                 try:
-                    message = self._bot.send_message(
+                    message = await self._bot.send_message(
                         chat_id=chat_id,
                         text="کارت‌های شما " + mention_markdown,
                         reply_markup=markup,
@@ -167,9 +167,9 @@ class PokerBotModel:
         """
         chat_id = update.effective_chat.id
         user = update.effective_user
-        self._view.show_reopen_keyboard(chat_id, user.mention_markdown())
+        await self._view.show_reopen_keyboard(chat_id, user.mention_markdown())
         # پیام "کارت‌ها پنهان شد" را پس از چند ثانیه حذف می‌کنیم تا چت شلوغ نشود.
-        self._view.remove_message_delayed(chat_id, update.message.message_id, delay=5)
+        await self._view.remove_message_delayed(chat_id, update.message.message_id, delay=5)
 
 
     async def send_cards_to_user(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -188,12 +188,12 @@ class PokerBotModel:
                 break
         
         if not current_player or not current_player.cards:
-            self._view.send_message(chat_id, "شما در بازی فعلی حضور ندارید یا کارتی ندارید.")
+            await self._view.send_message(chat_id, "شما در بازی فعلی حضور ندارید یا کارتی ندارید.")
             return
 
         # ارسال پیام با کیبورد کارتی
         # اینجا دیگر نیازی به ریپلای نیست.
-        cards_message_id = self._view.send_cards(
+        cards_message_id = await self._view.send_cards(
             chat_id=chat_id,
             cards=current_player.cards,
             mention_markdown=current_player.mention_markdown,
@@ -204,24 +204,24 @@ class PokerBotModel:
             await self._table_manager.save_game(chat_id, game)
         
         # حذف پیام "/نمایش کارت‌ها" که بازیکن فرستاده
-        self._view.remove_message_delayed(chat_id, update.message.message_id, delay=1)
+        await self._view.remove_message_delayed(chat_id, update.message.message_id, delay=1)
         
     async def show_table(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """کارت‌های روی میز را به درخواست بازیکن با فرمت جدید نمایش می‌دهد."""
         game, chat_id = await self._get_game(update, context)
 
         # پیام درخواست بازیکن را حذف می‌کنیم تا چت تمیز بماند
-        self._view.remove_message_delayed(chat_id, update.message.message_id, delay=1)
+        await self._view.remove_message_delayed(chat_id, update.message.message_id, delay=1)
 
         if game.state in self.ACTIVE_GAME_STATES and game.cards_table:
             # از متد اصلاح‌شده برای نمایش میز استفاده می‌کنیم
             # با count=0 و یک عنوان عمومی و زیبا
-            self.add_cards_to_table(0, game, chat_id, "🃏 کارت‌های روی میز")
+            await self.add_cards_to_table(0, game, chat_id, "🃏 کارت‌های روی میز")
             await self._table_manager.save_game(chat_id, game)
         else:
-            msg_id = self._view.send_message_return_id(chat_id, "هنوز بازی شروع نشده یا کارتی روی میز نیست.")
+            msg_id = await self._view.send_message_return_id(chat_id, "هنوز بازی شروع نشده یا کارتی روی میز نیست.")
             if msg_id:
-                self._view.remove_message_delayed(chat_id, msg_id, 5)
+                await self._view.remove_message_delayed(chat_id, msg_id, 5)
 
     async def ready(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """بازیکن برای شروع بازی اعلام آمادگی می‌کند."""
@@ -229,16 +229,16 @@ class PokerBotModel:
         user = update.effective_message.from_user
 
         if game.state != GameState.INITIAL:
-            self._view.send_message_reply(chat_id, update.message.message_id, "⚠️ بازی قبلاً شروع شده است، لطفاً صبر کنید!")
+            await self._view.send_message_reply(chat_id, update.message.message_id, "⚠️ بازی قبلاً شروع شده است، لطفاً صبر کنید!")
             return
 
         if game.seated_count() >= MAX_PLAYERS:
-            self._view.send_message_reply(chat_id, update.message.message_id, "🚪 اتاق پر است!")
+            await self._view.send_message_reply(chat_id, update.message.message_id, "🚪 اتاق پر است!")
             return
 
         wallet = WalletManagerModel(user.id, self._kv)
         if wallet.value() < SMALL_BLIND * 2:
-            self._view.send_message_reply(chat_id, update.message.message_id, f"💸 موجودی شما برای ورود به بازی کافی نیست (حداقل {SMALL_BLIND * 2}$ نیاز است).")
+            await self._view.send_message_reply(chat_id, update.message.message_id, f"💸 موجودی شما برای ورود به بازی کافی نیست (حداقل {SMALL_BLIND * 2}$ نیاز است).")
             return
 
         if user.id not in game.ready_users:
@@ -252,7 +252,7 @@ class PokerBotModel:
             game.ready_users.add(user.id)
             seat_assigned = game.add_player(player)
             if seat_assigned == -1:
-                self._view.send_message_reply(chat_id, update.message.message_id, "🚪 اتاق پر است!")
+                await self._view.send_message_reply(chat_id, update.message.message_id, "🚪 اتاق پر است!")
                 return
 
         ready_list = "\n".join([
@@ -269,17 +269,17 @@ class PokerBotModel:
 
         if game.ready_message_main_id:
             try:
-                self._bot.edit_message_text(chat_id=chat_id, message_id=game.ready_message_main_id, text=text, parse_mode="Markdown", reply_markup=keyboard)
-            except Exception: # اگر ویرایش نشد، یک پیام جدید بفرست
-                msg = self._view.send_message_return_id(chat_id, text, reply_markup=keyboard)
+                await self._bot.edit_message_text(chat_id=chat_id, message_id=game.ready_message_main_id, text=text, parse_mode="Markdown", reply_markup=keyboard)
+            except Exception:  # اگر ویرایش نشد، یک پیام جدید بفرست
+                msg = await self._view.send_message_return_id(chat_id, text, reply_markup=keyboard)
                 if msg: game.ready_message_main_id = msg
         else:
-            msg = self._view.send_message_return_id(chat_id, text, reply_markup=keyboard)
+            msg = await self._view.send_message_return_id(chat_id, text, reply_markup=keyboard)
             if msg: game.ready_message_main_id = msg
 
         # بررسی برای شروع خودکار
-        if game.seated_count() >= self._min_players and (game.seated_count() == self._bot.get_chat_member_count(chat_id) - 1 or self._cfg.DEBUG):
-            self._start_game(context, game, chat_id)
+        if game.seated_count() >= self._min_players and (game.seated_count() == await self._bot.get_chat_member_count(chat_id) - 1 or self._cfg.DEBUG):
+            await self._start_game(context, game, chat_id)
 
         await self._table_manager.save_game(chat_id, game)
     async def start(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -287,7 +287,7 @@ class PokerBotModel:
         game, chat_id = await self._get_game(update, context)
 
         if game.state not in (GameState.INITIAL, GameState.FINISHED):
-            self._view.send_message(chat_id, "🎮 یک بازی در حال حاضر در جریان است.")
+            await self._view.send_message(chat_id, "🎮 یک بازی در حال حاضر در جریان است.")
             return
 
         if game.state == GameState.FINISHED:
@@ -298,15 +298,15 @@ class PokerBotModel:
             # For now, just resetting allows new players to join.
 
         if game.seated_count() >= self._min_players:
-            self._start_game(context, game, chat_id)
+            await self._start_game(context, game, chat_id)
         else:
-            self._view.send_message(chat_id, f"👤 تعداد بازیکنان برای شروع کافی نیست (حداقل {self._min_players} نفر).")
+            await self._view.send_message(chat_id, f"👤 تعداد بازیکنان برای شروع کافی نیست (حداقل {self._min_players} نفر).")
         await self._table_manager.save_game(chat_id, game)
 
-    def _start_game(self, context: CallbackContext, game: Game, chat_id: ChatId) -> None:
+    async def _start_game(self, context: CallbackContext, game: Game, chat_id: ChatId) -> None:
         """مراحل شروع یک دست جدید بازی را انجام می‌دهد."""
         if game.ready_message_main_id:
-            self._view.remove_message(chat_id, game.ready_message_main_id)
+            await self._view.remove_message(chat_id, game.ready_message_main_id)
             game.ready_message_main_id = None
     
         # Ensure dealer_index is initialized before use
@@ -314,10 +314,10 @@ class PokerBotModel:
              game.dealer_index = -1
         game.dealer_index = (game.dealer_index + 1) % game.seated_count()
     
-        self._view.send_message(chat_id, '🚀 !بازی شروع شد!')
+        await self._view.send_message(chat_id, '🚀 !بازی شروع شد!')
     
         game.state = GameState.ROUND_PRE_FLOP
-        self._divide_cards(game, chat_id)
+        await self._divide_cards(game, chat_id)
     
         # این متد به تنهایی تمام کارهای لازم برای شروع راند را انجام می‌دهد.
         # از جمله تعیین بلایندها، تعیین نوبت اول و ارسال پیام نوبت.
@@ -330,7 +330,7 @@ class PokerBotModel:
         context.chat_data[KEY_OLD_PLAYERS] = [p.user_id for p in game.players]
 
 
-    def _divide_cards(self, game: Game, chat_id: ChatId):
+    async def _divide_cards(self, game: Game, chat_id: ChatId):
         """
         کارت‌ها را بین بازیکنان پخش می‌کند:
         ۱. کارت‌ها را در PV بازیکن ارسال می‌کند.
@@ -338,7 +338,7 @@ class PokerBotModel:
         """
         for player in game.seated_players():
             if len(game.remain_cards) < 2:
-                self._view.send_message(chat_id, "کارت‌های کافی در دسته وجود ندارد! بازی ریست می‌شود.")
+                await self._view.send_message(chat_id, "کارت‌های کافی در دسته وجود ندارد! بازی ریست می‌شود.")
                 game.reset()
                 return
 
@@ -349,14 +349,14 @@ class PokerBotModel:
 
             # ۱. ارسال کارت‌ها به چت خصوصی (برای سابقه و دسترسی آسان)
             try:
-                self._view.send_desk_cards_img(
+                await self._view.send_desk_cards_img(
                     chat_id=player.user_id,
                     cards=cards,
                     caption="🃏 کارت‌های شما برای این دست."
                 )
             except Exception as e:
                 print(f"WARNING: Could not send cards to private chat for user {player.user_id}. Error: {e}")
-                self._view.send_message(
+                await self._view.send_message(
                     chat_id=chat_id,
                     text=f"⚠️ {player.mention_markdown}، نتوانستم کارت‌ها را در PV ارسال کنم. لطفاً ربات را استارت کن (/start).",
                     parse_mode="Markdown"
@@ -364,7 +364,7 @@ class PokerBotModel:
 
             # ۲. ارسال پیام با کیبورد کارتی در گروه
             # این پیام برای دسترسی سریع بازیکن به کارت‌هایش است.
-            cards_message_id = self._view.send_cards(
+            cards_message_id = await self._view.send_cards(
                 chat_id=chat_id,
                 cards=player.cards,
                 mention_markdown=player.mention_markdown,

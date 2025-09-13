@@ -10,9 +10,9 @@ from telegram import (
 )
 from telegram.constants import ParseMode
 from telegram.error import BadRequest, Forbidden
-from threading import Timer
 from io import BytesIO
 from typing import List, Optional
+import asyncio
 from pokerapp.winnerdetermination import HAND_NAMES_TRANSLATIONS
 from pokerapp.desk import DeskImageGenerator
 from pokerapp.cards import Cards
@@ -32,7 +32,7 @@ class PokerBotViewer:
         self._bot = bot
         self._desk_generator = DeskImageGenerator()
 
-    def send_message_return_id(
+    async def send_message_return_id(
         self,
         chat_id: ChatId,
         text: str,
@@ -40,7 +40,7 @@ class PokerBotViewer:
     ) -> Optional[MessageId]:
         """Sends a message and returns its ID, or None if not applicable."""
         try:
-            message = self._bot.send_message(
+            message = await self._bot.send_message(
                 chat_id=chat_id,
                 parse_mode=ParseMode.MARKDOWN,
                 text=text,
@@ -55,7 +55,7 @@ class PokerBotViewer:
         return None
 
 
-    def send_message(
+    async def send_message(
         self,
         chat_id: ChatId,
         text: str,
@@ -63,7 +63,7 @@ class PokerBotViewer:
         parse_mode: str = ParseMode.MARKDOWN,  # <--- پارامتر جدید اضافه شد
     ) -> Optional[MessageId]:
         try:
-            message = self._bot.send_message(
+            message = await self._bot.send_message(
                 chat_id=chat_id,
                 parse_mode=parse_mode,  # <--- از پارامتر ورودی استفاده شد
                 text=text,
@@ -77,9 +77,9 @@ class PokerBotViewer:
             print(f"Error sending message: {e}")
         return None
 
-    def send_photo(self, chat_id: ChatId) -> None:
+    async def send_photo(self, chat_id: ChatId) -> None:
         try:
-            self._bot.send_photo(
+            await self._bot.send_photo(
                 chat_id=chat_id,
                 photo=open("./assets/poker_hand.jpg", 'rb'),
                 parse_mode=ParseMode.MARKDOWN,
@@ -88,11 +88,11 @@ class PokerBotViewer:
         except Exception as e:
             print(f"Error sending photo: {e}")
 
-    def send_dice_reply(
+    async def send_dice_reply(
         self, chat_id: ChatId, message_id: MessageId, emoji='🎲'
     ) -> Optional[Message]:
         try:
-            return self._bot.send_dice(
+            return await self._bot.send_dice(
                 reply_to_message_id=message_id,
                 chat_id=chat_id,
                 disable_notification=True,
@@ -102,11 +102,11 @@ class PokerBotViewer:
             print(f"Error sending dice reply: {e}")
             return None
 
-    def send_message_reply(
+    async def send_message_reply(
         self, chat_id: ChatId, message_id: MessageId, text: str
     ) -> None:
         try:
-            self._bot.send_message(
+            await self._bot.send_message(
                 reply_to_message_id=message_id,
                 chat_id=chat_id,
                 parse_mode=ParseMode.MARKDOWN,
@@ -116,7 +116,7 @@ class PokerBotViewer:
         except Exception as e:
             print(f"Error sending message reply: {e}")
 
-    def send_desk_cards_img(
+    async def send_desk_cards_img(
         self,
         chat_id: ChatId,
         cards: Cards,
@@ -130,7 +130,7 @@ class PokerBotViewer:
             bio.name = 'desk.png'
             im_cards.save(bio, 'PNG')
             bio.seek(0)
-            messages = self._bot.send_media_group(
+            messages = await self._bot.send_media_group(
                 chat_id=chat_id,
                 media=[
                     InputMediaPhoto(
@@ -161,7 +161,7 @@ class PokerBotViewer:
             one_time_keyboard=False,
         )
 
-    def show_reopen_keyboard(self, chat_id: ChatId, player_mention: Mention) -> None:
+    async def show_reopen_keyboard(self, chat_id: ChatId, player_mention: Mention) -> None:
         """Hides cards and shows a keyboard with a 'Show Cards' button."""
         show_cards_button_text = "🃏 نمایش کارت‌ها"
         show_table_button_text = "👁️ نمایش میز"
@@ -171,13 +171,13 @@ class PokerBotViewer:
             resize_keyboard=True,
             one_time_keyboard=False
         )
-        self.send_message(
+        await self.send_message(
             chat_id=chat_id,
             text=f"کارت‌های {player_mention} پنهان شد. برای مشاهده دوباره از دکمه‌ها استفاده کن.",
             reply_markup=reopen_keyboard,
         )
 
-    def send_cards(
+    async def send_cards(
             self,
             chat_id: ChatId,
             cards: Cards,
@@ -186,7 +186,7 @@ class PokerBotViewer:
     ) -> Optional[MessageId]:
         markup = self._get_cards_markup(cards)
         try:
-            message = self._bot.send_message(
+            message = await self._bot.send_message(
                 chat_id=chat_id,
                 text="کارت‌های شما " + mention_markdown,
                 reply_markup=markup,
@@ -206,7 +206,7 @@ class PokerBotViewer:
             return PlayerAction.CHECK
         return PlayerAction.CALL
 
-    def send_turn_actions(
+    async def send_turn_actions(
             self,
             chat_id: ChatId,
             game: Game,
@@ -243,7 +243,7 @@ class PokerBotViewer:
         markup = self._get_turns_markup(call_check_text, call_check_action)
 
         try:
-            message = self._bot.send_message(
+            message = await self._bot.send_message(
                 chat_id=chat_id,
                 text=text,
                 reply_markup=markup,
@@ -270,12 +270,12 @@ class PokerBotViewer:
         return InlineKeyboardMarkup(inline_keyboard=keyboard)
 
 
-    def remove_markup(self, chat_id: ChatId, message_id: MessageId) -> None:
+    async def remove_markup(self, chat_id: ChatId, message_id: MessageId) -> None:
         """حذف دکمه‌های اینلاین از یک پیام و فیلتر کردن ارورهای رایج."""
         if not message_id:
             return
         try:
-            self._bot.edit_message_reply_markup(chat_id=chat_id, message_id=message_id)
+            await self._bot.edit_message_reply_markup(chat_id=chat_id, message_id=message_id)
         except BadRequest as e:
             err = str(e).lower()
             if "message to edit not found" in err or "message is not modified" in err:
@@ -287,12 +287,12 @@ class PokerBotViewer:
         except Exception as e:
             print(f"[ERROR] Unexpected error removing markup (ID={message_id}): {e}")
     
-    def remove_message(self, chat_id: ChatId, message_id: MessageId) -> None:
+    async def remove_message(self, chat_id: ChatId, message_id: MessageId) -> None:
         """حذف پیام از چت و فیلتر کردن ارورهای بی‌خطر."""
         if not message_id:
             return
         try:
-            self._bot.delete_message(chat_id=chat_id, message_id=message_id)
+            await self._bot.delete_message(chat_id=chat_id, message_id=message_id)
         except BadRequest as e:
             err = str(e).lower()
             if "message to delete not found" in err or "message can't be deleted" in err:
@@ -304,20 +304,24 @@ class PokerBotViewer:
         except Exception as e:
             print(f"[ERROR] Unexpected error deleting message (ID={message_id}): {e}")
             
-    def remove_message_delayed(self, chat_id: ChatId, message_id: MessageId, delay: float = 3.0) -> None:
+    async def remove_message_delayed(self, chat_id: ChatId, message_id: MessageId, delay: float = 3.0) -> None:
         """حذف پیام با تأخیر برحسب ثانیه."""
         if not message_id:
             return
 
-        def _remove():
+        async def _remove():
             try:
-                self._bot.delete_message(chat_id=chat_id, message_id=message_id)
+                await self._bot.delete_message(chat_id=chat_id, message_id=message_id)
             except Exception as e:
                 print(f"Could not delete message {message_id} in chat {chat_id}: {e}")
 
-        Timer(delay, _remove).start()
+        async def _delayed_remove():
+            await asyncio.sleep(delay)
+            await _remove()
+
+        asyncio.create_task(_delayed_remove())
         
-    def send_showdown_results(self, chat_id: ChatId, game: Game, winners_by_pot: list) -> None:
+    async def send_showdown_results(self, chat_id: ChatId, game: Game, winners_by_pot: list) -> None:
         """
         پیام نهایی نتایج بازی را با فرمت زیبا ساخته و ارسال می‌کند.
         این نسخه برای مدیریت ساختار داده جدید Side Pot (لیست دیکشنری‌ها) به‌روز شده است.
@@ -381,12 +385,12 @@ class PokerBotViewer:
                 state_info = " (فولد)" if p.state == PlayerState.FOLD else ""
                 final_message += f"  - {p.mention_markdown}{state_info}: {card_display}\n"
 
-        self.send_message(chat_id=chat_id, text=final_message, parse_mode="Markdown")
+        await self.send_message(chat_id=chat_id, text=final_message, parse_mode="Markdown")
 
-    def send_new_hand_ready_message(self, chat_id: ChatId) -> None:
+    async def send_new_hand_ready_message(self, chat_id: ChatId) -> None:
         """پیام آمادگی برای دست جدید را ارسال می‌کند."""
         message = (
             "♻️ دست به پایان رسید. بازیکنان باقی‌مانده برای دست بعد حفظ شدند.\n"
             "برای شروع دست جدید، /start را بزنید یا بازیکنان جدید می‌توانند با /ready اعلام آمادگی کنند."
         )
-        self.send_message(chat_id, message)
+        await self.send_message(chat_id, message)
