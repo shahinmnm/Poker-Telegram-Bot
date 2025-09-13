@@ -547,7 +547,7 @@ class PokerBotModel:
         if not current_player:
             return
         current_player.state = PlayerState.FOLD
-        self._view.send_message(chat_id, f"🏳️ {current_player.mention_markdown} فولد کرد.")
+        await self._view.send_message(chat_id, f"🏳️ {current_player.mention_markdown} فولد کرد.")
     
         # برای اطمینان از پاک شدن دکمه‌ها، مارک‌آپ را حذف می‌کنیم
         if game.turn_message_id:
@@ -572,12 +572,12 @@ class PokerBotModel:
                 current_player.round_rate += call_amount
                 current_player.total_bet += call_amount
                 game.pot += call_amount
-                self._view.send_message(chat_id, f"🎯 {current_player.mention_markdown} با {call_amount}$ کال کرد.")
+                await self._view.send_message(chat_id, f"🎯 {current_player.mention_markdown} با {call_amount}$ کال کرد.")
             else:
                 # منطق Check
-                self._view.send_message(chat_id, f"✋ {current_player.mention_markdown} چک کرد.")
+                await self._view.send_message(chat_id, f"✋ {current_player.mention_markdown} چک کرد.")
         except UserException as e:
-            self._view.send_message(chat_id, f"⚠️ خطای {current_player.mention_markdown}: {e}")
+            await self._view.send_message(chat_id, f"⚠️ خطای {current_player.mention_markdown}: {e}")
             return  # اگر پول نداشت، از ادامه متد جلوگیری کن
     
         if game.turn_message_id:
@@ -604,7 +604,10 @@ class PokerBotModel:
             # به‌روزرسانی حداکثر شرط و اعلام آن
             game.max_round_rate = current_player.round_rate
             action_text = "بِت" if call_amount == 0 else "رِیز"
-            self._view.send_message(chat_id, f"💹 {current_player.mention_markdown} {action_text} زد و شرط رو به {current_player.round_rate}$ رسوند.")
+            await self._view.send_message(
+                chat_id,
+                f"💹 {current_player.mention_markdown} {action_text} زد و شرط رو به {current_player.round_rate}$ رسوند.",
+            )
     
             # --- بخش کلیدی منطق پوکر ---
             # وقتی کسی رِیز می‌کند، نوبت بازی باید یک دور کامل دیگر بچرخد
@@ -616,7 +619,7 @@ class PokerBotModel:
                     p.has_acted = False
     
         except UserException as e:
-            self._view.send_message(chat_id, f"⚠️ خطای {current_player.mention_markdown}: {e}")
+            await self._view.send_message(chat_id, f"⚠️ خطای {current_player.mention_markdown}: {e}")
             return
     
         if game.turn_message_id:
@@ -688,7 +691,7 @@ class PokerBotModel:
         contenders = game.players_by(states=(PlayerState.ACTIVE, PlayerState.ALL_IN))
         if len(contenders) <= 1:
             # اگر فقط یک نفر باقی مانده، مستقیم به showdown می‌رویم تا برنده مشخص شود
-              self._showdown(game, chat_id, context)
+              await self._showdown(game, chat_id, context)
               return
     
         # جمع‌آوری پول‌های شرط‌بندی شده در این دور و ریست کردن وضعیت بازیکنان
@@ -699,16 +702,16 @@ class PokerBotModel:
         # رفتن به مرحله بعدی بر اساس وضعیت فعلی بازی
         if game.state == GameState.ROUND_PRE_FLOP:
             game.state = GameState.ROUND_FLOP
-            self.add_cards_to_table(3, game, chat_id, "🃏 فلاپ (Flop)")
+            await self.add_cards_to_table(3, game, chat_id, "🃏 فلاپ (Flop)")
         elif game.state == GameState.ROUND_FLOP:
             game.state = GameState.ROUND_TURN
-            self.add_cards_to_table(1, game, chat_id, "🃏 ترن (Turn)")
+            await self.add_cards_to_table(1, game, chat_id, "🃏 ترن (Turn)")
         elif game.state == GameState.ROUND_TURN:
             game.state = GameState.ROUND_RIVER
-            self.add_cards_to_table(1, game, chat_id, "🃏 ریور (River)")
+            await self.add_cards_to_table(1, game, chat_id, "🃏 ریور (River)")
         elif game.state == GameState.ROUND_RIVER:
             # بعد از ریور، دور شرط‌بندی تمام شده و باید showdown انجام شود
-              self._showdown(game, chat_id, context)
+              await self._showdown(game, chat_id, context)
               return # <-- مهم: بعد از فراخوانی showdown، ادامه نمی‌دهیم
     
         # اگر هنوز بازیکنی برای بازی وجود دارد، نوبت را به نفر اول می‌دهیم
@@ -793,7 +796,7 @@ class PokerBotModel:
         winners = [data['player'] for data in player_scores if data['score'] == highest_score]
         return winners, highest_score
         
-    def add_cards_to_table(self, count: int, game: Game, chat_id: ChatId, street_name: str):
+    async def add_cards_to_table(self, count: int, game: Game, chat_id: ChatId, street_name: str):
         """
         کارت‌های جدید را به میز اضافه کرده و تصویر میز را با فرمت جدید و زیبا ارسال می‌کند.
         اگر count=0 باشد، فقط کارت‌های فعلی را نمایش می‌دهد.
@@ -807,10 +810,12 @@ class PokerBotModel:
         # مرحله ۲: بررسی وجود کارت روی میز
         if not game.cards_table:
             # اگر کارتی روی میز نیست، به جای عکس، یک پیام متنی ساده می‌فرستیم.
-            msg_id = self._view.send_message_return_id(chat_id, "هنوز کارتی روی میز نیامده است.")
+            msg_id = await self._view.send_message_return_id(
+                chat_id, "هنوز کارتی روی میز نیامده است."
+            )
             if msg_id:
                 game.message_ids_to_delete.append(msg_id)
-                self._view.remove_message_delayed(chat_id, msg_id, 5)
+                await self._view.remove_message_delayed(chat_id, msg_id, 5)
             return
 
         # مرحله ۳: ساخت رشته کارت‌ها با فرمت جدید (دو فاصله بین هر کارت)
@@ -820,7 +825,7 @@ class PokerBotModel:
         caption = f"{street_name}\n{cards_str}"
 
         # مرحله ۵: ارسال تصویر میز با کپشن جدید
-        msg = self._view.send_desk_cards_img(
+        msg = await self._view.send_desk_cards_img(
             chat_id=chat_id,
             cards=game.cards_table,
             caption=caption,
@@ -859,7 +864,7 @@ class PokerBotModel:
         # ۳. بعد از اتمام کار، لیست را کاملاً خالی می‌کنیم
         game.message_ids_to_delete.clear()
         
-    def _showdown(self, game: Game, chat_id: ChatId, context: CallbackContext) -> None:
+    async def _showdown(self, game: Game, chat_id: ChatId, context: CallbackContext) -> None:
         """
         فرآیند پایان دست را با استفاده از خروجی دقیق _determine_winners مدیریت می‌کند.
         """
@@ -871,7 +876,7 @@ class PokerBotModel:
             if len(active_players) == 1:
                 winner = active_players[0]
                 winner.wallet.inc(game.pot)
-                self._view.send_message(
+                await self._view.send_message(
                     chat_id,
                     f"🏆 تمام بازیکنان دیگر فولد کردند! {winner.mention_markdown} برنده {game.pot}$ شد."
                 )
@@ -891,20 +896,20 @@ class PokerBotModel:
                             player = winner["player"]
                             player.wallet.inc(win_amount_per_player)
             else:
-                 self._view.send_message(chat_id, "ℹ️ هیچ برنده‌ای در این دست مشخص نشد. مشکلی در منطق بازی رخ داده است.")
+                 await self._view.send_message(chat_id, "ℹ️ هیچ برنده‌ای در این دست مشخص نشد. مشکلی در منطق بازی رخ داده است.")
 
 
             # ۲. فراخوانی View برای نمایش نتایج
             # View باید آپدیت شود تا این ساختار داده جدید را به زیبایی نمایش دهد
-            self._view.send_showdown_results(chat_id, game, winners_by_pot)
+            await self._view.send_showdown_results(chat_id, game, winners_by_pot)
 
         # ۳. پاکسازی و ریست کردن بازی برای دست بعدی (بدون تغییر)
         for msg_id in game.message_ids_to_delete:
-            self._view.remove_message(chat_id, msg_id)
+            await self._view.remove_message(chat_id, msg_id)
         game.message_ids_to_delete.clear()
 
         if game.turn_message_id:
-            self._view.remove_message(chat_id, game.turn_message_id)
+            await self._view.remove_message(chat_id, game.turn_message_id)
             game.turn_message_id = None
 
         remaining_players = [p for p in game.players if p.wallet.value() > 0]
@@ -912,7 +917,7 @@ class PokerBotModel:
 
         game.reset()
 
-        self._view.send_new_hand_ready_message(chat_id)
+        await self._view.send_new_hand_ready_message(chat_id)
         
     def _end_hand(self, game: Game, chat_id: ChatId, context: CallbackContext) -> None:
         """
