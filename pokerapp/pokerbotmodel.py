@@ -321,7 +321,7 @@ class PokerBotModel:
     
         # این متد به تنهایی تمام کارهای لازم برای شروع راند را انجام می‌دهد.
         # از جمله تعیین بلایندها، تعیین نوبت اول و ارسال پیام نوبت.
-        self._round_rate.set_blinds(game, chat_id)
+        await self._round_rate.set_blinds(game, chat_id)
     
         # نیازی به هیچ کد دیگری در اینجا نیست.
         # کدهای اضافی حذف شدند.
@@ -481,7 +481,7 @@ class PokerBotModel:
             
         return winners_by_pot
 
-    def _process_playing(self, chat_id: ChatId, game: Game, context: CallbackContext) -> None:
+    async def _process_playing(self, chat_id: ChatId, game: Game, context: CallbackContext) -> None:
         """
         مغز متفکر و کنترل‌کننده اصلی جریان بازی.
         این متد پس از هر حرکت بازیکن فراخوانی می‌شود تا تصمیم بگیرد:
@@ -492,18 +492,18 @@ class PokerBotModel:
         """
         # پاک کردن پیام نوبت قبلی برای تمیز نگه داشتن چت
         if game.turn_message_id:
-            self._view.remove_message(chat_id, game.turn_message_id)
+            await self._view.remove_message(chat_id, game.turn_message_id)
             game.turn_message_id = None
     
         # شرط ۱: آیا فقط یک بازیکن (یا کمتر) در بازی باقی مانده؟
         contenders = game.players_by(states=(PlayerState.ACTIVE, PlayerState.ALL_IN))
         if len(contenders) <= 1:
-            self._go_to_next_street(game, chat_id, context)
+            await self._go_to_next_street(game, chat_id, context)
             return
     
         # شرط ۲: آیا دور شرط‌بندی فعلی به پایان رسیده است؟
         if self._is_betting_round_over(game):
-            self._go_to_next_street(game, chat_id, context)
+            await self._go_to_next_street(game, chat_id, context)
             return
     
         # شرط ۳: بازی ادامه دارد، نوبت را به بازیکن بعدی منتقل کن
@@ -515,24 +515,24 @@ class PokerBotModel:
             # ایندکس بازیکن فعلی را *قبل* از ارسال پیام نوبت آپدیت می‌کنیم
             game.current_player_index = next_player_index
             player = game.players[next_player_index]
-    
+
             # ارسال پیام نوبت به بازیکن جدید
-            self._send_turn_message(game, player, chat_id)
+            await self._send_turn_message(game, player, chat_id)
         else:
             # اگر هیچ بازیکن فعالی برای حرکت بعدی وجود ندارد (مثلاً همه All-in هستند)
             # مستقیماً به مرحله بعدی برو
-            self._go_to_next_street(game, chat_id, context)
+            await self._go_to_next_street(game, chat_id, context)
 
     # FIX 1 (PART 1): Remove the 'money' parameter. The function will fetch the latest wallet value itself.
-    def _send_turn_message(self, game: Game, player: Player, chat_id: ChatId):
+    async def _send_turn_message(self, game: Game, player: Player, chat_id: ChatId):
         """پیام نوبت را ارسال کرده و شناسه آن را برای حذف در آینده ذخیره می‌کند."""
         if game.turn_message_id:
-            self._view.remove_markup(chat_id, game.turn_message_id)
+            await self._view.remove_markup(chat_id, game.turn_message_id)
 
         # Fetch the most current wallet value right here, ensuring it's up-to-date.
         money = player.wallet.value()
         
-        msg_id = self._view.send_turn_actions(chat_id, game, player, money)
+        msg_id = await self._view.send_turn_actions(chat_id, game, player, money)
         
         if msg_id:
             game.turn_message_id = msg_id
@@ -551,9 +551,9 @@ class PokerBotModel:
     
         # برای اطمینان از پاک شدن دکمه‌ها، مارک‌آپ را حذف می‌کنیم
         if game.turn_message_id:
-            self._view.remove_markup(chat_id, game.turn_message_id)
-    
-        self._process_playing(chat_id, game, context)
+            await self._view.remove_markup(chat_id, game.turn_message_id)
+
+        await self._process_playing(chat_id, game, context)
         await self._table_manager.save_game(chat_id, game)
     
     async def player_action_call_check(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -581,9 +581,9 @@ class PokerBotModel:
             return  # اگر پول نداشت، از ادامه متد جلوگیری کن
     
         if game.turn_message_id:
-            self._view.remove_markup(chat_id, game.turn_message_id)
-    
-        self._process_playing(chat_id, game, context)
+            await self._view.remove_markup(chat_id, game.turn_message_id)
+
+        await self._process_playing(chat_id, game, context)
         await self._table_manager.save_game(chat_id, game)
     
     async def player_action_raise_bet(self, update: Update, context: ContextTypes.DEFAULT_TYPE, raise_amount: int) -> None:
@@ -620,9 +620,9 @@ class PokerBotModel:
             return
     
         if game.turn_message_id:
-            self._view.remove_markup(chat_id, game.turn_message_id)
-    
-        self._process_playing(chat_id, game, context)
+            await self._view.remove_markup(chat_id, game.turn_message_id)
+
+        await self._process_playing(chat_id, game, context)
         await self._table_manager.save_game(chat_id, game)
     
     async def player_action_all_in(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -656,9 +656,9 @@ class PokerBotModel:
                     p.has_acted = False
 
         if game.turn_message_id:
-            self._view.remove_markup(chat_id, game.turn_message_id)
+            await self._view.remove_markup(chat_id, game.turn_message_id)
 
-        self._process_playing(chat_id, game, context)
+        await self._process_playing(chat_id, game, context)
         await self._table_manager.save_game(chat_id, game)
 
     # ---- Table management commands ---------------------------------
@@ -668,7 +668,7 @@ class PokerBotModel:
         await self._table_manager.create_game(chat_id)
         self._view.send_message(chat_id, "بازی جدید ایجاد شد.")
 
-    def _go_to_next_street(self, game: Game, chat_id: ChatId, context: CallbackContext) -> None:
+    async def _go_to_next_street(self, game: Game, chat_id: ChatId, context: CallbackContext) -> None:
         """
         بازی را به مرحله بعدی (street) می‌برد.
         این متد مسئولیت‌های زیر را بر عهده دارد:
@@ -681,15 +681,15 @@ class PokerBotModel:
         """
         # ابتدا، تمام پیام‌های نوبت قبلی را پاک می‌کنیم تا چت تمیز بماند
         if game.turn_message_id:
-            self._view.remove_message(chat_id, game.turn_message_id)
+            await self._view.remove_message(chat_id, game.turn_message_id)
             game.turn_message_id = None
     
         # بررسی می‌کنیم چند بازیکن هنوز در بازی هستند (Active یا All-in)
         contenders = game.players_by(states=(PlayerState.ACTIVE, PlayerState.ALL_IN))
         if len(contenders) <= 1:
             # اگر فقط یک نفر باقی مانده، مستقیم به showdown می‌رویم تا برنده مشخص شود
-            self._showdown(game, chat_id, context)
-            return
+              self._showdown(game, chat_id, context)
+              return
     
         # جمع‌آوری پول‌های شرط‌بندی شده در این دور و ریست کردن وضعیت بازیکنان
         self._round_rate.collect_bets_for_pot(game)
@@ -708,16 +708,16 @@ class PokerBotModel:
             self.add_cards_to_table(1, game, chat_id, "🃏 ریور (River)")
         elif game.state == GameState.ROUND_RIVER:
             # بعد از ریور، دور شرط‌بندی تمام شده و باید showdown انجام شود
-            self._showdown(game, chat_id, context)
-            return # <-- مهم: بعد از فراخوانی showdown، ادامه نمی‌دهیم
+              self._showdown(game, chat_id, context)
+              return # <-- مهم: بعد از فراخوانی showdown، ادامه نمی‌دهیم
     
         # اگر هنوز بازیکنی برای بازی وجود دارد، نوبت را به نفر اول می‌دهیم
         active_players = game.players_by(states=(PlayerState.ACTIVE,))
         if not active_players:
             # اگر هیچ بازیکن فعالی نمانده (همه All-in هستند)، مستقیم به مراحل بعدی می‌رویم
             # تا همه کارت‌ها رو شوند.
-            self._go_to_next_street(game, chat_id, context)
-            return
+              await self._go_to_next_street(game, chat_id, context)
+              return
     
         # پیدا کردن اولین بازیکن برای شروع دور جدید (معمولاً اولین فرد فعال بعد از دیلر)
         # توجه: شما باید متد _get_first_player_index را داشته باشید.
@@ -739,10 +739,10 @@ class PokerBotModel:
     
         # اگر بازیکنی برای بازی پیدا شد، حلقه بازی را مجدداً شروع می‌کنیم
         if game.current_player_index != -1:
-            self._process_playing(chat_id, game, context)
+            await self._process_playing(chat_id, game, context)
         else:
             # اگر به هر دلیلی بازیکنی پیدا نشد، به مرحله بعد می‌رویم
-            self._go_to_next_street(game, chat_id, context)
+            await self._go_to_next_street(game, chat_id, context)
 
     def _determine_all_scores(self, game: Game) -> List[Dict]:
         """
@@ -981,7 +981,7 @@ class RoundRateModel:
 
 
     # داخل کلاس RoundRateModel
-    def set_blinds(self, game: Game, chat_id: ChatId) -> None:
+    async def set_blinds(self, game: Game, chat_id: ChatId) -> None:
         """
         Determine small/big blinds (using seat indices) and debit the players.
         Works for heads-up (2-player) and multiplayer by walking occupied seats.
@@ -1021,7 +1021,7 @@ class RoundRateModel:
 
         player_turn = game.get_player_by_seat(game.current_player_index)
         if player_turn:
-            self._view.send_turn_actions(
+            await self._view.send_turn_actions(
                 chat_id=chat_id,
                 game=game,
                 player=player_turn,
