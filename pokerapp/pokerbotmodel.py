@@ -6,8 +6,9 @@ from threading import Timer
 from typing import List, Tuple, Dict, Optional
 
 import redis
-from telegram import Message, ReplyKeyboardMarkup, Update, Bot, ParseMode
-from telegram.ext import Handler, CallbackContext
+from telegram import Message, ReplyKeyboardMarkup, Update, Bot
+from telegram.constants import ParseMode
+from telegram.ext import CallbackContext, ContextTypes
 
 from pokerapp.config import Config
 from pokerapp.privatechatmodel import UserPrivateChatModel
@@ -33,13 +34,14 @@ from pokerapp.entities import (
     MAX_PLAYERS,
 )
 from pokerapp.pokerbotview import PokerBotViewer
+from pokerapp.table_manager import TableManager
 
 DICE_MULT = 10
 DICE_DELAY_SEC = 5
 BONUSES = (5, 20, 40, 80, 160, 320)
 DICES = "⚀⚁⚂⚃⚄⚅"
 
-KEY_CHAT_DATA_GAME = "game"
+# legacy keys kept for backward compatibility but unused
 KEY_OLD_PLAYERS = "old_players"
 
 # MAX_PLAYERS = 8 (Defined in entities)
@@ -57,22 +59,26 @@ class PokerBotModel:
         GameState.ROUND_RIVER,
     }
 
-    def __init__(self, view: PokerBotViewer, bot: Bot, cfg: Config, kv: redis.Redis):
+    def __init__(self, view: PokerBotViewer, bot: Bot, cfg: Config, kv: redis.Redis, table_manager: TableManager):
         self._view: PokerBotViewer = view
         self._bot: Bot = bot
         self._cfg: Config = cfg
         self._kv = kv
+        self._table_manager = table_manager
         self._winner_determine: WinnerDetermination = WinnerDetermination()
         self._round_rate = RoundRateModel(view=self._view, kv=self._kv, model=self)
     @property
     def _min_players(self):
         return 1 if self._cfg.DEBUG else MIN_PLAYERS
 
-    @staticmethod
-    def _game_from_context(context: CallbackContext) -> Game:
-        if KEY_CHAT_DATA_GAME not in context.chat_data:
-            context.chat_data[KEY_CHAT_DATA_GAME] = Game()
-        return context.chat_data[KEY_CHAT_DATA_GAME]
+    async def _get_game(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> Tuple[Game, ChatId, int]:
+        """Fetch the Game instance for the user's current table."""
+        chat_id = update.effective_chat.id
+        table_id = context.user_data.get("table_id")
+        if table_id is None:
+            raise UserException("ابتدا به یک میز بپیوندید.")
+        game = await self._table_manager.get_game(chat_id, table_id)
+        return game, chat_id, table_id
 
     @staticmethod
     def _current_turn_player(game: Game) -> Optional[Player]:
@@ -157,7 +163,7 @@ class PokerBotModel:
             else:
                  print(f"Error sending cards: {e}")
         return None
-    def hide_cards(self, update: Update, context: CallbackContext) -> None:
+    async def hide_cards(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """
         کیبورد کارتی را پنهان کرده و کیبورد "نمایش مجدد" را نشان می‌دهد.
         """
@@ -168,13 +174,12 @@ class PokerBotModel:
         self._view.remove_message_delayed(chat_id, update.message.message_id, delay=5)
 
 
-    def send_cards_to_user(self, update: Update, context: CallbackContext) -> None:
+    async def send_cards_to_user(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """
         کارت‌های بازیکن را با کیبورد مخصوص در گروه دوباره ارسال می‌کند.
         این متد زمانی فراخوانی می‌شود که بازیکن دکمه "نمایش کارت‌ها" را می‌زند.
         """
-        game = self._game_from_context(context)
-        chat_id = update.effective_chat.id
+        game, chat_id, table_id = await self._get_game(update, context)
         user_id = update.effective_user.id
         
         # پیدا کردن بازیکن در لیست بازیکنان بازی فعلی
@@ -198,14 +203,14 @@ class PokerBotModel:
         )
         if cards_message_id:
             game.message_ids_to_delete.append(cards_message_id)
+            await self._table_manager.save_game(chat_id, table_id, game)
         
         # حذف پیام "/نمایش کارت‌ها" که بازیکن فرستاده
         self._view.remove_message_delayed(chat_id, update.message.message_id, delay=1)
         
-    def show_table(self, update: Update, context: CallbackContext):
+    async def show_table(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """کارت‌های روی میز را به درخواست بازیکن با فرمت جدید نمایش می‌دهد."""
-        game = self._game_from_context(context)
-        chat_id = update.effective_chat.id
+        game, chat_id, table_id = await self._get_game(update, context)
 
         # پیام درخواست بازیکن را حذف می‌کنیم تا چت تمیز بماند
         self._view.remove_message_delayed(chat_id, update.message.message_id, delay=1)
@@ -214,15 +219,15 @@ class PokerBotModel:
             # از متد اصلاح‌شده برای نمایش میز استفاده می‌کنیم
             # با count=0 و یک عنوان عمومی و زیبا
             self.add_cards_to_table(0, game, chat_id, "🃏 کارت‌های روی میز")
+            await self._table_manager.save_game(chat_id, table_id, game)
         else:
             msg_id = self._view.send_message_return_id(chat_id, "هنوز بازی شروع نشده یا کارتی روی میز نیست.")
             if msg_id:
                 self._view.remove_message_delayed(chat_id, msg_id, 5)
 
-    def ready(self, update: Update, context: CallbackContext) -> None:
+    async def ready(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """بازیکن برای شروع بازی اعلام آمادگی می‌کند."""
-        game = self._game_from_context(context)
-        chat_id = update.effective_chat.id
+        game, chat_id, table_id = await self._get_game(update, context)
         user = update.effective_message.from_user
 
         if game.state != GameState.INITIAL:
@@ -278,10 +283,10 @@ class PokerBotModel:
         if game.seated_count() >= self._min_players and (game.seated_count() == self._bot.get_chat_member_count(chat_id) - 1 or self._cfg.DEBUG):
             self._start_game(context, game, chat_id)
 
-    def start(self, update: Update, context: CallbackContext) -> None:
+        await self._table_manager.save_game(chat_id, table_id, game)
+    async def start(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """بازی را به صورت دستی شروع می‌کند."""
-        game = self._game_from_context(context)
-        chat_id = update.effective_chat.id
+        game, chat_id, table_id = await self._get_game(update, context)
 
         if game.state not in (GameState.INITIAL, GameState.FINISHED):
             self._view.send_message(chat_id, "🎮 یک بازی در حال حاضر در جریان است.")
@@ -298,6 +303,7 @@ class PokerBotModel:
             self._start_game(context, game, chat_id)
         else:
             self._view.send_message(chat_id, f"👤 تعداد بازیکنان برای شروع کافی نیست (حداقل {self._min_players} نفر).")
+        await self._table_manager.save_game(chat_id, table_id, game)
 
     def _start_game(self, context: CallbackContext, game: Game, chat_id: ChatId) -> None:
         """مراحل شروع یک دست جدید بازی را انجام می‌دهد."""
@@ -536,13 +542,12 @@ class PokerBotModel:
     # --- Player Action Handlers ---
     # این بخش تمام حرکات ممکن بازیکنان در نوبتشان را مدیریت می‌کند.
     
-    def player_action_fold(self, update: Update, context: CallbackContext, game: Game) -> None:
+    async def player_action_fold(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """بازیکن فولد می‌کند، از دور شرط‌بندی کنار می‌رود و نوبت به نفر بعدی منتقل می‌شود."""
+        game, chat_id, table_id = await self._get_game(update, context)
         current_player = self._current_turn_player(game)
         if not current_player:
             return
-    
-        chat_id = update.effective_chat.id
         current_player.state = PlayerState.FOLD
         self._view.send_message(chat_id, f"🏳️ {current_player.mention_markdown} فولد کرد.")
     
@@ -551,14 +556,14 @@ class PokerBotModel:
             self._view.remove_markup(chat_id, game.turn_message_id)
     
         self._process_playing(chat_id, game, context)
+        await self._table_manager.save_game(chat_id, table_id, game)
     
-    def player_action_call_check(self, update: Update, context: CallbackContext, game: Game) -> None:
+    async def player_action_call_check(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """بازیکن کال (پرداخت) یا چک (عبور) را انجام می‌دهد."""
+        game, chat_id, table_id = await self._get_game(update, context)
         current_player = self._current_turn_player(game)
         if not current_player:
             return
-    
-        chat_id = update.effective_chat.id
         call_amount = game.max_round_rate - current_player.round_rate
         current_player.has_acted = True
     
@@ -581,14 +586,14 @@ class PokerBotModel:
             self._view.remove_markup(chat_id, game.turn_message_id)
     
         self._process_playing(chat_id, game, context)
+        await self._table_manager.save_game(chat_id, table_id, game)
     
-    def player_action_raise_bet(self, update: Update, context: CallbackContext, game: Game, raise_amount: int) -> None:
+    async def player_action_raise_bet(self, update: Update, context: ContextTypes.DEFAULT_TYPE, raise_amount: int) -> None:
         """بازیکن شرط را افزایش می‌دهد (Raise) یا برای اولین بار شرط می‌بندد (Bet)."""
+        game, chat_id, table_id = await self._get_game(update, context)
         current_player = self._current_turn_player(game)
         if not current_player:
             return
-    
-        chat_id = update.effective_chat.id
         call_amount = game.max_round_rate - current_player.round_rate
         total_amount_to_bet = call_amount + raise_amount
     
@@ -620,19 +625,19 @@ class PokerBotModel:
             self._view.remove_markup(chat_id, game.turn_message_id)
     
         self._process_playing(chat_id, game, context)
+        await self._table_manager.save_game(chat_id, table_id, game)
     
-    def player_action_all_in(self, update: Update, context: CallbackContext, game: Game) -> None:
+    async def player_action_all_in(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """بازیکن تمام موجودی خود را شرط می‌بندد (All-in)."""
+        game, chat_id, table_id = await self._get_game(update, context)
         current_player = self._current_turn_player(game)
         if not current_player:
             return
-    
-        chat_id = update.effective_chat.id
         all_in_amount = current_player.wallet.value()
     
         if all_in_amount <= 0:
             self._view.send_message(chat_id, f"👀 {current_player.mention_markdown} موجودی برای آل-این ندارد و چک می‌کند.")
-            self.player_action_call_check(update, context, game) # این حرکت معادل چک است
+            await self.player_action_call_check(update, context)  # این حرکت معادل چک است
             return
     
         current_player.wallet.authorize(game.id, all_in_amount)
@@ -643,7 +648,7 @@ class PokerBotModel:
         current_player.has_acted = True
     
         self._view.send_message(chat_id, f"🀄 {current_player.mention_markdown} با {all_in_amount}$ آل‑این کرد!")
-    
+
         if current_player.round_rate > game.max_round_rate:
             game.max_round_rate = current_player.round_rate
             # اگر آل-این باعث افزایش شرط شد، مانند رِیز عمل می‌کند
@@ -651,12 +656,43 @@ class PokerBotModel:
             for p in game.players_by(states=(PlayerState.ACTIVE,)):
                 if p.user_id != current_player.user_id:
                     p.has_acted = False
-    
+
         if game.turn_message_id:
             self._view.remove_markup(chat_id, game.turn_message_id)
-    
+
         self._process_playing(chat_id, game, context)
-            
+        await self._table_manager.save_game(chat_id, table_id, game)
+
+    # ---- Table management commands ---------------------------------
+
+    async def new_table(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        chat_id = update.effective_chat.id
+        table_id = await self._table_manager.new_table(chat_id)
+        self._view.send_message(chat_id, f"میز جدید با شناسه {table_id} ایجاد شد.")
+
+    async def join_table(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        chat_id = update.effective_chat.id
+        if not context.args:
+            self._view.send_message(chat_id, "شناسه میز را وارد کنید.")
+            return
+        try:
+            table_id = int(context.args[0])
+        except ValueError:
+            self._view.send_message(chat_id, "شناسه میز نامعتبر است.")
+            return
+        await self._table_manager.get_game(chat_id, table_id)
+        context.user_data["table_id"] = table_id
+        self._view.send_message(chat_id, f"به میز {table_id} پیوستید.")
+
+    async def list_tables(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        chat_id = update.effective_chat.id
+        tables = await self._table_manager.list_tables(chat_id)
+        if tables:
+            text = "میزهای موجود: " + ", ".join(map(str, tables))
+        else:
+            text = "هیچ میزی ایجاد نشده است."
+        self._view.send_message(chat_id, text)
+
     def _go_to_next_street(self, game: Game, chat_id: ChatId, context: CallbackContext) -> None:
         """
         بازی را به مرحله بعدی (street) می‌برد.
@@ -952,10 +988,10 @@ class PokerBotModel:
 
 
 class RoundRateModel:
-    def __init__(self, view: PokerBotViewer, kv: redis.Redis, model: "PokerBotModel"):
+    def __init__(self, view: PokerBotViewer = None, kv: redis.Redis = None, model: "PokerBotModel" = None):
         self._view = view
         self._kv = kv
-        self._model = model # <<< نمونه model ذخیره شد
+        self._model = model  # optional reference to model
         
     def _find_next_active_player_index(self, game: Game, start_index: int) -> int:
         num_players = game.seated_count()
@@ -1097,7 +1133,20 @@ class WalletManagerModel(Wallet):
         if amount == 0:
             return self.value()
 
-        result = self._LUA_DECR_IF_GE(keys=[self._val_key], args=[amount, DEFAULT_MONEY])
+        try:
+            result = self._LUA_DECR_IF_GE(keys=[self._val_key], args=[amount, DEFAULT_MONEY])
+        except redis.exceptions.NoScriptError:
+            current = self._kv.get(self._val_key)
+            if current is None:
+                self._kv.set(self._val_key, DEFAULT_MONEY)
+                current = DEFAULT_MONEY
+            else:
+                current = int(current)
+            if current >= amount:
+                self._kv.decrby(self._val_key, amount)
+                result = current - amount
+            else:
+                result = -1
         if result == -1:
             raise UserException("موجودی شما کافی نیست.")
         return int(result)

@@ -3,7 +3,7 @@
 import unittest
 from typing import Tuple
 
-import redis
+import fakeredis
 
 from pokerapp.cards import Cards, Card
 from pokerapp.config import Config
@@ -23,13 +23,7 @@ class TestRoundRateModel(unittest.TestCase):
         super(TestRoundRateModel, self).__init__(*args, **kwargs)
         self._user_id = 0
         self._round_rate = RoundRateModel()
-        cfg: Config = Config()
-        self._kv = redis.Redis(
-            host=cfg.REDIS_HOST,
-            port=cfg.REDIS_PORT,
-            db=cfg.REDIS_DB,
-            password=cfg.REDIS_PASS if cfg.REDIS_PASS != "" else None
-        )
+        self._kv = fakeredis.FakeRedis()
 
     def _next_player(self, game: Game, autorized: Money) -> Player:
         self._user_id += 1

@@ -2,13 +2,14 @@
 
 from telegram import (
     Message,
-    ParseMode,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
     ReplyKeyboardMarkup,
     Bot,
     InputMediaPhoto,
 )
+from telegram.constants import ParseMode
+from telegram.error import BadRequest, Forbidden
 from threading import Timer
 from io import BytesIO
 from typing import List, Optional
@@ -269,8 +270,6 @@ class PokerBotViewer:
         return InlineKeyboardMarkup(inline_keyboard=keyboard)
 
 
-    from telegram.error import BadRequest, Unauthorized  # اضافه کردن بالای فایل
-    
     def remove_markup(self, chat_id: ChatId, message_id: MessageId) -> None:
         """حذف دکمه‌های اینلاین از یک پیام و فیلتر کردن ارورهای رایج."""
         if not message_id:
@@ -283,7 +282,7 @@ class PokerBotViewer:
                 print(f"[INFO] Markup already removed or message not found (ID={message_id}).")
             else:
                 print(f"[WARNING] BadRequest removing markup (ID={message_id}): {e}")
-        except Unauthorized as e:
+        except Forbidden as e:
             print(f"[INFO] Cannot edit markup, bot unauthorized in chat {chat_id}: {e}")
         except Exception as e:
             print(f"[ERROR] Unexpected error removing markup (ID={message_id}): {e}")
@@ -300,7 +299,7 @@ class PokerBotViewer:
                 print(f"[INFO] Message already deleted or too old (ID={message_id}).")
             else:
                 print(f"[WARNING] BadRequest deleting message (ID={message_id}): {e}")
-        except Unauthorized as e:
+        except Forbidden as e:
             print(f"[INFO] Cannot delete message, bot unauthorized in chat {chat_id}: {e}")
         except Exception as e:
             print(f"[ERROR] Unexpected error deleting message (ID={message_id}): {e}")

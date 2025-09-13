@@ -70,6 +70,17 @@ class WinnerDetermination:
         # برگرداندن بهترین دست ممکن از بین تمام ترکیب‌ها
         return best_hand_type, max_score, best_hand_cards
 
+    def determine_best_hand(self, hands: Tuple[Cards, ...]) -> Tuple[HandsOfPoker, Score, Tuple[Card, ...]]:
+        """Determine the best hand among multiple 5-card hands."""
+        best_type = HandsOfPoker.HIGH_CARD
+        best_score = -1
+        best_cards: Tuple[Card, ...] = tuple()
+        for hand in hands:
+            hand_type, score, cards = self.get_hand_value(hand, [])
+            if score > best_score:
+                best_type, best_score, best_cards = hand_type, score, cards
+        return best_type, best_score, best_cards
+
     def _calculate_hand_score(self, hand: Tuple[Card, ...]) -> Tuple[Score, HandsOfPoker]:
         """
         امتیاز و نوع یک دست ۵ کارتی مشخص را محاسبه می‌کند.
