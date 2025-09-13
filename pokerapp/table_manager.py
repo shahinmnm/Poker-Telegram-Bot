@@ -1,6 +1,7 @@
 import pickle
-from typing import Dict
+from typing import Dict, Optional
 
+import redis
 import redis.asyncio as aioredis
 
 from pokerapp.entities import Game, ChatId
@@ -9,8 +10,9 @@ from pokerapp.entities import Game, ChatId
 class TableManager:
     """Manage a single poker game per chat and persist it in Redis."""
 
-    def __init__(self, redis: aioredis.Redis):
+    def __init__(self, redis: aioredis.Redis, wallet_redis: Optional[redis.Redis] = None):
         self._redis = redis
+        self._wallet_redis = wallet_redis
         # Keep games cached in memory keyed only by chat_id
         self._tables: Dict[ChatId, Game] = {}
 
@@ -35,6 +37,13 @@ class TableManager:
         data = await self._redis.get(self._game_key(chat_id))
         if data:
             game = pickle.loads(data)
+            if self._wallet_redis is not None:
+                from pokerapp.pokerbotmodel import WalletManagerModel
+                for player in game.players:
+                    info = getattr(player, "_wallet_info", {"user_id": player.user_id})
+                    player.wallet = WalletManagerModel(info["user_id"], self._wallet_redis)
+                    if hasattr(player, "_wallet_info"):
+                        delattr(player, "_wallet_info")
         else:
             game = Game()
             await self._save(chat_id, game)

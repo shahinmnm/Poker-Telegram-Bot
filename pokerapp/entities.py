@@ -75,8 +75,20 @@ class Player:
         self.has_acted = False # آیا در راند فعلی نوبت خود را بازی کرده؟
         self.seat_index = seat_index
         # -------------------------
-def __repr__(self):
+    def __repr__(self):
         return "{}({!r})".format(self.__class__.__name__, self.__dict__)
+
+    def __getstate__(self):
+        state = self.__dict__.copy()
+        wallet = state.pop("wallet", None)
+        if wallet is not None:
+            state["_wallet_info"] = {"user_id": getattr(wallet, "_user_id", None)}
+        return state
+
+    def __setstate__(self, state):
+        self.__dict__.update(state)
+        # wallet will be reconstructed after unpickling
+        self.wallet = None
 
 class PlayerState(enum.Enum):
     ACTIVE = 1
@@ -228,6 +240,12 @@ class Game:
                 return False
 
         return True
+
+    def __getstate__(self):
+        return self.__dict__.copy()
+
+    def __setstate__(self, state):
+        self.__dict__.update(state)
 
     def __repr__(self):
         return "{}({!r})".format(self.__class__.__name__, self.__dict__)
