@@ -1012,8 +1012,8 @@ class RoundRateModel:
             return
 
         # apply blinds
-        self._set_player_blind(game, small_blind_player, SMALL_BLIND, "کوچک", chat_id)
-        self._set_player_blind(game, big_blind_player, SMALL_BLIND * 2, "بزرگ", chat_id)
+        await self._set_player_blind(game, small_blind_player, SMALL_BLIND, "کوچک", chat_id)
+        await self._set_player_blind(game, big_blind_player, SMALL_BLIND * 2, "بزرگ", chat_id)
 
         game.max_round_rate = SMALL_BLIND * 2
         game.current_player_index = first_action_index
@@ -1029,13 +1029,13 @@ class RoundRateModel:
             )
     
 
-    def _set_player_blind(self, game: Game, player: Player, amount: Money, blind_type: str, chat_id: ChatId):
+    async def _set_player_blind(self, game: Game, player: Player, amount: Money, blind_type: str, chat_id: ChatId):
         try:
             player.wallet.authorize(game_id=str(chat_id), amount=amount)
             player.round_rate += amount
             player.total_bet += amount  # ← این خط اضافه شود
             game.pot += amount
-            self._view.send_message(
+            await self._view.send_message(
                 chat_id,
                 f"💸 {player.mention_markdown} بلایند {blind_type} به مبلغ {amount}$ را پرداخت کرد."
             )
@@ -1046,7 +1046,7 @@ class RoundRateModel:
             player.total_bet += available_money  # ← این خط هم اضافه شود
             game.pot += available_money
             player.state = PlayerState.ALL_IN
-            self._view.send_message(
+            await self._view.send_message(
                 chat_id,
                 f"⚠️ {player.mention_markdown} موجودی کافی برای بلایند نداشت و All-in شد ({available_money}$)."
             )
