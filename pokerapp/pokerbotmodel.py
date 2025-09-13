@@ -78,6 +78,14 @@ class PokerBotModel:
         game = await self._table_manager.get_game(chat_id)
         return game, chat_id
 
+    async def _get_game_by_user(self, user_id: int) -> Tuple[Game, ChatId]:
+        """Find the game and chat id for a given user."""
+        for chat_id in self._table_manager._tables.keys():
+            game = await self._table_manager.get_game(chat_id)
+            if any(p.user_id == user_id for p in game.players):
+                return game, chat_id
+        raise UserException("بازی‌ای برای توقف یافت نشد.")
+
     @staticmethod
     def _current_turn_player(game: Game) -> Optional[Player]:
         if game.current_player_index < 0:
@@ -302,6 +310,13 @@ class PokerBotModel:
         else:
             await self._view.send_message(chat_id, f"👤 تعداد بازیکنان برای شروع کافی نیست (حداقل {self._min_players} نفر).")
         await self._table_manager.save_game(chat_id, game)
+
+    async def stop(self, user_id: int) -> None:
+        """Stop the current game for the chat where the user plays."""
+        game, chat_id = await self._get_game_by_user(user_id)
+        game.reset()
+        await self._table_manager.save_game(chat_id, game)
+        await self._view.send_message(chat_id, "🛑 بازی متوقف شد.")
 
     async def _start_game(self, context: CallbackContext, game: Game, chat_id: ChatId) -> None:
         """مراحل شروع یک دست جدید بازی را انجام می‌دهد."""
