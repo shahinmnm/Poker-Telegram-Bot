@@ -140,9 +140,11 @@ class PokerBotModel:
         chat_id = update.effective_chat.id
         user = update.effective_user
         await self._view.show_reopen_keyboard(chat_id, user.mention_markdown())
-        # پیام "کارت‌ها پنهان شد" را پس از چند ثانیه حذف می‌کنیم تا چت شلوغ نشود.
-        await self._view.remove_message_delayed(
-            chat_id, update.message.message_id, delay=5
+        # پیام "کارت‌ها پنهان شد" را حذف نمی‌کنیم تا چت ساده بماند
+        logger.debug(
+            "Skipping deletion of message %s in chat %s",
+            update.message.message_id,
+            chat_id,
         )
 
     async def send_cards_to_user(
@@ -180,9 +182,11 @@ class PokerBotModel:
             game.message_ids_to_delete.append(cards_message_id)
             await self._table_manager.save_game(chat_id, game)
 
-        # حذف پیام "/نمایش کارت‌ها" که بازیکن فرستاده
-        await self._view.remove_message_delayed(
-            chat_id, update.message.message_id, delay=1
+        # حذف پیام کاربر لازم نیست
+        logger.debug(
+            "Skipping deletion of message %s in chat %s",
+            update.message.message_id,
+            chat_id,
         )
 
     async def _safe_edit_message_text(
@@ -250,9 +254,11 @@ class PokerBotModel:
         """کارت‌های روی میز را به درخواست بازیکن با فرمت جدید نمایش می‌دهد."""
         game, chat_id = await self._get_game(update, context)
 
-        # پیام درخواست بازیکن را حذف می‌کنیم تا چت تمیز بماند
-        await self._view.remove_message_delayed(
-            chat_id, update.message.message_id, delay=1
+        # پیام درخواست بازیکن حذف نمی‌شود
+        logger.debug(
+            "Skipping deletion of message %s in chat %s",
+            update.message.message_id,
+            chat_id,
         )
 
         if game.state in self.ACTIVE_GAME_STATES and game.cards_table:
@@ -265,7 +271,11 @@ class PokerBotModel:
                 chat_id, "هنوز بازی شروع نشده یا کارتی روی میز نیست."
             )
             if msg_id:
-                await self._view.remove_message_delayed(chat_id, msg_id, 5)
+                logger.debug(
+                    "Skipping deletion of message %s in chat %s",
+                    msg_id,
+                    chat_id,
+                )
 
     async def ready(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """بازیکن برای شروع بازی اعلام آمادگی می‌کند."""
@@ -394,7 +404,11 @@ class PokerBotModel:
     ) -> None:
         """مراحل شروع یک دست جدید بازی را انجام می‌دهد."""
         if game.ready_message_main_id:
-            await self._view.remove_message(chat_id, game.ready_message_main_id)
+            logger.debug(
+                "Skipping deletion of message %s in chat %s",
+                game.ready_message_main_id,
+                chat_id,
+            )
             game.ready_message_main_id = None
 
         # Ensure dealer_index is initialized before use
@@ -611,9 +625,13 @@ class PokerBotModel:
         3. در غیر این صورت، نوبت را به بازیکن فعال بعدی بده.
         این متد جایگزین چرخه بازگشتی قبلی بین _process_playing و _move_to_next_player_and_process شده است.
         """
-        # پاک کردن پیام نوبت قبلی برای تمیز نگه داشتن چت
+        # پاک کردن پیام نوبت قبلی انجام نمی‌شود
         if game.turn_message_id:
-            await self._view.remove_message(chat_id, game.turn_message_id)
+            logger.debug(
+                "Skipping deletion of message %s in chat %s",
+                game.turn_message_id,
+                chat_id,
+            )
             game.turn_message_id = None
 
         # شرط ۱: آیا فقط یک بازیکن (یا کمتر) در بازی باقی مانده؟
@@ -837,9 +855,13 @@ class PokerBotModel:
         5. پیدا کردن اولین بازیکن فعال برای شروع دور شرط‌بندی جدید.
         6. اگر فقط یک بازیکن باقی مانده باشد، او را برنده اعلام می‌کند.
         """
-        # ابتدا، تمام پیام‌های نوبت قبلی را پاک می‌کنیم تا چت تمیز بماند
+        # پیام‌های نوبت قبلی را حذف نمی‌کنیم
         if game.turn_message_id:
-            await self._view.remove_message(chat_id, game.turn_message_id)
+            logger.debug(
+                "Skipping deletion of message %s in chat %s",
+                game.turn_message_id,
+                chat_id,
+            )
             game.turn_message_id = None
 
         # بررسی می‌کنیم چند بازیکن هنوز در بازی هستند (Active یا All-in)
@@ -994,7 +1016,11 @@ class PokerBotModel:
             )
             if msg_id:
                 game.message_ids_to_delete.append(msg_id)
-                await self._view.remove_message_delayed(chat_id, msg_id, 5)
+                logger.debug(
+                    "Skipping deletion of message %s in chat %s",
+                    msg_id,
+                    chat_id,
+                )
             return
 
         # مرحله ۳: ساخت رشته کارت‌ها با فرمت جدید (دو فاصله بین هر کارت)
@@ -1031,15 +1057,23 @@ class PokerBotModel:
             extra={"chat_id": chat_id},
         )
 
-        # ۱. پاک کردن پیام نوبت فعال (که دکمه‌ها را دارد)
+        # ۱. پاک کردن پیام نوبت فعال لازم نیست
         if game.turn_message_id:
-            self._view.remove_message(chat_id, game.turn_message_id)
+            logger.debug(
+                "Skipping deletion of message %s in chat %s",
+                game.turn_message_id,
+                chat_id,
+            )
             game.turn_message_id = None  # آن را نال می‌کنیم تا دوباره استفاده نشود
 
         # ۲. پاک کردن بقیه پیام‌های ذخیره شده در لیست
         # ما از یک کپی از لیست استفاده می‌کنیم تا حذف عناصر در حین پیمایش مشکلی ایجاد نکند
         for message_id in list(game.message_ids_to_delete):
-            self._view.remove_message(chat_id, message_id)
+            logger.debug(
+                "Skipping deletion of message %s in chat %s",
+                message_id,
+                chat_id,
+            )
 
         # ۳. بعد از اتمام کار، لیست را کاملاً خالی می‌کنیم
         game.message_ids_to_delete.clear()
