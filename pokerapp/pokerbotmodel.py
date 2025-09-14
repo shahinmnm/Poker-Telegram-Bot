@@ -1129,7 +1129,7 @@ class WalletManagerModel(Wallet):
 
         try:
             result = self._LUA_DECR_IF_GE(keys=[self._val_key], args=[amount, DEFAULT_MONEY])
-        except redis.exceptions.NoScriptError:
+        except (redis.exceptions.NoScriptError, ModuleNotFoundError):
             current = self._kv.get(self._val_key)
             if current is None:
                 self._kv.set(self._val_key, DEFAULT_MONEY)
