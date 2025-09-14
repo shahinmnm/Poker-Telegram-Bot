@@ -37,6 +37,7 @@ from pokerapp.entities import (
 )
 from pokerapp.pokerbotview import PokerBotViewer
 from pokerapp.table_manager import TableManager
+from pokerapp.message_delete_manager import MessageDeleteManager
 
 DICE_MULT = 10
 DICE_DELAY_SEC = 5
@@ -70,6 +71,8 @@ class PokerBotModel:
         self._table_manager = table_manager
         self._winner_determine: WinnerDetermination = WinnerDetermination()
         self._round_rate = RoundRateModel(view=self._view, kv=self._kv, model=self)
+        self._delete_manager = MessageDeleteManager()
+        self._delete_manager.set_bot(self._bot)
     @property
     def _min_players(self):
         return 1 if self._cfg.DEBUG else MIN_PLAYERS
@@ -1000,12 +1003,15 @@ class PokerBotModel:
             await _send_with_retry(self._view.send_showdown_results, chat_id, game, winners_by_pot)
 
         # ۳. پاکسازی و ریست کردن بازی برای دست بعدی (بدون تغییر)
-        for msg_id in game.message_ids_to_delete:
-            await self._view.remove_message(chat_id, msg_id)
+        await self._delete_manager.delete_messages_sequential(
+            chat_id, list(game.message_ids_to_delete)
+        )
         game.message_ids_to_delete.clear()
 
         if game.turn_message_id:
-            await self._view.remove_message(chat_id, game.turn_message_id)
+            await self._delete_manager.delete_messages_sequential(
+                chat_id, [game.turn_message_id]
+            )
             game.turn_message_id = None
 
         remaining_players = [p for p in game.players if p.wallet.value() > 0]
@@ -1023,19 +1029,15 @@ class PokerBotModel:
         """
         # ۱. پاکسازی تمام پیام‌های موقت این دست (کارت‌های بازیکنان و ...)
         # این کار باعث می‌شود چت گروه شلوغ نشود
-        for message_id in set(game.message_ids_to_delete): # از set استفاده می‌کنیم که پیام تکراری حذف نکنیم
-            try:
-                await context.bot.delete_message(chat_id=chat_id, message_id=message_id)
-            except Exception as e:
-                # اگر پیام قبلاً حذف شده یا مشکلی پیش بیاید، خطا را فقط چاپ می‌کنیم
-                print(f"INFO: Could not delete message {message_id} in chat {chat_id}. Reason: {e}")
+        await self._delete_manager.delete_messages_sequential(
+            chat_id, list(set(game.message_ids_to_delete))
+        )
 
         # پاک کردن آخرین پیام نوبت
         if game.turn_message_id:
-            try:
-                await context.bot.delete_message(chat_id=chat_id, message_id=game.turn_message_id)
-            except Exception as e:
-                print(f"INFO: Could not delete turn message {game.turn_message_id}. Reason: {e}")
+            await self._delete_manager.delete_messages_sequential(
+                chat_id, [game.turn_message_id]
+            )
 
         # ۲. ذخیره بازیکنان برای دست بعدی
         # این باعث می‌شود در بازی بعدی، لازم نباشد همه دوباره /ready بزنند
