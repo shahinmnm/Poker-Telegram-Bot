@@ -2,8 +2,6 @@
 
 import asyncio
 import datetime
-import traceback
-from threading import Timer
 from typing import List, Tuple, Dict, Optional
 
 import redis
@@ -12,14 +10,14 @@ from telegram.constants import ParseMode
 from telegram.error import BadRequest, RetryAfter
 from telegram.ext import CallbackContext, ContextTypes
 
+import logging
+
 from pokerapp.config import Config
-from pokerapp.privatechatmodel import UserPrivateChatModel
 from pokerapp.winnerdetermination import (
     WinnerDetermination,
-    HAND_NAMES_TRANSLATIONS,
     HandsOfPoker,
 )
-from pokerapp.cards import Card, Cards
+from pokerapp.cards import Cards
 from pokerapp.entities import (
     Game,
     GameState,
@@ -29,7 +27,6 @@ from pokerapp.entities import (
     MessageId,
     UserException,
     Money,
-    PlayerAction,
     PlayerState,
     Score,
     Wallet,
@@ -58,6 +55,8 @@ KEY_CHAT_DATA_GAME = "game"
 # DEFAULT_MONEY = 1000 (Defined in entities)
 MAX_TIME_FOR_TURN = datetime.timedelta(minutes=2)
 DESCRIPTION_FILE = "assets/description_bot.md"
+
+logger = logging.getLogger(__name__)
 
 
 class PokerBotModel:
@@ -119,12 +118,6 @@ class PokerBotModel:
             return None
         # Use seat-based lookup
         return game.get_player_by_seat(game.current_player_index)
-
-    def _log_bet_change(player, amount, source):
-        print(
-            f"[DEBUG] {source}: {player.mention_markdown} bet +{amount}, total_bet={player.total_bet}, round_rate={player.round_rate}, pot={game.pot}"
-        )
-
 
     async def send_cards(
         self,
@@ -243,7 +236,15 @@ class PokerBotModel:
                     return message_id
                 break
             except Exception as e:
-                print(f"Error editing message {message_id}: {e}")
+                logger.error(
+                    "Error editing message",
+                    extra={
+                        "error_type": type(e).__name__,
+                        "chat_id": chat_id,
+                        "message_id": message_id,
+                        "request_params": {"text": text},
+                    },
+                )
                 break
 
         # If editing failed, send a new message instead.
@@ -448,8 +449,13 @@ class PokerBotModel:
                     caption="🃏 کارت‌های شما برای این دست.",
                 )
             except Exception as e:
-                print(
-                    f"WARNING: Could not send cards to private chat for user {player.user_id}. Error: {e}"
+                logger.warning(
+                    "Could not send cards to private chat",
+                    extra={
+                        "error_type": type(e).__name__,
+                        "chat_id": player.user_id,
+                        "request_params": {"player": player.user_id},
+                    },
                 )
                 await self._view.send_message(
                     chat_id=chat_id,
@@ -567,15 +573,35 @@ class PokerBotModel:
             winners_by_pot[0]["amount"] += discrepancy
         elif discrepancy < 0:
             # این حالت نباید رخ دهد، اما برای اطمینان لاگ می‌گیریم
-            print(
-                f"[ERROR] Pot calculation mismatch! Game pot: {game.pot}, Calculated: {calculated_pot_total}"
+            logger.error(
+                "Pot calculation mismatch",
+                extra={
+                    "chat_id": game.chat_id if hasattr(game, "chat_id") else None,
+                    "request_params": {
+                        "game_pot": game.pot,
+                        "calculated": calculated_pot_total,
+                    },
+                    "error_type": "PotMismatch",
+                },
             )
+            try:
+                asyncio.create_task(
+                    self._view.notify_admin(
+                        {
+                            "event": "pot_mismatch",
+                            "game_pot": game.pot,
+                            "calculated": calculated_pot_total,
+                        }
+                    )
+                )
+            except Exception:
+                pass
 
         # --- FIX 2: ادغام پات‌های غیرضروری ---
         # اگر در نهایت فقط یک پات وجود داشت، اما به اشتباه به چند بخش تقسیم شده بود
         # (مثل سناریوی شما)، همه را در یک پات اصلی ادغام می‌کنیم.
         if len(bet_tiers) == 1 and len(winners_by_pot) > 1:
-            print("[INFO] Merging unnecessary side pots into a single main pot.")
+            logger.info("Merging unnecessary side pots into a single main pot")
             main_pot = {"amount": game.pot, "winners": winners_by_pot[0]["winners"]}
             return [main_pot]
 
@@ -866,7 +892,10 @@ class PokerBotModel:
             game.current_player_index = self._get_first_player_index(game)
         except AttributeError:
             # پیاده‌سازی موقت اگر متد بالا وجود ندارد
-            print("WARNING: _get_first_player_index() not found. Using fallback logic.")
+            logger.warning(
+                "_get_first_player_index() not found. Using fallback logic",
+                extra={"chat_id": chat_id},
+            )
             first_player_index = -1
             start_index = (game.dealer_index + 1) % game.seated_count()
             for i in range(game.seated_count()):
@@ -913,8 +942,9 @@ class PokerBotModel:
             except AttributeError:
                 # اگر `get_hand_value_and_type` هنوز پیاده سازی نشده است، این بخش اجرا می شود.
                 # این یک fallback موقت است.
-                print(
-                    "WARNING: 'get_hand_value_and_type' not found in WinnerDetermination. Update winnerdetermination.py"
+                logger.warning(
+                    "'get_hand_value_and_type' not found in WinnerDetermination",
+                    extra={"chat_id": getattr(game, "chat_id", None)},
                 )
                 score, best_hand = self._winner_determine.get_hand_value(
                     player.cards, game.cards_table
@@ -1003,7 +1033,10 @@ class PokerBotModel:
         تمام پیام‌های مربوط به این دست از بازی، از جمله پیام نوبت فعلی
         و سایر پیام‌های ثبت‌شده را پاک می‌کند تا چت برای نمایش نتایج تمیز شود.
         """
-        print(f"DEBUG: Clearing game messages...")
+        logger.debug(
+            "Clearing game messages",
+            extra={"chat_id": chat_id},
+        )
 
         # ۱. پاک کردن پیام نوبت فعال (که دکمه‌ها را دارد)
         if game.turn_message_id:
@@ -1033,7 +1066,13 @@ class PokerBotModel:
                 except RetryAfter as e:
                     await asyncio.sleep(e.retry_after)
                 except Exception as e:
-                    print(f"Error sending message attempt {attempt + 1}: {e}")
+                    logger.error(
+                        "Error sending message attempt",
+                        extra={
+                            "error_type": type(e).__name__,
+                            "request_params": {"attempt": attempt + 1, "args": args},
+                        },
+                    )
                     if attempt + 1 >= retries:
                         return
                     await asyncio.sleep(1)

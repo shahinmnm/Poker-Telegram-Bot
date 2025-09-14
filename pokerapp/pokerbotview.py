@@ -11,8 +11,10 @@ from telegram import (
 from telegram.constants import ParseMode
 from telegram.error import BadRequest, Forbidden, RetryAfter, TelegramError
 from io import BytesIO
-from typing import List, Optional
+from typing import Optional, Callable, Awaitable, Dict, Any
 import asyncio
+import logging
+import json
 from pokerapp.winnerdetermination import HAND_NAMES_TRANSLATIONS
 from pokerapp.desk import DeskImageGenerator
 from pokerapp.cards import Cards
@@ -28,16 +30,24 @@ from pokerapp.entities import (
 )
 
 
+logger = logging.getLogger(__name__)
+
+
 class RateLimitedSender:
     """Serializes send/edit/delete operations and retries on failures."""
 
     def __init__(
-        self, delay: float = 0.5, max_retries: int = 3, error_delay: float = 1.0
+        self,
+        delay: float = 0.5,
+        max_retries: int = 3,
+        error_delay: float = 1.0,
+        notify_admin: Optional[Callable[[Dict[str, Any]], Awaitable[None]]] = None,
     ):
         self._delay = delay
         self._lock = asyncio.Lock()
         self._max_retries = max_retries
         self._error_delay = error_delay
+        self._notify_admin = notify_admin
 
     async def send(self, func, *args, **kwargs):
         async with self._lock:
@@ -51,16 +61,58 @@ class RateLimitedSender:
                 except TelegramError:
                     await asyncio.sleep(self._error_delay)
                 except Exception as e:
-                    print(f"Unexpected error in RateLimitedSender.send: {e}")
+                    logger.error(
+                        "Unexpected error in RateLimitedSender.send",
+                        extra={
+                            "error_type": type(e).__name__,
+                            "request_params": {"args": args, "kwargs": kwargs},
+                        },
+                    )
+                    if self._notify_admin:
+                        await self._notify_admin(
+                            {
+                                "event": "rate_limiter_error",
+                                "error": str(e),
+                                "error_type": type(e).__name__,
+                            }
+                        )
                     break
-            print("[WARNING] RateLimitedSender.send failed after retries.")
+            logger.warning(
+                "RateLimitedSender.send failed after retries",
+                extra={"request_params": {"args": args, "kwargs": kwargs}},
+            )
+            if self._notify_admin:
+                await self._notify_admin(
+                    {
+                        "event": "rate_limiter_failed",
+                        "request_params": {"args": str(args), "kwargs": str(kwargs)},
+                    }
+                )
             return None
 
 class PokerBotViewer:
-    def __init__(self, bot: Bot):
+    def __init__(self, bot: Bot, admin_chat_id: Optional[int] = None):
         self._bot = bot
         self._desk_generator = DeskImageGenerator()
-        self._rate_limiter = RateLimitedSender()
+        self._admin_chat_id = admin_chat_id
+        self._rate_limiter = RateLimitedSender(notify_admin=self.notify_admin)
+
+    async def notify_admin(self, log_data: Dict[str, Any]) -> None:
+        if not self._admin_chat_id:
+            return
+        try:
+            await self._bot.send_message(
+                chat_id=self._admin_chat_id,
+                text=json.dumps(log_data, ensure_ascii=False),
+            )
+        except Exception as e:
+            logger.error(
+                "Failed to notify admin",
+                extra={
+                    "error_type": type(e).__name__,
+                    "chat_id": self._admin_chat_id,
+                },
+            )
 
     async def send_message_return_id(
         self,
@@ -82,7 +134,14 @@ class PokerBotViewer:
             if isinstance(message, Message):
                 return message.message_id
         except Exception as e:
-            print(f"Error sending message and returning ID: {e}")
+            logger.error(
+                "Error sending message and returning ID",
+                extra={
+                    "error_type": type(e).__name__,
+                    "chat_id": chat_id,
+                    "request_params": {"text": text},
+                },
+            )
         return None
 
 
@@ -110,7 +169,14 @@ class PokerBotViewer:
             except RetryAfter as e:
                 await asyncio.sleep(e.retry_after)
             except Exception as e:
-                print(f"Error sending message: {e}")
+                logger.error(
+                    "Error sending message",
+                    extra={
+                        "error_type": type(e).__name__,
+                        "chat_id": chat_id,
+                        "request_params": {"text": text},
+                    },
+                )
                 break
         return None
 
@@ -126,7 +192,10 @@ class PokerBotViewer:
         try:
             await self._rate_limiter.send(_send)
         except Exception as e:
-            print(f"Error sending photo: {e}")
+            logger.error(
+                "Error sending photo",
+                extra={"error_type": type(e).__name__, "chat_id": chat_id},
+            )
 
     async def send_dice_reply(
         self, chat_id: ChatId, message_id: MessageId, emoji='🎲'
@@ -140,7 +209,15 @@ class PokerBotViewer:
                 emoji=emoji,
             )
         except Exception as e:
-            print(f"Error sending dice reply: {e}")
+            logger.error(
+                "Error sending dice reply",
+                extra={
+                    "error_type": type(e).__name__,
+                    "chat_id": chat_id,
+                    "message_id": message_id,
+                    "request_params": {"emoji": emoji},
+                },
+            )
             return None
 
     async def send_message_reply(
@@ -156,7 +233,15 @@ class PokerBotViewer:
                 disable_notification=True,
             )
         except Exception as e:
-            print(f"Error sending message reply: {e}")
+            logger.error(
+                "Error sending message reply",
+                extra={
+                    "error_type": type(e).__name__,
+                    "chat_id": chat_id,
+                    "message_id": message_id,
+                    "request_params": {"text": text},
+                },
+            )
 
     async def send_desk_cards_img(
         self,
@@ -186,7 +271,13 @@ class PokerBotViewer:
             if messages and isinstance(messages, list) and len(messages) > 0:
                 return messages[0]
         except Exception as e:
-            print(f"Error sending desk cards image: {e}")
+            logger.error(
+                "Error sending desk cards image",
+                extra={
+                    "error_type": type(e).__name__,
+                    "chat_id": chat_id,
+                },
+            )
         return None
 
     @staticmethod
@@ -241,7 +332,13 @@ class PokerBotViewer:
             if isinstance(message, Message):
                 return message.message_id
         except Exception as e:
-            print(f"Error sending cards: {e}")
+            logger.error(
+                "Error sending cards",
+                extra={
+                    "error_type": type(e).__name__,
+                    "chat_id": chat_id,
+                },
+            )
         return None
 
     @staticmethod
@@ -298,7 +395,14 @@ class PokerBotViewer:
             if isinstance(message, Message):
                 return message.message_id
         except Exception as e:
-            print(f"Error sending turn actions: {e}")
+            logger.error(
+                "Error sending turn actions",
+                extra={
+                    "error_type": type(e).__name__,
+                    "chat_id": chat_id,
+                    "request_params": {"player": player.user_id},
+                },
+            )
         return None
 
     @staticmethod
@@ -328,13 +432,37 @@ class PokerBotViewer:
         except BadRequest as e:
             err = str(e).lower()
             if "message to edit not found" in err or "message is not modified" in err:
-                print(f"[INFO] Markup already removed or message not found (ID={message_id}).")
+                logger.info(
+                    "Markup already removed or message not found",
+                    extra={"message_id": message_id},
+                )
             else:
-                print(f"[WARNING] BadRequest removing markup (ID={message_id}): {e}")
+                logger.warning(
+                    "BadRequest removing markup",
+                    extra={
+                        "error_type": type(e).__name__,
+                        "chat_id": chat_id,
+                        "message_id": message_id,
+                    },
+                )
         except Forbidden as e:
-            print(f"[INFO] Cannot edit markup, bot unauthorized in chat {chat_id}: {e}")
+            logger.info(
+                "Cannot edit markup, bot unauthorized",
+                extra={
+                    "error_type": type(e).__name__,
+                    "chat_id": chat_id,
+                    "message_id": message_id,
+                },
+            )
         except Exception as e:
-            print(f"[ERROR] Unexpected error removing markup (ID={message_id}): {e}")
+            logger.error(
+                "Unexpected error removing markup",
+                extra={
+                    "error_type": type(e).__name__,
+                    "chat_id": chat_id,
+                    "message_id": message_id,
+                },
+            )
     
     async def remove_message(self, chat_id: ChatId, message_id: MessageId) -> None:
         """حذف پیام از چت و فیلتر کردن ارورهای بی‌خطر."""
@@ -349,13 +477,37 @@ class PokerBotViewer:
         except BadRequest as e:
             err = str(e).lower()
             if "message to delete not found" in err or "message can't be deleted" in err:
-                print(f"[INFO] Message already deleted or too old (ID={message_id}).")
+                logger.info(
+                    "Message already deleted or too old",
+                    extra={"message_id": message_id},
+                )
             else:
-                print(f"[WARNING] BadRequest deleting message (ID={message_id}): {e}")
+                logger.warning(
+                    "BadRequest deleting message",
+                    extra={
+                        "error_type": type(e).__name__,
+                        "chat_id": chat_id,
+                        "message_id": message_id,
+                    },
+                )
         except Forbidden as e:
-            print(f"[INFO] Cannot delete message, bot unauthorized in chat {chat_id}: {e}")
+            logger.info(
+                "Cannot delete message, bot unauthorized",
+                extra={
+                    "error_type": type(e).__name__,
+                    "chat_id": chat_id,
+                    "message_id": message_id,
+                },
+            )
         except Exception as e:
-            print(f"[ERROR] Unexpected error deleting message (ID={message_id}): {e}")
+            logger.error(
+                "Unexpected error deleting message",
+                extra={
+                    "error_type": type(e).__name__,
+                    "chat_id": chat_id,
+                    "message_id": message_id,
+                },
+            )
             
     async def remove_message_delayed(self, chat_id: ChatId, message_id: MessageId, delay: float = 3.0) -> None:
         """حذف پیام با تأخیر برحسب ثانیه."""
@@ -370,8 +522,13 @@ class PokerBotViewer:
                     message_id=message_id,
                 )
             except Exception as e:
-                print(
-                    f"Could not delete message {message_id} in chat {chat_id}: {e}"
+                logger.warning(
+                    "Could not delete message",
+                    extra={
+                        "error_type": type(e).__name__,
+                        "chat_id": chat_id,
+                        "message_id": message_id,
+                    },
                 )
 
         async def _delayed_remove():
@@ -466,5 +623,11 @@ class PokerBotViewer:
             except RetryAfter as e:
                 await asyncio.sleep(e.retry_after)
             except Exception as e:
-                print(f"Error sending new hand ready message: {e}")
+                logger.error(
+                    "Error sending new hand ready message",
+                    extra={
+                        "error_type": type(e).__name__,
+                        "chat_id": chat_id,
+                    },
+                )
                 break

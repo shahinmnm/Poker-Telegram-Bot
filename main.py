@@ -5,25 +5,25 @@ from dotenv import load_dotenv
 from pokerapp.config import Config
 from pokerapp.pokerbot import PokerBot
 import logging
-from pokerapp.pokerbot import PokerBot
-from pokerapp.config import Config
+from pokerapp.logging_config import setup_logging
 
-logging.basicConfig(
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    level=logging.DEBUG
-)
+setup_logging(logging.DEBUG)
+logger = logging.getLogger(__name__)
+
 
 def main() -> None:
     load_dotenv()
     cfg: Config = Config()
 
     if cfg.TOKEN == "":
-        print("Environment varaible POKERBOT_TOKEN is not set")
+        logger.error(
+            "Environment variable POKERBOT_TOKEN is not set",
+            extra={"error_type": "MissingToken"},
+        )
         exit(1)
 
     bot = PokerBot(token=cfg.TOKEN, cfg=cfg)
     bot.run()
-
 
 
 if __name__ == "__main__":
