@@ -506,79 +506,22 @@ class PokerBotViewer:
             )
     
     async def remove_message(self, chat_id: ChatId, message_id: MessageId) -> None:
-        """حذف پیام از چت و فیلتر کردن ارورهای بی‌خطر."""
-        if not message_id:
-            return
-        try:
-            await self._rate_limiter.send(
-                lambda: self._bot.delete_message(
-                    chat_id=chat_id,
-                    message_id=message_id,
-                )
-            )
-        except BadRequest as e:
-            err = str(e).lower()
-            if "message to delete not found" in err or "message can't be deleted" in err:
-                logger.info(
-                    "Message already deleted or too old",
-                    extra={"message_id": message_id},
-                )
-            else:
-                logger.warning(
-                    "BadRequest deleting message",
-                    extra={
-                        "error_type": type(e).__name__,
-                        "chat_id": chat_id,
-                        "message_id": message_id,
-                    },
-                )
-        except Forbidden as e:
-            logger.info(
-                "Cannot delete message, bot unauthorized",
-                extra={
-                    "error_type": type(e).__name__,
-                    "chat_id": chat_id,
-                    "message_id": message_id,
-                },
-            )
-        except Exception as e:
-            logger.error(
-                "Unexpected error deleting message",
-                extra={
-                    "error_type": type(e).__name__,
-                    "chat_id": chat_id,
-                    "message_id": message_id,
-                },
-            )
-            
-    async def remove_message_delayed(self, chat_id: ChatId, message_id: MessageId, delay: float = 3.0) -> None:
-        """حذف پیام با تأخیر برحسب ثانیه."""
-        if not message_id:
-            return
+        """Stub for backward compatibility; message deletion is disabled."""
+        logger.debug(
+            "remove_message called for chat_id %s message_id %s but deletion is disabled",
+            chat_id,
+            message_id,
+        )
 
-        async def _remove():
-            try:
-                await self._rate_limiter.send(
-                    lambda: self._bot.delete_message(
-                        chat_id=chat_id,
-                        message_id=message_id,
-                    )
-                )
-            except Exception as e:
-                logger.warning(
-                    "Could not delete message",
-                    extra={
-                        "error_type": type(e).__name__,
-                        "chat_id": chat_id,
-                        "message_id": message_id,
-                    },
-                )
-
-        async def _delayed_remove():
-            await asyncio.sleep(delay)
-            await _remove()
-
-        asyncio.create_task(_delayed_remove())
+    async def remove_message_delayed(
+        self, chat_id: ChatId, message_id: MessageId, delay: float = 3.0
+    ) -> None:
+        """Stub for backward compatibility; message deletion is disabled."""
+        logger.debug(
+            "remove_message_delayed called for chat_id %s message_id %s but deletion is disabled",
+            chat_id,
+            message_id,
+        )
         
     async def send_showdown_results(self, chat_id: ChatId, game: Game, winners_by_pot: list) -> None:
         """
