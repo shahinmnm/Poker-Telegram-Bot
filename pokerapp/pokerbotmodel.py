@@ -80,11 +80,10 @@ class PokerBotModel:
 
     async def _get_game_by_user(self, user_id: int) -> Tuple[Game, ChatId]:
         """Find the game and chat id for a given user."""
-        for chat_id in self._table_manager._tables.keys():
-            game = await self._table_manager.get_game(chat_id)
-            if any(p.user_id == user_id for p in game.players):
-                return game, chat_id
-        raise UserException("بازی‌ای برای توقف یافت نشد.")
+        result = await self._table_manager.find_game_by_user(user_id)
+        if result is None:
+            raise UserException("بازی‌ای برای توقف یافت نشد.")
+        return result
 
     @staticmethod
     def _current_turn_player(game: Game) -> Optional[Player]:

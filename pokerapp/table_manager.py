@@ -1,5 +1,5 @@
 import pickle
-from typing import Dict, Optional
+from typing import Dict, Optional, Tuple
 
 import redis
 import redis.asyncio as aioredis
@@ -54,6 +54,15 @@ class TableManager:
     async def save_game(self, chat_id: ChatId, game: Game) -> None:
         self._tables[chat_id] = game
         await self._save(chat_id, game)
+
+    async def find_game_by_user(self, user_id: int) -> Optional[Tuple[Game, ChatId]]:
+        """Return the game and chat id for the given user if present."""
+        # Iterate over cached games and make sure they are loaded
+        for chat_id in list(self._tables.keys()):
+            game = await self.get_game(chat_id)
+            if any(p.user_id == user_id for p in game.players):
+                return game, chat_id
+        return None
 
     # Internal -----------------------------------------------------------
     async def _save(self, chat_id: ChatId, game: Game) -> None:

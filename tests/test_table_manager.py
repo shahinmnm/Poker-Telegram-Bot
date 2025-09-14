@@ -49,13 +49,31 @@ async def test_wallet_recreated_on_load():
     game.add_player(player, seat_index=0)
     await tm.save_game(chat, game)
 
-    tm._tables.pop(chat)
-
+    # Use a new TableManager to ensure the game is loaded from Redis
+    tm = TableManager(redis_async, redis_sync)
     loaded_game = await tm.get_game(chat)
     loaded_player = loaded_game.seats[0]
 
     assert loaded_player.wallet is not None
     assert isinstance(loaded_player.wallet, WalletManagerModel)
+
+
+@pytest.mark.asyncio
+async def test_find_game_by_user():
+    server = fakeredis.FakeServer()
+    redis_async = fakeredis.aioredis.FakeRedis(server=server)
+    redis_sync = fakeredis.FakeRedis(server=server)
+    tm = TableManager(redis_async, redis_sync)
+
+    chat = 321
+    game = await tm.create_game(chat)
+    wallet = WalletManagerModel("user1", redis_sync)
+    player = Player(user_id="user1", mention_markdown="@u1", wallet=wallet, ready_message_id="ready")
+    game.add_player(player, seat_index=0)
+    await tm.save_game(chat, game)
+
+    assert await tm.find_game_by_user("user1") == (game, chat)
+    assert await tm.find_game_by_user("user2") is None
 
 
 def test_game_pickle():
