@@ -15,6 +15,7 @@ from typing import Optional, Callable, Awaitable, Dict, Any
 import asyncio
 import logging
 import json
+import time
 from pokerapp.winnerdetermination import HAND_NAMES_TRANSLATIONS
 from pokerapp.desk import DeskImageGenerator
 from pokerapp.cards import Cards
@@ -34,7 +35,15 @@ logger = logging.getLogger(__name__)
 
 
 class RateLimitedSender:
-    """Serializes Telegram requests and retries on rate limits."""
+    """Serializes Telegram requests with per-chat rate limiting.
+
+    A simple token-bucket is maintained for each chat to ensure that no more
+    than ``max_per_minute`` messages are sent within a rolling minute. When the
+    bucket is close to exhaustion, an additional delay is injected between
+    messages to reduce the likelihood of hitting Telegram's ``HTTP 429``. The
+    queue of pending messages is preserved even when a ``RetryAfter`` error is
+    received.
+    """
 
     def __init__(
         self,
@@ -42,24 +51,60 @@ class RateLimitedSender:
         max_retries: int = 3,
         error_delay: float = 0.1,
         notify_admin: Optional[Callable[[Dict[str, Any]], Awaitable[None]]] = None,
+        max_per_minute: int = 20,
     ):
         self._delay = delay
         self._lock = asyncio.Lock()
         self._max_retries = max_retries
         self._error_delay = error_delay
         self._notify_admin = notify_admin
+        self._max_tokens = max_per_minute
+        self._refill_rate = max_per_minute / 60.0  # tokens per second
+        self._buckets: Dict[ChatId, Dict[str, float]] = {}
 
-    async def send(self, func: Callable[..., Awaitable[Any]], *args, **kwargs):
-        """Execute ``func`` with args, retrying on ``RetryAfter``."""
+    async def _wait_for_token(self, chat_id: ChatId) -> Dict[str, float]:
+        bucket = self._buckets.setdefault(
+            chat_id, {"tokens": self._max_tokens, "ts": time.monotonic()}
+        )
+        while True:
+            now = time.monotonic()
+            elapsed = now - bucket["ts"]
+            bucket["tokens"] = min(
+                self._max_tokens, bucket["tokens"] + elapsed * self._refill_rate
+            )
+            bucket["ts"] = now
+            if bucket["tokens"] >= 1:
+                return bucket
+            wait_time = (1 - bucket["tokens"]) / self._refill_rate
+            await asyncio.sleep(wait_time)
+
+    async def send(
+        self, func: Callable[..., Awaitable[Any]], *args, chat_id: Optional[ChatId] = None, **kwargs
+    ):
+        """Execute ``func`` with args, respecting per-chat limits and retrying."""
         async with self._lock:
-            for _ in range(self._max_retries):
+            bucket = None
+            if chat_id is not None:
+                bucket = await self._wait_for_token(chat_id)
+            attempts = 0
+            while True:
                 try:
                     result = await func(*args, **kwargs)
-                    await asyncio.sleep(self._delay)
+                    remaining = None
+                    if bucket is not None:
+                        bucket["tokens"] -= 1
+                        remaining = bucket["tokens"]
+                    delay = self._delay
+                    if remaining is not None and remaining < 5:
+                        delay += (5 - remaining) * 0.5
+                    await asyncio.sleep(delay)
                     return result
                 except RetryAfter as e:
                     await asyncio.sleep(e.retry_after)
                 except TelegramError:
+                    if attempts >= self._max_retries:
+                        break
+                    attempts += 1
                     await asyncio.sleep(self._error_delay)
                 except Exception as e:
                     logger.error(
@@ -109,7 +154,8 @@ class PokerBotViewer:
                 lambda: self._bot.send_message(
                     chat_id=self._admin_chat_id,
                     text=json.dumps(log_data, ensure_ascii=False),
-                )
+                ),
+                chat_id=self._admin_chat_id,
             )
         except Exception as e:
             logger.error(
@@ -136,7 +182,8 @@ class PokerBotViewer:
                     reply_markup=reply_markup,
                     disable_notification=True,
                     disable_web_page_preview=True,
-                )
+                ),
+                chat_id=chat_id,
             )
             if isinstance(message, Message):
                 return message.message_id
@@ -168,7 +215,8 @@ class PokerBotViewer:
                     reply_markup=reply_markup,
                     disable_notification=True,
                     disable_web_page_preview=True,
-                )
+                ),
+                chat_id=chat_id,
             )
             if isinstance(message, Message):
                 return message.message_id
@@ -193,7 +241,7 @@ class PokerBotViewer:
                     disable_notification=True,
                 )
         try:
-            await self._rate_limiter.send(_send)
+            await self._rate_limiter.send(_send, chat_id=chat_id)
         except Exception as e:
             logger.error(
                 "Error sending photo",
@@ -210,7 +258,8 @@ class PokerBotViewer:
                     chat_id=chat_id,
                     disable_notification=True,
                     emoji=emoji,
-                )
+                ),
+                chat_id=chat_id,
             )
         except Exception as e:
             logger.error(
@@ -235,7 +284,8 @@ class PokerBotViewer:
                     parse_mode=ParseMode.MARKDOWN,
                     text=text,
                     disable_notification=True,
-                )
+                ),
+                chat_id=chat_id,
             )
         except Exception as e:
             logger.error(
@@ -265,7 +315,8 @@ class PokerBotViewer:
                     text=text,
                     parse_mode=parse_mode,
                     reply_markup=reply_markup,
-                )
+                ),
+                chat_id=chat_id,
             )
             if isinstance(message, Message):
                 return message.message_id
@@ -308,7 +359,8 @@ class PokerBotViewer:
                         ),
                     ],
                     disable_notification=disable_notification,
-                )
+                ),
+                chat_id=chat_id,
             )
             if messages and isinstance(messages, list) and len(messages) > 0:
                 return messages[0]
@@ -370,7 +422,8 @@ class PokerBotViewer:
                     reply_to_message_id=ready_message_id,
                     parse_mode=ParseMode.MARKDOWN,
                     disable_notification=True,
-                )
+                ),
+                chat_id=chat_id,
             )
             if isinstance(message, Message):
                 return message.message_id
@@ -434,7 +487,8 @@ class PokerBotViewer:
                     reply_markup=markup,
                     parse_mode=ParseMode.MARKDOWN,
                     disable_notification=False,  # player gets notification
-                )
+                ),
+                chat_id=chat_id,
             )
             if isinstance(message, Message):
                 return message.message_id
@@ -472,7 +526,8 @@ class PokerBotViewer:
                 lambda: self._bot.edit_message_reply_markup(
                     chat_id=chat_id,
                     message_id=message_id,
-                )
+                ),
+                chat_id=chat_id,
             )
         except BadRequest as e:
             err = str(e).lower()
@@ -622,7 +677,8 @@ class PokerBotViewer:
                     parse_mode=ParseMode.MARKDOWN,
                     disable_notification=True,
                     disable_web_page_preview=True,
-                )
+                ),
+                chat_id=chat_id,
             )
         except Exception as e:
             logger.error(
