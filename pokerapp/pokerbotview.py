@@ -9,7 +9,7 @@ from telegram import (
     InputMediaPhoto,
 )
 from telegram.constants import ParseMode
-from telegram.error import BadRequest, Forbidden
+from telegram.error import BadRequest, Forbidden, RetryAfter
 from io import BytesIO
 from typing import List, Optional
 import asyncio
@@ -62,19 +62,24 @@ class PokerBotViewer:
         reply_markup: ReplyKeyboardMarkup = None,
         parse_mode: str = ParseMode.MARKDOWN,  # <--- پارامتر جدید اضافه شد
     ) -> Optional[MessageId]:
-        try:
-            message = await self._bot.send_message(
-                chat_id=chat_id,
-                parse_mode=parse_mode,  # <--- از پارامتر ورودی استفاده شد
-                text=text,
-                reply_markup=reply_markup,
-                disable_notification=True,
-                disable_web_page_preview=True,
-            )
-            if isinstance(message, Message):
-                return message.message_id
-        except Exception as e:
-            print(f"Error sending message: {e}")
+        for _ in range(2):
+            try:
+                message = await self._bot.send_message(
+                    chat_id=chat_id,
+                    parse_mode=parse_mode,  # <--- از پارامتر ورودی استفاده شد
+                    text=text,
+                    reply_markup=reply_markup,
+                    disable_notification=True,
+                    disable_web_page_preview=True,
+                )
+                if isinstance(message, Message):
+                    return message.message_id
+                break
+            except RetryAfter as e:
+                await asyncio.sleep(e.retry_after)
+            except Exception as e:
+                print(f"Error sending message: {e}")
+                break
         return None
 
     async def send_photo(self, chat_id: ChatId) -> None:
@@ -393,4 +398,18 @@ class PokerBotViewer:
             "♻️ دست به پایان رسید. بازیکنان باقی‌مانده برای دست بعد حفظ شدند.\n"
             "برای شروع دست جدید، /start را بزنید یا بازیکنان جدید می‌توانند با /ready اعلام آمادگی کنند."
         )
-        await self.send_message(chat_id, message)
+        for _ in range(2):
+            try:
+                await self._bot.send_message(
+                    chat_id=chat_id,
+                    text=message,
+                    parse_mode=ParseMode.MARKDOWN,
+                    disable_notification=True,
+                    disable_web_page_preview=True,
+                )
+                break
+            except RetryAfter as e:
+                await asyncio.sleep(e.retry_after)
+            except Exception as e:
+                print(f"Error sending new hand ready message: {e}")
+                break
