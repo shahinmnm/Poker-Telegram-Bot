@@ -287,24 +287,62 @@ class PokerBotModel:
 
         if game.ready_message_main_id:
             if text != current_text:
+                valid_message = True
                 try:
-                    await self._bot.edit_message_text(
-                        chat_id=chat_id,
-                        message_id=game.ready_message_main_id,
-                        text=text,
-                        parse_mode="Markdown",
-                        reply_markup=keyboard,
-                    )
-                    game.ready_message_main_text = text
+                    if hasattr(self._bot, "get_message"):
+                        await self._bot.get_message(chat_id=chat_id, message_id=game.ready_message_main_id)
+                    else:
+                        # Fallback: ensure bot can access the chat
+                        await self._bot.get_chat_member(chat_id, self._bot.id)
                 except BadRequest as exc:
-                    print(f"Error editing ready message: {exc}")
-                    msg = await self._view.send_message_return_id(chat_id, text, reply_markup=keyboard)
-                    if msg:
-                        game.ready_message_main_id = msg
-                        game.ready_message_main_text = text
+                    print(
+                        "Ready message validation failed: "
+                        f"{getattr(exc, 'message', str(exc))}"
+                    )
+                    valid_message = False
                 except Exception as exc:
-                    print(f"Unexpected error editing ready message: {exc}")
-                    msg = await self._view.send_message_return_id(chat_id, text, reply_markup=keyboard)
+                    print(
+                        "Unexpected error validating ready message: "
+                        f"{getattr(exc, 'message', str(exc))}"
+                    )
+                    valid_message = False
+
+                if valid_message:
+                    try:
+                        await self._bot.edit_message_text(
+                            chat_id=chat_id,
+                            message_id=game.ready_message_main_id,
+                            text=text,
+                            parse_mode="Markdown",
+                            reply_markup=keyboard,
+                        )
+                        game.ready_message_main_text = text
+                    except BadRequest as exc:
+                        print(
+                            "BadRequest editing ready message: "
+                            f"{getattr(exc, 'message', str(exc))}"
+                        )
+                        msg = await self._view.send_message_return_id(
+                            chat_id, text, reply_markup=keyboard
+                        )
+                        if msg:
+                            game.ready_message_main_id = msg
+                            game.ready_message_main_text = text
+                    except Exception as exc:
+                        print(
+                            "Unexpected error editing ready message: "
+                            f"{getattr(exc, 'message', str(exc))}"
+                        )
+                        msg = await self._view.send_message_return_id(
+                            chat_id, text, reply_markup=keyboard
+                        )
+                        if msg:
+                            game.ready_message_main_id = msg
+                            game.ready_message_main_text = text
+                else:
+                    msg = await self._view.send_message_return_id(
+                        chat_id, text, reply_markup=keyboard
+                    )
                     if msg:
                         game.ready_message_main_id = msg
                         game.ready_message_main_text = text
@@ -1118,6 +1156,36 @@ class RoundRateModel:
                 f"⚠️ {player.mention_markdown} موجودی کافی برای بلایند نداشت و All-in شد ({available_money}$)."
             )
 
+    def finish_rate(self, game: Game, player_scores: Dict[Score, List[Tuple[Player, Cards]]]) -> None:
+        """Split the pot among players based on their hand scores.
+
+        ``player_scores`` maps a score to a list of ``(Player, Cards)`` tuples
+        where higher scores represent better hands. Players receive chips
+        proportional to their wager and capped by the remaining pot.
+        """
+        total_players = sum(len(v) for v in player_scores.values())
+        remaining_pot = game.pot
+
+        for score in sorted(player_scores.keys(), reverse=True):
+            group = player_scores[score]
+            caps = [p.wallet.authorized_money(game.id) * total_players for p, _ in group]
+            group_total = sum(caps)
+            if group_total == 0:
+                continue
+            scale = min(1, remaining_pot / group_total)
+            for (player, _), cap in zip(group, caps):
+                payout = cap * scale
+                player.wallet.inc(int(round(payout)))
+                remaining_pot -= payout
+            if remaining_pot <= 0:
+                break
+
+        for group in player_scores.values():
+            for player, _ in group:
+                player.wallet.approve(game.id)
+
+        game.pot = int(remaining_pot)
+
     def collect_bets_for_pot(self, game: Game):
         # This function resets the round-specific bets for the next street.
         # The money is already in the pot.
@@ -1210,6 +1278,23 @@ class WalletManagerModel(Wallet):
         return self.inc(amount)
 
     # --- متدهای مربوط به تراکنش‌های بازی (برای تطابق با Wallet ABC) ---
+    def inc_authorized_money(self, game_id: str, amount: Money) -> None:
+        """Increase reserved money for a specific game."""
+        self._kv.hincrby(self._authorized_money_key, game_id, amount)
+
+    def authorized_money(self, game_id: str) -> Money:
+        """Return the amount of money currently reserved for ``game_id``."""
+        val = self._kv.hget(self._authorized_money_key, game_id)
+        return int(val) if val else 0
+
+    def authorize_all(self, game_id: str) -> Money:
+        """Reserve the entire wallet for ``game_id`` and return that amount."""
+        current = self.value()
+        if current > 0:
+            self.dec(current)
+            self._kv.hincrby(self._authorized_money_key, game_id, current)
+        return current
+
     def authorize(self, game_id: str, amount: Money) -> None:
         """مبلغی از پول بازیکن را برای یک بازی خاص رزرو (dec) می‌کند."""
         # در این پیاده‌سازی، ما مستقیماً پول را کم می‌کنیم.
