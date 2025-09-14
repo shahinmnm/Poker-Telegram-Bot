@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 
+import asyncio
 import datetime
 import traceback
 from threading import Timer
@@ -8,7 +9,7 @@ from typing import List, Tuple, Dict, Optional
 import redis
 from telegram import Message, ReplyKeyboardMarkup, Update, Bot
 from telegram.constants import ParseMode
-from telegram.error import BadRequest
+from telegram.error import BadRequest, RetryAfter
 from telegram.ext import CallbackContext, ContextTypes
 
 from pokerapp.config import Config
@@ -912,6 +913,19 @@ class PokerBotModel:
         """
         فرآیند پایان دست را با استفاده از خروجی دقیق _determine_winners مدیریت می‌کند.
         """
+        async def _send_with_retry(func, *args, retries: int = 3):
+            for attempt in range(retries):
+                try:
+                    await func(*args)
+                    return
+                except RetryAfter as e:
+                    await asyncio.sleep(e.retry_after)
+                except Exception as e:
+                    print(f"Error sending message attempt {attempt + 1}: {e}")
+                    if attempt + 1 >= retries:
+                        return
+                    await asyncio.sleep(1)
+
         contenders = game.players_by(states=(PlayerState.ACTIVE, PlayerState.ALL_IN))
 
         if not contenders:
@@ -945,7 +959,7 @@ class PokerBotModel:
 
             # ۲. فراخوانی View برای نمایش نتایج
             # View باید آپدیت شود تا این ساختار داده جدید را به زیبایی نمایش دهد
-            await self._view.send_showdown_results(chat_id, game, winners_by_pot)
+            await _send_with_retry(self._view.send_showdown_results, chat_id, game, winners_by_pot)
 
         # ۳. پاکسازی و ریست کردن بازی برای دست بعدی (بدون تغییر)
         for msg_id in game.message_ids_to_delete:
@@ -961,7 +975,8 @@ class PokerBotModel:
 
         game.reset()
 
-        await self._view.send_new_hand_ready_message(chat_id)
+        await asyncio.sleep(1)
+        await _send_with_retry(self._view.send_new_hand_ready_message, chat_id)
         
     async def _end_hand(self, game: Game, chat_id: ChatId, context: CallbackContext) -> None:
         """
