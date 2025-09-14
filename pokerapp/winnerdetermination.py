@@ -74,12 +74,12 @@ class WinnerDetermination:
         """Determine the best hand among multiple 5-card hands."""
         best_type = HandsOfPoker.HIGH_CARD
         best_score = -1
-        best_cards: Tuple[Card, ...] = tuple()
+        best_cards: Cards = []
         for hand in hands:
-            hand_type, score, cards = self.get_hand_value(hand, [])
+            hand_type, score, _ = self.get_hand_value(hand, [])
             if score > best_score:
-                best_type, best_score, best_cards = hand_type, score, cards
-        return best_type, best_score, best_cards
+                best_type, best_score, best_cards = hand_type, score, hand
+        return best_type, best_score, tuple(best_cards)
 
     def _calculate_hand_score(self, hand: Tuple[Card, ...]) -> Tuple[Score, HandsOfPoker]:
         """
@@ -141,11 +141,11 @@ class WinnerDetermination:
         مهم‌تر (مثل کارتِ Pair) وزن بیشتری از کیکرها داشته باشد.
         """
         score = HAND_RANK_MULTIPLIER * hand_type.value
-        power = 0
-        # hand_values باید از قبل بر اساس اهمیت مرتب شده باشد (از کم به زیاد)
-        for val in reversed(hand_values):
+        # hand_values باید از قبل بر اساس اهمیت مرتب شده باشد (از بیشترین به کمترین)
+        power = len(hand_values) - 1
+        for val in hand_values:
             score += val * (15 ** power)
-            power += 1
+            power -= 1
         return score
 
     @staticmethod
@@ -158,8 +158,8 @@ class WinnerDetermination:
         dict_hand = {}
         for i in hand_values:
             dict_hand[i] = dict_hand.get(i, 0) + 1
-        # مرتب‌سازی بر اساس تعداد تکرار، و سپس بر اساس ارزش کارت
-        sorted_dict_items = sorted(dict_hand.items(), key=lambda item: (item[1], item[0]))
-        counts = [item[1] for item in sorted_dict_items]
-        keys = [item[0] for item in sorted_dict_items]
+        # counts مرتب‌شده بر اساس تعداد تکرار به صورت صعودی
+        counts = sorted(dict_hand.values())
+        # keys مرتب‌شده بر اساس اهمیت (تعداد تکرار و سپس ارزش کارت) به صورت نزولی
+        keys = [item[0] for item in sorted(dict_hand.items(), key=lambda item: (item[1], item[0]), reverse=True)]
         return (counts, keys)
