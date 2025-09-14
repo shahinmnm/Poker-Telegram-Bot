@@ -73,7 +73,8 @@ async def test_find_game_by_user():
     await tm.save_game(chat, game)
 
     assert await tm.find_game_by_user("user1") == (game, chat)
-    assert await tm.find_game_by_user("user2") is None
+    with pytest.raises(LookupError):
+        await tm.find_game_by_user("user2")
 
 
 def test_game_pickle():
