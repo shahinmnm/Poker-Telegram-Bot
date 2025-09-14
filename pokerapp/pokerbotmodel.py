@@ -355,67 +355,19 @@ class PokerBotModel:
 
         if game.ready_message_main_id:
             if text != current_text:
-                valid_message = True
                 try:
-                    if hasattr(self._bot, "get_message"):
-                        await self._bot.get_message(
-                            chat_id=chat_id, message_id=game.ready_message_main_id
-                        )
-                    else:
-                        # Fallback: ensure bot can access the chat
-                        await self._bot.get_chat_member(chat_id, self._bot.id)
-                except BadRequest as exc:
-                    print(
-                        "Ready message validation failed: "
-                        f"{getattr(exc, 'message', str(exc))}"
-                    )
-                    valid_message = False
+                    await self._view.remove_message(chat_id, game.ready_message_main_id)
                 except Exception as exc:
                     print(
-                        "Unexpected error validating ready message: "
+                        "Failed to remove ready message: "
                         f"{getattr(exc, 'message', str(exc))}"
                     )
-                    valid_message = False
-
-                if valid_message:
-                    try:
-                        await self._bot.edit_message_text(
-                            chat_id=chat_id,
-                            message_id=game.ready_message_main_id,
-                            text=text,
-                            parse_mode="Markdown",
-                            reply_markup=keyboard,
-                        )
-                        game.ready_message_main_text = text
-                    except BadRequest as exc:
-                        print(
-                            "BadRequest editing ready message: "
-                            f"{getattr(exc, 'message', str(exc))}"
-                        )
-                        msg = await self._view.send_message_return_id(
-                            chat_id, text, reply_markup=keyboard
-                        )
-                        if msg:
-                            game.ready_message_main_id = msg
-                            game.ready_message_main_text = text
-                    except Exception as exc:
-                        print(
-                            "Unexpected error editing ready message: "
-                            f"{getattr(exc, 'message', str(exc))}"
-                        )
-                        msg = await self._view.send_message_return_id(
-                            chat_id, text, reply_markup=keyboard
-                        )
-                        if msg:
-                            game.ready_message_main_id = msg
-                            game.ready_message_main_text = text
-                else:
-                    msg = await self._view.send_message_return_id(
-                        chat_id, text, reply_markup=keyboard
-                    )
-                    if msg:
-                        game.ready_message_main_id = msg
-                        game.ready_message_main_text = text
+                msg = await self._view.send_message_return_id(
+                    chat_id, text, reply_markup=keyboard
+                )
+                if msg:
+                    game.ready_message_main_id = msg
+                    game.ready_message_main_text = text
             # If text is the same, do nothing
         else:
             msg = await self._view.send_message_return_id(
