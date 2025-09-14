@@ -9,7 +9,7 @@ from telegram import (
     InputMediaPhoto,
 )
 from telegram.constants import ParseMode
-from telegram.error import BadRequest, Forbidden, RetryAfter
+from telegram.error import BadRequest, Forbidden, RetryAfter, TelegramError
 from io import BytesIO
 from typing import List, Optional
 import asyncio
@@ -29,17 +29,32 @@ from pokerapp.entities import (
 
 
 class RateLimitedSender:
-    """Serializes send/edit/delete operations to avoid rate limits."""
+    """Serializes send/edit/delete operations and retries on failures."""
 
-    def __init__(self, delay: float = 0.5):
+    def __init__(
+        self, delay: float = 0.5, max_retries: int = 3, error_delay: float = 1.0
+    ):
         self._delay = delay
         self._lock = asyncio.Lock()
+        self._max_retries = max_retries
+        self._error_delay = error_delay
 
-    async def send(self, coro):
+    async def send(self, func, *args, **kwargs):
         async with self._lock:
-            result = await coro
-            await asyncio.sleep(self._delay)
-            return result
+            for attempt in range(self._max_retries):
+                try:
+                    result = await func(*args, **kwargs)
+                    await asyncio.sleep(self._delay)
+                    return result
+                except RetryAfter as e:
+                    await asyncio.sleep(e.retry_after)
+                except TelegramError:
+                    await asyncio.sleep(self._error_delay)
+                except Exception as e:
+                    print(f"Unexpected error in RateLimitedSender.send: {e}")
+                    break
+            print("[WARNING] RateLimitedSender.send failed after retries.")
+            return None
 
 class PokerBotViewer:
     def __init__(self, bot: Bot):
@@ -56,14 +71,13 @@ class PokerBotViewer:
         """Sends a message and returns its ID, or None if not applicable."""
         try:
             message = await self._rate_limiter.send(
-                self._bot.send_message(
-                    chat_id=chat_id,
-                    parse_mode=ParseMode.MARKDOWN,
-                    text=text,
-                    reply_markup=reply_markup,
-                    disable_notification=True,
-                    disable_web_page_preview=True,
-                )
+                self._bot.send_message,
+                chat_id=chat_id,
+                parse_mode=ParseMode.MARKDOWN,
+                text=text,
+                reply_markup=reply_markup,
+                disable_notification=True,
+                disable_web_page_preview=True,
             )
             if isinstance(message, Message):
                 return message.message_id
@@ -82,14 +96,13 @@ class PokerBotViewer:
         for _ in range(2):
             try:
                 message = await self._rate_limiter.send(
-                    self._bot.send_message(
-                        chat_id=chat_id,
-                        parse_mode=parse_mode,  # <--- از پارامتر ورودی استفاده شد
-                        text=text,
-                        reply_markup=reply_markup,
-                        disable_notification=True,
-                        disable_web_page_preview=True,
-                    )
+                    self._bot.send_message,
+                    chat_id=chat_id,
+                    parse_mode=parse_mode,  # <--- از پارامتر ورودی استفاده شد
+                    text=text,
+                    reply_markup=reply_markup,
+                    disable_notification=True,
+                    disable_web_page_preview=True,
                 )
                 if isinstance(message, Message):
                     return message.message_id
@@ -102,15 +115,16 @@ class PokerBotViewer:
         return None
 
     async def send_photo(self, chat_id: ChatId) -> None:
-        try:
-            await self._rate_limiter.send(
-                self._bot.send_photo(
+        async def _send():
+            with open("./assets/poker_hand.jpg", "rb") as f:
+                return await self._bot.send_photo(
                     chat_id=chat_id,
-                    photo=open("./assets/poker_hand.jpg", 'rb'),
+                    photo=f,
                     parse_mode=ParseMode.MARKDOWN,
                     disable_notification=True,
                 )
-            )
+        try:
+            await self._rate_limiter.send(_send)
         except Exception as e:
             print(f"Error sending photo: {e}")
 
@@ -119,12 +133,11 @@ class PokerBotViewer:
     ) -> Optional[Message]:
         try:
             return await self._rate_limiter.send(
-                self._bot.send_dice(
-                    reply_to_message_id=message_id,
-                    chat_id=chat_id,
-                    disable_notification=True,
-                    emoji=emoji,
-                )
+                self._bot.send_dice,
+                reply_to_message_id=message_id,
+                chat_id=chat_id,
+                disable_notification=True,
+                emoji=emoji,
             )
         except Exception as e:
             print(f"Error sending dice reply: {e}")
@@ -135,13 +148,12 @@ class PokerBotViewer:
     ) -> None:
         try:
             await self._rate_limiter.send(
-                self._bot.send_message(
-                    reply_to_message_id=message_id,
-                    chat_id=chat_id,
-                    parse_mode=ParseMode.MARKDOWN,
-                    text=text,
-                    disable_notification=True,
-                )
+                self._bot.send_message,
+                reply_to_message_id=message_id,
+                chat_id=chat_id,
+                parse_mode=ParseMode.MARKDOWN,
+                text=text,
+                disable_notification=True,
             )
         except Exception as e:
             print(f"Error sending message reply: {e}")
@@ -161,16 +173,15 @@ class PokerBotViewer:
             im_cards.save(bio, 'PNG')
             bio.seek(0)
             messages = await self._rate_limiter.send(
-                self._bot.send_media_group(
-                    chat_id=chat_id,
-                    media=[
-                        InputMediaPhoto(
-                            media=bio,
-                            caption=caption,
-                        ),
-                    ],
-                    disable_notification=disable_notification,
-                )
+                self._bot.send_media_group,
+                chat_id=chat_id,
+                media=[
+                    InputMediaPhoto(
+                        media=bio,
+                        caption=caption,
+                    ),
+                ],
+                disable_notification=disable_notification,
             )
             if messages and isinstance(messages, list) and len(messages) > 0:
                 return messages[0]
@@ -219,14 +230,13 @@ class PokerBotViewer:
         markup = self._get_cards_markup(cards)
         try:
             message = await self._rate_limiter.send(
-                self._bot.send_message(
-                    chat_id=chat_id,
-                    text="کارت‌های شما " + mention_markdown,
-                    reply_markup=markup,
-                    reply_to_message_id=ready_message_id,
-                    parse_mode=ParseMode.MARKDOWN,
-                    disable_notification=True,
-                )
+                self._bot.send_message,
+                chat_id=chat_id,
+                text="کارت‌های شما " + mention_markdown,
+                reply_markup=markup,
+                reply_to_message_id=ready_message_id,
+                parse_mode=ParseMode.MARKDOWN,
+                disable_notification=True,
             )
             if isinstance(message, Message):
                 return message.message_id
@@ -278,13 +288,12 @@ class PokerBotViewer:
 
         try:
             message = await self._rate_limiter.send(
-                self._bot.send_message(
-                    chat_id=chat_id,
-                    text=text,
-                    reply_markup=markup,
-                    parse_mode=ParseMode.MARKDOWN,
-                    disable_notification=False,  # player gets notification
-                )
+                self._bot.send_message,
+                chat_id=chat_id,
+                text=text,
+                reply_markup=markup,
+                parse_mode=ParseMode.MARKDOWN,
+                disable_notification=False,  # player gets notification
             )
             if isinstance(message, Message):
                 return message.message_id
@@ -312,7 +321,9 @@ class PokerBotViewer:
             return
         try:
             await self._rate_limiter.send(
-                self._bot.edit_message_reply_markup(chat_id=chat_id, message_id=message_id)
+                self._bot.edit_message_reply_markup,
+                chat_id=chat_id,
+                message_id=message_id,
             )
         except BadRequest as e:
             err = str(e).lower()
@@ -331,7 +342,9 @@ class PokerBotViewer:
             return
         try:
             await self._rate_limiter.send(
-                self._bot.delete_message(chat_id=chat_id, message_id=message_id)
+                self._bot.delete_message,
+                chat_id=chat_id,
+                message_id=message_id,
             )
         except BadRequest as e:
             err = str(e).lower()
@@ -352,10 +365,14 @@ class PokerBotViewer:
         async def _remove():
             try:
                 await self._rate_limiter.send(
-                    self._bot.delete_message(chat_id=chat_id, message_id=message_id)
+                    self._bot.delete_message,
+                    chat_id=chat_id,
+                    message_id=message_id,
                 )
             except Exception as e:
-                print(f"Could not delete message {message_id} in chat {chat_id}: {e}")
+                print(
+                    f"Could not delete message {message_id} in chat {chat_id}: {e}"
+                )
 
         async def _delayed_remove():
             await asyncio.sleep(delay)
@@ -438,13 +455,12 @@ class PokerBotViewer:
         for _ in range(2):
             try:
                 await self._rate_limiter.send(
-                    self._bot.send_message(
-                        chat_id=chat_id,
-                        text=message,
-                        parse_mode=ParseMode.MARKDOWN,
-                        disable_notification=True,
-                        disable_web_page_preview=True,
-                    )
+                    self._bot.send_message,
+                    chat_id=chat_id,
+                    text=message,
+                    parse_mode=ParseMode.MARKDOWN,
+                    disable_notification=True,
+                    disable_web_page_preview=True,
                 )
                 break
             except RetryAfter as e:
