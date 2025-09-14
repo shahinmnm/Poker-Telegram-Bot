@@ -38,7 +38,6 @@ from pokerapp.entities import (
 )
 from pokerapp.pokerbotview import PokerBotViewer
 from pokerapp.table_manager import TableManager
-from pokerapp.message_delete_manager import MessageDeleteManager
 
 DICE_MULT = 10
 DICE_DELAY_SEC = 5
@@ -82,8 +81,6 @@ class PokerBotModel:
         self._table_manager = table_manager
         self._winner_determine: WinnerDetermination = WinnerDetermination()
         self._round_rate = RoundRateModel(view=self._view, kv=self._kv, model=self)
-        self._delete_manager = MessageDeleteManager()
-        self._delete_manager.set_bot(self._bot)
 
     @property
     def _min_players(self):
@@ -1112,16 +1109,10 @@ class PokerBotModel:
                 self._view.send_showdown_results, chat_id, game, winners_by_pot
             )
 
-        # ۳. پاکسازی و ریست کردن بازی برای دست بعدی (بدون تغییر)
-        await self._delete_manager.delete_messages_sequential(
-            chat_id, list(game.message_ids_to_delete)
-        )
+        # ۳. ریست کردن وضعیت پیام‌ها و آماده‌سازی برای دست بعدی
         game.message_ids_to_delete.clear()
 
         if game.turn_message_id:
-            await self._delete_manager.delete_messages_sequential(
-                chat_id, [game.turn_message_id]
-            )
             game.turn_message_id = None
 
         remaining_players = [p for p in game.players if p.wallet.value() > 0]
@@ -1139,17 +1130,12 @@ class PokerBotModel:
         """
         یک دست از بازی را تمام کرده، پیام‌ها را پاکسازی کرده و برای دست بعدی آماده می‌شود.
         """
-        # ۱. پاکسازی تمام پیام‌های موقت این دست (کارت‌های بازیکنان و ...)
-        # این کار باعث می‌شود چت گروه شلوغ نشود
-        await self._delete_manager.delete_messages_sequential(
-            chat_id, list(set(game.message_ids_to_delete))
-        )
+        # ۱. ریست کردن شناسه‌های پیام موقت بدون حذف پیام‌ها
+        game.message_ids_to_delete.clear()
 
-        # پاک کردن آخرین پیام نوبت
+        # پاک کردن اشاره به آخرین پیام نوبت بدون حذف آن
         if game.turn_message_id:
-            await self._delete_manager.delete_messages_sequential(
-                chat_id, [game.turn_message_id]
-            )
+            game.turn_message_id = None
 
         # ۲. ذخیره بازیکنان برای دست بعدی
         # این باعث می‌شود در بازی بعدی، لازم نباشد همه دوباره /ready بزنند
