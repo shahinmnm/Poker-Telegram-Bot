@@ -887,7 +887,11 @@ class PokerBotModel:
             await self.add_cards_to_table(1, game, chat_id, "🃏 ترن (Turn)")
         elif game.state == GameState.ROUND_TURN:
             game.state = GameState.ROUND_RIVER
-            await self.add_cards_to_table(1, game, chat_id, "🃏 ریور (River)")
+            # کارت ریور را اضافه می‌کنیم اما پیام جداگانه‌ای ارسال نمی‌شود؛
+            # تصویر نهایی میز به همراه نتایج در مرحله showdown نمایش داده خواهد شد.
+            await self.add_cards_to_table(
+                1, game, chat_id, "🃏 ریور (River)", send_message=False
+            )
         elif game.state == GameState.ROUND_RIVER:
             # بعد از ریور، دور شرط‌بندی تمام شده و باید showdown انجام شود
             await self._showdown(game, chat_id, context)
@@ -998,17 +1002,29 @@ class PokerBotModel:
         return winners, highest_score
 
     async def add_cards_to_table(
-        self, count: int, game: Game, chat_id: ChatId, street_name: str
+        self,
+        count: int,
+        game: Game,
+        chat_id: ChatId,
+        street_name: str,
+        send_message: bool = True,
     ):
         """
-        کارت‌های جدید را به میز اضافه کرده و تصویر میز را با فرمت جدید و زیبا ارسال می‌کند.
-        اگر count=0 باشد، فقط کارت‌های فعلی را نمایش می‌دهد.
+        کارت‌های جدید را به میز اضافه کرده و در صورت نیاز تصویر میز را ارسال می‌کند.
+        اگر ``count=0`` باشد، فقط کارت‌های فعلی نمایش داده می‌شود. با تنظیم
+        ``send_message=False`` می‌توان فقط کارت‌ها را اضافه کرد بدون اینکه پیامی
+        ارسال شود (برای مثال در مرحله ریور که نتیجه به همراه تصویر نهایی
+        ارسال خواهد شد).
         """
         # مرحله ۱: اضافه کردن کارت‌های جدید در صورت نیاز
         if count > 0:
             for _ in range(count):
                 if game.remain_cards:
                     game.cards_table.append(game.remain_cards.pop())
+
+        # اگر قرار نیست پیامی ارسال شود، فقط کارت‌ها اضافه شده‌اند و تمام
+        if not send_message:
+            return
 
         # مرحله ۲: بررسی وجود کارت روی میز
         if not game.cards_table:
