@@ -7,7 +7,7 @@ from threading import Timer
 from typing import List, Tuple, Dict, Optional
 
 import redis
-from telegram import Message, ReplyKeyboardMarkup, Update, Bot
+from telegram import ReplyKeyboardMarkup, Update, Bot
 from telegram.constants import ParseMode
 from telegram.error import BadRequest, RetryAfter
 from telegram.ext import CallbackContext, ContextTypes
@@ -60,20 +60,6 @@ MAX_TIME_FOR_TURN = datetime.timedelta(minutes=2)
 DESCRIPTION_FILE = "assets/description_bot.md"
 
 
-class RateLimitedSender:
-    """Serializes message sends with a small delay to avoid rate limits."""
-
-    def __init__(self, delay: float = 0.5):
-        self._delay = delay
-        self._lock = asyncio.Lock()
-
-    async def send(self, coro):
-        async with self._lock:
-            result = await coro
-            await asyncio.sleep(self._delay)
-            return result
-
-
 class PokerBotModel:
     ACTIVE_GAME_STATES = {
         GameState.ROUND_PRE_FLOP,
@@ -99,7 +85,6 @@ class PokerBotModel:
         self._round_rate = RoundRateModel(view=self._view, kv=self._kv, model=self)
         self._delete_manager = MessageDeleteManager()
         self._delete_manager.set_bot(self._bot)
-        self._rate_limiter = RateLimitedSender()
 
     @property
     def _min_players(self):
@@ -135,42 +120,11 @@ class PokerBotModel:
         # Use seat-based lookup
         return game.get_player_by_seat(game.current_player_index)
 
-    @staticmethod
-    def _get_cards_markup(cards: Cards) -> ReplyKeyboardMarkup:
-        """کیبورد مخصوص نمایش کارت‌های بازیکن و دکمه‌های کنترلی را می‌سازد."""
-        # این دکمه‌ها برای مدیریت کیبورد توسط بازیکن استفاده می‌شوند
-        hide_cards_button_text = "🙈 پنهان کردن کارت‌ها"
-        show_table_button_text = "👁️ نمایش میز"  # این دکمه را هم اضافه می‌کنیم
-        return ReplyKeyboardMarkup(
-            keyboard=[
-                cards,  # <-- ردیف اول: خود کارت‌ها
-                [hide_cards_button_text, show_table_button_text],
-            ],
-            selective=True,  # <-- کیبورد فقط برای بازیکن مورد نظر نمایش داده می‌شود
-            resize_keyboard=True,
-            one_time_keyboard=False,
-        )
-
     def _log_bet_change(player, amount, source):
         print(
             f"[DEBUG] {source}: {player.mention_markdown} bet +{amount}, total_bet={player.total_bet}, round_rate={player.round_rate}, pot={game.pot}"
         )
 
-    def show_reopen_keyboard(self, chat_id: ChatId, player_mention: Mention) -> None:
-        """کیبورد جایگزین را بعد از پنهان کردن کارت‌ها نمایش می‌دهد."""
-        show_cards_button_text = "🃏 نمایش کارت‌ها"
-        show_table_button_text = "👁️ نمایش میز"
-        reopen_keyboard = ReplyKeyboardMarkup(
-            keyboard=[[show_cards_button_text, show_table_button_text]],
-            selective=True,
-            resize_keyboard=True,
-            one_time_keyboard=False,
-        )
-        self.send_message(
-            chat_id=chat_id,
-            text=f"کارت‌های {player_mention} پنهان شد. برای مشاهده دوباره، از دکمه زیر استفاده کن.",
-            reply_markup=reopen_keyboard,
-        )
 
     async def send_cards(
         self,
@@ -179,44 +133,13 @@ class PokerBotModel:
         mention_markdown: Mention,
         ready_message_id: MessageId,
     ) -> Optional[MessageId]:
-        """
-        یک پیام در گروه با کیبورد حاوی کارت‌های بازیکن ارسال می‌کند و به پیام /ready ریپلای می‌زند.
-        """
-        markup = self._get_cards_markup(cards)
-        try:
-            # اینجا ما به جای محتوای کارت‌ها، یک متن عمومی می‌فرستیم
-            # و خود کارت‌ها را در کیبورد ReplyKeyboardMarkup قرار می‌دهیم.
-            message = await self._bot.send_message(
-                chat_id=chat_id,
-                text="کارت‌های شما " + mention_markdown,
-                reply_markup=markup,
-                reply_to_message_id=ready_message_id,
-                parse_mode=ParseMode.MARKDOWN,
-                disable_notification=True,
-            )
-            if isinstance(message, Message):
-                return message.message_id
-        except Exception as e:
-            # اگر ریپلای شکست خورد (پیام /ready حذف شده)، بدون ریپلای تلاش می‌کنیم
-            if "message to be replied not found" in str(e).lower():
-                print(
-                    f"INFO: ready_message_id {ready_message_id} not found. Sending cards without reply."
-                )
-                try:
-                    message = await self._bot.send_message(
-                        chat_id=chat_id,
-                        text="کارت‌های شما " + mention_markdown,
-                        reply_markup=markup,
-                        parse_mode=ParseMode.MARKDOWN,
-                        disable_notification=True,
-                    )
-                    if isinstance(message, Message):
-                        return message.message_id
-                except Exception as inner_e:
-                    print(f"Error sending cards (second attempt): {inner_e}")
-            else:
-                print(f"Error sending cards: {e}")
-        return None
+        """Delegate to the viewer for sending player cards."""
+        return await self._view.send_cards(
+            chat_id=chat_id,
+            cards=cards,
+            mention_markdown=mention_markdown,
+            ready_message_id=ready_message_id,
+        )
 
     async def hide_cards(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
@@ -455,10 +378,8 @@ class PokerBotModel:
         """
         for player in game.seated_players():
             if len(game.remain_cards) < 2:
-                await self._rate_limiter.send(
-                    self._view.send_message(
-                        chat_id, "کارت‌های کافی در دسته وجود ندارد! بازی ریست می‌شود."
-                    )
+                await self._view.send_message(
+                    chat_id, "کارت‌های کافی در دسته وجود ندارد! بازی ریست می‌شود."
                 )
                 game.reset()
                 return
@@ -466,41 +387,31 @@ class PokerBotModel:
             cards = [game.remain_cards.pop(), game.remain_cards.pop()]
             player.cards = cards
 
-            # --- شروع بلوک اصلاح شده ---
-
             # ۱. ارسال کارت‌ها به چت خصوصی (برای سابقه و دسترسی آسان)
             try:
-                await self._rate_limiter.send(
-                    self._view.send_desk_cards_img(
-                        chat_id=player.user_id,
-                        cards=cards,
-                        caption="🃏 کارت‌های شما برای این دست.",
-                    )
+                await self._view.send_desk_cards_img(
+                    chat_id=player.user_id,
+                    cards=cards,
+                    caption="🃏 کارت‌های شما برای این دست.",
                 )
-                await asyncio.sleep(0.5)
             except Exception as e:
                 print(
                     f"WARNING: Could not send cards to private chat for user {player.user_id}. Error: {e}"
                 )
-                await self._rate_limiter.send(
-                    self._view.send_message(
-                        chat_id=chat_id,
-                        text=f"⚠️ {player.mention_markdown}، نتوانستم کارت‌ها را در PV ارسال کنم. لطفاً ربات را استارت کن (/start).",
-                        parse_mode="Markdown",
-                    )
+                await self._view.send_message(
+                    chat_id=chat_id,
+                    text=f"⚠️ {player.mention_markdown}، نتوانستم کارت‌ها را در PV ارسال کنم. لطفاً ربات را استارت کن (/start).",
+                    parse_mode="Markdown",
                 )
 
             # ۲. ارسال پیام با کیبورد کارتی در گروه
             # این پیام برای دسترسی سریع بازیکن به کارت‌هایش است.
-            cards_message_id = await self._rate_limiter.send(
-                self._view.send_cards(
-                    chat_id=chat_id,
-                    cards=player.cards,
-                    mention_markdown=player.mention_markdown,
-                    ready_message_id=player.ready_message_id,
-                )
+            cards_message_id = await self._view.send_cards(
+                chat_id=chat_id,
+                cards=player.cards,
+                mention_markdown=player.mention_markdown,
+                ready_message_id=player.ready_message_id,
             )
-            await asyncio.sleep(0.5)
 
             # این پیام موقتی است و در آخر دست پاک خواهد شد.
             if cards_message_id:
@@ -1002,10 +913,8 @@ class PokerBotModel:
         # مرحله ۲: بررسی وجود کارت روی میز
         if not game.cards_table:
             # اگر کارتی روی میز نیست، به جای عکس، یک پیام متنی ساده می‌فرستیم.
-            msg_id = await self._rate_limiter.send(
-                self._view.send_message_return_id(
-                    chat_id, "هنوز کارتی روی میز نیامده است."
-                )
+            msg_id = await self._view.send_message_return_id(
+                chat_id, "هنوز کارتی روی میز نیامده است."
             )
             if msg_id:
                 game.message_ids_to_delete.append(msg_id)
@@ -1017,14 +926,11 @@ class PokerBotModel:
 
         # مرحله ۴: ساخت کپشن دو خطی و زیبا
         caption = f"{street_name}\n{cards_str}"
-        msg = await self._rate_limiter.send(
-            self._view.send_desk_cards_img(
-                chat_id=chat_id,
-                cards=game.cards_table,
-                caption=caption,
-            )
+        msg = await self._view.send_desk_cards_img(
+            chat_id=chat_id,
+            cards=game.cards_table,
+            caption=caption,
         )
-        await asyncio.sleep(0.5)
 
         # پیام تصویر میز را برای حذف در انتهای دست، ذخیره می‌کنیم
         if msg:
@@ -1171,7 +1077,7 @@ class PokerBotModel:
 
         # ۴. اعلام پایان دست و راهنمایی برای شروع دست بعدی
         keyboard = ReplyKeyboardMarkup([["/ready", "/start"]], resize_keyboard=True)
-        await context.bot.send_message(
+        await self._view.send_message(
             chat_id=chat_id,
             text="🎉 دست تمام شد! برای شروع دست بعدی، /ready بزنید یا منتظر بمانید تا کسی /start کند.",
             reply_markup=keyboard,
