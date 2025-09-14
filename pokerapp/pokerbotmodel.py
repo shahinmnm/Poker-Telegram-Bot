@@ -218,34 +218,30 @@ class PokerBotModel:
         except Exception:
             pass
 
-        for _ in range(2):
-            try:
-                await self._bot.edit_message_text(
-                    chat_id=chat_id,
-                    message_id=message_id,
-                    text=text,
-                    parse_mode=parse_mode,
-                    reply_markup=reply_markup,
-                )
+        try:
+            result = await self._view.edit_message_text(
+                chat_id=chat_id,
+                message_id=message_id,
+                text=text,
+                reply_markup=reply_markup,
+                parse_mode=parse_mode,
+            )
+            if result:
                 return message_id
-            except RetryAfter as e:
-                await asyncio.sleep(e.retry_after)
-            except BadRequest as e:
-                err = str(e).lower()
-                if "message is not modified" in err:
-                    return message_id
-                break
-            except Exception as e:
-                logger.error(
-                    "Error editing message",
-                    extra={
-                        "error_type": type(e).__name__,
-                        "chat_id": chat_id,
-                        "message_id": message_id,
-                        "request_params": {"text": text},
-                    },
-                )
-                break
+        except BadRequest as e:
+            err = str(e).lower()
+            if "message is not modified" in err:
+                return message_id
+        except Exception as e:
+            logger.error(
+                "Error editing message",
+                extra={
+                    "error_type": type(e).__name__,
+                    "chat_id": chat_id,
+                    "message_id": message_id,
+                    "request_params": {"text": text},
+                },
+            )
 
         # If editing failed, send a new message instead.
         new_id = await self._view.send_message_return_id(
