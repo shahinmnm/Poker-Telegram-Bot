@@ -1,6 +1,7 @@
 from collections import defaultdict, deque
+import asyncio
 import time
-from typing import Optional, Deque, Dict, Any
+from typing import Optional, Deque, Dict, Any, Iterable
 
 class MessageDeleteManager:
     def __init__(self, max_per_chat: int = 500):
@@ -37,6 +38,22 @@ class MessageDeleteManager:
         )
         while len(q) > self._max_per_chat:
             q.popleft()
+
+    async def delete_messages_sequential(
+        self,
+        chat_id: int,
+        message_ids: Iterable[int],
+        delay: float = 0.3,
+    ) -> None:
+        """Delete messages one by one with a delay between each call."""
+        if self._bot is None:
+            return
+        for mid in message_ids:
+            try:
+                await self._bot.delete_message(chat_id=chat_id, message_id=mid)
+            except Exception:
+                pass
+            await asyncio.sleep(delay)
 
     def purge_context(
         self,
