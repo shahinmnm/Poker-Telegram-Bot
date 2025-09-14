@@ -73,9 +73,17 @@ class PokerBotModel:
         return 1 if self._cfg.DEBUG else MIN_PLAYERS
 
     async def _get_game(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> Tuple[Game, ChatId]:
-        """Fetch or create the Game instance for the current chat."""
+        """Fetch the Game instance for the current chat, caching it in ``chat_data``.
+
+        If the game has already been stored in ``context.chat_data`` it will be
+        reused. Otherwise it is loaded from ``TableManager`` and cached for
+        subsequent calls.
+        """
         chat_id = update.effective_chat.id
-        game = await self._table_manager.get_game(chat_id)
+        game = context.chat_data.get(KEY_CHAT_DATA_GAME)
+        if not game:
+            game = await self._table_manager.get_game(chat_id)
+            context.chat_data[KEY_CHAT_DATA_GAME] = game
         return game, chat_id
 
     async def _get_game_by_user(self, user_id: int) -> Tuple[Game, ChatId]:
