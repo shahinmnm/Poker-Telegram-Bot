@@ -455,7 +455,7 @@ class PokerBotModel:
                     cards=cards,
                     caption="🃏 کارت‌های شما برای این دست.",
                 )
-                await asyncio.sleep(0.5)
+                await asyncio.sleep(0.1)
             except Exception as e:
                 logger.warning(
                     "Could not send cards to private chat",
@@ -479,7 +479,7 @@ class PokerBotModel:
                 mention_markdown=player.mention_markdown,
                 ready_message_id=player.ready_message_id,
             )
-            await asyncio.sleep(0.5)
+            await asyncio.sleep(0.1)
 
             # این پیام موقتی است و در آخر دست پاک خواهد شد.
             if cards_message_id:
@@ -1035,7 +1035,7 @@ class PokerBotModel:
             cards=game.cards_table,
             caption=caption,
         )
-        await asyncio.sleep(0.5)
+        await asyncio.sleep(0.1)
 
         # پیام تصویر میز را برای حذف در انتهای دست، ذخیره می‌کنیم
         if msg:
@@ -1105,7 +1105,7 @@ class PokerBotModel:
                     )
                     if attempt + 1 >= retries:
                         return
-                    await asyncio.sleep(1)
+                    await asyncio.sleep(0.1)
 
         contenders = game.players_by(states=(PlayerState.ACTIVE, PlayerState.ALL_IN))
 
@@ -1158,7 +1158,7 @@ class PokerBotModel:
         game.reset()
         await self._table_manager.save_game(chat_id, game)
 
-        await asyncio.sleep(1)
+        await asyncio.sleep(0.1)
         await _send_with_retry(self._view.send_new_hand_ready_message, chat_id)
 
     async def _end_hand(
