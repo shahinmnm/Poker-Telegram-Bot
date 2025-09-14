@@ -16,7 +16,7 @@ async def test_end_hand_persists_game_and_reuses_instance():
     redis_sync = fakeredis.FakeRedis(server=server)
     table_manager = TableManager(redis_async, redis_sync)
 
-    bot = SimpleNamespace(delete_message=AsyncMock(), send_message=AsyncMock())
+    bot = SimpleNamespace(send_message=AsyncMock())
     view = SimpleNamespace(send_message=AsyncMock())
     model = PokerBotModel(view, bot, Config(), redis_sync, table_manager)
 
