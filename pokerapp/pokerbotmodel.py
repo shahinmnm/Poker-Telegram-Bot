@@ -974,6 +974,7 @@ class PokerBotModel:
         context.chat_data[KEY_OLD_PLAYERS] = [p.user_id for p in remaining_players]
 
         game.reset()
+        await self._table_manager.save_game(chat_id, game)
 
         await asyncio.sleep(1)
         await _send_with_retry(self._view.send_new_hand_ready_message, chat_id)
