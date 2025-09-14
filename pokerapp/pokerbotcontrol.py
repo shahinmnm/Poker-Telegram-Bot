@@ -11,8 +11,8 @@ from telegram.ext import (
 )
 import traceback  # <--- برای لاگ دقیق خطا اضافه شد
 
-from pokerapp.entities import PlayerAction, UserException, Game
-from pokerapp.pokerbotmodel import PokerBotModel, KEY_CHAT_DATA_GAME
+from pokerapp.entities import PlayerAction, UserException
+from pokerapp.pokerbotmodel import PokerBotModel
 
 class PokerBotCotroller:
     def __init__(self, model: PokerBotModel, application: Application):
@@ -44,9 +44,8 @@ class PokerBotCotroller:
         این میدل‌ور قبل از اجرای هر دستور دکمه اینلاین، نوبت بازیکن را چک می‌کند
         و لاگ‌های دقیقی برای دیباگ ثبت می‌کند.
         """
-        chat_id = update.effective_chat.id
         user_id = update.effective_user.id
-        game: Game = context.chat_data.get(KEY_CHAT_DATA_GAME)
+        game, chat_id = await self._model._get_game(update, context)
 
         print(f"\nDEBUG: Callback received from user {user_id} in chat {chat_id}.")
 
