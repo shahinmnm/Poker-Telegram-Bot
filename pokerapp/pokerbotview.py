@@ -38,9 +38,9 @@ class RateLimitedSender:
 
     def __init__(
         self,
-        delay: float = 3.0,
+        delay: float = 0.1,
         max_retries: int = 3,
-        error_delay: float = 1.0,
+        error_delay: float = 0.1,
         notify_admin: Optional[Callable[[Dict[str, Any]], Awaitable[None]]] = None,
     ):
         self._delay = delay
@@ -96,8 +96,10 @@ class PokerBotViewer:
         self._bot = bot
         self._desk_generator = DeskImageGenerator()
         self._admin_chat_id = admin_chat_id
-        # 3s base delay to avoid hitting 20 messages/min limit in group chats
-        self._rate_limiter = RateLimitedSender(delay=3.0, notify_admin=self.notify_admin)
+        # 0.1s base delay to allow faster message delivery while avoiding limits
+        self._rate_limiter = RateLimitedSender(
+            delay=0.1, error_delay=0.1, notify_admin=self.notify_admin
+        )
 
     async def notify_admin(self, log_data: Dict[str, Any]) -> None:
         if not self._admin_chat_id:
