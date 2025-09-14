@@ -8,6 +8,7 @@ from typing import List, Tuple, Dict, Optional
 import redis
 from telegram import Message, ReplyKeyboardMarkup, Update, Bot
 from telegram.constants import ParseMode
+from telegram.error import BadRequest
 from telegram.ext import CallbackContext, ContextTypes
 
 from pokerapp.config import Config
@@ -281,16 +282,37 @@ class PokerBotModel:
         )
 
         keyboard = ReplyKeyboardMarkup([["/ready", "/start"]], resize_keyboard=True)
+        current_text = getattr(game, "ready_message_main_text", "")
 
         if game.ready_message_main_id:
-            try:
-                await self._bot.edit_message_text(chat_id=chat_id, message_id=game.ready_message_main_id, text=text, parse_mode="Markdown", reply_markup=keyboard)
-            except Exception:  # اگر ویرایش نشد، یک پیام جدید بفرست
-                msg = await self._view.send_message_return_id(chat_id, text, reply_markup=keyboard)
-                if msg: game.ready_message_main_id = msg
+            if text != current_text:
+                try:
+                    await self._bot.edit_message_text(
+                        chat_id=chat_id,
+                        message_id=game.ready_message_main_id,
+                        text=text,
+                        parse_mode="Markdown",
+                        reply_markup=keyboard,
+                    )
+                    game.ready_message_main_text = text
+                except BadRequest as exc:
+                    print(f"Error editing ready message: {exc}")
+                    msg = await self._view.send_message_return_id(chat_id, text, reply_markup=keyboard)
+                    if msg:
+                        game.ready_message_main_id = msg
+                        game.ready_message_main_text = text
+                except Exception as exc:
+                    print(f"Unexpected error editing ready message: {exc}")
+                    msg = await self._view.send_message_return_id(chat_id, text, reply_markup=keyboard)
+                    if msg:
+                        game.ready_message_main_id = msg
+                        game.ready_message_main_text = text
+            # If text is the same, do nothing
         else:
             msg = await self._view.send_message_return_id(chat_id, text, reply_markup=keyboard)
-            if msg: game.ready_message_main_id = msg
+            if msg:
+                game.ready_message_main_id = msg
+                game.ready_message_main_text = text
 
         # بررسی برای شروع خودکار
         if game.seated_count() >= self._min_players and (game.seated_count() == await self._bot.get_chat_member_count(chat_id) - 1 or self._cfg.DEBUG):
