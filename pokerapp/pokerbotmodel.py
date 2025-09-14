@@ -195,6 +195,63 @@ class PokerBotModel:
             chat_id, update.message.message_id, delay=1
         )
 
+    async def _safe_edit_message_text(
+        self,
+        chat_id: ChatId,
+        message_id: MessageId,
+        text: str,
+        reply_markup: Optional[ReplyKeyboardMarkup] = None,
+        parse_mode: str = ParseMode.MARKDOWN,
+    ) -> Optional[MessageId]:
+        """
+        Safely edit a message's text, retrying on rate limits and
+        sending a new message if the original cannot be edited.
+
+        The method attempts to ensure the target message exists by
+        calling ``get_chat`` before editing. It handles ``BadRequest``
+        and ``RetryAfter`` errors by retrying or falling back to sending
+        a fresh message. The ID of the edited or newly sent message is
+        returned.
+        """
+
+        if not message_id:
+            return await self._view.send_message_return_id(
+                chat_id, text, reply_markup=reply_markup
+            )
+
+        # Confirm chat availability; errors here are non-fatal.
+        try:
+            await self._bot.get_chat(chat_id)
+        except Exception:
+            pass
+
+        for _ in range(2):
+            try:
+                await self._bot.edit_message_text(
+                    chat_id=chat_id,
+                    message_id=message_id,
+                    text=text,
+                    parse_mode=parse_mode,
+                    reply_markup=reply_markup,
+                )
+                return message_id
+            except RetryAfter as e:
+                await asyncio.sleep(e.retry_after)
+            except BadRequest as e:
+                err = str(e).lower()
+                if "message is not modified" in err:
+                    return message_id
+                break
+            except Exception as e:
+                print(f"Error editing message {message_id}: {e}")
+                break
+
+        # If editing failed, send a new message instead.
+        new_id = await self._view.send_message_return_id(
+            chat_id, text, reply_markup=reply_markup
+        )
+        return new_id
+
     async def show_table(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """کارت‌های روی میز را به درخواست بازیکن با فرمت جدید نمایش می‌دهد."""
         game, chat_id = await self._get_game(update, context)
@@ -278,18 +335,14 @@ class PokerBotModel:
 
         if game.ready_message_main_id:
             if text != current_text:
-                try:
-                    await self._view.remove_message(chat_id, game.ready_message_main_id)
-                except Exception as exc:
-                    print(
-                        "Failed to remove ready message: "
-                        f"{getattr(exc, 'message', str(exc))}"
-                    )
-                msg = await self._view.send_message_return_id(
-                    chat_id, text, reply_markup=keyboard
+                new_id = await self._safe_edit_message_text(
+                    chat_id,
+                    game.ready_message_main_id,
+                    text,
+                    reply_markup=keyboard,
                 )
-                if msg:
-                    game.ready_message_main_id = msg
+                if new_id:
+                    game.ready_message_main_id = new_id
                     game.ready_message_main_text = text
             # If text is the same, do nothing
         else:
