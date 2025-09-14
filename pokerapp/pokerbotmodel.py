@@ -440,6 +440,7 @@ class PokerBotModel:
                     cards=cards,
                     caption="🃏 کارت‌های شما برای این دست."
                 )
+                await asyncio.sleep(0.5)
             except Exception as e:
                 print(f"WARNING: Could not send cards to private chat for user {player.user_id}. Error: {e}")
                 await self._view.send_message(
@@ -456,6 +457,7 @@ class PokerBotModel:
                 mention_markdown=player.mention_markdown,
                 ready_message_id=player.ready_message_id,
             )
+            await asyncio.sleep(0.5)
 
             # این پیام موقتی است و در آخر دست پاک خواهد شد.
             if cards_message_id:
@@ -916,6 +918,7 @@ class PokerBotModel:
             cards=game.cards_table,
             caption=caption,
         )
+        await asyncio.sleep(0.5)
 
         # پیام تصویر میز را برای حذف در انتهای دست، ذخیره می‌کنیم
         if msg:
