@@ -989,7 +989,9 @@ class PokerBotModel:
 
         # ۳. ریست کردن کامل آبجکت بازی برای شروع یک دست جدید و تمیز
         # یک آبجکت جدید Game می‌سازیم تا هیچ داده‌ای از دست قبل باقی نماند
-        context.chat_data[KEY_CHAT_DATA_GAME] = Game()
+        new_game = Game()
+        context.chat_data[KEY_CHAT_DATA_GAME] = new_game
+        await self._table_manager.save_game(chat_id, new_game)
 
         # ۴. اعلام پایان دست و راهنمایی برای شروع دست بعدی
         keyboard = ReplyKeyboardMarkup([["/ready", "/start"]], resize_keyboard=True)
