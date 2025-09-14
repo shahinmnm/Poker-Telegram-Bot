@@ -10,11 +10,9 @@ from pokerapp.pokerbotcontrol import PokerBotCotroller
 from pokerapp.pokerbotmodel import PokerBotModel
 from pokerapp.pokerbotview import PokerBotViewer
 from pokerapp.table_manager import TableManager
+from pokerapp.logging_config import setup_logging
 
-logging.basicConfig(
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    level=logging.INFO,
-)
+setup_logging(logging.INFO)
 
 
 class PokerBot:
@@ -39,7 +37,7 @@ class PokerBot:
         )
 
         table_manager = TableManager(kv_async, kv_sync)
-        view = PokerBotViewer(bot=self._application.bot)
+        view = PokerBotViewer(bot=self._application.bot, admin_chat_id=cfg.ADMIN_CHAT_ID)
         model = PokerBotModel(
             view=view,
             bot=self._application.bot,
