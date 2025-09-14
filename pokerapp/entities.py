@@ -124,9 +124,11 @@ class Game:
         self.ready_users = set()
         self.message_ids = {}
         self.last_actions = []
-    
+
         # 🆕 اضافه شده: پیام لیست آماده‌ها
         self.ready_message_main_id: Optional[MessageId] = None
+        # متن آخرین پیام آماده‌باش برای جلوگیری از ویرایش‌های تکراری
+        self.ready_message_main_text: str = ""
     
         # 🆕 اضافه شده: آرایه پیام‌هایی که باید پاک شوند
         self.message_ids_to_delete: List[MessageId] = []
