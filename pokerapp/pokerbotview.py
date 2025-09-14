@@ -288,6 +288,7 @@ class PokerBotViewer:
         cards: Cards,
         caption: str = "",
         disable_notification: bool = True,
+        parse_mode: str = ParseMode.MARKDOWN,
     ) -> Optional[Message]:
         """Sends desk cards image and returns the message object."""
         try:
@@ -303,6 +304,7 @@ class PokerBotViewer:
                         InputMediaPhoto(
                             media=bio,
                             caption=caption,
+                            parse_mode=parse_mode,
                         ),
                     ],
                     disable_notification=disable_notification,
@@ -589,7 +591,22 @@ class PokerBotViewer:
                 state_info = " (فولد)" if p.state == PlayerState.FOLD else ""
                 final_message += f"  - {p.mention_markdown}{state_info}: {card_display}\n"
 
-        await self.send_message(chat_id=chat_id, text=final_message, parse_mode="Markdown")
+        # ارسال تصویر نهایی میز همراه با کپشن نتایج. اگر طول پیام از
+        # محدودیت کپشن تلگرام بیشتر شد، ادامه پیام در یک پیام متنی جداگانه
+        # ارسال می‌شود تا تعداد پیام‌ها حداقل باقی بماند.
+        caption_limit = 1024
+        caption = final_message[:caption_limit]
+        await self.send_desk_cards_img(
+            chat_id=chat_id,
+            cards=game.cards_table,
+            caption=caption,
+        )
+        if len(final_message) > caption_limit:
+            await self.send_message(
+                chat_id=chat_id,
+                text=final_message[caption_limit:],
+                parse_mode="Markdown",
+            )
 
     async def send_new_hand_ready_message(self, chat_id: ChatId) -> None:
         """پیام آمادگی برای دست جدید را ارسال می‌کند."""
