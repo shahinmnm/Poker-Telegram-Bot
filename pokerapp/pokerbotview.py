@@ -340,30 +340,28 @@ class PokerBotViewer:
         caption: str = "",
         disable_notification: bool = True,
         parse_mode: str = ParseMode.MARKDOWN,
+        reply_markup: Optional[ReplyKeyboardMarkup] = None,
     ) -> Optional[Message]:
         """Sends desk cards image and returns the message object."""
         try:
             im_cards = self._desk_generator.generate_desk(cards)
             bio = BytesIO()
-            bio.name = 'desk.png'
-            im_cards.save(bio, 'PNG')
+            bio.name = "desk.png"
+            im_cards.save(bio, "PNG")
             bio.seek(0)
-            messages = await self._rate_limiter.send(
-                lambda: self._bot.send_media_group(
+            message = await self._rate_limiter.send(
+                lambda: self._bot.send_photo(
                     chat_id=chat_id,
-                    media=[
-                        InputMediaPhoto(
-                            media=bio,
-                            caption=caption,
-                            parse_mode=parse_mode,
-                        ),
-                    ],
+                    photo=bio,
+                    caption=caption,
+                    parse_mode=parse_mode,
                     disable_notification=disable_notification,
+                    reply_markup=reply_markup,
                 ),
                 chat_id=chat_id,
             )
-            if messages and isinstance(messages, list) and len(messages) > 0:
-                return messages[0]
+            if isinstance(message, Message):
+                return message
         except Exception as e:
             logger.error(
                 "Error sending desk cards image",
@@ -381,6 +379,7 @@ class PokerBotViewer:
         cards: Cards,
         caption: str = "",
         parse_mode: str = ParseMode.MARKDOWN,
+        reply_markup: Optional[ReplyKeyboardMarkup] = None,
     ) -> bool:
         """Edits an existing desk cards image message."""
         try:
@@ -392,7 +391,10 @@ class PokerBotViewer:
             media = InputMediaPhoto(media=bio, caption=caption, parse_mode=parse_mode)
             await self._rate_limiter.send(
                 lambda: self._bot.edit_message_media(
-                    chat_id=chat_id, message_id=message_id, media=media
+                    chat_id=chat_id,
+                    message_id=message_id,
+                    media=media,
+                    reply_markup=reply_markup,
                 ),
                 chat_id=chat_id,
             )
@@ -418,6 +420,23 @@ class PokerBotViewer:
                 cards,
                 [hide_cards_button_text, show_table_button_text]
             ],
+            selective=True,
+            resize_keyboard=True,
+            one_time_keyboard=False,
+        )
+
+    @staticmethod
+    def _get_table_markup(table_cards: Cards, stage: str) -> ReplyKeyboardMarkup:
+        """Creates a keyboard displaying table cards and stage buttons."""
+        cards_row = table_cards if table_cards else ["❔"]
+        stages = ["فلاپ", "ترن", "ریور", "👁️ نمایش میز"]
+        stage_map = {"flop": "فلاپ", "turn": "ترن", "river": "ریور"}
+        if stage in stage_map:
+            stages = [
+                f"✅ {stage_map[stage]}" if s == stage_map[stage] else s for s in stages
+            ]
+        return ReplyKeyboardMarkup(
+            keyboard=[cards_row, stages],
             selective=True,
             resize_keyboard=True,
             one_time_keyboard=False,
