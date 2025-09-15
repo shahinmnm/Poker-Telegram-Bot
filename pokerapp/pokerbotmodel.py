@@ -163,13 +163,17 @@ class PokerBotModel:
         """
         chat_id = update.effective_chat.id
         user = update.effective_user
-        await self._view.show_reopen_keyboard(user.id)
-        # پیام "کارت‌ها پنهان شد" را حذف نمی‌کنیم تا چت ساده بماند
-        logger.debug(
-            "Skipping deletion of message %s in chat %s",
-            update.message.message_id,
-            chat_id,
-        )
+        await self._view.show_reopen_keyboard(chat_id=user.id)
+        if update.message:
+            try:
+                await update.message.delete()
+            except Exception as e:
+                logger.warning(
+                    "Failed to delete hide message %s in chat %s: %s",
+                    update.message.message_id,
+                    chat_id,
+                    e,
+                )
 
     async def send_cards_to_user(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
@@ -190,22 +194,14 @@ class PokerBotModel:
 
         if not current_player or not current_player.cards:
             await self._view.send_message(
-                chat_id, "شما در بازی فعلی حضور ندارید یا کارتی ندارید."
+                user_id, "شما در بازی فعلی حضور ندارید یا کارتی ندارید."
             )
             return
 
-        # ارسال پیام با کیبورد کارتی در چت خصوصی
         await self._view.send_cards(
             chat_id=user_id,
             cards=current_player.cards,
             mention_markdown=current_player.mention_markdown,
-        )
-
-        # حذف پیام کاربر لازم نیست
-        logger.debug(
-            "Skipping deletion of message %s in chat %s",
-            update.message.message_id,
-            chat_id,
         )
 
     async def _safe_edit_message_text(
