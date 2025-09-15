@@ -123,7 +123,8 @@ class Game:
     
         self.ready_users = set()
         self.message_ids = {}
-        self.last_actions = []
+        # history of most recent player actions; cleared each reset
+        self.last_actions: List[str] = []
 
         # 🆕 اضافه شده: پیام لیست آماده‌ها
         self.ready_message_main_id: Optional[MessageId] = None

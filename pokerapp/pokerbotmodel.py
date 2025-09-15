@@ -687,16 +687,21 @@ class PokerBotModel:
     # FIX 1 (PART 1): Remove the 'money' parameter. The function will fetch the latest wallet value itself.
     async def _send_turn_message(self, game: Game, player: Player, chat_id: ChatId):
         """پیام نوبت را ارسال کرده و شناسه آن را برای حذف در آینده ذخیره می‌کند."""
-        if game.turn_message_id:
-            await self._view.remove_markup(chat_id, game.turn_message_id)
-
         # Fetch the most current wallet value right here, ensuring it's up-to-date.
         money = player.wallet.value()
+        recent_actions = "\n".join(game.last_actions[-4:])
 
-        msg_id = await self._view.send_turn_actions(chat_id, game, player, money)
+        if game.turn_message_id:
+            await self._view.send_turn_actions(
+                chat_id, game, player, money, message_id=game.turn_message_id, recent_actions=recent_actions
+            )
+        else:
+            msg_id = await self._view.send_turn_actions(
+                chat_id, game, player, money, recent_actions=recent_actions
+            )
+            if msg_id:
+                game.turn_message_id = msg_id
 
-        if msg_id:
-            game.turn_message_id = msg_id
         game.last_turn_time = datetime.datetime.now()
 
     # --- Player Action Handlers ---
@@ -1307,12 +1312,15 @@ class RoundRateModel:
 
         player_turn = game.get_player_by_seat(game.current_player_index)
         if player_turn:
-            await self._view.send_turn_actions(
+            msg_id = await self._view.send_turn_actions(
                 chat_id=chat_id,
                 game=game,
                 player=player_turn,
                 money=player_turn.wallet.value(),
+                recent_actions="\n".join(game.last_actions[-4:]),
             )
+            if msg_id:
+                game.turn_message_id = msg_id
 
     async def _set_player_blind(
         self,
