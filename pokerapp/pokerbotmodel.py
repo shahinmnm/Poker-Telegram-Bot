@@ -130,15 +130,53 @@ class PokerBotModel:
         """Send initial join prompt with inline button if not already sent."""
         if game.state == GameState.INITIAL and not game.ready_message_main_id:
             markup = InlineKeyboardMarkup(
-                [[InlineKeyboardButton(text="پیوستن", callback_data="join_game")]]
+                [[InlineKeyboardButton(text="نشستن سر میز", callback_data="join_game")]]
             )
             msg_id = await self._view.send_message_return_id(
-                chat_id, "برای پیوستن دکمه را بزن", reply_markup=markup
+                chat_id, "برای نشستن سر میز دکمه را بزن", reply_markup=markup
             )
             if msg_id:
                 game.ready_message_main_id = msg_id
-                game.ready_message_main_text = "برای پیوستن دکمه را بزن"
+                game.ready_message_main_text = "برای نشستن سر میز دکمه را بزن"
                 await self._table_manager.save_game(chat_id, game)
+
+    async def _auto_start_tick(self, context: CallbackContext) -> None:
+        job = context.job
+        chat_id = job.chat_id
+        game = await self._table_manager.get_game(chat_id)
+        remaining = context.chat_data.get("start_countdown", 0)
+        if remaining <= 0:
+            job.schedule_removal()
+            context.chat_data.pop("start_countdown_job", None)
+            await self._start_game(context, game, chat_id)
+            return
+        keyboard_buttons = [
+            [InlineKeyboardButton(text="نشستن سر میز", callback_data="join_game"),
+             InlineKeyboardButton(text=f"شروع بازی ({remaining})", callback_data="start_game")]
+        ]
+        keyboard = InlineKeyboardMarkup(keyboard_buttons)
+        await self._safe_edit_message_text(
+            chat_id,
+            game.ready_message_main_id,
+            getattr(game, "ready_message_main_text", ""),
+            reply_markup=keyboard,
+        )
+        context.chat_data["start_countdown"] = remaining - 1
+
+    async def _schedule_auto_start(self, context: CallbackContext, game: Game, chat_id: ChatId) -> None:
+        if context.chat_data.get("start_countdown_job"):
+            return
+        context.chat_data["start_countdown"] = 60
+        job = context.job_queue.run_repeating(
+            self._auto_start_tick, interval=1, chat_id=chat_id
+        )
+        context.chat_data["start_countdown_job"] = job
+
+    def _cancel_auto_start(self, context: CallbackContext) -> None:
+        job = context.chat_data.pop("start_countdown_job", None)
+        if job:
+            job.schedule_removal()
+        context.chat_data.pop("start_countdown", None)
 
     async def send_cards(
         self,
@@ -293,7 +331,7 @@ class PokerBotModel:
                 )
 
     async def join_game(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        """بازیکن با دکمهٔ پیوستن به بازی افزوده می‌شود."""
+        """بازیکن با دکمهٔ نشستن سر میز به بازی افزوده می‌شود."""
         game, chat_id = await self._get_game(update, context)
         user = update.effective_user
         if update.callback_query:
@@ -344,9 +382,21 @@ class PokerBotModel:
             f"🚀 برای شروع بازی /start را بزنید یا منتظر بمانید."
         )
 
-        keyboard = InlineKeyboardMarkup(
-            [[InlineKeyboardButton(text="پیوستن", callback_data="join_game")]]
-        )
+        keyboard_buttons = [
+            [InlineKeyboardButton(text="نشستن سر میز", callback_data="join_game")]
+        ]
+        if game.seated_count() >= self._min_players:
+            await self._schedule_auto_start(context, game, chat_id)
+            countdown = context.chat_data.get("start_countdown", 60)
+            keyboard_buttons[0].append(
+                InlineKeyboardButton(
+                    text=f"شروع بازی ({countdown})", callback_data="start_game"
+                )
+            )
+        else:
+            self._cancel_auto_start(context)
+
+        keyboard = InlineKeyboardMarkup(keyboard_buttons)
         current_text = getattr(game, "ready_message_main_text", "")
 
         if game.ready_message_main_id:
@@ -368,12 +418,6 @@ class PokerBotModel:
                 game.ready_message_main_id = msg
                 game.ready_message_main_text = text
 
-        if game.seated_count() >= self._min_players and (
-            game.seated_count() == await self._bot.get_chat_member_count(chat_id) - 1
-            or self._cfg.DEBUG
-        ):
-            await self._start_game(context, game, chat_id)
-
         await self._table_manager.save_game(chat_id, game)
 
     async def ready(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -382,7 +426,7 @@ class PokerBotModel:
     async def start(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """بازی را به صورت دستی شروع می‌کند."""
         game, chat_id = await self._get_game(update, context)
-
+        self._cancel_auto_start(context)
         if game.state not in (GameState.INITIAL, GameState.FINISHED):
             await self._view.send_message(
                 chat_id, "🎮 یک بازی در حال حاضر در جریان است."
@@ -416,6 +460,7 @@ class PokerBotModel:
         self, context: CallbackContext, game: Game, chat_id: ChatId
     ) -> None:
         """مراحل شروع یک دست جدید بازی را انجام می‌دهد."""
+        self._cancel_auto_start(context)
         if game.ready_message_main_id:
             logger.debug(
                 "Skipping deletion of message %s in chat %s",
@@ -475,12 +520,13 @@ class PokerBotModel:
             cards = [game.remain_cards.pop(), game.remain_cards.pop()]
             player.cards = cards
 
-            # ۱. ارسال کارت‌ها به چت خصوصی (برای سابقه و دسترسی آسان)
             try:
-                await self._view.send_desk_cards_img(
+                markup = self._view._get_hand_and_board_markup(cards, [], "")
+                msg = await self._view.send_desk_cards_img(
                     chat_id=player.user_id,
                     cards=cards,
-                    caption="🃏 کارت‌های شما برای این دست.",
+                    caption=" ",
+                    reply_markup=markup,
                 )
                 await asyncio.sleep(0.1)
             except Exception as e:
@@ -497,22 +543,11 @@ class PokerBotModel:
                     text=f"⚠️ {player.mention_markdown}، نتوانستم کارت‌ها را در PV ارسال کنم. لطفاً ربات را استارت کن (/start).",
                     parse_mode="Markdown",
                 )
+                msg = None
 
-            # ۲. ارسال پیام با کیبورد کارتی در چت خصوصی بازیکن
-            # این پیام برای دسترسی سریع بازیکن به کارت‌هایش است.
-            cards_message_id = await self._view.send_cards(
-                chat_id=player.user_id,
-                cards=player.cards,
-                mention_markdown=player.mention_markdown,
-                table_cards=game.cards_table,
-                stage="",
-            )
-            await asyncio.sleep(0.1)
-
-            # این پیام موقتی است و در آخر دست پاک خواهد شد.
-            if cards_message_id:
-                player.hand_message_id = cards_message_id
-                game.message_ids_to_delete.append(cards_message_id)
+            if msg:
+                player.hand_message_id = msg.message_id
+                game.message_ids_to_delete.append(msg.message_id)
 
     def _is_betting_round_over(self, game: Game) -> bool:
         """
@@ -1185,7 +1220,7 @@ class PokerBotModel:
         await self._clear_game_messages(game, chat_id)
 
         # ۲. ذخیره بازیکنان برای دست بعدی
-        # این باعث می‌شود در بازی بعدی، لازم نباشد همه دوباره دکمهٔ پیوستن را بزنند
+        # این باعث می‌شود در بازی بعدی، لازم نباشد همه دوباره دکمهٔ نشستن سر میز را بزنند
         context.chat_data[KEY_OLD_PLAYERS] = [
             p.user_id for p in game.players if p.wallet.value() > 0
         ]
@@ -1200,7 +1235,7 @@ class PokerBotModel:
         # ۴. اعلام پایان دست و راهنمایی برای شروع دست بعدی
         await self._view.send_message(
             chat_id=chat_id,
-            text="🎉 دست تمام شد! برای شروع دست بعدی، دکمهٔ «پیوستن» را بزنید یا منتظر بمانید تا کسی /start کند.",
+            text="🎉 دست تمام شد! برای شروع دست بعدی، دکمهٔ «نشستن سر میز» را بزنید یا منتظر بمانید تا کسی /start کند.",
         )
 
     def _format_cards(self, cards: Cards) -> str:

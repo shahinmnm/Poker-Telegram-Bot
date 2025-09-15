@@ -526,21 +526,27 @@ class PokerBotViewer:
     def _get_hand_and_board_markup(
         hand: Cards, table_cards: Cards, stage: str
     ) -> ReplyKeyboardMarkup:
-        """Combine player's hand, table cards and stage/hide buttons in one keyboard.
+        """Combine player's hand, table cards and stage buttons in one keyboard.
 
-        این کیبورد در پیام خصوصی بازیکن نیز استفاده می‌شود تا او هم‌زمان دست و
-        کارت‌های میز را مشاهده کند.
+        این کیبورد در پیام خصوصی بازیکن استفاده می‌شود تا او هم‌زمان دست و کارت‌های
+        میز را مشاهده کند. دکمهٔ پنهان‌سازی کارت‌ها حذف شده است تا فضا برای نمایش
+        بهتر کارت‌ها فراهم شود.
         """
-        table_row = table_cards if table_cards else ["❔"]
+
+        hand_row = [str(c) for c in hand]
+        table_row = [str(c) for c in table_cards] if table_cards else ["❔"]
+
         stages = ["فلاپ", "ترن", "ریور"]
         stage_map = {"flop": "فلاپ", "turn": "ترن", "river": "ریور"}
-        stage_row = [
-            f"✅ {stage_map[stage]}" if s == stage_map.get(stage, "") else s
-            for s in stages
-        ]
-        stage_row.append("🙈 پنهان کردن کارت‌ها")
+        stage_row = []
+        for s in stages:
+            label = f"🔁 {s}"
+            if stage_map.get(stage) == s:
+                label = f"✅ {s}"
+            stage_row.append(label)
+
         return ReplyKeyboardMarkup(
-            keyboard=[hand, table_row, stage_row],
+            keyboard=[hand_row, table_row, stage_row],
             selective=True,
             resize_keyboard=True,
             one_time_keyboard=False,
@@ -598,9 +604,8 @@ class PokerBotViewer:
             async def _send() -> Message:
                 return await self._bot.send_message(
                     chat_id=chat_id,
-                    text="کارت‌های شما " + mention_markdown,
+                    text=" ",
                     reply_markup=markup,
-                    parse_mode=ParseMode.MARKDOWN,
                     disable_notification=True,
                     **({"reply_to_message_id": ready_message_id} if ready_message_id else {}),
                 )
@@ -890,7 +895,7 @@ class PokerBotViewer:
         """پیام آمادگی برای دست جدید را ارسال می‌کند."""
         message = (
             "♻️ دست به پایان رسید. بازیکنان باقی‌مانده برای دست بعد حفظ شدند.\n"
-            "برای شروع دست جدید، /start را بزنید یا بازیکنان جدید می‌توانند با دکمهٔ «پیوستن» وارد شوند."
+            "برای شروع دست جدید، /start را بزنید یا بازیکنان جدید می‌توانند با دکمهٔ «نشستن سر میز» وارد شوند."
         )
         try:
             await self._rate_limiter.send(
