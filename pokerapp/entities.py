@@ -124,8 +124,8 @@ class Game:
         self.ready_users = set()
         self.message_ids = {}
         # history of most recent player actions; cleared each reset
-        # Each entry is a tuple of (player name, action type, amount)
-        self.last_actions: List[Tuple[str, str, Money]] = []
+        # Each entry is a formatted string like "player: action amount$"
+        self.last_actions: List[str] = []
 
         # 🆕 اضافه شده: پیام لیست آماده‌ها
         self.ready_message_main_id: Optional[MessageId] = None
