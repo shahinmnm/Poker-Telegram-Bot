@@ -509,11 +509,14 @@ class PokerBotModel:
                 cards=player.cards,
                 mention_markdown=player.mention_markdown,
                 ready_message_id=player.ready_message_id,
+                table_cards=game.cards_table,
+                stage="",
             )
             await asyncio.sleep(0.1)
 
             # این پیام موقتی است و در آخر دست پاک خواهد شد.
             if cards_message_id:
+                player.hand_message_id = cards_message_id
                 game.message_ids_to_delete.append(cards_message_id)
 
     def _is_betting_round_over(self, game: Game) -> bool:
@@ -1092,6 +1095,19 @@ class PokerBotModel:
                 await asyncio.sleep(0.1)
                 game.board_message_id = msg.message_id
                 game.message_ids_to_delete.append(msg.message_id)
+
+        # به‌روزرسانی کیبورد پیام کارت‌های بازیکنان با کارت‌های میز
+        for player in game.seated_players():
+            if player.hand_message_id:
+                await self._view.send_cards(
+                    chat_id=chat_id,
+                    cards=player.cards,
+                    mention_markdown=player.mention_markdown,
+                    table_cards=game.cards_table,
+                    stage=stage,
+                    message_id=player.hand_message_id,
+                )
+                await asyncio.sleep(0.1)
 
         # پس از ارسال/ویرایش تصویر میز، پیام نوبت باید آخرین پیام باشد
         if count == 0 and game.turn_message_id:

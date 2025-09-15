@@ -468,20 +468,6 @@ class PokerBotViewer:
         return None
 
     @staticmethod
-    def _get_cards_markup(cards: Cards) -> ReplyKeyboardMarkup:
-        """Creates the keyboard for showing player cards and actions."""
-        hide_cards_button_text = "🙈 پنهان کردن کارت‌ها"
-        show_table_button_text = "👁️ نمایش میز"
-        return ReplyKeyboardMarkup(
-            keyboard=[
-                cards,
-                [hide_cards_button_text, show_table_button_text]
-            ],
-            selective=True,
-            resize_keyboard=True,
-            one_time_keyboard=False,
-        )
-
     @staticmethod
     def _get_table_markup(table_cards: Cards, stage: str) -> ReplyKeyboardMarkup:
         """Creates a keyboard displaying table cards and stage buttons."""
@@ -495,6 +481,26 @@ class PokerBotViewer:
         return ReplyKeyboardMarkup(
             keyboard=[cards_row, stages],
             selective=False,
+            resize_keyboard=True,
+            one_time_keyboard=False,
+        )
+
+    @staticmethod
+    def _get_hand_and_board_markup(
+        hand: Cards, table_cards: Cards, stage: str
+    ) -> ReplyKeyboardMarkup:
+        """Combine player's hand, table cards and stage/hide buttons in one keyboard."""
+        table_row = table_cards if table_cards else ["❔"]
+        stages = ["فلاپ", "ترن", "ریور"]
+        stage_map = {"flop": "فلاپ", "turn": "ترن", "river": "ریور"}
+        stage_row = [
+            f"✅ {stage_map[stage]}" if s == stage_map.get(stage, "") else s
+            for s in stages
+        ]
+        stage_row.append("🙈 پنهان کردن کارت‌ها")
+        return ReplyKeyboardMarkup(
+            keyboard=[hand, table_row, stage_row],
+            selective=True,
             resize_keyboard=True,
             one_time_keyboard=False,
         )
@@ -521,8 +527,32 @@ class PokerBotViewer:
             cards: Cards,
             mention_markdown: Mention,
             ready_message_id: str | None = None,
+            table_cards: Cards | None = None,
+            stage: str = "",
+            message_id: MessageId | None = None,
     ) -> Optional[MessageId]:
-        markup = self._get_cards_markup(cards)
+        markup = self._get_hand_and_board_markup(cards, table_cards or [], stage)
+        if message_id:
+            try:
+                await self._rate_limiter.send(
+                    lambda: self._bot.edit_message_reply_markup(
+                        chat_id=chat_id,
+                        message_id=message_id,
+                        reply_markup=markup,
+                    ),
+                    chat_id=chat_id,
+                )
+                return message_id
+            except Exception as e:
+                logger.error(
+                    "Error editing cards markup",
+                    extra={
+                        "error_type": type(e).__name__,
+                        "chat_id": chat_id,
+                        "request_params": {"message_id": message_id},
+                    },
+                )
+                return None
         try:
             async def _send() -> Message:
                 return await self._bot.send_message(
