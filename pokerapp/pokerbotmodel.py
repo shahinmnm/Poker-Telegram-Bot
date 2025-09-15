@@ -1042,16 +1042,40 @@ class PokerBotModel:
 
         # مرحله ۴: ساخت کپشن دو خطی و زیبا
         caption = f"{street_name}\n{cards_str}"
-        msg = await self._view.send_desk_cards_img(
-            chat_id=chat_id,
-            cards=game.cards_table,
-            caption=caption,
-        )
-        await asyncio.sleep(0.1)
 
-        # پیام تصویر میز را برای حذف در انتهای دست، ذخیره می‌کنیم
-        if msg:
-            game.message_ids_to_delete.append(msg.message_id)
+        if not game.board_message_id:
+            msg = await self._view.send_desk_cards_img(
+                chat_id=chat_id,
+                cards=game.cards_table,
+                caption=caption,
+            )
+            await asyncio.sleep(0.1)
+            if msg:
+                game.board_message_id = msg.message_id
+                game.message_ids_to_delete.append(msg.message_id)
+        else:
+            edited = await self._view.edit_desk_cards_img(
+                chat_id=chat_id,
+                message_id=game.board_message_id,
+                cards=game.cards_table,
+                caption=caption,
+            )
+            if not edited:
+                msg = await self._view.send_desk_cards_img(
+                    chat_id=chat_id,
+                    cards=game.cards_table,
+                    caption=caption,
+                )
+                await asyncio.sleep(0.1)
+                if msg:
+                    game.board_message_id = msg.message_id
+                    game.message_ids_to_delete.append(msg.message_id)
+
+        # پس از ارسال/ویرایش تصویر میز، پیام نوبت باید آخرین پیام باشد
+        if count == 0 and game.turn_message_id:
+            current_player = self._current_turn_player(game)
+            if current_player:
+                await self._send_turn_message(game, current_player, chat_id)
 
     def _hand_name_from_score(self, score: int) -> str:
         """تبدیل عدد امتیاز به نام دست پوکر"""
@@ -1072,7 +1096,16 @@ class PokerBotModel:
             extra={"chat_id": chat_id},
         )
 
-        # ۱. پاک کردن پیام نوبت فعال لازم نیست
+        # ۱. پاک کردن پیام تصویر میز
+        if game.board_message_id:
+            logger.debug(
+                "Skipping deletion of message %s in chat %s",
+                game.board_message_id,
+                chat_id,
+            )
+            game.board_message_id = None
+
+        # ۲. پاک کردن پیام نوبت فعال لازم نیست
         if game.turn_message_id:
             logger.debug(
                 "Skipping deletion of message %s in chat %s",
@@ -1081,7 +1114,7 @@ class PokerBotModel:
             )
             game.turn_message_id = None  # آن را نال می‌کنیم تا دوباره استفاده نشود
 
-        # ۲. پاک کردن بقیه پیام‌های ذخیره شده در لیست
+        # ۳. پاک کردن بقیه پیام‌های ذخیره شده در لیست
         # ما از یک کپی از لیست استفاده می‌کنیم تا حذف عناصر در حین پیمایش مشکلی ایجاد نکند
         for message_id in list(game.message_ids_to_delete):
             logger.debug(
@@ -1090,7 +1123,7 @@ class PokerBotModel:
                 chat_id,
             )
 
-        # ۳. بعد از اتمام کار، لیست را کاملاً خالی می‌کنیم
+        # ۴. بعد از اتمام کار، لیست را کاملاً خالی می‌کنیم
         game.message_ids_to_delete.clear()
 
     async def _showdown(
