@@ -122,6 +122,10 @@ class PokerBotModel:
         # Use seat-based lookup
         return game.get_player_by_seat(game.current_player_index)
 
+    def _get_first_player_index(self, game: Game) -> int:
+        """Return index of the first active player after the dealer."""
+        return self._round_rate._find_next_active_player_index(game, game.dealer_index)
+
     async def _send_join_prompt(self, game: Game, chat_id: ChatId) -> None:
         """Send initial join prompt with inline button if not already sent."""
         if game.state == GameState.INITIAL and not game.ready_message_main_id:
@@ -913,25 +917,8 @@ class PokerBotModel:
             return
 
         # پیدا کردن اولین بازیکن برای شروع دور جدید (معمولاً اولین فرد فعال بعد از دیلر)
-        # توجه: شما باید متد _get_first_player_index را داشته باشید.
-        # اگر ندارید، فعلاً از این پیاده‌سازی ساده استفاده کنید:
-        try:
-            # این متد باید ایندکس اولین بازیکن *فعال* بعد از دیلر را پیدا کند
-            game.current_player_index = self._get_first_player_index(game)
-        except AttributeError:
-            # پیاده‌سازی موقت اگر متد بالا وجود ندارد
-            logger.warning(
-                "_get_first_player_index() not found. Using fallback logic",
-                extra={"chat_id": chat_id},
-            )
-            first_player_index = -1
-            start_index = (game.dealer_index + 1) % game.seated_count()
-            for i in range(game.seated_count()):
-                idx = (start_index + i) % game.seated_count()
-                if game.players[idx].state == PlayerState.ACTIVE:
-                    first_player_index = idx
-                    break
-            game.current_player_index = first_player_index
+        first_player_index = self._get_first_player_index(game)
+        game.current_player_index = first_player_index
 
         # اگر بازیکنی برای بازی پیدا شد، حلقه بازی را مجدداً شروع می‌کنیم
         if game.current_player_index != -1:
