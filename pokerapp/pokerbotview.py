@@ -468,7 +468,7 @@ class PokerBotViewer:
             ]
         return ReplyKeyboardMarkup(
             keyboard=[cards_row, stages],
-            selective=True,
+            selective=False,
             resize_keyboard=True,
             one_time_keyboard=False,
         )
