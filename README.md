@@ -8,7 +8,7 @@ Texas Poker is one of the most popular game nowsday. And of course there are man
 
 The bot plays role "our admin": he divides cards, adds cards, controlls whose turn is next, determines the winner and saves our money or can give us bonus money every day.
 
-All things that we need to do is adding bot to your group chat on telegram and every member need to  command /ready at the beginning of round. Then the game will be started. Rules of the texas poker you can read briefly below:
+All things that we need to do is adding bot to your group chat on telegram and every member needs to press the join button at the beginning of round. Then the game will be started. Rules of the texas poker you can read briefly below:
 
 **Here is the brief instruction of Texas Poker**\
 Every player has two private cards and on the table has five community cards which are dealt face up in the three stages.
@@ -51,7 +51,7 @@ The winner is determinated by various combinations of Poker hands rank from five
 ### FAQ
 
 1. It shows `not enough players` after `/start`.
-   All players need to send `/ready`.
+   All players need to press the join button.
    The command `/start` starts a game only for ready players.
 2. I don't see my cards.
    All cards are sent in the inline keyboard, if you don't see them, try

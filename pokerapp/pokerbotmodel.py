@@ -5,7 +5,13 @@ import datetime
 from typing import List, Tuple, Dict, Optional
 
 import redis
-from telegram import ReplyKeyboardMarkup, Update, Bot
+from telegram import (
+    ReplyKeyboardMarkup,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    Update,
+    Bot,
+)
 from telegram.constants import ParseMode
 from telegram.error import BadRequest, RetryAfter
 from telegram.ext import CallbackContext, ContextTypes
@@ -116,6 +122,20 @@ class PokerBotModel:
         # Use seat-based lookup
         return game.get_player_by_seat(game.current_player_index)
 
+    async def _send_join_prompt(self, game: Game, chat_id: ChatId) -> None:
+        """Send initial join prompt with inline button if not already sent."""
+        if game.state == GameState.INITIAL and not game.ready_message_main_id:
+            markup = InlineKeyboardMarkup(
+                [[InlineKeyboardButton(text="پیوستن", callback_data="join_game")]]
+            )
+            msg_id = await self._view.send_message_return_id(
+                chat_id, "برای پیوستن دکمه را بزن", reply_markup=markup
+            )
+            if msg_id:
+                game.ready_message_main_id = msg_id
+                game.ready_message_main_text = "برای پیوستن دکمه را بزن"
+                await self._table_manager.save_game(chat_id, game)
+
     async def send_cards(
         self,
         chat_id: ChatId,
@@ -194,7 +214,7 @@ class PokerBotModel:
         chat_id: ChatId,
         message_id: MessageId,
         text: str,
-        reply_markup: Optional[ReplyKeyboardMarkup] = None,
+        reply_markup: Optional[InlineKeyboardMarkup | ReplyKeyboardMarkup] = None,
         parse_mode: str = ParseMode.MARKDOWN,
     ) -> Optional[MessageId]:
         """
@@ -277,30 +297,27 @@ class PokerBotModel:
                     chat_id,
                 )
 
-    async def ready(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        """بازیکن برای شروع بازی اعلام آمادگی می‌کند."""
+    async def join_game(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """بازیکن با دکمهٔ پیوستن به بازی افزوده می‌شود."""
         game, chat_id = await self._get_game(update, context)
-        user = update.effective_message.from_user
+        user = update.effective_user
+        if update.callback_query:
+            await update.callback_query.answer()
+
+        await self._send_join_prompt(game, chat_id)
 
         if game.state != GameState.INITIAL:
-            await self._view.send_message_reply(
-                chat_id,
-                update.message.message_id,
-                "⚠️ بازی قبلاً شروع شده است، لطفاً صبر کنید!",
-            )
+            await self._view.send_message(chat_id, "⚠️ بازی قبلاً شروع شده است، لطفاً صبر کنید!")
             return
 
         if game.seated_count() >= MAX_PLAYERS:
-            await self._view.send_message_reply(
-                chat_id, update.message.message_id, "🚪 اتاق پر است!"
-            )
+            await self._view.send_message(chat_id, "🚪 اتاق پر است!")
             return
 
         wallet = WalletManagerModel(user.id, self._kv)
         if wallet.value() < SMALL_BLIND * 2:
-            await self._view.send_message_reply(
+            await self._view.send_message(
                 chat_id,
-                update.message.message_id,
                 f"💸 موجودی شما برای ورود به بازی کافی نیست (حداقل {SMALL_BLIND * 2}$ نیاز است).",
             )
             return
@@ -310,15 +327,13 @@ class PokerBotModel:
                 user_id=user.id,
                 mention_markdown=user.mention_markdown(),
                 wallet=wallet,
-                ready_message_id=update.effective_message.message_id,  # <-- کد صحیح
+                ready_message_id=game.ready_message_main_id,
                 seat_index=None,
             )
             game.ready_users.add(user.id)
             seat_assigned = game.add_player(player)
             if seat_assigned == -1:
-                await self._view.send_message_reply(
-                    chat_id, update.message.message_id, "🚪 اتاق پر است!"
-                )
+                await self._view.send_message(chat_id, "🚪 اتاق پر است!")
                 return
 
         ready_list = "\n".join(
@@ -334,7 +349,9 @@ class PokerBotModel:
             f"🚀 برای شروع بازی /start را بزنید یا منتظر بمانید."
         )
 
-        keyboard = ReplyKeyboardMarkup([["/ready", "/start"]], resize_keyboard=True)
+        keyboard = InlineKeyboardMarkup(
+            [[InlineKeyboardButton(text="پیوستن", callback_data="join_game")]]
+        )
         current_text = getattr(game, "ready_message_main_text", "")
 
         if game.ready_message_main_id:
@@ -348,7 +365,6 @@ class PokerBotModel:
                 if new_id:
                     game.ready_message_main_id = new_id
                     game.ready_message_main_text = text
-            # If text is the same, do nothing
         else:
             msg = await self._view.send_message_return_id(
                 chat_id, text, reply_markup=keyboard
@@ -357,7 +373,6 @@ class PokerBotModel:
                 game.ready_message_main_id = msg
                 game.ready_message_main_text = text
 
-        # بررسی برای شروع خودکار
         if game.seated_count() >= self._min_players and (
             game.seated_count() == await self._bot.get_chat_member_count(chat_id) - 1
             or self._cfg.DEBUG
@@ -365,6 +380,9 @@ class PokerBotModel:
             await self._start_game(context, game, chat_id)
 
         await self._table_manager.save_game(chat_id, game)
+
+    async def ready(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        await self.join_game(update, context)
 
     async def start(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """بازی را به صورت دستی شروع می‌کند."""
@@ -842,6 +860,8 @@ class PokerBotModel:
     ) -> None:
         chat_id = update.effective_chat.id
         await self._table_manager.create_game(chat_id)
+        game = await self._table_manager.get_game(chat_id)
+        await self._send_join_prompt(game, chat_id)
         self._view.send_message(chat_id, "بازی جدید ایجاد شد.")
 
     async def _go_to_next_street(
@@ -1173,6 +1193,7 @@ class PokerBotModel:
 
         game.reset()
         await self._table_manager.save_game(chat_id, game)
+        await self._send_join_prompt(game, chat_id)
 
         await asyncio.sleep(0.1)
         await _send_with_retry(self._view.send_new_hand_ready_message, chat_id)
@@ -1191,7 +1212,7 @@ class PokerBotModel:
             game.turn_message_id = None
 
         # ۲. ذخیره بازیکنان برای دست بعدی
-        # این باعث می‌شود در بازی بعدی، لازم نباشد همه دوباره /ready بزنند
+        # این باعث می‌شود در بازی بعدی، لازم نباشد همه دوباره دکمهٔ پیوستن را بزنند
         context.chat_data[KEY_OLD_PLAYERS] = [
             p.user_id for p in game.players if p.wallet.value() > 0
         ]
@@ -1201,13 +1222,12 @@ class PokerBotModel:
         new_game = Game()
         context.chat_data[KEY_CHAT_DATA_GAME] = new_game
         await self._table_manager.save_game(chat_id, new_game)
+        await self._send_join_prompt(new_game, chat_id)
 
         # ۴. اعلام پایان دست و راهنمایی برای شروع دست بعدی
-        keyboard = ReplyKeyboardMarkup([["/ready", "/start"]], resize_keyboard=True)
         await self._view.send_message(
             chat_id=chat_id,
-            text="🎉 دست تمام شد! برای شروع دست بعدی، /ready بزنید یا منتظر بمانید تا کسی /start کند.",
-            reply_markup=keyboard,
+            text="🎉 دست تمام شد! برای شروع دست بعدی، دکمهٔ «پیوستن» را بزنید یا منتظر بمانید تا کسی /start کند.",
         )
 
     def _format_cards(self, cards: Cards) -> str:
