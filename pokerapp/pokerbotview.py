@@ -87,6 +87,7 @@ class RateLimitedSender:
             if chat_id is not None:
                 bucket = await self._wait_for_token(chat_id)
             attempts = 0
+            last_error: Optional[TelegramError] = None
             while True:
                 try:
                     result = await func(*args, **kwargs)
@@ -101,8 +102,9 @@ class RateLimitedSender:
                     return result
                 except RetryAfter as e:
                     await asyncio.sleep(e.retry_after)
-                except TelegramError:
+                except TelegramError as e:
                     if attempts >= self._max_retries:
+                        last_error = e
                         break
                     attempts += 1
                     await asyncio.sleep(self._error_delay)
@@ -122,7 +124,21 @@ class RateLimitedSender:
                                 "error_type": type(e).__name__,
                             }
                         )
+                    last_error = e if isinstance(e, TelegramError) else None
                     break
+            if last_error:
+                if self._notify_admin:
+                    await self._notify_admin(
+                        {
+                            "event": "rate_limiter_failed",
+                            "request_params": {"args": str(args), "kwargs": str(kwargs)},
+                        }
+                    )
+                logger.warning(
+                    "RateLimitedSender.send failed after retries",
+                    extra={"request_params": {"args": args, "kwargs": kwargs}},
+                )
+                raise last_error
             if self._notify_admin:
                 await self._notify_admin(
                     {
