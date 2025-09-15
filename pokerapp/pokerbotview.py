@@ -508,7 +508,7 @@ class PokerBotViewer:
     @staticmethod
     def _get_table_markup(table_cards: Cards, stage: str) -> ReplyKeyboardMarkup:
         """Creates a keyboard displaying table cards and stage buttons."""
-        cards_row = table_cards if table_cards else ["❔"]
+        cards_row = [str(card) for card in table_cards] if table_cards else ["❔"]
         stages = ["فلاپ", "ترن", "ریور", "👁️ نمایش میز"]
         stage_map = {"flop": "فلاپ", "turn": "ترن", "river": "ریور"}
         if stage in stage_map:

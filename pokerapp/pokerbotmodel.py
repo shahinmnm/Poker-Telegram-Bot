@@ -1045,20 +1045,12 @@ class PokerBotModel:
                 if msg_id not in game.message_ids_to_delete:
                     game.message_ids_to_delete.append(msg_id)
         else:
-            edited_id = await self._view.edit_message_text(
+            await self._view.edit_message_text(
                 chat_id=chat_id,
                 message_id=game.board_message_id,
                 text=street_name,
                 reply_markup=markup,
             )
-            if not edited_id:
-                msg_id = await self._view.send_message_return_id(
-                    chat_id, street_name, reply_markup=markup
-                )
-                if msg_id:
-                    game.board_message_id = msg_id
-                    if msg_id not in game.message_ids_to_delete:
-                        game.message_ids_to_delete.append(msg_id)
 
         # به‌روزرسانی کیبورد پیام کارت‌های بازیکنان با کارت‌های میز
         for player in game.seated_players():
