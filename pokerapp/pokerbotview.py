@@ -11,7 +11,7 @@ from telegram import (
 from telegram.constants import ParseMode
 from telegram.error import BadRequest, Forbidden, RetryAfter, TelegramError
 from io import BytesIO
-from typing import Optional, Callable, Awaitable, Dict, Any
+from typing import Optional, Callable, Awaitable, Dict, Any, List
 import asyncio
 import logging
 import json
@@ -450,7 +450,7 @@ class PokerBotViewer:
         player: Player,
         money: Money,
         message_id: Optional[MessageId] = None,
-        recent_actions: str = "",
+        recent_actions: Optional[List[str]] = None,
     ) -> Optional[MessageId]:
         """ارسال یا ویرایش پیام نوبت بازیکن با نمایش اکشن‌های اخیر."""
 
@@ -479,7 +479,7 @@ class PokerBotViewer:
             f"⬇️ حرکت خود را انتخاب کنید:"
         )
         if recent_actions:
-            text += f"\n\n🎬 **اکشن‌های اخیر:**\n{recent_actions}"
+            text += "\n\n🎬 **اکشن‌های اخیر:**\n" + "\n".join(recent_actions)
 
         # کیبورد اینلاین
         markup = self._get_turns_markup(call_check_text, call_check_action)

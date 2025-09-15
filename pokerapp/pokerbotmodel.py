@@ -676,17 +676,10 @@ class PokerBotModel:
         await self._go_to_next_street(game, chat_id, context)
         return None
 
-    # FIX 1 (PART 1): Remove the 'money' parameter. The function will fetch the latest wallet value itself.
-    def _format_recent_actions(self, game: Game) -> str:
-        return "\n".join(
-            f"{name} {action} {amount}$" if amount else f"{name} {action}"
-            for name, action, amount in game.last_actions[-4:]
-        )
-
     async def _send_turn_message(self, game: Game, player: Player, chat_id: ChatId):
         """پیام نوبت را ارسال کرده و شناسه آن را برای حذف در آینده ذخیره می‌کند."""
         money = player.wallet.value()
-        recent_actions = self._format_recent_actions(game)
+        recent_actions = game.last_actions
 
         if game.turn_message_id:
             await self._view.send_turn_actions(
@@ -713,7 +706,8 @@ class PokerBotModel:
         if not current_player:
             return
         current_player.state = PlayerState.FOLD
-        game.last_actions.append((current_player.mention_markdown, "فولد", 0))
+        action_str = f"{current_player.mention_markdown}: فولد"
+        game.last_actions.append(action_str)
         if len(game.last_actions) > 4:
             game.last_actions.pop(0)
 
@@ -748,7 +742,10 @@ class PokerBotModel:
 
         action_type = "کال" if call_amount > 0 else "چک"
         amount = call_amount if call_amount > 0 else 0
-        game.last_actions.append((current_player.mention_markdown, action_type, amount))
+        action_str = f"{current_player.mention_markdown}: {action_type}"
+        if amount > 0:
+            action_str += f" {amount}$"
+        game.last_actions.append(action_str)
         if len(game.last_actions) > 4:
             game.last_actions.pop(0)
 
@@ -790,9 +787,8 @@ class PokerBotModel:
             )
             return
 
-        game.last_actions.append(
-            (current_player.mention_markdown, action_text, total_amount_to_bet)
-        )
+        action_str = f"{current_player.mention_markdown}: {action_text} {total_amount_to_bet}$"
+        game.last_actions.append(action_str)
         if len(game.last_actions) > 4:
             game.last_actions.pop(0)
 
@@ -828,9 +824,8 @@ class PokerBotModel:
         current_player.state = PlayerState.ALL_IN
         current_player.has_acted = True
 
-        game.last_actions.append(
-            (current_player.mention_markdown, "آل-این", all_in_amount)
-        )
+        action_str = f"{current_player.mention_markdown}: آل-این {all_in_amount}$"
+        game.last_actions.append(action_str)
         if len(game.last_actions) > 4:
             game.last_actions.pop(0)
 
@@ -1306,7 +1301,7 @@ class RoundRateModel:
                 game=game,
                 player=player_turn,
                 money=player_turn.wallet.value(),
-                recent_actions=self._format_recent_actions(game),
+                recent_actions=game.last_actions,
             )
             if msg_id:
                 game.turn_message_id = msg_id
