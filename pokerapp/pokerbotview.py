@@ -444,13 +444,16 @@ class PokerBotViewer:
         return PlayerAction.CALL
 
     async def send_turn_actions(
-            self,
-            chat_id: ChatId,
-            game: Game,
-            player: Player,
-            money: Money,
+        self,
+        chat_id: ChatId,
+        game: Game,
+        player: Player,
+        money: Money,
+        message_id: Optional[MessageId] = None,
+        recent_actions: str = "",
     ) -> Optional[MessageId]:
-        """ارسال پیام نوبت بازیکن با فرمت فارسی/ایموجی و استفاده از delay جدید 0.5s."""
+        """ارسال یا ویرایش پیام نوبت بازیکن با نمایش اکشن‌های اخیر."""
+
         # نمایش کارت‌های میز
         if not game.cards_table:
             cards_table = "🚫 کارتی روی میز نیست"
@@ -475,9 +478,15 @@ class PokerBotViewer:
             f"📈 **حداکثر شرط این دور:** `{game.max_round_rate}$`\n\n"
             f"⬇️ حرکت خود را انتخاب کنید:"
         )
+        if recent_actions:
+            text += f"\n\n🎬 **اکشن‌های اخیر:**\n{recent_actions}"
 
         # کیبورد اینلاین
         markup = self._get_turns_markup(call_check_text, call_check_action)
+
+        if message_id:
+            await self.edit_turn_actions(chat_id, message_id, text, markup)
+            return message_id
 
         try:
             message = await self._rate_limiter.send(
@@ -499,6 +508,39 @@ class PokerBotViewer:
                     "error_type": type(e).__name__,
                     "chat_id": chat_id,
                     "request_params": {"player": player.user_id},
+                },
+            )
+        return None
+
+    async def edit_turn_actions(
+        self,
+        chat_id: ChatId,
+        message_id: MessageId,
+        text: str,
+        reply_markup: InlineKeyboardMarkup,
+    ) -> Optional[MessageId]:
+        """ویرایش پیام موجود با متن و کیبورد جدید."""
+        try:
+            message = await self._rate_limiter.send(
+                lambda: self._bot.edit_message_text(
+                    chat_id=chat_id,
+                    message_id=message_id,
+                    text=text,
+                    reply_markup=reply_markup,
+                    parse_mode=ParseMode.MARKDOWN,
+                    disable_web_page_preview=True,
+                ),
+                chat_id=chat_id,
+            )
+            if isinstance(message, Message):
+                return message.message_id
+        except Exception as e:
+            logger.error(
+                "Error editing turn actions",
+                extra={
+                    "error_type": type(e).__name__,
+                    "chat_id": chat_id,
+                    "request_params": {"message_id": message_id},
                 },
             )
         return None
