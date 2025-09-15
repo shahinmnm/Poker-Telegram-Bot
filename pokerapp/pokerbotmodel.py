@@ -438,14 +438,28 @@ class PokerBotModel:
             game.dealer_index = -1
         game.dealer_index = (game.dealer_index + 1) % game.seated_count()
 
-        await self._view.send_message(chat_id, "🚀 !بازی شروع شد!")
-
         game.state = GameState.ROUND_PRE_FLOP
         await self._divide_cards(game, chat_id)
 
         # این متد به تنهایی تمام کارهای لازم برای شروع راند را انجام می‌دهد.
         # از جمله تعیین بلایندها، تعیین نوبت اول و ارسال پیام نوبت.
         await self._round_rate.set_blinds(game, chat_id)
+
+        action_str = "بازی شروع شد"
+        game.last_actions.append(action_str)
+        if len(game.last_actions) > 4:
+            game.last_actions.pop(0)
+        if game.turn_message_id:
+            current_player = game.get_player_by_seat(game.current_player_index)
+            if current_player:
+                await self._view.send_turn_actions(
+                    chat_id=chat_id,
+                    game=game,
+                    player=current_player,
+                    money=current_player.wallet.value(),
+                    message_id=game.turn_message_id,
+                    recent_actions=game.last_actions,
+                )
 
         # نیازی به هیچ کد دیگری در اینجا نیست.
         # کدهای اضافی حذف شدند.
@@ -1339,10 +1353,24 @@ class RoundRateModel:
             player.round_rate += amount
             player.total_bet += amount  # ← این خط اضافه شود
             game.pot += amount
-            await self._view.send_message(
-                chat_id,
-                f"💸 {player.mention_markdown} بلایند {blind_type} به مبلغ {amount}$ را پرداخت کرد.",
+
+            action_str = (
+                f"💸 {player.mention_markdown} بلایند {blind_type} به مبلغ {amount}$ را پرداخت کرد."
             )
+            game.last_actions.append(action_str)
+            if len(game.last_actions) > 4:
+                game.last_actions.pop(0)
+            if game.turn_message_id:
+                current_player = game.get_player_by_seat(game.current_player_index)
+                if current_player:
+                    await self._view.send_turn_actions(
+                        chat_id=chat_id,
+                        game=game,
+                        player=current_player,
+                        money=current_player.wallet.value(),
+                        message_id=game.turn_message_id,
+                        recent_actions=game.last_actions,
+                    )
         except UserException as e:
             available_money = player.wallet.value()
             player.wallet.authorize(game_id=str(chat_id), amount=available_money)
