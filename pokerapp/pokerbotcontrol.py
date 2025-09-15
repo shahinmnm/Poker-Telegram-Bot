@@ -36,6 +36,7 @@ class PokerBotCotroller:
             )
         )
 
+        application.add_handler(CallbackQueryHandler(self._handle_start, pattern="^start_game$"))
         application.add_handler(CallbackQueryHandler(self._handle_join_game, pattern="^join_game$"))
         application.add_handler(CallbackQueryHandler(self._handle_board_card, pattern="^board_card_"))
         application.add_handler(CallbackQueryHandler(self.middleware_user_turn))
@@ -79,12 +80,7 @@ class PokerBotCotroller:
     async def _handle_text_buttons(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Handles clicks on custom reply keyboard buttons."""
         text = update.message.text
-
-        if text == "🙈 پنهان کردن کارت‌ها":
-            await self._model.hide_cards(update, context)
-        elif text == "🃏 نمایش کارت‌ها":
-            await self._model.send_cards_to_user(update, context)
-        elif text == "👁️ نمایش میز":
+        if text == "👁️ نمایش میز":
             await self._model.show_table(update, context)
         elif text == "🔁 فلاپ":
             game, chat_id = await self._model._get_game(update, context)
@@ -100,6 +96,8 @@ class PokerBotCotroller:
         await self._model.join_game(update, context)
 
     async def _handle_start(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        if update.callback_query:
+            await update.callback_query.answer()
         await self._model.start(update, context)
 
     async def _handle_stop(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
