@@ -473,19 +473,19 @@ class PokerBotViewer:
             one_time_keyboard=False,
         )
 
-    async def show_reopen_keyboard(self, chat_id: ChatId, player_mention: Mention) -> None:
-        """Hides cards and shows a keyboard with a 'Show Cards' button."""
+    async def show_reopen_keyboard(self, chat_id: ChatId) -> None:
+        """Hides cards and sends a private keyboard to reopen them."""
         show_cards_button_text = "🃏 نمایش کارت‌ها"
         show_table_button_text = "👁️ نمایش میز"
         reopen_keyboard = ReplyKeyboardMarkup(
             keyboard=[[show_cards_button_text, show_table_button_text]],
-            selective=True,
+            selective=False,
             resize_keyboard=True,
             one_time_keyboard=False
         )
         await self.send_message(
             chat_id=chat_id,
-            text=f"کارت‌های {player_mention} پنهان شد. برای مشاهده دوباره از دکمه‌ها استفاده کن.",
+            text="کارت‌ها پنهان شد. برای مشاهده دوباره از دکمه‌ها استفاده کن.",
             reply_markup=reopen_keyboard,
         )
 
@@ -494,21 +494,21 @@ class PokerBotViewer:
             chat_id: ChatId,
             cards: Cards,
             mention_markdown: Mention,
-            ready_message_id: str,
+            ready_message_id: str | None = None,
     ) -> Optional[MessageId]:
         markup = self._get_cards_markup(cards)
         try:
-            message = await self._rate_limiter.send(
-                lambda: self._bot.send_message(
+            async def _send() -> Message:
+                return await self._bot.send_message(
                     chat_id=chat_id,
                     text="کارت‌های شما " + mention_markdown,
                     reply_markup=markup,
-                    reply_to_message_id=ready_message_id,
                     parse_mode=ParseMode.MARKDOWN,
                     disable_notification=True,
-                ),
-                chat_id=chat_id,
-            )
+                    **({"reply_to_message_id": ready_message_id} if ready_message_id else {}),
+                )
+
+            message = await self._rate_limiter.send(_send, chat_id=chat_id)
             if isinstance(message, Message):
                 return message.message_id
         except Exception as e:

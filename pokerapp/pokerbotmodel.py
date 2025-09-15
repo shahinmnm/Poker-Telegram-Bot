@@ -163,7 +163,7 @@ class PokerBotModel:
         """
         chat_id = update.effective_chat.id
         user = update.effective_user
-        await self._view.show_reopen_keyboard(chat_id, user.mention_markdown())
+        await self._view.show_reopen_keyboard(user.id)
         # پیام "کارت‌ها پنهان شد" را حذف نمی‌کنیم تا چت ساده بماند
         logger.debug(
             "Skipping deletion of message %s in chat %s",
@@ -175,7 +175,7 @@ class PokerBotModel:
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
     ) -> None:
         """
-        کارت‌های بازیکن را با کیبورد مخصوص در گروه دوباره ارسال می‌کند.
+        کارت‌های بازیکن را در چت خصوصی دوباره ارسال می‌کند.
         این متد زمانی فراخوانی می‌شود که بازیکن دکمه "نمایش کارت‌ها" را می‌زند.
         """
         game, chat_id = await self._get_game(update, context)
@@ -194,17 +194,12 @@ class PokerBotModel:
             )
             return
 
-        # ارسال پیام با کیبورد کارتی
-        # اینجا دیگر نیازی به ریپلای نیست.
-        cards_message_id = await self._view.send_cards(
-            chat_id=chat_id,
+        # ارسال پیام با کیبورد کارتی در چت خصوصی
+        await self._view.send_cards(
+            chat_id=user_id,
             cards=current_player.cards,
             mention_markdown=current_player.mention_markdown,
-            ready_message_id=None,  # <-- چون این یک نمایش مجدد است، ریپلای نمی‌زنیم.
         )
-        if cards_message_id:
-            game.message_ids_to_delete.append(cards_message_id)
-            await self._table_manager.save_game(chat_id, game)
 
         # حذف پیام کاربر لازم نیست
         logger.debug(
