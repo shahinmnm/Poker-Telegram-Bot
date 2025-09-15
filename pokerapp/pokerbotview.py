@@ -18,7 +18,7 @@ import json
 import time
 from pokerapp.winnerdetermination import HAND_NAMES_TRANSLATIONS
 from pokerapp.desk import DeskImageGenerator
-from pokerapp.cards import Cards
+from pokerapp.cards import Cards, Card
 from pokerapp.entities import (
     Game,
     Player,
@@ -332,6 +332,37 @@ class PokerBotViewer:
                 },
             )
         return None
+
+    async def send_single_card(
+        self,
+        chat_id: ChatId,
+        card: Card,
+        disable_notification: bool = True,
+    ) -> None:
+        """Send a single card image to the specified chat."""
+        try:
+            im_card = self._desk_generator._load_card_image(card)
+            bio = BytesIO()
+            bio.name = "card.png"
+            im_card.save(bio, "PNG")
+            bio.seek(0)
+            await self._rate_limiter.send(
+                lambda: self._bot.send_photo(
+                    chat_id=chat_id,
+                    photo=bio,
+                    disable_notification=disable_notification,
+                ),
+                chat_id=chat_id,
+            )
+        except Exception as e:
+            logger.error(
+                "Error sending single card",
+                extra={
+                    "error_type": type(e).__name__,
+                    "chat_id": chat_id,
+                    "card": card,
+                },
+            )
 
     async def send_desk_cards_img(
         self,
