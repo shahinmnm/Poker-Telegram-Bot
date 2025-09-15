@@ -37,6 +37,7 @@ class PokerBotCotroller:
         )
 
         application.add_handler(CallbackQueryHandler(self._handle_join_game, pattern="^join_game$"))
+        application.add_handler(CallbackQueryHandler(self._handle_board_card, pattern="^board_card_"))
         application.add_handler(CallbackQueryHandler(self.middleware_user_turn))
 
 
@@ -85,6 +86,15 @@ class PokerBotCotroller:
             await self._model.send_cards_to_user(update, context)
         elif text == "👁️ نمایش میز":
             await self._model.show_table(update, context)
+        elif text == "🔁 فلاپ":
+            game, chat_id = await self._model._get_game(update, context)
+            await self._model.add_cards_to_table(0, game, chat_id, "🃏 فلاپ (Flop)")
+        elif text == "🔁 ترن":
+            game, chat_id = await self._model._get_game(update, context)
+            await self._model.add_cards_to_table(0, game, chat_id, "🃏 ترن (Turn)")
+        elif text == "🔁 ریور":
+            game, chat_id = await self._model._get_game(update, context)
+            await self._model.add_cards_to_table(0, game, chat_id, "🃏 ریور (River)")
 
     async def _handle_ready(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await self._model.join_game(update, context)
@@ -109,6 +119,25 @@ class PokerBotCotroller:
 
     async def _handle_join_game(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await self._model.join_game(update, context)
+
+    async def _handle_board_card(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Sends a larger image of a board card to the requesting user."""
+        query = update.callback_query
+        if not query or not query.data:
+            return
+
+        index_str = query.data.split("_")[-1]
+        try:
+            index = int(index_str)
+        except ValueError:
+            await query.answer()
+            return
+
+        game, _ = await self._model._get_game(update, context)
+        if 0 <= index < len(game.cards_table):
+            card = game.cards_table[index]
+            await self._view.send_single_card(chat_id=query.from_user.id, card=card)
+        await query.answer()
 
     async def _handle_button_clicked(
         self,
