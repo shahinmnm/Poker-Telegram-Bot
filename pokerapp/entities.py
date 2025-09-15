@@ -252,7 +252,14 @@ class Game:
         return self.__dict__.copy()
 
     def __setstate__(self, state):
+        # Reset to initialize default values for attributes added in newer
+        # versions before applying the saved state.
+        self.reset()
         self.__dict__.update(state)
+        # Ensure optional attributes exist even if they were missing from the
+        # persisted state.
+        if "board_message_id" not in state:
+            self.board_message_id = None
 
     def __repr__(self):
         return "{}({!r})".format(self.__class__.__name__, self.__dict__)
