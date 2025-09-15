@@ -134,9 +134,12 @@ class Game:
     
         # 🆕 اضافه شده: آرایه پیام‌هایی که باید پاک شوند
         self.message_ids_to_delete: List[MessageId] = []
-    
+
         # 🆕 اضافه شده: پیام نوبت فعلی
         self.turn_message_id: Optional[MessageId] = None
+
+        # 🆕 اضافه شده: پیام تصویر میز
+        self.board_message_id: Optional[MessageId] = None
 
     # --- Seats / players helpers ----------------------------------------
     @property

@@ -374,6 +374,40 @@ class PokerBotViewer:
             )
         return None
 
+    async def edit_desk_cards_img(
+        self,
+        chat_id: ChatId,
+        message_id: MessageId,
+        cards: Cards,
+        caption: str = "",
+        parse_mode: str = ParseMode.MARKDOWN,
+    ) -> bool:
+        """Edits an existing desk cards image message."""
+        try:
+            im_cards = self._desk_generator.generate_desk(cards)
+            bio = BytesIO()
+            bio.name = "desk.png"
+            im_cards.save(bio, "PNG")
+            bio.seek(0)
+            media = InputMediaPhoto(media=bio, caption=caption, parse_mode=parse_mode)
+            await self._rate_limiter.send(
+                lambda: self._bot.edit_message_media(
+                    chat_id=chat_id, message_id=message_id, media=media
+                ),
+                chat_id=chat_id,
+            )
+            return True
+        except Exception as e:
+            logger.error(
+                "Error editing desk cards image",
+                extra={
+                    "error_type": type(e).__name__,
+                    "chat_id": chat_id,
+                    "message_id": message_id,
+                },
+            )
+        return False
+
     @staticmethod
     def _get_cards_markup(cards: Cards) -> ReplyKeyboardMarkup:
         """Creates the keyboard for showing player cards and actions."""
