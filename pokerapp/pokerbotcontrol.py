@@ -36,6 +36,7 @@ class PokerBotCotroller:
             )
         )
 
+        application.add_handler(CallbackQueryHandler(self._handle_join_game, pattern="^join_game$"))
         application.add_handler(CallbackQueryHandler(self.middleware_user_turn))
 
 
@@ -86,7 +87,7 @@ class PokerBotCotroller:
             await self._model.show_table(update, context)
 
     async def _handle_ready(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        await self._model.ready(update, context)
+        await self._model.join_game(update, context)
 
     async def _handle_start(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await self._model.start(update, context)
@@ -105,6 +106,9 @@ class PokerBotCotroller:
 
     async def _handle_create_game(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await self._model.create_game(update, context)
+
+    async def _handle_join_game(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        await self._model.join_game(update, context)
 
     async def _handle_button_clicked(
         self,
