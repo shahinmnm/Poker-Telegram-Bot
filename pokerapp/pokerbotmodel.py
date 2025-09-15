@@ -1036,11 +1036,25 @@ class PokerBotModel:
         if not send_message:
             return
 
+        # تعیین مرحله فعلی بازی برای کیبورد
+        cards_count = len(game.cards_table)
+        if cards_count >= 5:
+            stage = "river"
+        elif cards_count == 4:
+            stage = "turn"
+        elif cards_count >= 3:
+            stage = "flop"
+        else:
+            stage = ""
+        markup = self._view._get_table_markup(game.cards_table, stage)
+
         # مرحله ۲: بررسی وجود کارت روی میز
         if not game.cards_table:
             # اگر کارتی روی میز نیست، به جای عکس، یک پیام متنی ساده می‌فرستیم.
             msg_id = await self._view.send_message_return_id(
-                chat_id, "هنوز کارتی روی میز نیامده است."
+                chat_id,
+                "هنوز کارتی روی میز نیامده است.",
+                reply_markup=markup,
             )
             if msg_id:
                 game.message_ids_to_delete.append(msg_id)
@@ -1062,6 +1076,7 @@ class PokerBotModel:
                 chat_id=chat_id,
                 cards=game.cards_table,
                 caption=caption,
+                reply_markup=markup,
             )
             await asyncio.sleep(0.1)
             if msg:
@@ -1073,12 +1088,14 @@ class PokerBotModel:
                 message_id=game.board_message_id,
                 cards=game.cards_table,
                 caption=caption,
+                reply_markup=markup,
             )
             if not edited:
                 msg = await self._view.send_desk_cards_img(
                     chat_id=chat_id,
                     cards=game.cards_table,
                     caption=caption,
+                    reply_markup=markup,
                 )
                 await asyncio.sleep(0.1)
                 if msg:
