@@ -147,11 +147,11 @@ class PokerBotCotroller:
 
         except UserException as ex:
             print(f"INFO: Handled UserException: {ex}")
-            self._view.send_message(chat_id=chat_id, text=str(ex))
+            await self._view.send_message(chat_id=chat_id, text=str(ex))
         except Exception:
             # گرفتن تمام خطاهای دیگر برای دیباگ
             print(f"FATAL ERROR: Unexpected exception in player_action.")
             traceback.print_exc() # چاپ کامل خطا
-            self._view.send_message(chat_id, "یک خطای بحرانی در پردازش حرکت رخ داد. بازی ریست می‌شود.")
+            await self._view.send_message(chat_id, "یک خطای بحرانی در پردازش حرکت رخ داد. بازی ریست می‌شود.")
 
         # ==================== پایان بلوک اصلی دیباگ و اصلاح ====================
