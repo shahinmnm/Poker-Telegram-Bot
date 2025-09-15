@@ -1,4 +1,4 @@
-python-telegram-bot>=20
+python-telegram-bot[job-queue]>=20
 flake8==4.0.1
 pillow==10.4.0
 PySocks==1.7.1
