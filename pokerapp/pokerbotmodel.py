@@ -166,6 +166,11 @@ class PokerBotModel:
     async def _schedule_auto_start(self, context: CallbackContext, game: Game, chat_id: ChatId) -> None:
         if context.chat_data.get("start_countdown_job"):
             return
+
+        if context.job_queue is None:
+            logger.warning("JobQueue not available; auto start disabled")
+            return
+
         context.chat_data["start_countdown"] = 60
         job = context.job_queue.run_repeating(
             self._auto_start_tick, interval=1, chat_id=chat_id
