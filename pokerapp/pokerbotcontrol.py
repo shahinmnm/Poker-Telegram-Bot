@@ -88,13 +88,13 @@ class PokerBotCotroller:
             await self._model.show_table(update, context)
         elif text == "🔁 فلاپ":
             game, chat_id = await self._model._get_game(update, context)
-            await self._model.add_cards_to_table(0, game, chat_id, "🃏 فلاپ (Flop)")
+            await self._model.add_cards_to_table(0, game, chat_id, "🃏 فلاپ")
         elif text == "🔁 ترن":
             game, chat_id = await self._model._get_game(update, context)
-            await self._model.add_cards_to_table(0, game, chat_id, "🃏 ترن (Turn)")
+            await self._model.add_cards_to_table(0, game, chat_id, "🃏 ترن")
         elif text == "🔁 ریور":
             game, chat_id = await self._model._get_game(update, context)
-            await self._model.add_cards_to_table(0, game, chat_id, "🃏 ریور (River)")
+            await self._model.add_cards_to_table(0, game, chat_id, "🃏 ریور")
 
     async def _handle_ready(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await self._model.join_game(update, context)

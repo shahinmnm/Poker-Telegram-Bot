@@ -349,6 +349,27 @@ class PokerBotViewer:
             )
         return None
 
+    async def delete_message(
+        self, chat_id: ChatId, message_id: MessageId
+    ) -> None:
+        """Delete a message with rate limiting and basic error handling."""
+        try:
+            await self._rate_limiter.send(
+                lambda: self._bot.delete_message(
+                    chat_id=chat_id, message_id=message_id
+                ),
+                chat_id=chat_id,
+            )
+        except Exception as e:
+            logger.error(
+                "Error deleting message",
+                extra={
+                    "error_type": type(e).__name__,
+                    "chat_id": chat_id,
+                    "message_id": message_id,
+                },
+            )
+
     async def send_single_card(
         self,
         chat_id: ChatId,

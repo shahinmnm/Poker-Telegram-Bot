@@ -904,17 +904,13 @@ class PokerBotModel:
         # رفتن به مرحله بعدی بر اساس وضعیت فعلی بازی
         if game.state == GameState.ROUND_PRE_FLOP:
             game.state = GameState.ROUND_FLOP
-            await self.add_cards_to_table(3, game, chat_id, "🃏 فلاپ (Flop)")
+            await self.add_cards_to_table(3, game, chat_id, "🃏 فلاپ")
         elif game.state == GameState.ROUND_FLOP:
             game.state = GameState.ROUND_TURN
-            await self.add_cards_to_table(1, game, chat_id, "🃏 ترن (Turn)")
+            await self.add_cards_to_table(1, game, chat_id, "🃏 ترن")
         elif game.state == GameState.ROUND_TURN:
             game.state = GameState.ROUND_RIVER
-            # کارت ریور را اضافه می‌کنیم اما پیام جداگانه‌ای ارسال نمی‌شود؛
-            # تصویر نهایی میز به همراه نتایج در مرحله showdown نمایش داده خواهد شد.
-            await self.add_cards_to_table(
-                1, game, chat_id, "🃏 ریور (River)", send_message=False
-            )
+            await self.add_cards_to_table(1, game, chat_id, "🃏 ریور")
         elif game.state == GameState.ROUND_RIVER:
             # بعد از ریور، دور شرط‌بندی تمام شده و باید showdown انجام شود
             await self._showdown(game, chat_id, context)
@@ -1018,23 +1014,18 @@ class PokerBotModel:
         send_message: bool = True,
     ):
         """
-        کارت‌های جدید را به میز اضافه کرده و در صورت نیاز تصویر میز را ارسال می‌کند.
+        کارت‌های جدید را به میز اضافه کرده و پیامی متنی با کیبورد ترکیبی ارسال می‌کند.
         اگر ``count=0`` باشد، فقط کارت‌های فعلی نمایش داده می‌شود. با تنظیم
-        ``send_message=False`` می‌توان فقط کارت‌ها را اضافه کرد بدون اینکه پیامی
-        ارسال شود (برای مثال در مرحله ریور که نتیجه به همراه تصویر نهایی
-        ارسال خواهد شد).
+        ``send_message=False`` می‌توان فقط کارت‌ها را اضافه کرد بدون ارسال پیام.
         """
-        # مرحله ۱: اضافه کردن کارت‌های جدید در صورت نیاز
         if count > 0:
             for _ in range(count):
                 if game.remain_cards:
                     game.cards_table.append(game.remain_cards.pop())
 
-        # اگر قرار نیست پیامی ارسال شود، فقط کارت‌ها اضافه شده‌اند و تمام
         if not send_message:
             return
 
-        # تعیین مرحله فعلی بازی برای کیبورد
         cards_count = len(game.cards_table)
         if cards_count >= 5:
             stage = "river"
@@ -1046,55 +1037,29 @@ class PokerBotModel:
             stage = ""
         markup = self._view._get_table_markup(game.cards_table, stage)
 
-        # مرحله ۲: بررسی وجود کارت روی میز
-        if not game.cards_table:
-            # اگر کارتی روی میز نیست، به جای عکس، یک پیام متنی ساده می‌فرستیم.
+        if not game.board_message_id:
             msg_id = await self._view.send_message_return_id(
-                chat_id,
-                "هنوز کارتی روی میز نیامده است.",
-                reply_markup=markup,
+                chat_id, street_name, reply_markup=markup
             )
             if msg_id:
-                game.message_ids_to_delete.append(msg_id)
-                logger.debug(
-                    "Skipping deletion of message %s in chat %s",
-                    msg_id,
-                    chat_id,
-                )
-            return
-
-        # مرحله ۳: ساخت رشته کارت‌ها با فرمت جدید (دو فاصله بین هر کارت)
-        cards_str = "  ".join(game.cards_table)
-
-        # مرحله ۴: ساخت کپشن دو خطی و زیبا
-        caption = f"{street_name}\n{cards_str}"
-
-        if not game.board_message_id:
-            msg = await self._view.send_desk_cards_img(
-                chat_id=chat_id,
-                cards=game.cards_table,
-                caption=caption,
-                reply_markup=markup,
-            )
-            await asyncio.sleep(0.1)
-            if msg:
-                game.board_message_id = msg.message_id
-                game.message_ids_to_delete.append(msg.message_id)
+                game.board_message_id = msg_id
+                if msg_id not in game.message_ids_to_delete:
+                    game.message_ids_to_delete.append(msg_id)
         else:
-            msg = await self._view.edit_desk_cards_img(
+            edited_id = await self._view.edit_message_text(
                 chat_id=chat_id,
                 message_id=game.board_message_id,
-                cards=game.cards_table,
-                caption=caption,
+                text=street_name,
                 reply_markup=markup,
             )
-            # ``edit_desk_cards_img`` returns a message when a new photo is sent
-            # instead of editing. In that case, store the new message id so the
-            # board can be updated in subsequent rounds.
-            if msg:
-                await asyncio.sleep(0.1)
-                game.board_message_id = msg.message_id
-                game.message_ids_to_delete.append(msg.message_id)
+            if not edited_id:
+                msg_id = await self._view.send_message_return_id(
+                    chat_id, street_name, reply_markup=markup
+                )
+                if msg_id:
+                    game.board_message_id = msg_id
+                    if msg_id not in game.message_ids_to_delete:
+                        game.message_ids_to_delete.append(msg_id)
 
         # به‌روزرسانی کیبورد پیام کارت‌های بازیکنان با کارت‌های میز
         for player in game.seated_players():
@@ -1124,44 +1089,26 @@ class PokerBotModel:
         except ValueError:
             return "Unknown Hand"
 
-    def _clear_game_messages(self, game: Game, chat_id: ChatId) -> None:
-        """
-        تمام پیام‌های مربوط به این دست از بازی، از جمله پیام نوبت فعلی
-        و سایر پیام‌های ثبت‌شده را پاک می‌کند تا چت برای نمایش نتایج تمیز شود.
-        """
-        logger.debug(
-            "Clearing game messages",
-            extra={"chat_id": chat_id},
-        )
+    async def _clear_game_messages(self, game: Game, chat_id: ChatId) -> None:
+        """Deletes all temporary messages related to the current hand."""
+        logger.debug("Clearing game messages", extra={"chat_id": chat_id})
 
-        # ۱. پاک کردن پیام تصویر میز
+        ids_to_delete = set(game.message_ids_to_delete)
         if game.board_message_id:
-            logger.debug(
-                "Skipping deletion of message %s in chat %s",
-                game.board_message_id,
-                chat_id,
-            )
+            ids_to_delete.add(game.board_message_id)
             game.board_message_id = None
-
-        # ۲. پاک کردن پیام نوبت فعال لازم نیست
         if game.turn_message_id:
-            logger.debug(
-                "Skipping deletion of message %s in chat %s",
-                game.turn_message_id,
-                chat_id,
-            )
-            game.turn_message_id = None  # آن را نال می‌کنیم تا دوباره استفاده نشود
+            ids_to_delete.add(game.turn_message_id)
+            game.turn_message_id = None
 
-        # ۳. پاک کردن بقیه پیام‌های ذخیره شده در لیست
-        # ما از یک کپی از لیست استفاده می‌کنیم تا حذف عناصر در حین پیمایش مشکلی ایجاد نکند
-        for message_id in list(game.message_ids_to_delete):
-            logger.debug(
-                "Skipping deletion of message %s in chat %s",
-                message_id,
-                chat_id,
-            )
+        for message_id in ids_to_delete:
+            try:
+                await self._view.delete_message(chat_id, message_id)
+            except Exception as e:
+                logger.debug(
+                    "Failed to delete message", extra={"chat_id": chat_id, "message_id": message_id, "error_type": type(e).__name__}
+                )
 
-        # ۴. بعد از اتمام کار، لیست را کاملاً خالی می‌کنیم
         game.message_ids_to_delete.clear()
 
     async def _showdown(
@@ -1191,6 +1138,8 @@ class PokerBotModel:
                     await asyncio.sleep(0.1)
 
         contenders = game.players_by(states=(PlayerState.ACTIVE, PlayerState.ALL_IN))
+
+        await self._clear_game_messages(game, chat_id)
 
         if not contenders:
             # سناریوی نادر که همه قبل از showdown فولد کرده‌اند
@@ -1229,12 +1178,7 @@ class PokerBotModel:
                 self._view.send_showdown_results, chat_id, game, winners_by_pot
             )
 
-        # ۳. ریست کردن وضعیت پیام‌ها و آماده‌سازی برای دست بعدی
-        game.message_ids_to_delete.clear()
-
-        if game.turn_message_id:
-            game.turn_message_id = None
-
+        # ۳. آماده‌سازی برای دست بعدی
         remaining_players = [p for p in game.players if p.wallet.value() > 0]
         context.chat_data[KEY_OLD_PLAYERS] = [p.user_id for p in remaining_players]
 
@@ -1251,12 +1195,7 @@ class PokerBotModel:
         """
         یک دست از بازی را تمام کرده، پیام‌ها را پاکسازی کرده و برای دست بعدی آماده می‌شود.
         """
-        # ۱. ریست کردن شناسه‌های پیام موقت بدون حذف پیام‌ها
-        game.message_ids_to_delete.clear()
-
-        # پاک کردن اشاره به آخرین پیام نوبت بدون حذف آن
-        if game.turn_message_id:
-            game.turn_message_id = None
+        await self._clear_game_messages(game, chat_id)
 
         # ۲. ذخیره بازیکنان برای دست بعدی
         # این باعث می‌شود در بازی بعدی، لازم نباشد همه دوباره دکمهٔ پیوستن را بزنند
