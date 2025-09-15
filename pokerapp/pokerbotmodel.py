@@ -1078,24 +1078,20 @@ class PokerBotModel:
                 game.board_message_id = msg.message_id
                 game.message_ids_to_delete.append(msg.message_id)
         else:
-            edited = await self._view.edit_desk_cards_img(
+            msg = await self._view.edit_desk_cards_img(
                 chat_id=chat_id,
                 message_id=game.board_message_id,
                 cards=game.cards_table,
                 caption=caption,
                 reply_markup=markup,
             )
-            if not edited:
-                msg = await self._view.send_desk_cards_img(
-                    chat_id=chat_id,
-                    cards=game.cards_table,
-                    caption=caption,
-                    reply_markup=markup,
-                )
+            # ``edit_desk_cards_img`` returns a message when a new photo is sent
+            # instead of editing. In that case, store the new message id so the
+            # board can be updated in subsequent rounds.
+            if msg:
                 await asyncio.sleep(0.1)
-                if msg:
-                    game.board_message_id = msg.message_id
-                    game.message_ids_to_delete.append(msg.message_id)
+                game.board_message_id = msg.message_id
+                game.message_ids_to_delete.append(msg.message_id)
 
         # پس از ارسال/ویرایش تصویر میز، پیام نوبت باید آخرین پیام باشد
         if count == 0 and game.turn_message_id:
