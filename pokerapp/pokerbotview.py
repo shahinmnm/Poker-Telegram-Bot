@@ -411,8 +411,12 @@ class PokerBotViewer:
         caption: str = "",
         parse_mode: str = ParseMode.MARKDOWN,
         reply_markup: Optional[ReplyKeyboardMarkup] = None,
-    ) -> bool:
-        """Edits an existing desk cards image message."""
+    ) -> Optional[Message]:
+        """Edit an existing desk image or send a new one on failure.
+
+        Returns the newly sent :class:`telegram.Message` when a new photo is
+        sent instead of editing, otherwise ``None``.
+        """
         try:
             im_cards = self._desk_generator.generate_desk(cards)
             bio = BytesIO()
@@ -429,7 +433,29 @@ class PokerBotViewer:
                 ),
                 chat_id=chat_id,
             )
-            return True
+            return None
+        except BadRequest:
+            # If editing fails (e.g. original message no longer exists or is
+            # invalid), fall back to sending a new photo so the board can still
+            # be updated.
+            try:
+                msg = await self.send_desk_cards_img(
+                    chat_id=chat_id,
+                    cards=cards,
+                    caption=caption,
+                    parse_mode=parse_mode,
+                    reply_markup=reply_markup,
+                )
+                return msg
+            except Exception as e:
+                logger.error(
+                    "Error sending new desk cards image after edit failure",
+                    extra={
+                        "error_type": type(e).__name__,
+                        "chat_id": chat_id,
+                        "message_id": message_id,
+                    },
+                )
         except Exception as e:
             logger.error(
                 "Error editing desk cards image",
@@ -439,7 +465,7 @@ class PokerBotViewer:
                     "message_id": message_id,
                 },
             )
-        return False
+        return None
 
     @staticmethod
     def _get_cards_markup(cards: Cards) -> ReplyKeyboardMarkup:
