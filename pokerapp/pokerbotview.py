@@ -526,7 +526,11 @@ class PokerBotViewer:
     def _get_hand_and_board_markup(
         hand: Cards, table_cards: Cards, stage: str
     ) -> ReplyKeyboardMarkup:
-        """Combine player's hand, table cards and stage/hide buttons in one keyboard."""
+        """Combine player's hand, table cards and stage/hide buttons in one keyboard.
+
+        این کیبورد در پیام خصوصی بازیکن نیز استفاده می‌شود تا او هم‌زمان دست و
+        کارت‌های میز را مشاهده کند.
+        """
         table_row = table_cards if table_cards else ["❔"]
         stages = ["فلاپ", "ترن", "ریور"]
         stage_map = {"flop": "فلاپ", "turn": "ترن", "river": "ریور"}

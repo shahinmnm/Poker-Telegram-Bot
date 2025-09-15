@@ -502,13 +502,12 @@ class PokerBotModel:
                     parse_mode="Markdown",
                 )
 
-            # ۲. ارسال پیام با کیبورد کارتی در گروه
+            # ۲. ارسال پیام با کیبورد کارتی در چت خصوصی بازیکن
             # این پیام برای دسترسی سریع بازیکن به کارت‌هایش است.
             cards_message_id = await self._view.send_cards(
-                chat_id=chat_id,
+                chat_id=player.user_id,
                 cards=player.cards,
                 mention_markdown=player.mention_markdown,
-                ready_message_id=player.ready_message_id,
                 table_cards=game.cards_table,
                 stage="",
             )
@@ -1065,7 +1064,7 @@ class PokerBotModel:
         for player in game.seated_players():
             if player.hand_message_id:
                 await self._view.send_cards(
-                    chat_id=chat_id,
+                    chat_id=player.user_id,
                     cards=player.cards,
                     mention_markdown=player.mention_markdown,
                     table_cards=game.cards_table,
