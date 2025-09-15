@@ -17,7 +17,10 @@ async def test_end_hand_persists_game_and_reuses_instance():
     table_manager = TableManager(redis_async, redis_sync)
 
     bot = SimpleNamespace(send_message=AsyncMock())
-    view = SimpleNamespace(send_message=AsyncMock())
+    view = SimpleNamespace(
+        send_message=AsyncMock(),
+        send_message_return_id=AsyncMock(return_value=1),
+    )
     model = PokerBotModel(view, bot, Config(), redis_sync, table_manager)
 
     chat_id = 123
