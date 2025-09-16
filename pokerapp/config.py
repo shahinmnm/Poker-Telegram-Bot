@@ -37,6 +37,11 @@ class Config:
         self.DEBUG: bool = bool(
             os.getenv("POKERBOT_DEBUG", default="0") == "1"
         )
+        allow_polling_raw = os.getenv("POKERBOT_ALLOW_POLLING_FALLBACK")
+        self.ALLOW_POLLING_FALLBACK: bool = (
+            allow_polling_raw is not None
+            and allow_polling_raw.strip().lower() in {"1", "true", "yes", "on"}
+        )
         admin_chat_id = os.getenv("POKERBOT_ADMIN_CHAT_ID", "")
         self.ADMIN_CHAT_ID = int(admin_chat_id) if admin_chat_id else None
         self.WEBHOOK_LISTEN: str = (

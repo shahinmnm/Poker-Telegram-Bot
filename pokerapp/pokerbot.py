@@ -85,7 +85,11 @@ class PokerBot:
         self._controller = PokerBotCotroller(model, self._application)
 
     def run(self) -> None:
-        """Start the bot."""
+        """Start the bot using the webhook listener."""
+        self.run_webhook()
+
+    def run_webhook(self) -> None:
+        """Start the bot using webhook delivery."""
         logger.info(
             "Starting webhook listener on %s:%s%s targeting %s",
             self._cfg.WEBHOOK_LISTEN,
@@ -105,6 +109,22 @@ class PokerBot:
             raise
         finally:
             logger.info("Webhook listener stopped.")
+
+    def run_polling(self) -> None:
+        """Start the bot using long polling."""
+        logger.info(
+            "Starting polling mode for development; webhook configuration will be ignored."
+        )
+        try:
+            self._application.run_polling(
+                allowed_updates=self._webhook_settings.allowed_updates,
+                drop_pending_updates=self._webhook_settings.drop_pending_updates,
+            )
+        except Exception:
+            logger.exception("Polling run terminated due to an error.")
+            raise
+        finally:
+            logger.info("Polling stopped.")
 
     async def _apply_webhook_settings(self, application: "Application") -> None:
         application.bot_data["webhook_settings"] = self._webhook_settings
