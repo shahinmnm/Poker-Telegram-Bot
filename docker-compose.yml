@@ -15,7 +15,8 @@ services:
     restart: always
     ports:
       - "127.0.0.1:3000:3000"
-    # پروکسی خارجی TLS را خاتمه می‌دهد و درخواست‌ها را به 127.0.0.1:3000 می‌فرستد.
+    # TLS در Nginx خاتمه می‌یابد و درخواست‌ها به 127.0.0.1:3000 هدایت می‌شود،
+    # بنابراین کانتینر فقط روی لوپ‌بک گوش می‌دهد.
     environment:
       - POKERBOT_TOKEN=$POKERBOT_TOKEN
       - POKERBOT_REDIS_HOST=redis
