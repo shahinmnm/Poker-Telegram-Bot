@@ -1,6 +1,7 @@
 import logging
 import os
 from typing import List, Optional
+from urllib.parse import urljoin
 
 
 logger = logging.getLogger(__name__)
@@ -43,17 +44,27 @@ class Config:
                 default="3000",
             )
         )
-        self.WEBHOOK_PATH: str = os.getenv(
-            "POKERBOT_WEBHOOK_PATH",
-            default="/telegram/webhook-poker2025",
+        default_webhook_path = "/telegram/webhook-poker2025"
+        webhook_path_env = os.getenv("POKERBOT_WEBHOOK_PATH")
+        raw_webhook_path = (
+            webhook_path_env.strip()
+            if webhook_path_env is not None
+            else default_webhook_path
         )
-        self.WEBHOOK_PUBLIC_URL: str = os.getenv(
+        self.WEBHOOK_PATH: str = self._normalize_webhook_path(raw_webhook_path)
+        raw_webhook_domain = os.getenv("POKERBOT_WEBHOOK_DOMAIN", "")
+        self.WEBHOOK_DOMAIN: str = self._normalize_webhook_domain(raw_webhook_domain)
+        explicit_public_url = os.getenv(
             "POKERBOT_WEBHOOK_PUBLIC_URL",
             default="",
+        ).strip()
+        self.WEBHOOK_PUBLIC_URL: str = self._build_public_url(
+            explicit_public_url=explicit_public_url,
         )
         if not self.WEBHOOK_PUBLIC_URL:
             logger.warning(
-                "POKERBOT_WEBHOOK_PUBLIC_URL is not set; webhook may not be accessible externally."
+                "Webhook public URL is not set; define POKERBOT_WEBHOOK_DOMAIN together with "
+                "POKERBOT_WEBHOOK_PATH or provide POKERBOT_WEBHOOK_PUBLIC_URL."
             )
         self.WEBHOOK_SECRET: str = os.getenv(
             "POKERBOT_WEBHOOK_SECRET",
@@ -73,3 +84,45 @@ class Config:
         self.MAX_CONNECTIONS: Optional[int] = (
             int(max_connections) if max_connections else None
         )
+
+    @staticmethod
+    def _normalize_webhook_path(path: str) -> str:
+        normalized_path = path.strip()
+        if not normalized_path:
+            return ""
+        if not normalized_path.startswith("/"):
+            normalized_path = f"/{normalized_path}"
+        return normalized_path
+
+    @staticmethod
+    def _normalize_webhook_domain(domain: str) -> str:
+        normalized_domain = domain.strip()
+        if not normalized_domain:
+            return ""
+        if not normalized_domain.startswith(("http://", "https://")):
+            logger.debug(
+                "POKERBOT_WEBHOOK_DOMAIN missing scheme; defaulting to https://%s",
+                normalized_domain,
+            )
+            normalized_domain = f"https://{normalized_domain}"
+        return normalized_domain.rstrip("/")
+
+    def _build_public_url(self, explicit_public_url: str) -> str:
+        if self.WEBHOOK_DOMAIN and self.WEBHOOK_PATH:
+            combined_url = urljoin(
+                f"{self.WEBHOOK_DOMAIN.rstrip('/')}/",
+                self.WEBHOOK_PATH.lstrip("/"),
+            )
+            logger.debug(
+                "Derived WEBHOOK_PUBLIC_URL from domain and path using %s and %s",
+                self.WEBHOOK_DOMAIN,
+                self.WEBHOOK_PATH,
+            )
+            return combined_url
+
+        explicit_public_url = explicit_public_url.strip()
+        if explicit_public_url:
+            logger.debug(
+                "Using explicit WEBHOOK_PUBLIC_URL provided via POKERBOT_WEBHOOK_PUBLIC_URL."
+            )
+        return explicit_public_url
