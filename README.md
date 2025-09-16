@@ -4,7 +4,9 @@ Welcome to the telegram Bot **"Texas Poker Online"**!!!
 
 **Try it: [@online_poker_bot](https://t.me/online_poker_bot)**
 
-Texas Poker is one of the most popular game nowsday. And of course there are many applications and webs where you can play. We accidently thought about that why don't we playing poker when we are chatting with friends on the telegram. And how the poker game bot was created. 
+> **Note:** After pulling the latest changes, rerun `pip install -r requirements.txt` to install the updated Telegram bot dependencies.
+
+Texas Poker is one of the most popular game nowsday. And of course there are many applications and webs where you can play. We accidently thought about that why don't we playing poker when we are chatting with friends on the telegram. And how the poker game bot was created.
 
 The bot plays role "our admin": he divides cards, adds cards, controlls whose turn is next, determines the winner and saves our money or can give us bonus money every day.
 
