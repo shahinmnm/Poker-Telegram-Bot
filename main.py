@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
 
+import logging
+import sys
+
 from dotenv import load_dotenv
 
 from pokerapp.config import Config
 from pokerapp.pokerbot import PokerBot
-import logging
 from pokerapp.logging_config import setup_logging
 
 setup_logging(logging.DEBUG)
@@ -15,10 +17,20 @@ def main() -> None:
     load_dotenv()
     cfg: Config = Config()
 
-    missing_settings = []
+    logger.info(
+        "Ensure that POKERBOT_TOKEN, POKERBOT_WEBHOOK_PATH, POKERBOT_WEBHOOK_PUBLIC_URL "
+        "(or POKERBOT_WEBHOOK_DOMAIN together with the path), and POKERBOT_WEBHOOK_SECRET are "
+        "defined in your environment or .env file."
+    )
+    logger.info(
+        "Set POKERBOT_ALLOW_POLLING_FALLBACK=1 to enable development polling when webhook "
+        "settings are unavailable."
+    )
+
+    missing_required_settings = []
 
     if cfg.TOKEN == "":
-        missing_settings.append(
+        missing_required_settings.append(
             (
                 "MissingToken",
                 "Environment variable POKERBOT_TOKEN is not set. "
@@ -26,8 +38,15 @@ def main() -> None:
             )
         )
 
+    if missing_required_settings:
+        for error_type, message in missing_required_settings:
+            logger.error(message, extra={"error_type": error_type})
+        sys.exit(1)
+
+    webhook_missing_settings = []
+
     if not cfg.WEBHOOK_PATH:
-        missing_settings.append(
+        webhook_missing_settings.append(
             (
                 "MissingWebhookPath",
                 "Webhook path is not configured. Set POKERBOT_WEBHOOK_PATH in your "
@@ -36,7 +55,7 @@ def main() -> None:
         )
 
     if not cfg.WEBHOOK_PUBLIC_URL:
-        missing_settings.append(
+        webhook_missing_settings.append(
             (
                 "MissingWebhookPublicUrl",
                 "Webhook public URL is not configured. Set POKERBOT_WEBHOOK_DOMAIN (recommended) "
@@ -46,7 +65,7 @@ def main() -> None:
         )
 
     if not cfg.WEBHOOK_SECRET:
-        missing_settings.append(
+        webhook_missing_settings.append(
             (
                 "MissingWebhookSecret",
                 "Webhook secret token is not configured. Set POKERBOT_WEBHOOK_SECRET in your "
@@ -54,13 +73,31 @@ def main() -> None:
             )
         )
 
-    if missing_settings:
-        for error_type, message in missing_settings:
-            logger.error(message, extra={"error_type": error_type})
-        exit(1)
+    use_polling = False
+    if webhook_missing_settings:
+        if getattr(cfg, "ALLOW_POLLING_FALLBACK", False):
+            if not cfg.DEBUG:
+                logger.warning(
+                    "POKERBOT_ALLOW_POLLING_FALLBACK is enabled while DEBUG mode is off. "
+                    "This fallback is intended for development only."
+                )
+            for error_type, message in webhook_missing_settings:
+                logger.warning(message, extra={"error_type": error_type})
+            logger.info(
+                "Webhook configuration missing; falling back to long polling as requested by "
+                "POKERBOT_ALLOW_POLLING_FALLBACK."
+            )
+            use_polling = True
+        else:
+            for error_type, message in webhook_missing_settings:
+                logger.error(message, extra={"error_type": error_type})
+            sys.exit(1)
 
     bot = PokerBot(token=cfg.TOKEN, cfg=cfg)
-    bot.run()
+    if use_polling:
+        bot.run_polling()
+    else:
+        bot.run()
 
 
 if __name__ == "__main__":
