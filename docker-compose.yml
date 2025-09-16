@@ -13,9 +13,17 @@ services:
   bot:
     build: .
     restart: always
+    ports:
+      - "127.0.0.1:3000:3000"
+    # پروکسی خارجی TLS را خاتمه می‌دهد و درخواست‌ها را به 127.0.0.1:3000 می‌فرستد.
     environment:
       - POKERBOT_TOKEN=$POKERBOT_TOKEN
       - POKERBOT_REDIS_HOST=redis
+      - POKERBOT_WEBHOOK_LISTEN=$POKERBOT_WEBHOOK_LISTEN
+      - POKERBOT_WEBHOOK_PORT=$POKERBOT_WEBHOOK_PORT
+      - POKERBOT_WEBHOOK_PATH=$POKERBOT_WEBHOOK_PATH
+      - POKERBOT_WEBHOOK_PUBLIC_URL=$POKERBOT_WEBHOOK_PUBLIC_URL
+      - POKERBOT_WEBHOOK_SECRET=$POKERBOT_WEBHOOK_SECRET
 
 volumes:
   redis_data:
