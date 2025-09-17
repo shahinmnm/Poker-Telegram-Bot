@@ -215,50 +215,6 @@ class PokerBotModel:
                     e,
                 )
 
-    async def send_cards_to_user(
-        self, update: Update, context: ContextTypes.DEFAULT_TYPE
-    ) -> None:
-        """
-        کارت‌های بازیکن را در چت خصوصی دوباره ارسال می‌کند.
-        این متد زمانی فراخوانی می‌شود که بازیکن دکمه "نمایش کارت‌ها" را می‌زند.
-        """
-        game, chat_id = await self._get_game(update, context)
-        user_id = update.effective_user.id
-
-        # پیدا کردن بازیکن در لیست بازیکنان بازی فعلی
-        current_player = None
-        for p in game.players:
-            if p.user_id == user_id:
-                current_player = p
-                break
-
-        if not current_player or not current_player.cards:
-            mention = format_mention_markdown(
-                update.effective_user.id, update.effective_user.full_name
-            )
-            await self._view.send_message(
-                chat_id,
-                f"{mention} در بازی فعلی حضور ندارد یا کارتی ندارد.",
-                parse_mode="Markdown",
-            )
-            return
-
-        stage = self._view._derive_stage_from_table(game.cards_table)
-        previous_message_id = game.message_ids.get(current_player.user_id)
-        new_message_id = await self._view.send_cards(
-            chat_id=chat_id,
-            cards=current_player.cards,
-            mention_markdown=current_player.mention_markdown,
-            ready_message_id=current_player.ready_message_id,
-            table_cards=game.cards_table,
-            hide_hand_text=True,
-            stage=stage,
-            reply_to_ready_message=False,
-            message_id=previous_message_id,
-        )
-        if new_message_id:
-            game.message_ids[current_player.user_id] = new_message_id
-
     async def _safe_edit_message_text(
         self,
         chat_id: ChatId,
@@ -536,7 +492,7 @@ class PokerBotModel:
             player.cards = cards
 
             stage = self._view._derive_stage_from_table(game.cards_table)
-            message_id = await self._view.send_cards(
+            await self._view.send_cards(
                 chat_id=chat_id,
                 cards=cards,
                 mention_markdown=player.mention_markdown,
@@ -546,8 +502,6 @@ class PokerBotModel:
                 stage=stage,
                 reply_to_ready_message=False,
             )
-            if message_id:
-                game.message_ids[player.user_id] = message_id
 
     def _is_betting_round_over(self, game: Game) -> bool:
         """
@@ -1084,8 +1038,7 @@ class PokerBotModel:
         for player in game.seated_players():
             if not player.cards:
                 continue
-            existing_message_id = game.message_ids.get(player.user_id)
-            new_message_id = await self._view.send_cards(
+            await self._view.send_cards(
                 chat_id=chat_id,
                 cards=player.cards,
                 mention_markdown=player.mention_markdown,
@@ -1094,10 +1047,7 @@ class PokerBotModel:
                 hide_hand_text=True,
                 stage=stage,
                 reply_to_ready_message=False,
-                message_id=existing_message_id,
             )
-            if new_message_id:
-                game.message_ids[player.user_id] = new_message_id
             await asyncio.sleep(0.1)
 
         # پس از ارسال/ویرایش تصویر میز، پیام نوبت باید آخرین پیام باشد
@@ -1120,7 +1070,6 @@ class PokerBotModel:
         logger.debug("Clearing game messages", extra={"chat_id": chat_id})
 
         ids_to_delete = set(game.message_ids_to_delete)
-        ids_to_delete.update(game.message_ids.values())
 
         if game.board_message_id:
             ids_to_delete.add(game.board_message_id)
