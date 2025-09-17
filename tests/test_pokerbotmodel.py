@@ -356,3 +356,41 @@ async def test_auto_start_tick_skips_save_when_message_unchanged():
     table_manager.save_game.assert_not_awaited()
     assert context.chat_data["start_countdown"] == 9
     assert context.chat_data[KEY_CHAT_DATA_GAME] is game
+
+
+def test_send_turn_message_replaces_previous_message():
+    model, game, player, view = _build_model_with_game()
+    chat_id = -601
+    player.wallet.value.return_value = 450
+    game.turn_message_id = 111
+    game.last_actions = ["action"]
+
+    view.send_turn_actions = AsyncMock(return_value=222)
+    view.delete_message = AsyncMock()
+
+    asyncio.run(model._send_turn_message(game, player, chat_id))
+
+    assert view.send_turn_actions.await_count == 1
+    call = view.send_turn_actions.await_args
+    assert call.args == (chat_id, game, player, 450)
+    assert call.kwargs["recent_actions"] == game.last_actions
+
+    view.delete_message.assert_awaited_once_with(chat_id, 111)
+    assert game.turn_message_id == 222
+
+
+def test_send_turn_message_keeps_previous_when_new_message_missing():
+    model, game, player, view = _build_model_with_game()
+    chat_id = -602
+    player.wallet.value.return_value = 320
+    game.turn_message_id = 333
+    game.last_actions = ["action"]
+
+    view.send_turn_actions = AsyncMock(return_value=None)
+    view.delete_message = AsyncMock()
+
+    asyncio.run(model._send_turn_message(game, player, chat_id))
+
+    view.send_turn_actions.assert_awaited_once()
+    view.delete_message.assert_not_awaited()
+    assert game.turn_message_id == 333
