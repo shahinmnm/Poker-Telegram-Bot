@@ -533,16 +533,55 @@ class PokerBotViewer:
         return None
 
     @staticmethod
+    def _derive_stage_from_table(table_cards: Cards, stage: Optional[str] = None) -> str:
+        """Infer the current poker street from the number of table cards.
+
+        When an explicit ``stage`` value is provided it takes precedence. This
+        helper guarantees a consistent stage string (``preflop``, ``flop``,
+        ``turn`` or ``river``) so that all keyboards use the same labelling.
+        """
+
+        if stage:
+            return stage
+
+        cards_count = len(table_cards)
+        if cards_count >= 5:
+            return "river"
+        if cards_count == 4:
+            return "turn"
+        if cards_count >= 3:
+            return "flop"
+        return "preflop"
+
     @staticmethod
-    def _get_table_markup(table_cards: Cards, stage: str) -> ReplyKeyboardMarkup:
+    def _get_table_markup(
+        table_cards: Cards, stage: Optional[str] = None
+    ) -> ReplyKeyboardMarkup:
         """Creates a keyboard displaying table cards and stage buttons."""
+
+        resolved_stage = PokerBotViewer._derive_stage_from_table(table_cards, stage)
         cards_row = [str(card) for card in table_cards] if table_cards else ["❔"]
-        stages = ["فلاپ", "ترن", "ریور", "👁️ نمایش میز"]
-        stage_map = {"flop": "فلاپ", "turn": "ترن", "river": "ریور"}
-        if stage in stage_map:
-            stages = [
-                f"✅ {stage_map[stage]}" if s == stage_map[stage] else s for s in stages
-            ]
+
+        stage_map = {
+            "preflop": "پری فلاپ",
+            "flop": "فلاپ",
+            "turn": "ترن",
+            "river": "ریور",
+        }
+
+        stages = [
+            stage_map["preflop"],
+            stage_map["flop"],
+            stage_map["turn"],
+            stage_map["river"],
+            "👁️ نمایش میز",
+        ]
+
+        stages = [
+            (f"✅ {label}" if label == stage_map.get(resolved_stage, label) else label)
+            for label in stages
+        ]
+
         return ReplyKeyboardMarkup(
             keyboard=[cards_row, stages],
             selective=False,
@@ -552,7 +591,7 @@ class PokerBotViewer:
 
     @staticmethod
     def _get_hand_and_board_markup(
-        hand: Cards, table_cards: Cards, stage: str
+        hand: Cards, table_cards: Cards, stage: Optional[str] = None
     ) -> ReplyKeyboardMarkup:
         """Combine player's hand, table cards and stage buttons in one keyboard.
 
@@ -561,15 +600,26 @@ class PokerBotViewer:
         بهتر کارت‌ها فراهم شود.
         """
 
+        resolved_stage = PokerBotViewer._derive_stage_from_table(table_cards, stage)
         hand_row = [str(c) for c in hand]
         table_row = [str(c) for c in table_cards] if table_cards else ["❔"]
 
-        stages = ["فلاپ", "ترن", "ریور"]
-        stage_map = {"flop": "فلاپ", "turn": "ترن", "river": "ریور"}
+        stage_map = {
+            "preflop": "پری فلاپ",
+            "flop": "فلاپ",
+            "turn": "ترن",
+            "river": "ریور",
+        }
+        stages = [
+            stage_map["preflop"],
+            stage_map["flop"],
+            stage_map["turn"],
+            stage_map["river"],
+        ]
         stage_row = []
         for s in stages:
             label = f"🔁 {s}"
-            if stage_map.get(stage) == s:
+            if stage_map.get(resolved_stage) == s:
                 label = f"✅ {s}"
             stage_row.append(label)
 
@@ -607,7 +657,10 @@ class PokerBotViewer:
             message_id: MessageId | None = None,
             reply_to_ready_message: bool = True,
     ) -> Optional[MessageId]:
-        markup = self._get_hand_and_board_markup(cards, table_cards or [], stage)
+        resolved_stage = PokerBotViewer._derive_stage_from_table(table_cards or [], stage)
+        markup = self._get_hand_and_board_markup(
+            cards, table_cards or [], resolved_stage
+        )
         hand_text = " ".join(str(card) for card in cards)
         table_values = list(table_cards or [])
         table_text = " ".join(str(card) for card in table_values) if table_values else "❔"
