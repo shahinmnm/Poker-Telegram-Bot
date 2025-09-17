@@ -167,3 +167,14 @@ def test_send_cards_includes_hand_details_by_default():
     assert _row_texts(markup.keyboard[0]) == ["Q♥", "J♥"]
     assert _row_texts(markup.keyboard[1]) == ["10♥", "9♥", "8♥"]
     assert _row_texts(markup.keyboard[2])[1].startswith("✅")
+
+
+def test_table_markup_excludes_show_table_button():
+    table_cards = [Card("A♠"), Card("K♦"), Card("Q♣")]
+
+    markup = PokerBotViewer._get_table_markup(table_cards, stage="flop")
+
+    assert _row_texts(markup.keyboard[0]) == ["A♠", "K♦", "Q♣"]
+    stage_row = _row_texts(markup.keyboard[1])
+    assert "👁️ نمایش میز" not in stage_row
+    assert stage_row == ["پری فلاپ", "✅ فلاپ", "ترن", "ریور"]

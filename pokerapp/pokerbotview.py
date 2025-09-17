@@ -574,7 +574,6 @@ class PokerBotViewer:
             stage_map["flop"],
             stage_map["turn"],
             stage_map["river"],
-            "👁️ نمایش میز",
         ]
 
         stages = [
