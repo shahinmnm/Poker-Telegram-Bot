@@ -145,6 +145,7 @@ class PokerBotModel:
         job = context.job
         chat_id = job.chat_id
         game = await self._table_manager.get_game(chat_id)
+        context.chat_data[KEY_CHAT_DATA_GAME] = game
         remaining = context.chat_data.get("start_countdown", 0)
         if remaining <= 0:
             job.schedule_removal()
@@ -1111,7 +1112,8 @@ class PokerBotModel:
         for player in game.seated_players():
             if not player.cards:
                 continue
-            keyboard_message_id = await self._view.send_cards(
+            existing_keyboard_id = getattr(player, "cards_keyboard_message_id", None)
+            send_kwargs = dict(
                 chat_id=chat_id,
                 cards=player.cards,
                 mention_markdown=player.mention_markdown,
@@ -1121,6 +1123,9 @@ class PokerBotModel:
                 stage=stage,
                 reply_to_ready_message=False,
             )
+            if existing_keyboard_id:
+                send_kwargs["message_id"] = existing_keyboard_id
+            keyboard_message_id = await self._view.send_cards(**send_kwargs)
             await self._track_player_keyboard_message(
                 game,
                 chat_id,
