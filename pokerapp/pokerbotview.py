@@ -713,6 +713,18 @@ class PokerBotViewer:
             f"🃎 میز: {table_text}"
         )
         message_text = f"{mention_markdown}\n{message_body}"
+
+        if message_id:
+            updated_id = await self.edit_message_text(
+                chat_id=chat_id,
+                message_id=message_id,
+                text=message_text,
+                reply_markup=markup,
+                parse_mode=ParseMode.MARKDOWN,
+            )
+            if updated_id:
+                return updated_id
+
         try:
             async def _send() -> Message:
                 reply_kwargs = {}
@@ -730,7 +742,7 @@ class PokerBotViewer:
             message = await self._rate_limiter.send(_send, chat_id=chat_id)
             new_message_id: Optional[MessageId] = getattr(message, "message_id", None)
 
-            if message_id:
+            if message_id and new_message_id and new_message_id != message_id:
                 try:
                     await self._rate_limiter.send(
                         lambda: self._bot.delete_message(

@@ -269,23 +269,15 @@ class PokerBotModel:
         Safely edit a message's text, retrying on rate limits and
         sending a new message if the original cannot be edited.
 
-        The method attempts to ensure the target message exists by
-        calling ``get_chat`` before editing. It handles ``BadRequest``
-        and ``RetryAfter`` errors by retrying or falling back to sending
-        a fresh message. The ID of the edited or newly sent message is
-        returned.
+        The method handles ``BadRequest`` and ``RetryAfter`` errors by
+        retrying or falling back to sending a fresh message. The ID of
+        the edited or newly sent message is returned.
         """
 
         if not message_id:
             return await self._view.send_message_return_id(
                 chat_id, text, reply_markup=reply_markup
             )
-
-        # Confirm chat availability; errors here are non-fatal.
-        try:
-            await self._bot.get_chat(chat_id)
-        except Exception:
-            pass
 
         try:
             result = await self._view.edit_message_text(
