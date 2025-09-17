@@ -15,6 +15,7 @@ from telegram import (
 from telegram.constants import ParseMode
 from telegram.error import BadRequest, RetryAfter
 from telegram.ext import CallbackContext, ContextTypes
+from telegram.helpers import mention_markdown as format_mention_markdown
 
 import logging
 
@@ -367,7 +368,9 @@ class PokerBotModel:
         if user.id not in game.ready_users:
             player = Player(
                 user_id=user.id,
-                mention_markdown=user.mention_markdown(version=1),
+                mention_markdown=format_mention_markdown(
+                    user.id, user.full_name, version=1
+                ),
                 wallet=wallet,
                 ready_message_id=game.ready_message_main_id,
                 seat_index=None,
