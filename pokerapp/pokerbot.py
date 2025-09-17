@@ -46,13 +46,13 @@ class PokerBot:
             allowed_updates=cfg.ALLOWED_UPDATES,
             drop_pending_updates=True,
         )
-        job_queue = JobQueue()
+        self._job_queue = JobQueue()
 
         builder = (
             ApplicationBuilder()
             .token(token)
             .post_stop(self._cleanup_webhook)
-            .job_queue(job_queue)
+            .job_queue(self._job_queue)
         )
         self._application = builder.build()
         self._application.add_error_handler(self._handle_error)
