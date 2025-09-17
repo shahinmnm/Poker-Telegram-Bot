@@ -195,7 +195,17 @@ class PokerBot:
             )
 
         registered_max_connections = getattr(webhook_info, "max_connections", None)
-        if settings.max_connections == registered_max_connections:
+        if settings.max_connections is None:
+            logger.info(
+                "Webhook max_connections not configured; accepting Telegram-reported value: %s",
+                registered_max_connections,
+            )
+        elif registered_max_connections is None:
+            logger.info(
+                "Webhook max_connections not reported by Telegram; configured value is %s",
+                settings.max_connections,
+            )
+        elif settings.max_connections == registered_max_connections:
             logger.info(
                 "Webhook max_connections matches configured value: %s",
                 registered_max_connections,
