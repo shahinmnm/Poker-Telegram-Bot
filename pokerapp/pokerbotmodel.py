@@ -535,7 +535,7 @@ class PokerBotModel:
             player.cards = cards
 
             stage = self._view._derive_stage_from_table(game.cards_table)
-            await self._view.send_cards(
+            message_id = await self._view.send_cards(
                 chat_id=chat_id,
                 cards=cards,
                 mention_markdown=player.mention_markdown,
@@ -544,6 +544,8 @@ class PokerBotModel:
                 stage=stage,
                 reply_to_ready_message=False,
             )
+            if message_id:
+                game.message_ids[player.user_id] = message_id
 
     def _is_betting_round_over(self, game: Game) -> bool:
         """
