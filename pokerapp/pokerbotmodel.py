@@ -367,7 +367,7 @@ class PokerBotModel:
         if user.id not in game.ready_users:
             player = Player(
                 user_id=user.id,
-                mention_markdown=user.mention_markdown(),
+                mention_markdown=user.mention_markdown(version=1),
                 wallet=wallet,
                 ready_message_id=game.ready_message_main_id,
                 seat_index=None,
