@@ -577,6 +577,7 @@ class PokerBotViewer:
             table_cards: Cards | None = None,
             stage: str = "",
             message_id: MessageId | None = None,
+            reply_to_ready_message: bool = True,
     ) -> Optional[MessageId]:
         markup = self._get_hand_and_board_markup(cards, table_cards or [], stage)
         hand_text = " ".join(str(card) for card in cards)
@@ -612,7 +613,7 @@ class PokerBotViewer:
         try:
             async def _send() -> Message:
                 reply_kwargs = {}
-                if ready_message_id and not message_id:
+                if reply_to_ready_message and ready_message_id and not message_id:
                     reply_kwargs["reply_to_message_id"] = ready_message_id
                 return await self._bot.send_message(
                     chat_id=chat_id,
