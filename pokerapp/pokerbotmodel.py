@@ -244,7 +244,8 @@ class PokerBotModel:
             return
 
         stage = self._view._derive_stage_from_table(game.cards_table)
-        await self._view.send_cards(
+        previous_message_id = game.message_ids.get(current_player.user_id)
+        new_message_id = await self._view.send_cards(
             chat_id=chat_id,
             cards=current_player.cards,
             mention_markdown=current_player.mention_markdown,
@@ -252,7 +253,10 @@ class PokerBotModel:
             hide_hand_text=True,
             stage=stage,
             reply_to_ready_message=False,
+            message_id=previous_message_id,
         )
+        if new_message_id:
+            game.message_ids[current_player.user_id] = new_message_id
 
     async def _safe_edit_message_text(
         self,
@@ -1076,7 +1080,8 @@ class PokerBotModel:
         for player in game.seated_players():
             if not player.cards:
                 continue
-            await self._view.send_cards(
+            existing_message_id = game.message_ids.get(player.user_id)
+            new_message_id = await self._view.send_cards(
                 chat_id=chat_id,
                 cards=player.cards,
                 mention_markdown=player.mention_markdown,
@@ -1084,7 +1089,10 @@ class PokerBotModel:
                 hide_hand_text=True,
                 stage=stage,
                 reply_to_ready_message=False,
+                message_id=existing_message_id,
             )
+            if new_message_id:
+                game.message_ids[player.user_id] = new_message_id
             await asyncio.sleep(0.1)
 
         # پس از ارسال/ویرایش تصویر میز، پیام نوبت باید آخرین پیام باشد
@@ -1107,6 +1115,7 @@ class PokerBotModel:
         logger.debug("Clearing game messages", extra={"chat_id": chat_id})
 
         ids_to_delete = set(game.message_ids_to_delete)
+        ids_to_delete.update(game.message_ids.values())
 
         if game.board_message_id:
             ids_to_delete.add(game.board_message_id)
@@ -1130,6 +1139,7 @@ class PokerBotModel:
                 )
 
         game.message_ids_to_delete.clear()
+        game.message_ids.clear()
 
     async def _showdown(
         self, game: Game, chat_id: ChatId, context: CallbackContext
