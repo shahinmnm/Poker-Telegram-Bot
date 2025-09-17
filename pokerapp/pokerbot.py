@@ -7,7 +7,7 @@ from typing import Optional, Sequence, TYPE_CHECKING
 
 import redis
 import redis.asyncio as aioredis
-from telegram.ext import ApplicationBuilder, ContextTypes
+from telegram.ext import ApplicationBuilder, ContextTypes, JobQueue
 
 from pokerapp.config import Config
 from pokerapp.pokerbotcontrol import PokerBotCotroller
@@ -48,11 +48,14 @@ class PokerBot:
             allowed_updates=cfg.ALLOWED_UPDATES,
             drop_pending_updates=True,
         )
+        job_queue = JobQueue()
+
         builder = (
             ApplicationBuilder()
             .token(token)
             .post_init(self._apply_webhook_settings)
             .post_stop(self._cleanup_webhook)
+            .job_queue(job_queue)
         )
         self._application = builder.build()
         self._application.add_error_handler(self._handle_error)
