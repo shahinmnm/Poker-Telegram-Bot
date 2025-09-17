@@ -579,6 +579,14 @@ class PokerBotViewer:
             message_id: MessageId | None = None,
     ) -> Optional[MessageId]:
         markup = self._get_hand_and_board_markup(cards, table_cards or [], stage)
+        hand_text = " ".join(str(card) for card in cards)
+        table_values = list(table_cards or [])
+        table_text = " ".join(str(card) for card in table_values) if table_values else "❔"
+        message_text = (
+            f"{mention_markdown}\n"
+            f"🃏 دست: {hand_text}\n"
+            f"🃎 میز: {table_text}"
+        )
         if message_id:
             try:
                 await self._rate_limiter.send(
@@ -608,7 +616,8 @@ class PokerBotViewer:
                     reply_kwargs["reply_to_message_id"] = ready_message_id
                 return await self._bot.send_message(
                     chat_id=chat_id,
-                    text=" ",
+                    text=message_text,
+                    parse_mode=ParseMode.MARKDOWN,
                     reply_markup=markup,
                     disable_notification=True,
                     **reply_kwargs,
