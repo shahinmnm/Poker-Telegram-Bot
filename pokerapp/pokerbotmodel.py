@@ -243,10 +243,13 @@ class PokerBotModel:
             return
 
         previous_message_id = current_player.hand_message_id
+        stage = self._view._derive_stage_from_table(game.cards_table)
         new_message_id = await self._view.send_cards(
             chat_id=user_id,
             cards=current_player.cards,
             mention_markdown=current_player.mention_markdown,
+            table_cards=game.cards_table,
+            stage=stage,
             message_id=previous_message_id,
         )
         if new_message_id:
@@ -533,7 +536,7 @@ class PokerBotModel:
             player.cards = cards
 
             try:
-                markup = self._view._get_hand_and_board_markup(cards, [], "")
+                markup = self._view._get_hand_and_board_markup(cards, [])
                 msg = await self._view.send_desk_cards_img(
                     chat_id=player.user_id,
                     cards=cards,
@@ -1067,15 +1070,7 @@ class PokerBotModel:
         if not send_message:
             return
 
-        cards_count = len(game.cards_table)
-        if cards_count >= 5:
-            stage = "river"
-        elif cards_count == 4:
-            stage = "turn"
-        elif cards_count >= 3:
-            stage = "flop"
-        else:
-            stage = ""
+        stage = self._view._derive_stage_from_table(game.cards_table)
         markup = self._view._get_table_markup(game.cards_table, stage)
 
         if not game.board_message_id:
