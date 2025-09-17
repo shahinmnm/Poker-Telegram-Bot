@@ -97,16 +97,17 @@ class PokerBot:
             self._cfg.WEBHOOK_PUBLIC_URL,
         )
         self._schedule_webhook_verification()
+        settings = self._webhook_settings
         try:
             self._application.run_webhook(
                 listen=self._cfg.WEBHOOK_LISTEN,
                 port=self._cfg.WEBHOOK_PORT,
                 url_path=self._cfg.WEBHOOK_PATH,
                 webhook_url=self._cfg.WEBHOOK_PUBLIC_URL,
-                secret_token=self._webhook_settings.secret_token,
-                allowed_updates=self._webhook_settings.allowed_updates,
-                drop_pending_updates=self._webhook_settings.drop_pending_updates,
-                max_connections=self._webhook_settings.max_connections,
+                secret_token=settings.secret_token,
+                allowed_updates=settings.allowed_updates,
+                drop_pending_updates=settings.drop_pending_updates,
+                max_connections=settings.max_connections,
             )
         except Exception:
             logger.exception("Webhook run terminated due to an error.")
@@ -162,7 +163,8 @@ class PokerBot:
                 webhook_info.url,
             )
 
-        expected_secret = self._webhook_settings.secret_token or ""
+        settings = self._webhook_settings
+        expected_secret = settings.secret_token or ""
         registered_secret = getattr(webhook_info, "secret_token", None) or ""
         if expected_secret and registered_secret == expected_secret:
             logger.info("Webhook secret token matches configured value.")
@@ -172,6 +174,39 @@ class PokerBot:
             logger.warning("Webhook secret token set unexpectedly.")
         else:
             logger.info("Webhook secret token is not configured, as expected.")
+
+        registered_allowed_updates = (
+            tuple(webhook_info.allowed_updates)
+            if getattr(webhook_info, "allowed_updates", None)
+            else ()
+        )
+        expected_allowed_updates = tuple(settings.allowed_updates or ())
+        if expected_allowed_updates == registered_allowed_updates:
+            logger.info("Webhook allowed updates match configured values: %s", registered_allowed_updates)
+        else:
+            logger.warning(
+                "Webhook allowed updates mismatch: expected %s, got %s",
+                expected_allowed_updates,
+                registered_allowed_updates,
+            )
+
+        registered_max_connections = getattr(webhook_info, "max_connections", None)
+        if settings.max_connections == registered_max_connections:
+            logger.info(
+                "Webhook max_connections matches configured value: %s",
+                registered_max_connections,
+            )
+        else:
+            logger.warning(
+                "Webhook max_connections mismatch: expected %s, got %s",
+                settings.max_connections,
+                registered_max_connections,
+            )
+
+        logger.info(
+            "Webhook configured to drop pending updates: %s",
+            settings.drop_pending_updates,
+        )
 
     async def _cleanup_webhook(self, application: "Application") -> None:
         drop_updates = bool(self._webhook_settings.drop_pending_updates)
