@@ -1081,17 +1081,21 @@ class PokerBotModel:
                 if msg_id not in game.message_ids_to_delete:
                     game.message_ids_to_delete.append(msg_id)
         else:
-            await self._view.edit_message_text(
-                chat_id=chat_id,
-                message_id=game.board_message_id,
-                text=street_name,
-                reply_markup=markup,
+            new_msg_id = await self._view.send_message_return_id(
+                chat_id, street_name, reply_markup=markup
             )
+            if new_msg_id:
+                await self._view.delete_message(chat_id, game.board_message_id)
+                if game.board_message_id in game.message_ids_to_delete:
+                    game.message_ids_to_delete.remove(game.board_message_id)
+                game.board_message_id = new_msg_id
+                if new_msg_id not in game.message_ids_to_delete:
+                    game.message_ids_to_delete.append(new_msg_id)
 
         # به‌روزرسانی کیبورد پیام کارت‌های بازیکنان با کارت‌های میز
         for player in game.seated_players():
             if player.hand_message_id:
-                await self._view.send_cards(
+                new_player_msg_id = await self._view.send_cards(
                     chat_id=player.user_id,
                     cards=player.cards,
                     mention_markdown=player.mention_markdown,
@@ -1099,6 +1103,24 @@ class PokerBotModel:
                     stage=stage,
                     message_id=player.hand_message_id,
                 )
+                if (
+                    new_player_msg_id
+                    and new_player_msg_id != player.hand_message_id
+                ):
+                    await self._view.delete_message(
+                        player.user_id, player.hand_message_id
+                    )
+                    if (
+                        player.hand_message_id
+                        and player.hand_message_id in game.message_ids_to_delete
+                    ):
+                        game.message_ids_to_delete.remove(player.hand_message_id)
+                    player.hand_message_id = new_player_msg_id
+                    if (
+                        new_player_msg_id
+                        and new_player_msg_id not in game.message_ids_to_delete
+                    ):
+                        game.message_ids_to_delete.append(new_player_msg_id)
                 await asyncio.sleep(0.1)
 
         # پس از ارسال/ویرایش تصویر میز، پیام نوبت باید آخرین پیام باشد
