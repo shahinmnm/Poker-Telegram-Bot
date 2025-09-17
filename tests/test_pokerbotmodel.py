@@ -12,7 +12,12 @@ import pytest
 from pokerapp.cards import Cards, Card
 from pokerapp.config import Config
 from pokerapp.entities import Money, Player, Game
-from pokerapp.pokerbotmodel import PokerBotModel, RoundRateModel, WalletManagerModel
+from pokerapp.pokerbotmodel import (
+    PokerBotModel,
+    RoundRateModel,
+    WalletManagerModel,
+    KEY_CHAT_DATA_GAME,
+)
 
 
 HANDS_FILE = "./tests/hands.txt"
@@ -230,7 +235,7 @@ def test_add_cards_to_table_sends_plain_message_without_keyboard():
 def test_add_cards_to_table_replaces_player_keyboard_message():
     model, game, player, view = _build_model_with_game()
     chat_id = -301
-    view.send_cards = AsyncMock(side_effect=["msg-1", "msg-2"])
+    view.send_cards = AsyncMock(side_effect=["msg-1", "msg-1"])
     view.delete_message = AsyncMock()
     view.send_message_return_id = AsyncMock(return_value=222)
 
@@ -249,12 +254,11 @@ def test_add_cards_to_table_replaces_player_keyboard_message():
     )
 
     assert view.send_cards.await_count == 2
-    assert player.cards_keyboard_message_id == "msg-2"
-    assert view.delete_message.await_count == 1
-    delete_args = view.delete_message.await_args_list[0].args
-    assert delete_args == (chat_id, "msg-1")
-    assert "msg-2" in game.message_ids_to_delete
-    assert "msg-1" not in game.message_ids_to_delete
+    second_call_kwargs = view.send_cards.await_args_list[1].kwargs
+    assert second_call_kwargs["message_id"] == "msg-1"
+    assert player.cards_keyboard_message_id == "msg-1"
+    assert view.delete_message.await_count == 0
+    assert game.message_ids_to_delete.count("msg-1") == 1
 
 
 def test_divide_cards_sends_keyboard_without_tracking_message_id():
@@ -322,6 +326,7 @@ async def test_auto_start_tick_persists_replacement_message():
     assert game.ready_message_main_text == "prompt"
     table_manager.save_game.assert_awaited_once_with(chat_id, game)
     assert context.chat_data["start_countdown"] == 4
+    assert context.chat_data[KEY_CHAT_DATA_GAME] is game
 
 
 @pytest.mark.asyncio
@@ -350,3 +355,4 @@ async def test_auto_start_tick_skips_save_when_message_unchanged():
     assert game.ready_message_main_id == 555
     table_manager.save_game.assert_not_awaited()
     assert context.chat_data["start_countdown"] == 9
+    assert context.chat_data[KEY_CHAT_DATA_GAME] is game

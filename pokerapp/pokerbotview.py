@@ -677,6 +677,45 @@ class PokerBotViewer:
             else:
                 hidden_text = PokerBotViewer._ZERO_WIDTH_SPACE
 
+            if message_id:
+                try:
+                    result = await self._rate_limiter.send(
+                        lambda: self._bot.edit_message_text(
+                            chat_id=chat_id,
+                            message_id=message_id,
+                            text=hidden_text,
+                            parse_mode=ParseMode.MARKDOWN,
+                            reply_markup=markup,
+                            disable_web_page_preview=True,
+                        ),
+                        chat_id=chat_id,
+                    )
+                    if isinstance(result, Message):
+                        return result.message_id
+                    if result is True:
+                        return message_id
+                except BadRequest as e:
+                    err = str(e).lower()
+                    if "message is not modified" in err:
+                        return message_id
+                    logger.debug(
+                        "Failed editing hidden cards keyboard",
+                        extra={
+                            "error_type": type(e).__name__,
+                            "chat_id": chat_id,
+                            "message_id": message_id,
+                        },
+                    )
+                except Exception as e:
+                    logger.error(
+                        "Error editing hidden cards keyboard",
+                        extra={
+                            "error_type": type(e).__name__,
+                            "chat_id": chat_id,
+                            "message_id": message_id,
+                        },
+                    )
+
             try:
                 async def _send_keyboard() -> Message:
                     reply_kwargs = {}
