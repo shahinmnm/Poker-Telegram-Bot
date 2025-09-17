@@ -156,12 +156,17 @@ class PokerBotModel:
              InlineKeyboardButton(text=f"شروع بازی ({remaining})", callback_data="start_game")]
         ]
         keyboard = InlineKeyboardMarkup(keyboard_buttons)
-        await self._safe_edit_message_text(
+        message_text = getattr(game, "ready_message_main_text", "")
+        new_message_id = await self._safe_edit_message_text(
             chat_id,
             game.ready_message_main_id,
-            getattr(game, "ready_message_main_text", ""),
+            message_text,
             reply_markup=keyboard,
         )
+        if new_message_id and new_message_id != game.ready_message_main_id:
+            game.ready_message_main_id = new_message_id
+            game.ready_message_main_text = message_text
+            await self._table_manager.save_game(chat_id, game)
         context.chat_data["start_countdown"] = remaining - 1
 
     async def _schedule_auto_start(self, context: CallbackContext, game: Game, chat_id: ChatId) -> None:
@@ -311,6 +316,15 @@ class PokerBotModel:
         new_id = await self._view.send_message_return_id(
             chat_id, text, reply_markup=reply_markup
         )
+        if new_id and message_id and new_id != message_id:
+            logger.info(
+                "Sent replacement message after edit failure",
+                extra={
+                    "chat_id": chat_id,
+                    "old_message_id": message_id,
+                    "new_message_id": new_id,
+                },
+            )
         return new_id
 
     async def show_table(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
