@@ -205,24 +205,28 @@ class Game:
         return -1
 
     def next_occupied_seat(self, start_seat: int) -> int:
+        """Return the next occupied seat index after ``start_seat``.
+
+        The search wraps around the table once and skips empty seats. A
+        ``start_seat`` of ``-1`` is treated as "before" the first seat, which
+        allows callers to locate the first occupied seat at the table. If no
+        occupied seat exists the method returns ``-1``.
         """
-        Return the next occupied seat index after start_seat (exclusive).
-        If no other occupied seats, return -1.
-        """
-        if start_seat < 0:
+        if not any(self.seats):
             return -1
+
+        start = start_seat if 0 <= start_seat < MAX_PLAYERS else -1
         for i in range(1, MAX_PLAYERS + 1):
-            idx = (start_seat + i) % MAX_PLAYERS
+            idx = (start + i) % MAX_PLAYERS
             if self.seats[idx] is not None:
                 return idx
         return -1
 
-    def advance_dealer(self):
-        """
-        Move dealer_index to the next occupied seat. If none found, set to -1.
-        """
-        nxt = self.next_occupied_seat(self.dealer_index)
-        self.dealer_index = nxt if nxt != -1 else -1
+    def advance_dealer(self) -> int:
+        """Move ``dealer_index`` to the next occupied seat and return it."""
+        next_seat = self.next_occupied_seat(self.dealer_index)
+        self.dealer_index = next_seat
+        return next_seat
 
     def players_by(self, states: Tuple) -> List[Player]:
         """Return players whose state is in states (search seats)."""
