@@ -199,6 +199,43 @@ class PokerBotModel:
             ready_message_id=ready_message_id,
         )
 
+    async def _track_player_keyboard_message(
+        self,
+        game: Game,
+        chat_id: ChatId,
+        player: Player,
+        new_message_id: Optional[MessageId],
+    ) -> None:
+        """Update bookkeeping for a player's hidden keyboard message."""
+
+        previous_id = getattr(player, "cards_keyboard_message_id", None)
+
+        if not new_message_id:
+            if previous_id and previous_id not in game.message_ids_to_delete:
+                game.message_ids_to_delete.append(previous_id)
+            return
+
+        if previous_id and previous_id != new_message_id:
+            deleted_previous = False
+            try:
+                await self._view.delete_message(chat_id, previous_id)
+                deleted_previous = True
+            except Exception as e:
+                logger.debug(
+                    "Failed to delete previous keyboard message",
+                    extra={
+                        "chat_id": chat_id,
+                        "previous_message_id": previous_id,
+                        "error_type": type(e).__name__,
+                    },
+                )
+            if deleted_previous and previous_id in game.message_ids_to_delete:
+                game.message_ids_to_delete.remove(previous_id)
+
+        player.cards_keyboard_message_id = new_message_id
+        if new_message_id not in game.message_ids_to_delete:
+            game.message_ids_to_delete.append(new_message_id)
+
     async def hide_cards(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
     ) -> None:
@@ -492,7 +529,7 @@ class PokerBotModel:
             player.cards = cards
 
             stage = self._view._derive_stage_from_table(game.cards_table)
-            await self._view.send_cards(
+            keyboard_message_id = await self._view.send_cards(
                 chat_id=chat_id,
                 cards=cards,
                 mention_markdown=player.mention_markdown,
@@ -501,6 +538,12 @@ class PokerBotModel:
                 hide_hand_text=True,
                 stage=stage,
                 reply_to_ready_message=False,
+            )
+            await self._track_player_keyboard_message(
+                game,
+                chat_id,
+                player,
+                keyboard_message_id,
             )
 
     def _is_betting_round_over(self, game: Game) -> bool:
@@ -1038,7 +1081,7 @@ class PokerBotModel:
         for player in game.seated_players():
             if not player.cards:
                 continue
-            await self._view.send_cards(
+            keyboard_message_id = await self._view.send_cards(
                 chat_id=chat_id,
                 cards=player.cards,
                 mention_markdown=player.mention_markdown,
@@ -1047,6 +1090,12 @@ class PokerBotModel:
                 hide_hand_text=True,
                 stage=stage,
                 reply_to_ready_message=False,
+            )
+            await self._track_player_keyboard_message(
+                game,
+                chat_id,
+                player,
+                keyboard_message_id,
             )
             await asyncio.sleep(0.1)
 
@@ -1078,6 +1127,12 @@ class PokerBotModel:
         if game.turn_message_id:
             ids_to_delete.add(game.turn_message_id)
             game.turn_message_id = None
+
+        for player in game.seated_players():
+            keyboard_message_id = getattr(player, "cards_keyboard_message_id", None)
+            if keyboard_message_id:
+                ids_to_delete.add(keyboard_message_id)
+                player.cards_keyboard_message_id = None
 
         for message_id in ids_to_delete:
             try:

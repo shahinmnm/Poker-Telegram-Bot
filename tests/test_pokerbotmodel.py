@@ -222,7 +222,37 @@ def test_add_cards_to_table_sends_plain_message_without_keyboard():
 
     assert game.board_message_id == 101
     assert 101 in game.message_ids_to_delete
-    view.delete_message.assert_not_awaited()
+    assert view.delete_message.await_count == 0
+
+
+def test_add_cards_to_table_replaces_player_keyboard_message():
+    model, game, player, view = _build_model_with_game()
+    chat_id = -301
+    view.send_cards = AsyncMock(side_effect=["msg-1", "msg-2"])
+    view.delete_message = AsyncMock()
+    view.send_message_return_id = AsyncMock(return_value=222)
+
+    asyncio.run(model._divide_cards(game, chat_id))
+
+    assert player.cards_keyboard_message_id == "msg-1"
+    assert "msg-1" in game.message_ids_to_delete
+
+    asyncio.run(
+        model.add_cards_to_table(
+            0,
+            game,
+            chat_id,
+            "🃏 میز",
+        )
+    )
+
+    assert view.send_cards.await_count == 2
+    assert player.cards_keyboard_message_id == "msg-2"
+    assert view.delete_message.await_count == 1
+    delete_args = view.delete_message.await_args_list[0].args
+    assert delete_args == (chat_id, "msg-1")
+    assert "msg-2" in game.message_ids_to_delete
+    assert "msg-1" not in game.message_ids_to_delete
 
 
 def test_divide_cards_sends_keyboard_without_tracking_message_id():
@@ -243,6 +273,7 @@ def test_clear_game_messages_deletes_player_card_messages():
     model, game, player, view = _build_model_with_game()
     chat_id = -500
     view.delete_message = AsyncMock()
+    view.send_cards = AsyncMock(return_value="keyboard-7")
 
     asyncio.run(model._divide_cards(game, chat_id))
 
@@ -253,6 +284,7 @@ def test_clear_game_messages_deletes_player_card_messages():
     asyncio.run(model._clear_game_messages(game, chat_id))
 
     deleted_pairs = {call.args for call in view.delete_message.await_args_list}
+    assert (chat_id, "keyboard-7") in deleted_pairs
     assert (chat_id, 321) in deleted_pairs
     assert (chat_id, 654) in deleted_pairs
     assert (chat_id, 888) in deleted_pairs

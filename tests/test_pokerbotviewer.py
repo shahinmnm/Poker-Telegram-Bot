@@ -102,7 +102,7 @@ def test_send_cards_hides_group_hand_text_keeps_keyboard_message():
         )
     )
 
-    assert result is None
+    assert result == 42
     assert viewer._bot.send_message.await_count == 1
     call = viewer._bot.send_message.await_args
     text = call.kwargs["text"]
@@ -115,9 +115,7 @@ def test_send_cards_hides_group_hand_text_keeps_keyboard_message():
     assert _row_texts(markup.keyboard[0]) == ["A♠", "K♦"]
     assert _row_texts(markup.keyboard[1]) == ["2♣", "3♣", "4♣"]
     assert _row_texts(markup.keyboard[2]) == ["🔁 پری فلاپ", "✅ فلاپ", "🔁 ترن", "🔁 ریور"]
-    viewer.delete_message.assert_awaited_once()
-    delete_call = viewer.delete_message.await_args
-    assert delete_call.args == (123, 42)
+    assert viewer.delete_message.await_count == 0
 
 
 def test_send_cards_hidden_text_replies_to_ready_message():
@@ -138,13 +136,11 @@ def test_send_cards_hidden_text_replies_to_ready_message():
         )
     )
 
-    assert result is None
+    assert result == 99
     call = viewer._bot.send_message.await_args
     assert call.kwargs["reply_to_message_id"] == "777"
     assert call.kwargs["text"] == HIDDEN_MENTION_TEXT
-    viewer.delete_message.assert_awaited_once()
-    delete_call = viewer.delete_message.await_args
-    assert delete_call.args == (123, 99)
+    assert viewer.delete_message.await_count == 0
 
 
 def test_send_cards_includes_hand_details_by_default():
