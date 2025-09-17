@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 
+import asyncio
 import logging
 from dataclasses import dataclass
-from functools import wraps
 from typing import Optional, Sequence, TYPE_CHECKING
 
 import redis
@@ -102,6 +102,10 @@ class PokerBot:
                 port=self._cfg.WEBHOOK_PORT,
                 url_path=self._cfg.WEBHOOK_PATH,
                 webhook_url=self._cfg.WEBHOOK_PUBLIC_URL,
+                secret_token=self._webhook_settings.secret_token,
+                allowed_updates=self._webhook_settings.allowed_updates,
+                drop_pending_updates=self._webhook_settings.drop_pending_updates,
+                max_connections=self._webhook_settings.max_connections,
             )
         except Exception:
             logger.exception("Webhook run terminated due to an error.")
@@ -127,65 +131,42 @@ class PokerBot:
 
     async def _apply_webhook_settings(self, application: "Application") -> None:
         application.bot_data["webhook_settings"] = self._webhook_settings
+        logger.debug("Stored webhook settings in bot_data: %s", self._webhook_settings)
+        try:
+            application.create_task(self._verify_webhook_registration(application))
+        except RuntimeError:
+            logger.warning(
+                "Failed to schedule webhook verification task; event loop not running yet."
+            )
 
-        updater = getattr(application, "updater", None)
-        if updater is None:
-            logger.warning("Application updater is not available; webhook settings not applied.")
+    async def _verify_webhook_registration(self, application: "Application") -> None:
+        await asyncio.sleep(1)
+        try:
+            webhook_info = await application.bot.get_webhook_info()
+        except Exception:
+            logger.exception("Unable to confirm webhook registration with Telegram.")
             return
 
-        original_start_webhook = getattr(updater, "start_webhook", None)
-        if original_start_webhook is None:
-            logger.warning("Updater.start_webhook is not available; webhook settings not applied.")
-            return
+        expected_url = self._cfg.WEBHOOK_PUBLIC_URL or ""
+        if webhook_info.url == expected_url:
+            logger.info("Webhook registered at expected URL %s", webhook_info.url)
+        else:
+            logger.warning(
+                "Webhook URL mismatch: expected %s, got %s",
+                expected_url,
+                webhook_info.url,
+            )
 
-        if getattr(original_start_webhook, "__pokerbot_wrapped__", False):
-            logger.debug("Webhook settings already applied to updater.")
-            return
-
-        @wraps(original_start_webhook)
-        async def start_webhook_with_settings(*args, **kwargs):
-            settings = self._webhook_settings
-            if settings.secret_token:
-                kwargs.setdefault("secret_token", settings.secret_token)
-            if settings.allowed_updates is not None:
-                kwargs.setdefault("allowed_updates", settings.allowed_updates)
-            if settings.drop_pending_updates is not None:
-                kwargs.setdefault("drop_pending_updates", settings.drop_pending_updates)
-            if settings.max_connections is not None:
-                kwargs.setdefault("max_connections", settings.max_connections)
-
-            webhook_url = kwargs.get("webhook_url") or self._cfg.WEBHOOK_PUBLIC_URL
-            if webhook_url:
-                logger.info("Registering webhook with Telegram at %s", webhook_url)
-            else:
-                logger.info(
-                    "Registering webhook listener on %s:%s%s",
-                    self._cfg.WEBHOOK_LISTEN,
-                    self._cfg.WEBHOOK_PORT,
-                    self._cfg.WEBHOOK_PATH,
-                )
-
-            try:
-                result = await original_start_webhook(*args, **kwargs)
-            except Exception:
-                logger.exception("Failed to register webhook with Telegram.")
-                raise
-
-            try:
-                webhook_info = await application.bot.get_webhook_info()
-            except Exception:
-                logger.exception("Unable to confirm webhook registration with Telegram.")
-            else:
-                if webhook_info.url:
-                    logger.info("Webhook registered at %s", webhook_info.url)
-                else:
-                    logger.warning("Webhook registration returned an empty URL.")
-
-            return result
-
-        start_webhook_with_settings.__pokerbot_wrapped__ = True
-        updater.start_webhook = start_webhook_with_settings
-        logger.debug("Webhook settings applied: %s", self._webhook_settings)
+        expected_secret = self._webhook_settings.secret_token or ""
+        registered_secret = getattr(webhook_info, "secret_token", None) or ""
+        if expected_secret and registered_secret == expected_secret:
+            logger.info("Webhook secret token matches configured value.")
+        elif expected_secret and registered_secret != expected_secret:
+            logger.warning("Webhook secret token does not match the configured value.")
+        elif not expected_secret and registered_secret:
+            logger.warning("Webhook secret token set unexpectedly.")
+        else:
+            logger.info("Webhook secret token is not configured, as expected.")
 
     async def _cleanup_webhook(self, application: "Application") -> None:
         drop_updates = bool(self._webhook_settings.drop_pending_updates)
