@@ -519,11 +519,7 @@ class PokerBotModel:
         context.chat_data[KEY_OLD_PLAYERS] = [p.user_id for p in game.players]
 
     async def _divide_cards(self, game: Game, chat_id: ChatId):
-        """
-        کارت‌ها را بین بازیکنان پخش می‌کند:
-        ۱. کارت‌ها را در PV بازیکن ارسال می‌کند.
-        ۲. یک پیام در گروه با کیبورد حاوی کارت‌های بازیکن ارسال می‌کند.
-        """
+        """کارت‌ها را بین بازیکنان پخش کرده و به صورت خصوصی ارسال می‌کند."""
         for player in game.seated_players():
             if len(game.remain_cards) < 2:
                 await self._view.send_message(
@@ -562,21 +558,6 @@ class PokerBotModel:
 
             if msg:
                 player.hand_message_id = msg.message_id
-
-            stage = self._view._derive_stage_from_table(game.cards_table)
-            group_message_id = await self._view.send_cards(
-                chat_id=chat_id,
-                cards=cards,
-                mention_markdown=player.mention_markdown,
-                table_cards=game.cards_table,
-                hide_hand_text=True,
-                stage=stage,
-                reply_to_ready_message=False,
-            )
-            if group_message_id:
-                player.group_hand_message_id = group_message_id
-                if group_message_id not in game.message_ids_to_delete:
-                    game.message_ids_to_delete.append(group_message_id)
 
     def _is_betting_round_over(self, game: Game) -> bool:
         """
@@ -1122,25 +1103,6 @@ class PokerBotModel:
                 if new_player_msg_id:
                     player.hand_message_id = new_player_msg_id
 
-            if player.group_hand_message_id:
-                previous_group_id = player.group_hand_message_id
-                new_group_msg_id = await self._view.send_cards(
-                    chat_id=chat_id,
-                    cards=player.cards,
-                    mention_markdown=player.mention_markdown,
-                    table_cards=game.cards_table,
-                    hide_hand_text=True,
-                    stage=stage,
-                    message_id=previous_group_id,
-                    reply_to_ready_message=False,
-                )
-                if new_group_msg_id:
-                    if previous_group_id in game.message_ids_to_delete:
-                        game.message_ids_to_delete.remove(previous_group_id)
-                    player.group_hand_message_id = new_group_msg_id
-                    if new_group_msg_id not in game.message_ids_to_delete:
-                        game.message_ids_to_delete.append(new_group_msg_id)
-
             await asyncio.sleep(0.1)
 
         # پس از ارسال/ویرایش تصویر میز، پیام نوبت باید آخرین پیام باشد
@@ -1186,9 +1148,6 @@ class PokerBotModel:
                 )
 
         game.message_ids_to_delete.clear()
-
-        for player in game.players:
-            player.group_hand_message_id = None
 
     async def _showdown(
         self, game: Game, chat_id: ChatId, context: CallbackContext
