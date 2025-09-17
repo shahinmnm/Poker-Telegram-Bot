@@ -74,15 +74,16 @@ async def _passthrough_rate_limit(func, *args, **kwargs):
     return await func()
 
 
-def test_send_cards_hides_group_hand_text_when_requested():
+def test_send_cards_hides_group_hand_text_without_leaving_message():
     viewer = PokerBotViewer(bot=MagicMock())
     viewer._rate_limiter.send = _passthrough_rate_limit  # type: ignore[assignment]
     viewer._bot.send_message = AsyncMock(return_value=MagicMock(message_id=42))
+    viewer.delete_message = AsyncMock()
 
     cards = [Card("A♠"), Card("K♦")]
     table_cards = [Card("2♣"), Card("3♣"), Card("4♣")]
 
-    run(
+    result = run(
         viewer.send_cards(
             chat_id=123,
             cards=cards,
@@ -92,13 +93,44 @@ def test_send_cards_hides_group_hand_text_when_requested():
         )
     )
 
+    assert result is None
     assert viewer._bot.send_message.await_count == 1
     call = viewer._bot.send_message.await_args
     text = call.kwargs["text"]
-    assert "@player" in text
-    assert "A♠" not in text and "K♦" not in text
-    assert "2♣" not in text and "3♣" not in text and "4♣" not in text
-    assert "🔒" in text
+    assert text == "\u2063"
+    assert "@player" not in text
+    assert "🔒" not in text
+    assert call.kwargs["reply_markup"] is not None
+    viewer.delete_message.assert_awaited_once_with(chat_id=123, message_id=42)
+
+
+def test_send_cards_hides_group_hand_text_and_clears_previous_message():
+    viewer = PokerBotViewer(bot=MagicMock())
+    viewer._rate_limiter.send = _passthrough_rate_limit  # type: ignore[assignment]
+    viewer._bot.send_message = AsyncMock(return_value=MagicMock(message_id=55))
+    viewer.delete_message = AsyncMock()
+
+    cards = [Card("A♠"), Card("K♦")]
+
+    run(
+        viewer.send_cards(
+            chat_id=123,
+            cards=cards,
+            mention_markdown="@player",
+            hide_hand_text=True,
+            message_id=777,
+        )
+    )
+
+    assert viewer.delete_message.await_count == 2
+    assert viewer.delete_message.await_args_list[0].kwargs == {
+        "chat_id": 123,
+        "message_id": 777,
+    }
+    assert viewer.delete_message.await_args_list[1].kwargs == {
+        "chat_id": 123,
+        "message_id": 55,
+    }
 
 
 def test_send_cards_includes_hand_details_by_default():
