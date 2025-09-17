@@ -2,10 +2,12 @@
 
 import asyncio
 import unittest
+from types import SimpleNamespace
 from typing import Tuple
 from unittest.mock import AsyncMock, MagicMock
 
 import fakeredis
+import pytest
 
 from pokerapp.cards import Cards, Card
 from pokerapp.config import Config
@@ -291,3 +293,60 @@ def test_clear_game_messages_deletes_player_card_messages():
     assert (chat_id, 999) in deleted_pairs
     assert game.message_ids == {}
     assert game.message_ids_to_delete == []
+
+
+@pytest.mark.asyncio
+async def test_auto_start_tick_persists_replacement_message():
+    chat_id = -777
+    view = MagicMock()
+    bot = MagicMock()
+    cfg = MagicMock(DEBUG=False)
+    kv = MagicMock()
+    table_manager = MagicMock()
+    game = Game()
+    game.ready_message_main_id = 111
+    game.ready_message_main_text = "prompt"
+    table_manager.get_game = AsyncMock(return_value=game)
+    table_manager.save_game = AsyncMock()
+
+    model = PokerBotModel(view=view, bot=bot, cfg=cfg, kv=kv, table_manager=table_manager)
+    model._safe_edit_message_text = AsyncMock(return_value=222)
+
+    job = SimpleNamespace(chat_id=chat_id)
+    job.schedule_removal = MagicMock()
+    context = SimpleNamespace(job=job, chat_data={"start_countdown": 5})
+
+    await model._auto_start_tick(context)
+
+    assert game.ready_message_main_id == 222
+    assert game.ready_message_main_text == "prompt"
+    table_manager.save_game.assert_awaited_once_with(chat_id, game)
+    assert context.chat_data["start_countdown"] == 4
+
+
+@pytest.mark.asyncio
+async def test_auto_start_tick_skips_save_when_message_unchanged():
+    chat_id = -778
+    view = MagicMock()
+    bot = MagicMock()
+    cfg = MagicMock(DEBUG=False)
+    kv = MagicMock()
+    table_manager = MagicMock()
+    game = Game()
+    game.ready_message_main_id = 555
+    game.ready_message_main_text = "prompt"
+    table_manager.get_game = AsyncMock(return_value=game)
+    table_manager.save_game = AsyncMock()
+
+    model = PokerBotModel(view=view, bot=bot, cfg=cfg, kv=kv, table_manager=table_manager)
+    model._safe_edit_message_text = AsyncMock(return_value=555)
+
+    job = SimpleNamespace(chat_id=chat_id)
+    job.schedule_removal = MagicMock()
+    context = SimpleNamespace(job=job, chat_data={"start_countdown": 10})
+
+    await model._auto_start_tick(context)
+
+    assert game.ready_message_main_id == 555
+    table_manager.save_game.assert_not_awaited()
+    assert context.chat_data["start_countdown"] == 9
