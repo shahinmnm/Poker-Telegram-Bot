@@ -616,28 +616,6 @@ class PokerBotViewer:
             f"🃏 دست: {hand_text}\n"
             f"🃎 میز: {table_text}"
         )
-        if message_id:
-            try:
-                await self._rate_limiter.send(
-                    lambda: self._bot.delete_message(
-                        chat_id=chat_id,
-                        message_id=message_id,
-                    ),
-                    chat_id=chat_id,
-                )
-            except BadRequest:
-                # پیام ممکن است قبلاً حذف شده باشد؛ صرفاً ادامه می‌دهیم.
-                pass
-            except Exception as e:
-                logger.error(
-                    "Error deleting previous cards message",
-                    extra={
-                        "error_type": type(e).__name__,
-                        "chat_id": chat_id,
-                        "request_params": {"message_id": message_id},
-                    },
-                )
-
         try:
             async def _send() -> Message:
                 reply_kwargs = {}
@@ -653,8 +631,34 @@ class PokerBotViewer:
                 )
 
             message = await self._rate_limiter.send(_send, chat_id=chat_id)
+            new_message_id: Optional[MessageId] = None
             if isinstance(message, Message):
-                return message.message_id
+                new_message_id = message.message_id
+
+            if message_id:
+                try:
+                    await self._rate_limiter.send(
+                        lambda: self._bot.delete_message(
+                            chat_id=chat_id,
+                            message_id=message_id,
+                        ),
+                        chat_id=chat_id,
+                    )
+                except BadRequest:
+                    # پیام ممکن است قبلاً حذف شده باشد؛ صرفاً ادامه می‌دهیم.
+                    pass
+                except Exception as e:
+                    logger.error(
+                        "Error deleting previous cards message",
+                        extra={
+                            "error_type": type(e).__name__,
+                            "chat_id": chat_id,
+                            "request_params": {"message_id": message_id},
+                        },
+                    )
+
+            if new_message_id:
+                return new_message_id
         except Exception as e:
             logger.error(
                 "Error sending cards",
