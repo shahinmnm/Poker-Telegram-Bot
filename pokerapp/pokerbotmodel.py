@@ -1036,7 +1036,9 @@ class PokerBotModel:
         send_message: bool = True,
     ):
         """
-        کارت‌های جدید را به میز اضافه کرده و پیامی متنی با کیبورد ترکیبی ارسال می‌کند.
+        کارت‌های جدید را به میز اضافه کرده و پیامی متنی بدون کیبورد سراسری ارسال
+        می‌کند. به‌روزرسانی صفحه‌کلیدها تنها از مسیر ``PokerBotViewer.send_cards``
+        انجام می‌شود تا دست و کارت‌های میز در یک کیبورد ترکیبی نمایش داده شوند.
         اگر ``count=0`` باشد، فقط کارت‌های فعلی نمایش داده می‌شود. با تنظیم
         ``send_message=False`` می‌توان فقط کارت‌ها را اضافه کرد بدون ارسال پیام.
         """
@@ -1049,11 +1051,10 @@ class PokerBotModel:
             return
 
         stage = self._view._derive_stage_from_table(game.cards_table)
-        markup = self._view._get_table_markup(game.cards_table, stage)
 
         if not game.board_message_id:
             msg_id = await self._view.send_message_return_id(
-                chat_id, street_name, reply_markup=markup
+                chat_id, street_name, reply_markup=None
             )
             if msg_id:
                 game.board_message_id = msg_id
@@ -1061,7 +1062,7 @@ class PokerBotModel:
                     game.message_ids_to_delete.append(msg_id)
         else:
             new_msg_id = await self._view.send_message_return_id(
-                chat_id, street_name, reply_markup=markup
+                chat_id, street_name, reply_markup=None
             )
             if new_msg_id:
                 await self._view.delete_message(chat_id, game.board_message_id)

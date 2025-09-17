@@ -12,6 +12,10 @@ def run(coro):
     return asyncio.run(coro)
 
 
+def _row_texts(row):
+    return [getattr(button, "text", button) for button in row]
+
+
 def test_delete_message_ignores_missing_message(caplog):
     viewer = PokerBotViewer(bot=MagicMock())
     viewer._rate_limiter.send = AsyncMock(
@@ -100,7 +104,11 @@ def test_send_cards_hides_group_hand_text_without_leaving_message():
     assert text == "\u2063"
     assert "@player" not in text
     assert "🔒" not in text
-    assert call.kwargs["reply_markup"] is not None
+    markup = call.kwargs["reply_markup"]
+    assert markup is not None
+    assert _row_texts(markup.keyboard[0]) == ["A♠", "K♦"]
+    assert _row_texts(markup.keyboard[1]) == ["2♣", "3♣", "4♣"]
+    assert _row_texts(markup.keyboard[2]) == ["🔁 پری فلاپ", "✅ فلاپ", "🔁 ترن", "🔁 ریور"]
     viewer.delete_message.assert_awaited_once_with(chat_id=123, message_id=42)
 
 
@@ -155,3 +163,7 @@ def test_send_cards_includes_hand_details_by_default():
     text = call.kwargs["text"]
     assert "Q♥" in text and "J♥" in text
     assert "10♥" in text and "9♥" in text and "8♥" in text
+    markup = call.kwargs["reply_markup"]
+    assert _row_texts(markup.keyboard[0]) == ["Q♥", "J♥"]
+    assert _row_texts(markup.keyboard[1]) == ["10♥", "9♥", "8♥"]
+    assert _row_texts(markup.keyboard[2])[1].startswith("✅")
