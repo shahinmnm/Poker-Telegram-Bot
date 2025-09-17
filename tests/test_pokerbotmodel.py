@@ -173,7 +173,7 @@ if __name__ == '__main__':
 
 def _build_model_with_game():
     view = MagicMock()
-    view.send_cards = AsyncMock(return_value=900)
+    view.send_cards = AsyncMock(return_value=None)
     view.send_message = AsyncMock()
     bot = MagicMock()
     cfg = MagicMock(DEBUG=False)
@@ -192,71 +192,10 @@ def _build_model_with_game():
     return model, game, player, view
 
 
-def test_send_cards_to_user_uses_group_chat():
-    model, game, player, view = _build_model_with_game()
-    chat_id = -100
-    model._get_game = AsyncMock(return_value=(game, chat_id))
-
-    update = MagicMock()
-    update.effective_user.id = player.user_id
-    update.effective_user.full_name = "Test User"
-    context = MagicMock()
-
-    asyncio.run(model.send_cards_to_user(update, context))
-
-    assert view.send_cards.await_args.kwargs["chat_id"] == chat_id
-    assert view.send_cards.await_args.kwargs["hide_hand_text"] is True
-    assert view.send_cards.await_args.kwargs["message_id"] is None
-    assert view.send_cards.await_args.kwargs["ready_message_id"] == player.ready_message_id
-    assert game.message_ids_to_delete == []
-    assert game.message_ids[player.user_id] == 900
-    view.send_message.assert_not_awaited()
-
-
-def test_send_cards_to_user_reports_missing_player_in_group():
-    model, game, _, view = _build_model_with_game()
-    chat_id = -200
-    model._get_game = AsyncMock(return_value=(game, chat_id))
-
-    update = MagicMock()
-    update.effective_user.id = 999
-    update.effective_user.full_name = "Missing Player"
-    context = MagicMock()
-
-    asyncio.run(model.send_cards_to_user(update, context))
-
-    view.send_cards.assert_not_awaited()
-    assert view.send_message.await_args.args[0] == chat_id
-
-
-def test_send_cards_to_user_reuses_previous_keyboard_message():
-    model, game, player, view = _build_model_with_game()
-    chat_id = -300
-    model._get_game = AsyncMock(return_value=(game, chat_id))
-
-    update = MagicMock()
-    update.effective_user.id = player.user_id
-    update.effective_user.full_name = "Test User"
-    context = MagicMock()
-
-    view.send_cards.side_effect = [111, 222]
-
-    asyncio.run(model.send_cards_to_user(update, context))
-    assert game.message_ids[player.user_id] == 111
-
-    asyncio.run(model.send_cards_to_user(update, context))
-
-    assert view.send_cards.await_count == 2
-    assert view.send_cards.await_args_list[1].kwargs["message_id"] == 111
-    assert view.send_cards.await_args_list[0].kwargs["ready_message_id"] == player.ready_message_id
-    assert view.send_cards.await_args_list[1].kwargs["ready_message_id"] == player.ready_message_id
-    assert game.message_ids[player.user_id] == 222
-
-
 def test_add_cards_to_table_sends_plain_message_without_keyboard():
     model, game, player, view = _build_model_with_game()
     chat_id = -300
-    view.send_cards = AsyncMock(side_effect=[900, 900])
+    view.send_cards = AsyncMock(return_value=None)
     asyncio.run(model._divide_cards(game, chat_id))
 
     view.send_message_return_id = AsyncMock(return_value=101)
@@ -264,38 +203,32 @@ def test_add_cards_to_table_sends_plain_message_without_keyboard():
 
     game.remain_cards = [Card("2♣"), Card("3♦"), Card("4♥")]
 
+    view.send_cards.reset_mock()
     asyncio.run(model.add_cards_to_table(3, game, chat_id, "🃏 فلاپ"))
 
     assert view.send_message_return_id.await_count == 1
-    assert view.send_cards.await_count == 2
+    assert view.send_cards.await_count == 1
 
     send_args = view.send_message_return_id.await_args
     assert send_args.args[0] == chat_id
     assert send_args.args[1] == "🃏 فلاپ"
     assert send_args.kwargs.get("reply_markup") is None
 
-    first_call = view.send_cards.await_args_list[0]
-    second_call = view.send_cards.await_args_list[1]
-
-    assert first_call.kwargs["hide_hand_text"] is True
-    assert "message_id" not in first_call.kwargs
-    assert first_call.kwargs["ready_message_id"] == player.ready_message_id
-
-    assert second_call.kwargs["hide_hand_text"] is True
-    assert second_call.kwargs["table_cards"] == game.cards_table
-    assert second_call.kwargs["message_id"] == 900
-    assert second_call.kwargs["ready_message_id"] == player.ready_message_id
+    call_kwargs = view.send_cards.await_args.kwargs
+    assert call_kwargs["hide_hand_text"] is True
+    assert call_kwargs["table_cards"] == game.cards_table
+    assert call_kwargs["ready_message_id"] == player.ready_message_id
+    assert "message_id" not in call_kwargs
 
     assert game.board_message_id == 101
     assert 101 in game.message_ids_to_delete
-    assert game.message_ids[player.user_id] == 900
     view.delete_message.assert_not_awaited()
 
 
-def test_divide_cards_stores_keyboard_message_id():
+def test_divide_cards_sends_keyboard_without_tracking_message_id():
     model, game, player, view = _build_model_with_game()
     chat_id = -400
-    view.send_cards = AsyncMock(return_value=555)
+    view.send_cards = AsyncMock(return_value=None)
 
     asyncio.run(model._divide_cards(game, chat_id))
 
@@ -303,13 +236,12 @@ def test_divide_cards_stores_keyboard_message_id():
     call_kwargs = view.send_cards.await_args.kwargs
     assert "message_id" not in call_kwargs
     assert call_kwargs["ready_message_id"] == player.ready_message_id
-    assert game.message_ids[player.user_id] == 555
+    assert game.message_ids == {}
 
 
 def test_clear_game_messages_deletes_player_card_messages():
     model, game, player, view = _build_model_with_game()
     chat_id = -500
-    view.send_cards = AsyncMock(return_value=444)
     view.delete_message = AsyncMock()
 
     asyncio.run(model._divide_cards(game, chat_id))
@@ -321,7 +253,6 @@ def test_clear_game_messages_deletes_player_card_messages():
     asyncio.run(model._clear_game_messages(game, chat_id))
 
     deleted_pairs = {call.args for call in view.delete_message.await_args_list}
-    assert (chat_id, 444) in deleted_pairs
     assert (chat_id, 321) in deleted_pairs
     assert (chat_id, 654) in deleted_pairs
     assert (chat_id, 888) in deleted_pairs

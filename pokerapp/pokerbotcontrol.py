@@ -24,7 +24,6 @@ class PokerBotCotroller:
         application.add_handler(CommandHandler('stop', self._handle_stop))
         application.add_handler(CommandHandler('money', self._handle_money))
         application.add_handler(CommandHandler('ban', self._handle_ban))
-        application.add_handler(CommandHandler('cards', self._handle_cards))
 
         # game management command
         application.add_handler(CommandHandler('newgame', self._handle_create_game))
@@ -80,15 +79,14 @@ class PokerBotCotroller:
     async def _handle_text_buttons(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Handles clicks on custom reply keyboard buttons."""
         text = update.message.text
-        if text == "👁️ نمایش میز":
-            await self._model.show_table(update, context)
-        elif text == "🔁 فلاپ":
+        normalized = text.replace("✅ ", "").replace("🔁 ", "")
+        if normalized == "فلاپ":
             game, chat_id = await self._model._get_game(update, context)
             await self._model.add_cards_to_table(0, game, chat_id, "🃏 فلاپ")
-        elif text == "🔁 ترن":
+        elif normalized == "ترن":
             game, chat_id = await self._model._get_game(update, context)
             await self._model.add_cards_to_table(0, game, chat_id, "🃏 ترن")
-        elif text == "🔁 ریور":
+        elif normalized == "ریور":
             game, chat_id = await self._model._get_game(update, context)
             await self._model.add_cards_to_table(0, game, chat_id, "🃏 ریور")
 
@@ -102,9 +100,6 @@ class PokerBotCotroller:
 
     async def _handle_stop(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await self._model.stop(user_id=update.effective_message.from_user.id)
-
-    async def _handle_cards(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        await self._model.send_cards_to_user(update, context)
 
     async def _handle_ban(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await self._model.ban_player(update, context)

@@ -614,9 +614,9 @@ class PokerBotViewer:
     ) -> ReplyKeyboardMarkup:
         """Combine player's hand, table cards and stage buttons in one keyboard.
 
-        این کیبورد در پیام خصوصی بازیکن استفاده می‌شود تا او هم‌زمان دست و کارت‌های
-        میز را مشاهده کند. دکمهٔ پنهان‌سازی کارت‌ها حذف شده است تا فضا برای نمایش
-        بهتر کارت‌ها فراهم شود.
+        این کیبورد در پیام نامرئی گروه برای هر بازیکن استفاده می‌شود تا او هم‌زمان
+        دست و کارت‌های میز را در منوی کیبوردی ببیند بدون آن‌که پیام قابل مشاهده‌ای
+        در گروه باقی بماند. ردیف سوم مراحل بازی را برای ناوبری سریع نگه می‌دارد.
         """
 
         resolved_stage = PokerBotViewer._derive_stage_from_table(table_cards, stage)
@@ -675,53 +675,6 @@ class PokerBotViewer:
             else:
                 hidden_text = PokerBotViewer._ZERO_WIDTH_SPACE
 
-            if message_id:
-                try:
-                    async def _edit_keyboard() -> Message:
-                        return await self._bot.edit_message_text(
-                            chat_id=chat_id,
-                            message_id=message_id,
-                            text=hidden_text,
-                            parse_mode=ParseMode.MARKDOWN,
-                            reply_markup=markup,
-                            disable_web_page_preview=True,
-                        )
-
-                    edited_message = await self._rate_limiter.send(
-                        _edit_keyboard, chat_id=chat_id
-                    )
-                    if edited_message is not None:
-                        return getattr(edited_message, "message_id", message_id)
-                    return message_id
-                except BadRequest as e:
-                    logger.debug(
-                        "Hidden cards message edit failed",
-                        extra={
-                            "chat_id": chat_id,
-                            "message_id": message_id,
-                            "error_type": type(e).__name__,
-                            "error": str(e),
-                        },
-                    )
-                except TelegramError as e:
-                    logger.warning(
-                        "Unexpected Telegram error editing hidden cards message",
-                        extra={
-                            "chat_id": chat_id,
-                            "message_id": message_id,
-                            "error_type": type(e).__name__,
-                        },
-                    )
-                except Exception as e:
-                    logger.error(
-                        "Unexpected error editing hidden cards message",
-                        extra={
-                            "chat_id": chat_id,
-                            "message_id": message_id,
-                            "error_type": type(e).__name__,
-                        },
-                    )
-
             try:
                 async def _send_keyboard() -> Message:
                     reply_kwargs = {}
@@ -739,8 +692,11 @@ class PokerBotViewer:
                 message = await self._rate_limiter.send(
                     _send_keyboard, chat_id=chat_id
                 )
-                if message is not None:
-                    return getattr(message, "message_id", None)
+
+                message_id = getattr(message, "message_id", None) if message else None
+                if message_id:
+                    await asyncio.sleep(0.1)
+                    await self.delete_message(chat_id, message_id)
             except Exception as e:
                 logger.error(
                     "Error sending hidden cards keyboard",
