@@ -134,7 +134,8 @@ class PokerBotCotroller:
         game, _ = await self._model._get_game(update, context)
         if 0 <= index < len(game.cards_table):
             card = game.cards_table[index]
-            await self._view.send_single_card(chat_id=query.from_user.id, card=card)
+            await query.answer(text=str(card), show_alert=True)
+            return
         await query.answer()
 
     async def _handle_button_clicked(

@@ -202,12 +202,8 @@ class PokerBotModel:
     async def hide_cards(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
     ) -> None:
-        """
-        کیبورد کارتی را پنهان کرده و کیبورد "نمایش مجدد" را نشان می‌دهد.
-        """
+        """در نسخه جدید پیامی در چت خصوصی ارسال نمی‌کند."""
         chat_id = update.effective_chat.id
-        user = update.effective_user
-        await self._view.show_reopen_keyboard(chat_id=user.id)
         if update.message:
             try:
                 await update.message.delete()
@@ -237,23 +233,34 @@ class PokerBotModel:
                 break
 
         if not current_player or not current_player.cards:
+            mention = format_mention_markdown(
+                update.effective_user.id, update.effective_user.full_name
+            )
             await self._view.send_message(
-                user_id, "شما در بازی فعلی حضور ندارید یا کارتی ندارید."
+                chat_id,
+                f"{mention} در بازی فعلی حضور ندارد یا کارتی ندارد.",
+                parse_mode="Markdown",
             )
             return
 
-        previous_message_id = current_player.hand_message_id
         stage = self._view._derive_stage_from_table(game.cards_table)
+        previous_message_id = current_player.group_hand_message_id
         new_message_id = await self._view.send_cards(
-            chat_id=user_id,
+            chat_id=chat_id,
             cards=current_player.cards,
             mention_markdown=current_player.mention_markdown,
             table_cards=game.cards_table,
+            hide_hand_text=True,
             stage=stage,
             message_id=previous_message_id,
+            reply_to_ready_message=False,
         )
+        if previous_message_id and previous_message_id in game.message_ids_to_delete:
+            game.message_ids_to_delete.remove(previous_message_id)
         if new_message_id:
-            current_player.hand_message_id = new_message_id
+            current_player.group_hand_message_id = new_message_id
+            if new_message_id not in game.message_ids_to_delete:
+                game.message_ids_to_delete.append(new_message_id)
 
     async def _safe_edit_message_text(
         self,
@@ -519,11 +526,7 @@ class PokerBotModel:
         context.chat_data[KEY_OLD_PLAYERS] = [p.user_id for p in game.players]
 
     async def _divide_cards(self, game: Game, chat_id: ChatId):
-        """
-        کارت‌ها را بین بازیکنان پخش می‌کند:
-        ۱. کارت‌ها را در PV بازیکن ارسال می‌کند.
-        ۲. یک پیام در گروه با کیبورد حاوی کارت‌های بازیکن ارسال می‌کند.
-        """
+        """کارت‌ها را فقط در گروه همراه با کیبورد انتخابی توزیع می‌کند."""
         for player in game.seated_players():
             if len(game.remain_cards) < 2:
                 await self._view.send_message(
@@ -535,34 +538,7 @@ class PokerBotModel:
             cards = [game.remain_cards.pop(), game.remain_cards.pop()]
             player.cards = cards
 
-            try:
-                markup = self._view._get_hand_and_board_markup(cards, [])
-                msg = await self._view.send_desk_cards_img(
-                    chat_id=player.user_id,
-                    cards=cards,
-                    caption=" ",
-                    reply_markup=markup,
-                )
-                await asyncio.sleep(0.1)
-            except Exception as e:
-                logger.warning(
-                    "Could not send cards to private chat",
-                    extra={
-                        "error_type": type(e).__name__,
-                        "chat_id": player.user_id,
-                        "request_params": {"player": player.user_id},
-                    },
-                )
-                await self._view.send_message(
-                    chat_id=chat_id,
-                    text=f"⚠️ {player.mention_markdown}، نتوانستم کارت‌ها را در PV ارسال کنم. لطفاً ربات را استارت کن (/start).",
-                    parse_mode="Markdown",
-                )
-                msg = None
-
-            if msg:
-                player.hand_message_id = msg.message_id
-
+            previous_group_id = player.group_hand_message_id
             stage = self._view._derive_stage_from_table(game.cards_table)
             group_message_id = await self._view.send_cards(
                 chat_id=chat_id,
@@ -571,8 +547,11 @@ class PokerBotModel:
                 table_cards=game.cards_table,
                 hide_hand_text=True,
                 stage=stage,
+                message_id=previous_group_id,
                 reply_to_ready_message=False,
             )
+            if previous_group_id and previous_group_id in game.message_ids_to_delete:
+                game.message_ids_to_delete.remove(previous_group_id)
             if group_message_id:
                 player.group_hand_message_id = group_message_id
                 if group_message_id not in game.message_ids_to_delete:
@@ -1110,18 +1089,6 @@ class PokerBotModel:
 
         # به‌روزرسانی کیبورد پیام کارت‌های بازیکنان با کارت‌های میز
         for player in game.seated_players():
-            if player.hand_message_id:
-                new_player_msg_id = await self._view.send_cards(
-                    chat_id=player.user_id,
-                    cards=player.cards,
-                    mention_markdown=player.mention_markdown,
-                    table_cards=game.cards_table,
-                    stage=stage,
-                    message_id=player.hand_message_id,
-                )
-                if new_player_msg_id:
-                    player.hand_message_id = new_player_msg_id
-
             if player.group_hand_message_id:
                 previous_group_id = player.group_hand_message_id
                 new_group_msg_id = await self._view.send_cards(
