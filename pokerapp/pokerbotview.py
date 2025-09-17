@@ -360,6 +360,34 @@ class PokerBotViewer:
                 ),
                 chat_id=chat_id,
             )
+        except (BadRequest, Forbidden) as e:
+            error_message = getattr(e, "message", None) or str(e) or ""
+            normalized_message = error_message.lower()
+            ignorable_messages = (
+                "message to delete not found",
+                "message can't be deleted",
+                "message cant be deleted",
+            )
+            if any(msg in normalized_message for msg in ignorable_messages):
+                logger.debug(
+                    "Ignoring delete_message error",
+                    extra={
+                        "chat_id": chat_id,
+                        "message_id": message_id,
+                        "error_type": type(e).__name__,
+                        "error_message": error_message,
+                    },
+                )
+                return
+            logger.warning(
+                "Failed to delete message",
+                extra={
+                    "error_type": type(e).__name__,
+                    "chat_id": chat_id,
+                    "message_id": message_id,
+                    "error_message": error_message,
+                },
+            )
         except Exception as e:
             logger.error(
                 "Error deleting message",
