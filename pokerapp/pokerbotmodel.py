@@ -241,11 +241,22 @@ class PokerBotModel:
             )
             return
 
-        await self._view.send_cards(
+        previous_message_id = current_player.hand_message_id
+        new_message_id = await self._view.send_cards(
             chat_id=user_id,
             cards=current_player.cards,
             mention_markdown=current_player.mention_markdown,
+            message_id=previous_message_id,
         )
+        if new_message_id:
+            if (
+                previous_message_id
+                and previous_message_id in game.message_ids_to_delete
+            ):
+                game.message_ids_to_delete.remove(previous_message_id)
+            current_player.hand_message_id = new_message_id
+            if new_message_id not in game.message_ids_to_delete:
+                game.message_ids_to_delete.append(new_message_id)
 
     async def _safe_edit_message_text(
         self,
@@ -1103,23 +1114,14 @@ class PokerBotModel:
                     stage=stage,
                     message_id=player.hand_message_id,
                 )
-                if (
-                    new_player_msg_id
-                    and new_player_msg_id != player.hand_message_id
-                ):
-                    await self._view.delete_message(
-                        player.user_id, player.hand_message_id
-                    )
+                if new_player_msg_id:
                     if (
                         player.hand_message_id
                         and player.hand_message_id in game.message_ids_to_delete
                     ):
                         game.message_ids_to_delete.remove(player.hand_message_id)
                     player.hand_message_id = new_player_msg_id
-                    if (
-                        new_player_msg_id
-                        and new_player_msg_id not in game.message_ids_to_delete
-                    ):
+                    if new_player_msg_id not in game.message_ids_to_delete:
                         game.message_ids_to_delete.append(new_player_msg_id)
                 await asyncio.sleep(0.1)
 
