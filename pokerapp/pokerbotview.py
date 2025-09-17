@@ -356,6 +356,8 @@ class PokerBotViewer:
             )
             if isinstance(message, Message):
                 return message.message_id
+            if message is True:
+                return message_id
             return message_id
         except Exception as e:
             logger.error(
@@ -810,8 +812,12 @@ class PokerBotViewer:
         markup = self._get_turns_markup(call_check_text, call_check_action)
 
         if message_id:
-            await self.edit_turn_actions(chat_id, message_id, text, markup)
-            return message_id
+            edited_id = await self.edit_turn_actions(
+                chat_id, message_id, text, markup
+            )
+            if edited_id:
+                return edited_id
+            # پیام اصلی دیگر قابل ویرایش نیست، پیام جدید ارسال می‌کنیم
 
         try:
             message = await self._rate_limiter.send(
@@ -825,7 +831,28 @@ class PokerBotViewer:
                 chat_id=chat_id,
             )
             if isinstance(message, Message):
-                return message.message_id
+                new_message_id = message.message_id
+                if message_id:
+                    try:
+                        await self._rate_limiter.send(
+                            lambda: self._bot.delete_message(
+                                chat_id=chat_id,
+                                message_id=message_id,
+                            ),
+                            chat_id=chat_id,
+                        )
+                    except BadRequest:
+                        pass
+                    except Exception as e:
+                        logger.debug(
+                            "Failed to delete stale turn message",
+                            extra={
+                                "error_type": type(e).__name__,
+                                "chat_id": chat_id,
+                                "message_id": message_id,
+                            },
+                        )
+                return new_message_id
         except Exception as e:
             logger.error(
                 "Error sending turn actions",
@@ -859,6 +886,8 @@ class PokerBotViewer:
             )
             if isinstance(message, Message):
                 return message.message_id
+            if message is True:
+                return message_id
         except Exception as e:
             logger.error(
                 "Error editing turn actions",
