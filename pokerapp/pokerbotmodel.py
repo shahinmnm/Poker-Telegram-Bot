@@ -518,14 +518,7 @@ class PokerBotModel:
         if game.turn_message_id:
             current_player = game.get_player_by_seat(game.current_player_index)
             if current_player:
-                await self._view.send_turn_actions(
-                    chat_id=chat_id,
-                    game=game,
-                    player=current_player,
-                    money=current_player.wallet.value(),
-                    message_id=game.turn_message_id,
-                    recent_actions=game.last_actions,
-                )
+                await self._send_turn_message(game, current_player, chat_id)
 
         # نیازی به هیچ کد دیگری در اینجا نیست.
         # کدهای اضافی حذف شدند.
@@ -742,26 +735,29 @@ class PokerBotModel:
         money = player.wallet.value()
         recent_actions = game.last_actions
 
-        new_message_id = None
-        if game.turn_message_id:
-            new_message_id = await self._view.send_turn_actions(
-                chat_id,
-                game,
-                player,
-                money,
-                message_id=game.turn_message_id,
-                recent_actions=recent_actions,
-            )
-        else:
-            new_message_id = await self._view.send_turn_actions(
-                chat_id, game, player, money, recent_actions=recent_actions
-            )
+        previous_message_id = game.turn_message_id
+
+        new_message_id = await self._view.send_turn_actions(
+            chat_id, game, player, money, recent_actions=recent_actions
+        )
 
         if new_message_id:
+            if (
+                previous_message_id
+                and previous_message_id != new_message_id
+            ):
+                try:
+                    await self._view.delete_message(chat_id, previous_message_id)
+                except Exception as e:
+                    logger.debug(
+                        "Failed to delete previous turn message",
+                        extra={
+                            "chat_id": chat_id,
+                            "previous_message_id": previous_message_id,
+                            "error_type": type(e).__name__,
+                        },
+                    )
             game.turn_message_id = new_message_id
-        elif game.turn_message_id:
-            # اگر پیام قبلی دیگر وجود ندارد، در فراخوانی بعدی پیام جدید ارسال می‌کنیم
-            game.turn_message_id = None
 
         game.last_turn_time = datetime.datetime.now()
 
@@ -1367,15 +1363,18 @@ class RoundRateModel:
 
         player_turn = game.get_player_by_seat(game.current_player_index)
         if player_turn:
-            msg_id = await self._view.send_turn_actions(
-                chat_id=chat_id,
-                game=game,
-                player=player_turn,
-                money=player_turn.wallet.value(),
-                recent_actions=game.last_actions,
-            )
-            if msg_id:
-                game.turn_message_id = msg_id
+            if self._model:
+                await self._model._send_turn_message(game, player_turn, chat_id)
+            else:
+                msg_id = await self._view.send_turn_actions(
+                    chat_id=chat_id,
+                    game=game,
+                    player=player_turn,
+                    money=player_turn.wallet.value(),
+                    recent_actions=game.last_actions,
+                )
+                if msg_id:
+                    game.turn_message_id = msg_id
 
     async def _set_player_blind(
         self,
@@ -1400,14 +1399,19 @@ class RoundRateModel:
             if game.turn_message_id:
                 current_player = game.get_player_by_seat(game.current_player_index)
                 if current_player:
-                    await self._view.send_turn_actions(
-                        chat_id=chat_id,
-                        game=game,
-                        player=current_player,
-                        money=current_player.wallet.value(),
-                        message_id=game.turn_message_id,
-                        recent_actions=game.last_actions,
-                    )
+                    if self._model:
+                        await self._model._send_turn_message(
+                            game, current_player, chat_id
+                        )
+                    else:
+                        await self._view.send_turn_actions(
+                            chat_id=chat_id,
+                            game=game,
+                            player=current_player,
+                            money=current_player.wallet.value(),
+                            message_id=game.turn_message_id,
+                            recent_actions=game.last_actions,
+                        )
         except UserException as e:
             available_money = player.wallet.value()
             player.wallet.authorize(game_id=str(chat_id), amount=available_money)
