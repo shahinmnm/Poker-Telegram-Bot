@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 
 from telegram import Update
+from telegram.error import BadRequest
 from telegram.ext import (
     Application,
     CommandHandler,
@@ -56,7 +57,11 @@ class PokerBotCotroller:
             # می‌توانید یک پیام به کاربر بدهید که بازی فعال نیست
             query = update.callback_query
             if query:
-                await query.answer(text="بازی در جریان نیست.", show_alert=False)
+                try:
+                    await query.answer(text="بازی در جریان نیست.", show_alert=False)
+                except BadRequest as e:
+                    if "query is too old" not in str(e).lower():
+                        raise
             return
 
         current_player = self._model._current_turn_player(game)
@@ -68,7 +73,11 @@ class PokerBotCotroller:
             print(f"DEBUG: Not user's turn. Current turn: {current_player.user_id}, Requester: {user_id}.")
             query = update.callback_query
             if query:
-                await query.answer(text="☝️ نوبت شما نیست!", show_alert=True)
+                try:
+                    await query.answer(text="☝️ نوبت شما نیست!", show_alert=True)
+                except BadRequest as e:
+                    if "query is too old" not in str(e).lower():
+                        raise
             return
 
         # اگر نوبت کاربر بود، به متد اصلی برای پردازش دکمه برو

@@ -317,6 +317,17 @@ class PokerBotModel:
             chat_id, text, reply_markup=reply_markup
         )
         if new_id and message_id and new_id != message_id:
+            try:
+                await self._view.delete_message(chat_id, message_id)
+            except Exception as e:
+                logger.debug(
+                    "Failed to delete message after replacement",
+                    extra={
+                        "chat_id": chat_id,
+                        "old_message_id": message_id,
+                        "error_type": type(e).__name__,
+                    },
+                )
             logger.info(
                 "Sent replacement message after edit failure",
                 extra={
@@ -738,16 +749,26 @@ class PokerBotModel:
         money = player.wallet.value()
         recent_actions = game.last_actions
 
+        new_message_id = None
         if game.turn_message_id:
-            await self._view.send_turn_actions(
-                chat_id, game, player, money, message_id=game.turn_message_id, recent_actions=recent_actions
+            new_message_id = await self._view.send_turn_actions(
+                chat_id,
+                game,
+                player,
+                money,
+                message_id=game.turn_message_id,
+                recent_actions=recent_actions,
             )
         else:
-            msg_id = await self._view.send_turn_actions(
+            new_message_id = await self._view.send_turn_actions(
                 chat_id, game, player, money, recent_actions=recent_actions
             )
-            if msg_id:
-                game.turn_message_id = msg_id
+
+        if new_message_id:
+            game.turn_message_id = new_message_id
+        elif game.turn_message_id:
+            # اگر پیام قبلی دیگر وجود ندارد، در فراخوانی بعدی پیام جدید ارسال می‌کنیم
+            game.turn_message_id = None
 
         game.last_turn_time = datetime.datetime.now()
 
@@ -1080,11 +1101,14 @@ class PokerBotModel:
                 if msg_id not in game.message_ids_to_delete:
                     game.message_ids_to_delete.append(msg_id)
         else:
-            new_msg_id = await self._view.send_message_return_id(
-                chat_id, street_name, reply_markup=None
+            new_msg_id = await self._safe_edit_message_text(
+                chat_id,
+                game.board_message_id,
+                street_name,
+                reply_markup=None,
+                parse_mode=ParseMode.MARKDOWN,
             )
-            if new_msg_id:
-                await self._view.delete_message(chat_id, game.board_message_id)
+            if new_msg_id and new_msg_id != game.board_message_id:
                 if game.board_message_id in game.message_ids_to_delete:
                     game.message_ids_to_delete.remove(game.board_message_id)
                 game.board_message_id = new_msg_id
