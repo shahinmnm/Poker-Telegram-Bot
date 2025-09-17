@@ -249,14 +249,7 @@ class PokerBotModel:
             message_id=previous_message_id,
         )
         if new_message_id:
-            if (
-                previous_message_id
-                and previous_message_id in game.message_ids_to_delete
-            ):
-                game.message_ids_to_delete.remove(previous_message_id)
             current_player.hand_message_id = new_message_id
-            if new_message_id not in game.message_ids_to_delete:
-                game.message_ids_to_delete.append(new_message_id)
 
     async def _safe_edit_message_text(
         self,
@@ -563,26 +556,6 @@ class PokerBotModel:
 
             if msg:
                 player.hand_message_id = msg.message_id
-                game.message_ids_to_delete.append(msg.message_id)
-
-            group_message_id = await self._view.send_cards(
-                chat_id=chat_id,
-                cards=player.cards,
-                mention_markdown=player.mention_markdown,
-                ready_message_id=player.ready_message_id,
-                table_cards=game.cards_table,
-                stage="",
-                reply_to_ready_message=False,
-            )
-            if group_message_id:
-                if (
-                    player.group_hand_message_id
-                    and player.group_hand_message_id in game.message_ids_to_delete
-                ):
-                    game.message_ids_to_delete.remove(player.group_hand_message_id)
-                player.group_hand_message_id = group_message_id
-                if group_message_id not in game.message_ids_to_delete:
-                    game.message_ids_to_delete.append(group_message_id)
 
     def _is_betting_round_over(self, game: Game) -> bool:
         """
@@ -1134,35 +1107,8 @@ class PokerBotModel:
                     message_id=player.hand_message_id,
                 )
                 if new_player_msg_id:
-                    if (
-                        player.hand_message_id
-                        and player.hand_message_id in game.message_ids_to_delete
-                    ):
-                        game.message_ids_to_delete.remove(player.hand_message_id)
                     player.hand_message_id = new_player_msg_id
-                    if new_player_msg_id not in game.message_ids_to_delete:
-                        game.message_ids_to_delete.append(new_player_msg_id)
                 await asyncio.sleep(0.1)
-
-            group_previous_id = player.group_hand_message_id
-            group_message_id = await self._view.send_cards(
-                chat_id=chat_id,
-                cards=player.cards,
-                mention_markdown=player.mention_markdown,
-                table_cards=game.cards_table,
-                stage=stage,
-                message_id=group_previous_id,
-                reply_to_ready_message=False,
-            )
-            if group_message_id:
-                if (
-                    group_previous_id
-                    and group_previous_id in game.message_ids_to_delete
-                ):
-                    game.message_ids_to_delete.remove(group_previous_id)
-                player.group_hand_message_id = group_message_id
-                if group_message_id not in game.message_ids_to_delete:
-                    game.message_ids_to_delete.append(group_message_id)
 
         # پس از ارسال/ویرایش تصویر میز، پیام نوبت باید آخرین پیام باشد
         if count == 0 and game.turn_message_id:
@@ -1184,9 +1130,11 @@ class PokerBotModel:
         logger.debug("Clearing game messages", extra={"chat_id": chat_id})
 
         ids_to_delete = set(game.message_ids_to_delete)
+
         if game.board_message_id:
             ids_to_delete.add(game.board_message_id)
             game.board_message_id = None
+
         if game.turn_message_id:
             ids_to_delete.add(game.turn_message_id)
             game.turn_message_id = None
@@ -1196,13 +1144,15 @@ class PokerBotModel:
                 await self._view.delete_message(chat_id, message_id)
             except Exception as e:
                 logger.debug(
-                    "Failed to delete message", extra={"chat_id": chat_id, "message_id": message_id, "error_type": type(e).__name__}
+                    "Failed to delete message",
+                    extra={
+                        "chat_id": chat_id,
+                        "message_id": message_id,
+                        "error_type": type(e).__name__,
+                    },
                 )
 
         game.message_ids_to_delete.clear()
-        for player in game.seated_players():
-            if player.group_hand_message_id in ids_to_delete:
-                player.group_hand_message_id = None
 
     async def _showdown(
         self, game: Game, chat_id: ChatId, context: CallbackContext
