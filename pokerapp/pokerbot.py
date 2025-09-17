@@ -51,7 +51,6 @@ class PokerBot:
         builder = (
             ApplicationBuilder()
             .token(token)
-            .job_queue(True)
             .post_init(self._apply_webhook_settings)
             .post_stop(self._cleanup_webhook)
         )
