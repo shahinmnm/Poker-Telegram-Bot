@@ -630,22 +630,6 @@ class PokerBotViewer:
             one_time_keyboard=False,
         )
 
-    async def show_reopen_keyboard(self, chat_id: ChatId) -> None:
-        """Hides cards and sends a private keyboard to reopen them."""
-        show_cards_button_text = "🃏 نمایش کارت‌ها"
-        show_table_button_text = "👁️ نمایش میز"
-        reopen_keyboard = ReplyKeyboardMarkup(
-            keyboard=[[show_cards_button_text, show_table_button_text]],
-            selective=False,
-            resize_keyboard=True,
-            one_time_keyboard=False
-        )
-        await self.send_message(
-            chat_id=chat_id,
-            text="کارت‌ها پنهان شد. برای مشاهده دوباره از دکمه‌ها استفاده کن.",
-            reply_markup=reopen_keyboard,
-        )
-
     async def send_cards(
             self,
             chat_id: ChatId,

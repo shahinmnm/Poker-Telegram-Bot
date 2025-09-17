@@ -70,7 +70,6 @@ class Player:
         self.cards = []
         self.round_rate = 0
         self.ready_message_id = ready_message_id
-        self.hand_message_id: Optional[MessageId] = None
         self.group_hand_message_id: Optional[MessageId] = None
         # --- ویژگی‌های اضافه شده ---
         self.total_bet = 0  # کل مبلغ شرط‌بندی شده در یک دست

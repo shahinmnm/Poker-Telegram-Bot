@@ -1,14 +1,16 @@
 #!/usr/bin/env python3
 
+import asyncio
 import unittest
 from typing import Tuple
+from unittest.mock import AsyncMock, MagicMock
 
 import fakeredis
 
 from pokerapp.cards import Cards, Card
 from pokerapp.config import Config
 from pokerapp.entities import Money, Player, Game
-from pokerapp.pokerbotmodel import RoundRateModel, WalletManagerModel
+from pokerapp.pokerbotmodel import PokerBotModel, RoundRateModel, WalletManagerModel
 
 
 HANDS_FILE = "./tests/hands.txt"
@@ -167,3 +169,58 @@ class TestRoundRateModel(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+def _build_model_with_game():
+    view = MagicMock()
+    view.send_cards = AsyncMock(return_value="msg42")
+    view.send_message = AsyncMock()
+    bot = MagicMock()
+    cfg = MagicMock(DEBUG=False)
+    kv = MagicMock()
+    table_manager = MagicMock()
+    model = PokerBotModel(view=view, bot=bot, cfg=cfg, kv=kv, table_manager=table_manager)
+    game = Game()
+    player = Player(
+        user_id=123,
+        mention_markdown="@player",
+        wallet=MagicMock(),
+        ready_message_id="ready",
+    )
+    game.add_player(player, seat_index=0)
+    player.cards = [Card("A♠"), Card("K♦")]
+    return model, game, player, view
+
+
+def test_send_cards_to_user_uses_group_chat():
+    model, game, player, view = _build_model_with_game()
+    chat_id = -100
+    model._get_game = AsyncMock(return_value=(game, chat_id))
+
+    update = MagicMock()
+    update.effective_user.id = player.user_id
+    update.effective_user.full_name = "Test User"
+    context = MagicMock()
+
+    asyncio.run(model.send_cards_to_user(update, context))
+
+    assert view.send_cards.await_args.kwargs["chat_id"] == chat_id
+    assert player.group_hand_message_id == "msg42"
+    assert "msg42" in game.message_ids_to_delete
+    view.send_message.assert_not_awaited()
+
+
+def test_send_cards_to_user_reports_missing_player_in_group():
+    model, game, _, view = _build_model_with_game()
+    chat_id = -200
+    model._get_game = AsyncMock(return_value=(game, chat_id))
+
+    update = MagicMock()
+    update.effective_user.id = 999
+    update.effective_user.full_name = "Missing Player"
+    context = MagicMock()
+
+    asyncio.run(model.send_cards_to_user(update, context))
+
+    view.send_cards.assert_not_awaited()
+    assert view.send_message.await_args.args[0] == chat_id
