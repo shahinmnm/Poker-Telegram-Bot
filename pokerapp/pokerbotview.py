@@ -649,8 +649,54 @@ class PokerBotViewer:
         table_values = list(table_cards or [])
         table_text = " ".join(str(card) for card in table_values) if table_values else "❔"
         if hide_hand_text:
+            hidden_text = "\u2063"
+
             if message_id:
-                await self.delete_message(chat_id=chat_id, message_id=message_id)
+                try:
+                    async def _edit_keyboard() -> Message:
+                        return await self._bot.edit_message_text(
+                            chat_id=chat_id,
+                            message_id=message_id,
+                            text=hidden_text,
+                            parse_mode=ParseMode.MARKDOWN,
+                            reply_markup=markup,
+                            disable_web_page_preview=True,
+                        )
+
+                    edited_message = await self._rate_limiter.send(
+                        _edit_keyboard, chat_id=chat_id
+                    )
+                    if edited_message is not None:
+                        return getattr(edited_message, "message_id", message_id)
+                    return message_id
+                except BadRequest as e:
+                    logger.debug(
+                        "Hidden cards message edit failed",
+                        extra={
+                            "chat_id": chat_id,
+                            "message_id": message_id,
+                            "error_type": type(e).__name__,
+                            "error": str(e),
+                        },
+                    )
+                except TelegramError as e:
+                    logger.warning(
+                        "Unexpected Telegram error editing hidden cards message",
+                        extra={
+                            "chat_id": chat_id,
+                            "message_id": message_id,
+                            "error_type": type(e).__name__,
+                        },
+                    )
+                except Exception as e:
+                    logger.error(
+                        "Unexpected error editing hidden cards message",
+                        extra={
+                            "chat_id": chat_id,
+                            "message_id": message_id,
+                            "error_type": type(e).__name__,
+                        },
+                    )
 
             try:
                 async def _send_keyboard() -> Message:
@@ -659,7 +705,7 @@ class PokerBotViewer:
                         reply_kwargs["reply_to_message_id"] = ready_message_id
                     return await self._bot.send_message(
                         chat_id=chat_id,
-                        text="\u2063",  # کاراکتر نامرئی برای نگه‌داشتن صفحه‌کلید
+                        text=hidden_text,
                         parse_mode=ParseMode.MARKDOWN,
                         reply_markup=markup,
                         disable_notification=True,
@@ -669,20 +715,8 @@ class PokerBotViewer:
                 message = await self._rate_limiter.send(
                     _send_keyboard, chat_id=chat_id
                 )
-                temp_message_id = getattr(message, "message_id", None)
-                if temp_message_id is not None:
-                    try:
-                        await self.delete_message(
-                            chat_id=chat_id, message_id=temp_message_id
-                        )
-                    except Exception:
-                        logger.debug(
-                            "Failed to delete temporary keyboard message",
-                            extra={
-                                "chat_id": chat_id,
-                                "message_id": temp_message_id,
-                            },
-                        )
+                if message is not None:
+                    return getattr(message, "message_id", None)
             except Exception as e:
                 logger.error(
                     "Error sending hidden cards keyboard",
