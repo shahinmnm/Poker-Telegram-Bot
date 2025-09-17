@@ -244,23 +244,15 @@ class PokerBotModel:
             return
 
         stage = self._view._derive_stage_from_table(game.cards_table)
-        previous_message_id = current_player.group_hand_message_id
-        new_message_id = await self._view.send_cards(
+        await self._view.send_cards(
             chat_id=chat_id,
             cards=current_player.cards,
             mention_markdown=current_player.mention_markdown,
             table_cards=game.cards_table,
             hide_hand_text=True,
             stage=stage,
-            message_id=previous_message_id,
             reply_to_ready_message=False,
         )
-        if previous_message_id and previous_message_id in game.message_ids_to_delete:
-            game.message_ids_to_delete.remove(previous_message_id)
-        if new_message_id:
-            current_player.group_hand_message_id = new_message_id
-            if new_message_id not in game.message_ids_to_delete:
-                game.message_ids_to_delete.append(new_message_id)
 
     async def _safe_edit_message_text(
         self,
@@ -538,24 +530,16 @@ class PokerBotModel:
             cards = [game.remain_cards.pop(), game.remain_cards.pop()]
             player.cards = cards
 
-            previous_group_id = player.group_hand_message_id
             stage = self._view._derive_stage_from_table(game.cards_table)
-            group_message_id = await self._view.send_cards(
+            await self._view.send_cards(
                 chat_id=chat_id,
                 cards=cards,
                 mention_markdown=player.mention_markdown,
                 table_cards=game.cards_table,
                 hide_hand_text=True,
                 stage=stage,
-                message_id=previous_group_id,
                 reply_to_ready_message=False,
             )
-            if previous_group_id and previous_group_id in game.message_ids_to_delete:
-                game.message_ids_to_delete.remove(previous_group_id)
-            if group_message_id:
-                player.group_hand_message_id = group_message_id
-                if group_message_id not in game.message_ids_to_delete:
-                    game.message_ids_to_delete.append(group_message_id)
 
     def _is_betting_round_over(self, game: Game) -> bool:
         """
@@ -1089,25 +1073,17 @@ class PokerBotModel:
 
         # به‌روزرسانی کیبورد پیام کارت‌های بازیکنان با کارت‌های میز
         for player in game.seated_players():
-            if player.group_hand_message_id:
-                previous_group_id = player.group_hand_message_id
-                new_group_msg_id = await self._view.send_cards(
-                    chat_id=chat_id,
-                    cards=player.cards,
-                    mention_markdown=player.mention_markdown,
-                    table_cards=game.cards_table,
-                    hide_hand_text=True,
-                    stage=stage,
-                    message_id=previous_group_id,
-                    reply_to_ready_message=False,
-                )
-                if new_group_msg_id:
-                    if previous_group_id in game.message_ids_to_delete:
-                        game.message_ids_to_delete.remove(previous_group_id)
-                    player.group_hand_message_id = new_group_msg_id
-                    if new_group_msg_id not in game.message_ids_to_delete:
-                        game.message_ids_to_delete.append(new_group_msg_id)
-
+            if not player.cards:
+                continue
+            await self._view.send_cards(
+                chat_id=chat_id,
+                cards=player.cards,
+                mention_markdown=player.mention_markdown,
+                table_cards=game.cards_table,
+                hide_hand_text=True,
+                stage=stage,
+                reply_to_ready_message=False,
+            )
             await asyncio.sleep(0.1)
 
         # پس از ارسال/ویرایش تصویر میز، پیام نوبت باید آخرین پیام باشد
@@ -1153,9 +1129,6 @@ class PokerBotModel:
                 )
 
         game.message_ids_to_delete.clear()
-
-        for player in game.players:
-            player.group_hand_message_id = None
 
     async def _showdown(
         self, game: Game, chat_id: ChatId, context: CallbackContext

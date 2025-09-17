@@ -173,7 +173,7 @@ if __name__ == '__main__':
 
 def _build_model_with_game():
     view = MagicMock()
-    view.send_cards = AsyncMock(return_value="msg42")
+    view.send_cards = AsyncMock(return_value=None)
     view.send_message = AsyncMock()
     bot = MagicMock()
     cfg = MagicMock(DEBUG=False)
@@ -205,8 +205,8 @@ def test_send_cards_to_user_uses_group_chat():
     asyncio.run(model.send_cards_to_user(update, context))
 
     assert view.send_cards.await_args.kwargs["chat_id"] == chat_id
-    assert player.group_hand_message_id == "msg42"
-    assert "msg42" in game.message_ids_to_delete
+    assert view.send_cards.await_args.kwargs["hide_hand_text"] is True
+    assert game.message_ids_to_delete == []
     view.send_message.assert_not_awaited()
 
 

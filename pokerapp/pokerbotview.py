@@ -650,12 +650,54 @@ class PokerBotViewer:
         table_values = list(table_cards or [])
         table_text = " ".join(str(card) for card in table_values) if table_values else "❔"
         if hide_hand_text:
-            message_body = "🔒 کارت‌ها تنها در پیام خصوصی نمایش داده می‌شوند."
-        else:
-            message_body = (
-                f"🃏 دست: {hand_text}\n"
-                f"🃎 میز: {table_text}"
-            )
+            if message_id:
+                await self.delete_message(chat_id=chat_id, message_id=message_id)
+
+            try:
+                async def _send_keyboard() -> Message:
+                    reply_kwargs = {}
+                    if reply_to_ready_message and ready_message_id:
+                        reply_kwargs["reply_to_message_id"] = ready_message_id
+                    return await self._bot.send_message(
+                        chat_id=chat_id,
+                        text="\u2063",  # کاراکتر نامرئی برای نگه‌داشتن صفحه‌کلید
+                        parse_mode=ParseMode.MARKDOWN,
+                        reply_markup=markup,
+                        disable_notification=True,
+                        **reply_kwargs,
+                    )
+
+                message = await self._rate_limiter.send(
+                    _send_keyboard, chat_id=chat_id
+                )
+                temp_message_id = getattr(message, "message_id", None)
+                if temp_message_id is not None:
+                    try:
+                        await self.delete_message(
+                            chat_id=chat_id, message_id=temp_message_id
+                        )
+                    except Exception:
+                        logger.debug(
+                            "Failed to delete temporary keyboard message",
+                            extra={
+                                "chat_id": chat_id,
+                                "message_id": temp_message_id,
+                            },
+                        )
+            except Exception as e:
+                logger.error(
+                    "Error sending hidden cards keyboard",
+                    extra={
+                        "error_type": type(e).__name__,
+                        "chat_id": chat_id,
+                    },
+                )
+            return None
+
+        message_body = (
+            f"🃏 دست: {hand_text}\n"
+            f"🃎 میز: {table_text}"
+        )
         message_text = f"{mention_markdown}\n{message_body}"
         try:
             async def _send() -> Message:
@@ -672,9 +714,7 @@ class PokerBotViewer:
                 )
 
             message = await self._rate_limiter.send(_send, chat_id=chat_id)
-            new_message_id: Optional[MessageId] = None
-            if isinstance(message, Message):
-                new_message_id = message.message_id
+            new_message_id: Optional[MessageId] = getattr(message, "message_id", None)
 
             if message_id:
                 try:
