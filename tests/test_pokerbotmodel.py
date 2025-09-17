@@ -183,7 +183,7 @@ def _build_model_with_game():
     game = Game()
     player = Player(
         user_id=123,
-        mention_markdown="@player",
+        mention_markdown="[Player](tg://user?id=123)",
         wallet=MagicMock(),
         ready_message_id="ready",
     )
@@ -207,6 +207,7 @@ def test_send_cards_to_user_uses_group_chat():
     assert view.send_cards.await_args.kwargs["chat_id"] == chat_id
     assert view.send_cards.await_args.kwargs["hide_hand_text"] is True
     assert view.send_cards.await_args.kwargs["message_id"] is None
+    assert view.send_cards.await_args.kwargs["ready_message_id"] == player.ready_message_id
     assert game.message_ids_to_delete == []
     assert game.message_ids[player.user_id] == 900
     view.send_message.assert_not_awaited()
@@ -247,6 +248,8 @@ def test_send_cards_to_user_reuses_previous_keyboard_message():
 
     assert view.send_cards.await_count == 2
     assert view.send_cards.await_args_list[1].kwargs["message_id"] == 111
+    assert view.send_cards.await_args_list[0].kwargs["ready_message_id"] == player.ready_message_id
+    assert view.send_cards.await_args_list[1].kwargs["ready_message_id"] == player.ready_message_id
     assert game.message_ids[player.user_id] == 222
 
 
@@ -276,10 +279,12 @@ def test_add_cards_to_table_sends_plain_message_without_keyboard():
 
     assert first_call.kwargs["hide_hand_text"] is True
     assert "message_id" not in first_call.kwargs
+    assert first_call.kwargs["ready_message_id"] == player.ready_message_id
 
     assert second_call.kwargs["hide_hand_text"] is True
     assert second_call.kwargs["table_cards"] == game.cards_table
     assert second_call.kwargs["message_id"] == 900
+    assert second_call.kwargs["ready_message_id"] == player.ready_message_id
 
     assert game.board_message_id == 101
     assert 101 in game.message_ids_to_delete
@@ -297,6 +302,7 @@ def test_divide_cards_stores_keyboard_message_id():
     assert view.send_cards.await_count == 1
     call_kwargs = view.send_cards.await_args.kwargs
     assert "message_id" not in call_kwargs
+    assert call_kwargs["ready_message_id"] == player.ready_message_id
     assert game.message_ids[player.user_id] == 555
 
 

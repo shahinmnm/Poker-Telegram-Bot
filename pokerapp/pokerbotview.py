@@ -153,6 +153,26 @@ class RateLimitedSender:
             return None
 
 class PokerBotViewer:
+    _ZERO_WIDTH_SPACE = "\u2063"
+
+    @staticmethod
+    def _build_hidden_mention(mention_markdown: Optional[Mention]) -> str:
+        """Return an invisible Markdown mention for ``mention_markdown``."""
+
+        if not mention_markdown:
+            return ""
+
+        try:
+            label_end = mention_markdown.index("](")
+            link_end = mention_markdown.index(")", label_end + 2)
+            link = mention_markdown[label_end + 2 : link_end].strip()
+            if link:
+                return f"[{PokerBotViewer._ZERO_WIDTH_SPACE}]({link})"
+        except ValueError:
+            pass
+
+        return mention_markdown
+
     def __init__(self, bot: Bot, admin_chat_id: Optional[int] = None):
         self._bot = bot
         self._desk_generator = DeskImageGenerator()
@@ -649,7 +669,11 @@ class PokerBotViewer:
         table_values = list(table_cards or [])
         table_text = " ".join(str(card) for card in table_values) if table_values else "❔"
         if hide_hand_text:
-            hidden_text = "\u2063"
+            hidden_mention = PokerBotViewer._build_hidden_mention(mention_markdown)
+            if hidden_mention:
+                hidden_text = hidden_mention + PokerBotViewer._ZERO_WIDTH_SPACE
+            else:
+                hidden_text = PokerBotViewer._ZERO_WIDTH_SPACE
 
             if message_id:
                 try:

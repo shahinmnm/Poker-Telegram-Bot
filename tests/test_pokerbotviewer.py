@@ -8,6 +8,11 @@ from pokerapp.cards import Card
 from pokerapp.pokerbotview import PokerBotViewer
 
 
+MENTION_LINK = "tg://user?id=123"
+MENTION_MARKDOWN = f"[Player]({MENTION_LINK})"
+HIDDEN_MENTION_TEXT = f"[\u2063]({MENTION_LINK})\u2063"
+
+
 def run(coro):
     return asyncio.run(coro)
 
@@ -91,7 +96,7 @@ def test_send_cards_hides_group_hand_text_keeps_keyboard_message():
         viewer.send_cards(
             chat_id=123,
             cards=cards,
-            mention_markdown="@player",
+            mention_markdown=MENTION_MARKDOWN,
             table_cards=table_cards,
             hide_hand_text=True,
         )
@@ -101,15 +106,39 @@ def test_send_cards_hides_group_hand_text_keeps_keyboard_message():
     assert viewer._bot.send_message.await_count == 1
     call = viewer._bot.send_message.await_args
     text = call.kwargs["text"]
-    assert text == "\u2063"
-    assert "@player" not in text
+    assert text == HIDDEN_MENTION_TEXT
+    assert "Player" not in text
     assert "🔒" not in text
+    assert "reply_to_message_id" not in call.kwargs
     markup = call.kwargs["reply_markup"]
     assert markup is not None
     assert _row_texts(markup.keyboard[0]) == ["A♠", "K♦"]
     assert _row_texts(markup.keyboard[1]) == ["2♣", "3♣", "4♣"]
     assert _row_texts(markup.keyboard[2]) == ["🔁 پری فلاپ", "✅ فلاپ", "🔁 ترن", "🔁 ریور"]
     viewer.delete_message.assert_not_awaited()
+
+
+def test_send_cards_hidden_text_replies_to_ready_message():
+    viewer = PokerBotViewer(bot=MagicMock())
+    viewer._rate_limiter.send = _passthrough_rate_limit  # type: ignore[assignment]
+    viewer._bot.send_message = AsyncMock(return_value=MagicMock(message_id=99))
+
+    cards = [Card("A♠"), Card("K♦")]
+
+    result = run(
+        viewer.send_cards(
+            chat_id=123,
+            cards=cards,
+            mention_markdown=MENTION_MARKDOWN,
+            ready_message_id="777",
+            hide_hand_text=True,
+        )
+    )
+
+    assert result == 99
+    call = viewer._bot.send_message.await_args
+    assert call.kwargs["reply_to_message_id"] == "777"
+    assert call.kwargs["text"] == HIDDEN_MENTION_TEXT
 
 
 def test_send_cards_hides_group_hand_text_edits_existing_message():
@@ -127,7 +156,7 @@ def test_send_cards_hides_group_hand_text_edits_existing_message():
         viewer.send_cards(
             chat_id=123,
             cards=cards,
-            mention_markdown="@player",
+            mention_markdown=MENTION_MARKDOWN,
             hide_hand_text=True,
             message_id=777,
         )
@@ -140,7 +169,7 @@ def test_send_cards_hides_group_hand_text_edits_existing_message():
     edit_call = viewer._bot.edit_message_text.await_args
     assert edit_call.kwargs["chat_id"] == 123
     assert edit_call.kwargs["message_id"] == 777
-    assert edit_call.kwargs["text"] == "\u2063"
+    assert edit_call.kwargs["text"] == HIDDEN_MENTION_TEXT
     markup = edit_call.kwargs["reply_markup"]
     assert markup is not None
     assert _row_texts(markup.keyboard[0]) == ["A♠", "K♦"]
@@ -163,7 +192,7 @@ def test_send_cards_hides_group_hand_text_sends_new_when_edit_fails():
         viewer.send_cards(
             chat_id=123,
             cards=cards,
-            mention_markdown="@player",
+            mention_markdown=MENTION_MARKDOWN,
             hide_hand_text=True,
             message_id=777,
         )
@@ -187,7 +216,7 @@ def test_send_cards_includes_hand_details_by_default():
         viewer.send_cards(
             chat_id=456,
             cards=cards,
-            mention_markdown="@player",
+            mention_markdown=MENTION_MARKDOWN,
             table_cards=table_cards,
         )
     )
