@@ -565,6 +565,25 @@ class PokerBotModel:
                 player.hand_message_id = msg.message_id
                 game.message_ids_to_delete.append(msg.message_id)
 
+            group_message_id = await self._view.send_cards(
+                chat_id=chat_id,
+                cards=player.cards,
+                mention_markdown=player.mention_markdown,
+                ready_message_id=player.ready_message_id,
+                table_cards=game.cards_table,
+                stage="",
+                reply_to_ready_message=False,
+            )
+            if group_message_id:
+                if (
+                    player.group_hand_message_id
+                    and player.group_hand_message_id in game.message_ids_to_delete
+                ):
+                    game.message_ids_to_delete.remove(player.group_hand_message_id)
+                player.group_hand_message_id = group_message_id
+                if group_message_id not in game.message_ids_to_delete:
+                    game.message_ids_to_delete.append(group_message_id)
+
     def _is_betting_round_over(self, game: Game) -> bool:
         """
         بررسی می‌کند که آیا دور شرط‌بندی فعلی به پایان رسیده است یا خیر.
@@ -1125,6 +1144,26 @@ class PokerBotModel:
                         game.message_ids_to_delete.append(new_player_msg_id)
                 await asyncio.sleep(0.1)
 
+            group_previous_id = player.group_hand_message_id
+            group_message_id = await self._view.send_cards(
+                chat_id=chat_id,
+                cards=player.cards,
+                mention_markdown=player.mention_markdown,
+                table_cards=game.cards_table,
+                stage=stage,
+                message_id=group_previous_id,
+                reply_to_ready_message=False,
+            )
+            if group_message_id:
+                if (
+                    group_previous_id
+                    and group_previous_id in game.message_ids_to_delete
+                ):
+                    game.message_ids_to_delete.remove(group_previous_id)
+                player.group_hand_message_id = group_message_id
+                if group_message_id not in game.message_ids_to_delete:
+                    game.message_ids_to_delete.append(group_message_id)
+
         # پس از ارسال/ویرایش تصویر میز، پیام نوبت باید آخرین پیام باشد
         if count == 0 and game.turn_message_id:
             current_player = self._current_turn_player(game)
@@ -1161,6 +1200,9 @@ class PokerBotModel:
                 )
 
         game.message_ids_to_delete.clear()
+        for player in game.seated_players():
+            if player.group_hand_message_id in ids_to_delete:
+                player.group_hand_message_id = None
 
     async def _showdown(
         self, game: Game, chat_id: ChatId, context: CallbackContext
