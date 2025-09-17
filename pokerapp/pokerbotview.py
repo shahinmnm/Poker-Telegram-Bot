@@ -582,32 +582,36 @@ class PokerBotViewer:
         if message_id:
             try:
                 await self._rate_limiter.send(
-                    lambda: self._bot.edit_message_reply_markup(
+                    lambda: self._bot.delete_message(
                         chat_id=chat_id,
                         message_id=message_id,
-                        reply_markup=markup,
                     ),
                     chat_id=chat_id,
                 )
-                return message_id
+            except BadRequest:
+                # پیام ممکن است قبلاً حذف شده باشد؛ صرفاً ادامه می‌دهیم.
+                pass
             except Exception as e:
                 logger.error(
-                    "Error editing cards markup",
+                    "Error deleting previous cards message",
                     extra={
                         "error_type": type(e).__name__,
                         "chat_id": chat_id,
                         "request_params": {"message_id": message_id},
                     },
                 )
-                return None
+
         try:
             async def _send() -> Message:
+                reply_kwargs = {}
+                if ready_message_id and not message_id:
+                    reply_kwargs["reply_to_message_id"] = ready_message_id
                 return await self._bot.send_message(
                     chat_id=chat_id,
                     text=" ",
                     reply_markup=markup,
                     disable_notification=True,
-                    **({"reply_to_message_id": ready_message_id} if ready_message_id else {}),
+                    **reply_kwargs,
                 )
 
             message = await self._rate_limiter.send(_send, chat_id=chat_id)
