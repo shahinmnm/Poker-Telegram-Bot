@@ -695,8 +695,7 @@ class PokerBotViewer:
 
                 message_id = getattr(message, "message_id", None) if message else None
                 if message_id:
-                    await asyncio.sleep(0.1)
-                    await self.delete_message(chat_id, message_id)
+                    return message_id
             except Exception as e:
                 logger.error(
                     "Error sending hidden cards keyboard",
