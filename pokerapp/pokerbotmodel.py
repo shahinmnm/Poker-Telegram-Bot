@@ -502,7 +502,15 @@ class PokerBotModel:
         # Ensure dealer_index is initialized before use
         if not hasattr(game, "dealer_index"):
             game.dealer_index = -1
-        game.dealer_index = (game.dealer_index + 1) % game.seated_count()
+
+        new_dealer_index = game.advance_dealer()
+        if new_dealer_index == -1:
+            new_dealer_index = game.next_occupied_seat(-1)
+            game.dealer_index = new_dealer_index
+
+        if game.dealer_index == -1:
+            logger.warning("Cannot start game without an occupied dealer seat")
+            return
 
         game.state = GameState.ROUND_PRE_FLOP
         await self._divide_cards(game, chat_id)

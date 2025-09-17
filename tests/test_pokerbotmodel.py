@@ -358,6 +358,64 @@ async def test_auto_start_tick_skips_save_when_message_unchanged():
     assert context.chat_data[KEY_CHAT_DATA_GAME] is game
 
 
+@pytest.mark.asyncio
+async def test_start_game_assigns_blinds_to_occupied_seats():
+    view = MagicMock()
+    view.send_cards = AsyncMock()
+    view.send_message = AsyncMock()
+    bot = MagicMock()
+    cfg = MagicMock(DEBUG=False)
+    kv = MagicMock()
+    table_manager = MagicMock()
+
+    model = PokerBotModel(view=view, bot=bot, cfg=cfg, kv=kv, table_manager=table_manager)
+    model._divide_cards = AsyncMock()
+    model._send_turn_message = AsyncMock()
+    model._round_rate._set_player_blind = AsyncMock()
+
+    game = Game()
+    game.dealer_index = 0
+
+    wallet_a = MagicMock()
+    wallet_a.value.return_value = 1000
+    wallet_a.authorize = MagicMock()
+    player_a = Player(
+        user_id=1,
+        mention_markdown="@a",
+        wallet=wallet_a,
+        ready_message_id="ready-a",
+    )
+    game.add_player(player_a, seat_index=0)
+
+    wallet_b = MagicMock()
+    wallet_b.value.return_value = 1000
+    wallet_b.authorize = MagicMock()
+    player_b = Player(
+        user_id=2,
+        mention_markdown="@b",
+        wallet=wallet_b,
+        ready_message_id="ready-b",
+    )
+    game.add_player(player_b, seat_index=3)
+
+    context = SimpleNamespace(chat_data={}, job_queue=None)
+    chat_id = -123
+
+    await model._start_game(context, game, chat_id)
+
+    assert game.dealer_index == 3
+    assert game.small_blind_index == 3
+    assert game.big_blind_index == 0
+    assert game.get_player_by_seat(game.small_blind_index) is player_b
+    assert game.get_player_by_seat(game.big_blind_index) is player_a
+    assert game.current_player_index == game.small_blind_index
+
+    blind_players = {
+        call.args[1].user_id for call in model._round_rate._set_player_blind.await_args_list
+    }
+    assert blind_players == {1, 2}
+
+
 def test_send_turn_message_replaces_previous_message():
     model, game, player, view = _build_model_with_game()
     chat_id = -601
