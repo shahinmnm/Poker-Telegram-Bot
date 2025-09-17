@@ -1,6 +1,4 @@
 #!/usr/bin/env python3
-
-import asyncio
 import logging
 from dataclasses import dataclass
 from typing import Optional, Sequence, TYPE_CHECKING
@@ -53,7 +51,6 @@ class PokerBot:
         builder = (
             ApplicationBuilder()
             .token(token)
-            .post_init(self._apply_webhook_settings)
             .post_stop(self._cleanup_webhook)
             .job_queue(job_queue)
         )
@@ -99,6 +96,7 @@ class PokerBot:
             self._cfg.WEBHOOK_PATH,
             self._cfg.WEBHOOK_PUBLIC_URL,
         )
+        self._schedule_webhook_verification()
         try:
             self._application.run_webhook(
                 listen=self._cfg.WEBHOOK_LISTEN,
@@ -132,20 +130,24 @@ class PokerBot:
         finally:
             logger.info("Polling stopped.")
 
-    async def _apply_webhook_settings(self, application: "Application") -> None:
-        application.bot_data["webhook_settings"] = self._webhook_settings
-        logger.debug("Stored webhook settings in bot_data: %s", self._webhook_settings)
+    def _schedule_webhook_verification(self) -> None:
         try:
-            application.create_task(self._verify_webhook_registration(application))
-        except RuntimeError:
-            logger.warning(
-                "Failed to schedule webhook verification task; event loop not running yet."
+            self._application.job_queue.run_once(
+                self._webhook_verification_job,
+                when=1.0,
+                name="webhook-verification",
             )
+        except Exception:
+            logger.exception("Unable to schedule webhook verification job.")
 
-    async def _verify_webhook_registration(self, application: "Application") -> None:
-        await asyncio.sleep(1)
+    async def _webhook_verification_job(
+        self, _context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        await self._verify_webhook_registration()
+
+    async def _verify_webhook_registration(self) -> None:
         try:
-            webhook_info = await application.bot.get_webhook_info()
+            webhook_info = await self._application.bot.get_webhook_info()
         except Exception:
             logger.exception("Unable to confirm webhook registration with Telegram.")
             return
