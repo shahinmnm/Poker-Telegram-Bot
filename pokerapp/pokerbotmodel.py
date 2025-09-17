@@ -569,6 +569,7 @@ class PokerBotModel:
                 cards=cards,
                 mention_markdown=player.mention_markdown,
                 table_cards=game.cards_table,
+                hide_hand_text=True,
                 stage=stage,
                 reply_to_ready_message=False,
             )
@@ -1128,6 +1129,7 @@ class PokerBotModel:
                     cards=player.cards,
                     mention_markdown=player.mention_markdown,
                     table_cards=game.cards_table,
+                    hide_hand_text=True,
                     stage=stage,
                     message_id=previous_group_id,
                     reply_to_ready_message=False,

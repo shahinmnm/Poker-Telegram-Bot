@@ -653,6 +653,7 @@ class PokerBotViewer:
             mention_markdown: Mention,
             ready_message_id: str | None = None,
             table_cards: Cards | None = None,
+            hide_hand_text: bool = False,
             stage: str = "",
             message_id: MessageId | None = None,
             reply_to_ready_message: bool = True,
@@ -664,11 +665,14 @@ class PokerBotViewer:
         hand_text = " ".join(str(card) for card in cards)
         table_values = list(table_cards or [])
         table_text = " ".join(str(card) for card in table_values) if table_values else "❔"
-        message_text = (
-            f"{mention_markdown}\n"
-            f"🃏 دست: {hand_text}\n"
-            f"🃎 میز: {table_text}"
-        )
+        if hide_hand_text:
+            message_body = "🔒 کارت‌ها تنها در پیام خصوصی نمایش داده می‌شوند."
+        else:
+            message_body = (
+                f"🃏 دست: {hand_text}\n"
+                f"🃎 میز: {table_text}"
+            )
+        message_text = f"{mention_markdown}\n{message_body}"
         try:
             async def _send() -> Message:
                 reply_kwargs = {}
