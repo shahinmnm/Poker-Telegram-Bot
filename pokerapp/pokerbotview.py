@@ -97,7 +97,8 @@ class RateLimitedSender:
                         remaining = bucket["tokens"]
                     delay = self._delay
                     if remaining is not None and remaining < 5:
-                        delay += (5 - remaining) * 0.5
+                        shortage = max(0.0, 5 - remaining)
+                        delay += min(shortage * 0.2, 0.9)
                     await asyncio.sleep(delay)
                     return result
                 except RetryAfter as e:
