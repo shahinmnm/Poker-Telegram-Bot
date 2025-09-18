@@ -326,6 +326,7 @@ async def test_auto_start_tick_persists_replacement_message():
     assert game.ready_message_main_text == "prompt"
     table_manager.save_game.assert_awaited_once_with(chat_id, game)
     assert context.chat_data["start_countdown"] == 4
+    assert context.chat_data["start_countdown_last_rendered"] == 4
     assert context.chat_data[KEY_CHAT_DATA_GAME] is game
 
 
@@ -348,13 +349,21 @@ async def test_auto_start_tick_skips_save_when_message_unchanged():
 
     job = SimpleNamespace(chat_id=chat_id)
     job.schedule_removal = MagicMock()
-    context = SimpleNamespace(job=job, chat_data={"start_countdown": 10})
+    context = SimpleNamespace(
+        job=job,
+        chat_data={
+            "start_countdown": 12,
+            "start_countdown_last_rendered": 12,
+        },
+    )
 
     await model._auto_start_tick(context)
 
+    model._safe_edit_message_text.assert_not_awaited()
     assert game.ready_message_main_id == 555
     table_manager.save_game.assert_not_awaited()
-    assert context.chat_data["start_countdown"] == 9
+    assert context.chat_data["start_countdown"] == 11
+    assert context.chat_data["start_countdown_last_rendered"] == 12
     assert context.chat_data[KEY_CHAT_DATA_GAME] is game
 
 
@@ -387,6 +396,43 @@ async def test_auto_start_tick_decrements_before_rendering_countdown():
     assert button_text == "شروع بازی (59)"
     assert call_args.args[1] == 777
     assert context.chat_data["start_countdown"] == 59
+    assert context.chat_data["start_countdown_last_rendered"] == 59
+    table_manager.save_game.assert_not_awaited()
+    assert context.chat_data[KEY_CHAT_DATA_GAME] is game
+
+
+@pytest.mark.asyncio
+async def test_auto_start_tick_renders_on_multiple_of_four():
+    chat_id = -780
+    view = MagicMock()
+    bot = MagicMock()
+    cfg = MagicMock(DEBUG=False)
+    kv = MagicMock()
+    table_manager = MagicMock()
+    game = Game()
+    game.ready_message_main_id = 888
+    game.ready_message_main_text = "prompt"
+    table_manager.get_game = AsyncMock(return_value=game)
+    table_manager.save_game = AsyncMock()
+
+    model = PokerBotModel(view=view, bot=bot, cfg=cfg, kv=kv, table_manager=table_manager)
+    model._safe_edit_message_text = AsyncMock(return_value=888)
+
+    job = SimpleNamespace(chat_id=chat_id)
+    job.schedule_removal = MagicMock()
+    context = SimpleNamespace(
+        job=job,
+        chat_data={
+            "start_countdown": 9,
+            "start_countdown_last_rendered": 12,
+        },
+    )
+
+    await model._auto_start_tick(context)
+
+    model._safe_edit_message_text.assert_awaited_once()
+    assert context.chat_data["start_countdown"] == 8
+    assert context.chat_data["start_countdown_last_rendered"] == 8
     table_manager.save_game.assert_not_awaited()
     assert context.chat_data[KEY_CHAT_DATA_GAME] is game
 

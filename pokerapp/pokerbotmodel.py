@@ -150,14 +150,26 @@ class PokerBotModel:
         if remaining <= 0:
             job.schedule_removal()
             context.chat_data.pop("start_countdown_job", None)
+            context.chat_data.pop("start_countdown_last_rendered", None)
             await self._start_game(context, game, chat_id)
             return
         next_remaining = max(remaining - 1, 0)
-        if next_remaining == remaining:
-            # Nothing to update; ensure countdown stays in sync and exit early.
-            context.chat_data["start_countdown"] = next_remaining
-            return
         context.chat_data["start_countdown"] = next_remaining
+
+        last_rendered = context.chat_data.get("start_countdown_last_rendered")
+
+        should_render = False
+        if last_rendered is None:
+            should_render = True
+        elif next_remaining <= 5:
+            should_render = next_remaining != last_rendered
+        elif next_remaining % 4 == 0:
+            should_render = next_remaining != last_rendered
+
+        if not should_render:
+            return
+
+        context.chat_data["start_countdown_last_rendered"] = next_remaining
         keyboard_buttons = [
             [InlineKeyboardButton(text="نشستن سر میز", callback_data="join_game"),
              InlineKeyboardButton(text=f"شروع بازی ({next_remaining})", callback_data="start_game")]
@@ -184,6 +196,7 @@ class PokerBotModel:
             return
 
         context.chat_data["start_countdown"] = 60
+        context.chat_data.pop("start_countdown_last_rendered", None)
         job = context.job_queue.run_repeating(
             self._auto_start_tick, interval=1, chat_id=chat_id
         )
@@ -194,6 +207,7 @@ class PokerBotModel:
         if job:
             job.schedule_removal()
         context.chat_data.pop("start_countdown", None)
+        context.chat_data.pop("start_countdown_last_rendered", None)
 
     async def send_cards(
         self,
