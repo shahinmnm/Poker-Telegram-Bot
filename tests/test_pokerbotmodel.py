@@ -22,6 +22,7 @@ from pokerapp.pokerbotmodel import (
     STOP_CONFIRM_CALLBACK,
     STOP_RESUME_CALLBACK,
 )
+from pokerapp.pokerbotview import RateLimitedSender
 from telegram.error import BadRequest
 from telegram import InlineKeyboardMarkup
 
@@ -512,6 +513,56 @@ async def test_auto_start_tick_updates_text_with_countdown():
     assert "4 ثانیه" in rendered_text
     assert context.chat_data["start_countdown"] == 4
     assert game.ready_message_main_text == rendered_text
+    table_manager.save_game.assert_not_awaited()
+    assert context.chat_data[KEY_CHAT_DATA_GAME] is game
+
+
+@pytest.mark.asyncio
+async def test_auto_start_tick_finishes_without_rate_limit_tail_sleep(monkeypatch):
+    chat_id = -779
+    view = MagicMock()
+    bot = MagicMock()
+    cfg = MagicMock(DEBUG=False)
+    kv = MagicMock()
+    table_manager = MagicMock()
+    game = Game()
+    game.ready_message_main_id = 111
+    game.ready_message_main_text = "prompt"
+    table_manager.get_game = AsyncMock(return_value=game)
+    table_manager.save_game = AsyncMock()
+
+    model = PokerBotModel(view=view, bot=bot, cfg=cfg, kv=kv, table_manager=table_manager)
+
+    rate_limiter = RateLimitedSender(delay=0.5, max_per_minute=60)
+
+    async def limited_edit_message_text(chat_id_arg, message_id_arg, text, **kwargs):
+        assert chat_id_arg == chat_id
+        assert message_id_arg == 111
+
+        async def perform_edit():
+            return 111
+
+        await rate_limiter.send(perform_edit, chat_id=chat_id)
+        return 111
+
+    model._safe_edit_message_text = limited_edit_message_text
+
+    sleep_calls: List[float] = []
+
+    async def fake_sleep(duration: float) -> None:
+        sleep_calls.append(duration)
+
+    monkeypatch.setattr(asyncio, "sleep", fake_sleep)
+
+    job = SimpleNamespace(chat_id=chat_id)
+    job.schedule_removal = MagicMock()
+    context = SimpleNamespace(job=job, chat_data={"start_countdown": 3})
+
+    await model._auto_start_tick(context)
+
+    assert sleep_calls == []
+    assert context.chat_data["start_countdown"] == 2
+    assert game.ready_message_main_text != "prompt"
     table_manager.save_game.assert_not_awaited()
     assert context.chat_data[KEY_CHAT_DATA_GAME] is game
 
