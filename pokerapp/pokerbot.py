@@ -5,6 +5,7 @@ from typing import Optional, Sequence, TYPE_CHECKING
 
 import redis
 import redis.asyncio as aioredis
+from telegram.error import TelegramError
 from telegram.ext import ApplicationBuilder, ContextTypes, JobQueue
 
 from pokerapp.config import Config
@@ -89,7 +90,14 @@ class PokerBot:
 
     def run(self) -> None:
         """Start the bot using the webhook listener."""
-        self.run_webhook()
+        try:
+            self.run_webhook()
+        except (TelegramError, OSError) as exc:
+            if not self._handle_webhook_start_failure(exc):
+                raise
+        except Exception as exc:
+            if not self._handle_webhook_start_failure(exc):
+                raise
 
     def run_webhook(self) -> None:
         """Start the bot using webhook delivery."""
@@ -134,6 +142,25 @@ class PokerBot:
             raise
         finally:
             logger.info("Polling stopped.")
+
+    def _handle_webhook_start_failure(self, exc: Exception) -> bool:
+        """Handle failures when starting the webhook listener.
+
+        Returns True when the failure was handled (e.g., by falling back to
+        polling) and False when the caller should re-raise the exception.
+        """
+
+        if getattr(self._cfg, "ALLOW_POLLING_FALLBACK", False):
+            logger.error(
+                "Webhook startup failed; falling back to polling mode because "
+                "ALLOW_POLLING_FALLBACK is enabled. Error: %s",
+                exc,
+            )
+            logger.warning("Using polling mode as a fallback.")
+            self.run_polling()
+            return True
+
+        return False
 
     def _schedule_webhook_verification(self) -> None:
         try:
