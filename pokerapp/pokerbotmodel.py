@@ -2,7 +2,9 @@
 
 import asyncio
 import datetime
-from typing import List, Tuple, Dict, Optional
+import random
+from collections import defaultdict
+from typing import Dict, Iterable, List, Optional, Tuple
 
 import redis.asyncio as aioredis
 from redis.exceptions import NoScriptError
@@ -12,6 +14,7 @@ from telegram import (
     InlineKeyboardMarkup,
     Update,
     Bot,
+    User,
 )
 from telegram.constants import ParseMode
 from telegram.error import BadRequest, RetryAfter
@@ -24,6 +27,7 @@ from pokerapp.config import Config
 from pokerapp.winnerdetermination import (
     WinnerDetermination,
     HandsOfPoker,
+    HAND_NAMES_TRANSLATIONS,
 )
 from pokerapp.cards import Cards
 from pokerapp.entities import (
@@ -46,6 +50,12 @@ from pokerapp.entities import (
 )
 from pokerapp.pokerbotview import PokerBotViewer
 from pokerapp.table_manager import TableManager
+from pokerapp.stats import (
+    BaseStatsService,
+    NullStatsService,
+    PlayerHandResult,
+    PlayerIdentity,
+)
 
 DICE_MULT = 10
 DICE_DELAY_SEC = 5
@@ -78,6 +88,25 @@ class PokerBotModel:
         GameState.ROUND_RIVER,
     }
 
+    @staticmethod
+    def _safe_int(value: UserId) -> int:
+        try:
+            return int(value)  # type: ignore[arg-type]
+        except (TypeError, ValueError):
+            return 0
+
+    def _hand_type_to_label(self, hand_type: Optional[HandsOfPoker]) -> Optional[str]:
+        if not hand_type:
+            return None
+        translation = HAND_NAMES_TRANSLATIONS.get(hand_type, {})
+        label = translation.get("fa") or translation.get("en")
+        if not label:
+            label = hand_type.name.replace("_", " ").title()
+        emoji = translation.get("emoji")
+        if emoji:
+            return f"{emoji} {label}"
+        return label
+
     def __init__(
         self,
         view: PokerBotViewer,
@@ -85,6 +114,7 @@ class PokerBotModel:
         cfg: Config,
         kv: aioredis.Redis,
         table_manager: TableManager,
+        stats_service: Optional[BaseStatsService] = None,
     ):
         self._view: PokerBotViewer = view
         self._bot: Bot = bot
@@ -93,10 +123,95 @@ class PokerBotModel:
         self._table_manager = table_manager
         self._winner_determine: WinnerDetermination = WinnerDetermination()
         self._round_rate = RoundRateModel(view=self._view, kv=self._kv, model=self)
+        self._stats: BaseStatsService = stats_service or NullStatsService()
+        self._private_chat_ids: Dict[int, int] = {}
 
     @property
     def _min_players(self):
         return 1 if self._cfg.DEBUG else MIN_PLAYERS
+
+    def _stats_enabled(self) -> bool:
+        return not isinstance(self._stats, NullStatsService)
+
+    async def _register_player_identity(
+        self,
+        user: User,
+        *,
+        private_chat_id: Optional[int] = None,
+        display_name: Optional[str] = None,
+    ) -> None:
+        if private_chat_id:
+            self._private_chat_ids[self._safe_int(user.id)] = private_chat_id
+        if not self._stats_enabled():
+            return
+        identity = PlayerIdentity(
+            user_id=self._safe_int(user.id),
+            display_name=display_name or user.full_name or user.first_name or str(user.id),
+            username=user.username,
+            full_name=user.full_name,
+            private_chat_id=private_chat_id,
+        )
+        await self._stats.register_player_profile(identity)
+
+    def _build_private_menu(self) -> ReplyKeyboardMarkup:
+        return ReplyKeyboardMarkup(
+            [
+                ["🎁 بونوس روزانه", "📊 آمار بازی"],
+                ["⚙️ تنظیمات", "🃏 شروع بازی"],
+            ],
+            resize_keyboard=True,
+        )
+
+    def _build_identity_from_player(self, player: Player) -> PlayerIdentity:
+        display_name = getattr(player, "display_name", None) or player.mention_markdown
+        username = getattr(player, "username", None)
+        full_name = getattr(player, "full_name", None)
+        private_chat_id = getattr(player, "private_chat_id", None)
+        return PlayerIdentity(
+            user_id=self._safe_int(player.user_id),
+            display_name=display_name,
+            username=username,
+            full_name=full_name,
+            private_chat_id=private_chat_id,
+        )
+
+    async def _send_statistics_report(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        chat = update.effective_chat
+        user = update.effective_user
+        if chat.type != chat.PRIVATE:
+            await self._view.send_message(
+                chat.id,
+                "ℹ️ برای مشاهده آمار دقیق، لطفاً در چت خصوصی ربات از دکمه «📊 آمار بازی» استفاده کنید.",
+            )
+            return
+
+        await self._register_player_identity(user, private_chat_id=chat.id)
+
+        if not self._stats_enabled():
+            await self._view.send_message(
+                chat.id,
+                "⚙️ سیستم آمار در حال حاضر غیرفعال است. لطفاً بعداً دوباره تلاش کنید.",
+                reply_markup=self._build_private_menu(),
+            )
+            return
+
+        report = await self._stats.build_player_report(self._safe_int(user.id))
+        if report is None:
+            await self._view.send_message(
+                chat.id,
+                "ℹ️ هنوز داده‌ای برای نمایش وجود ندارد. پس از شرکت در چند دست بازی دوباره تلاش کنید.",
+                reply_markup=self._build_private_menu(),
+            )
+            return
+
+        formatted = self._stats.format_report(report)
+        await self._view.send_message(
+            chat.id,
+            formatted,
+            reply_markup=self._build_private_menu(),
+        )
 
     async def _get_game(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
@@ -447,6 +562,8 @@ class PokerBotModel:
 
         await self._send_join_prompt(game, chat_id)
 
+        await self._register_player_identity(user)
+
         if game.state != GameState.INITIAL:
             await self._view.send_message(chat_id, "⚠️ بازی قبلاً شروع شده است، لطفاً صبر کنید!")
             return
@@ -473,6 +590,10 @@ class PokerBotModel:
                 ready_message_id=game.ready_message_main_id,
                 seat_index=None,
             )
+            player.display_name = user.full_name or user.first_name or user.username
+            player.username = user.username
+            player.full_name = user.full_name
+            player.private_chat_id = self._private_chat_ids.get(self._safe_int(user.id))
             game.ready_users.add(user.id)
             seat_assigned = game.add_player(player)
             if seat_assigned == -1:
@@ -527,6 +648,26 @@ class PokerBotModel:
 
     async def start(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """بازی را به صورت دستی شروع می‌کند."""
+        chat = update.effective_chat
+        user = update.effective_user
+        if chat.type == chat.PRIVATE:
+            await self._register_player_identity(
+                user,
+                private_chat_id=chat.id,
+            )
+            welcome_text = (
+                "🎲 خوش آمدید به بازی پوکر ما!\n"
+                "لطفاً یکی از گزینه‌ها را از منوی زیر انتخاب کنید تا ادامه دهیم."
+            )
+            await self._view.send_message(
+                chat.id,
+                welcome_text,
+                reply_markup=self._build_private_menu(),
+            )
+            return
+
+        await self._register_player_identity(user)
+
         game, chat_id = await self._get_game(update, context)
         self._cancel_auto_start(context)
         if game.state not in (GameState.INITIAL, GameState.FINISHED):
@@ -881,6 +1022,17 @@ class PokerBotModel:
             logger.warning("Cannot start game without an occupied dealer seat")
             return
 
+        if self._stats_enabled():
+            identities = [
+                self._build_identity_from_player(player)
+                for player in game.seated_players()
+            ]
+            await self._stats.start_hand(
+                hand_id=game.id,
+                chat_id=self._safe_int(chat_id),
+                players=identities,
+            )
+
         game.state = GameState.ROUND_PRE_FLOP
         await self._divide_cards(game, chat_id)
 
@@ -961,14 +1113,16 @@ class PokerBotModel:
         # اگر هر دو شرط برقرار باشد، دور تمام شده است.
         return True
 
-    def _determine_winners(self, game: Game, contenders: list[Player]):
+    def _determine_winners(
+        self, game: Game, contenders: List[Player]
+    ) -> Tuple[List[Dict[str, object]], List[Dict[str, object]]]:
         """
         مغز متفکر مالی ربات! (نسخه ۲.۰ - خود اصلاحگر)
         برندگان را با در نظر گرفتن Side Pot مشخص کرده و با استفاده از game.pot
         از صحت محاسبات اطمینان حاصل می‌کند.
         """
         if not contenders or game.pot == 0:
-            return []
+            return [], []
 
         # ۱. محاسبه قدرت دست هر بازیکن (بدون تغییر)
         contender_details = []
@@ -1061,9 +1215,9 @@ class PokerBotModel:
         if len(bet_tiers) == 1 and len(winners_by_pot) > 1:
             logger.info("Merging unnecessary side pots into a single main pot")
             main_pot = {"amount": game.pot, "winners": winners_by_pot[0]["winners"]}
-            return [main_pot]
+            return [main_pot], contender_details
 
-        return winners_by_pot
+        return winners_by_pot, contender_details
 
     async def _process_playing(
         self, chat_id: ChatId, game: Game, context: CallbackContext
@@ -1534,6 +1688,78 @@ class PokerBotModel:
         except ValueError:
             return "Unknown Hand"
 
+    def _build_hand_statistics_results(
+        self,
+        game: Game,
+        payouts: Dict[int, int],
+        hand_labels: Dict[int, Optional[str]],
+    ) -> List[PlayerHandResult]:
+        results: List[PlayerHandResult] = []
+        for player in game.seated_players():
+            user_id = self._safe_int(player.user_id)
+            total_bet = int(getattr(player, "total_bet", 0))
+            payout = int(payouts.get(user_id, 0))
+            net_profit = payout - total_bet
+            if net_profit > 0 or (payout > 0 and total_bet == 0):
+                result_flag = "win"
+            elif net_profit < 0:
+                result_flag = "loss"
+            else:
+                result_flag = "push"
+            label = hand_labels.get(user_id)
+            if not label and result_flag == "win" and player.state == PlayerState.ALL_IN:
+                label = "پیروزی با آل-این"
+            results.append(
+                PlayerHandResult(
+                    user_id=user_id,
+                    display_name=player.mention_markdown,
+                    total_bet=total_bet,
+                    payout=payout,
+                    net_profit=net_profit,
+                    hand_type=label,
+                    was_all_in=player.state == PlayerState.ALL_IN,
+                    result=result_flag,
+                )
+            )
+        return results
+
+    async def bonus(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        chat = update.effective_chat
+        user = update.effective_user
+
+        if chat.type != chat.PRIVATE:
+            await self._view.send_message(
+                chat.id,
+                "ℹ️ برای دریافت بونوس روزانه، لطفاً در چت خصوصی با ربات گفتگو کنید.",
+            )
+            return
+
+        await self._register_player_identity(user, private_chat_id=chat.id)
+
+        wallet = WalletManagerModel(user.id, self._kv)
+        amount = random.choice(BONUSES)
+        try:
+            new_balance = await wallet.add_daily(amount)
+        except UserException as exc:
+            await self._view.send_message(
+                chat.id,
+                f"⚠️ {exc}",
+                reply_markup=self._build_private_menu(),
+            )
+            return
+
+        await self._view.send_message(
+            chat.id,
+            (
+                f"🎁 تبریک! {amount}$ بونوس تازه به موجودی شما افزوده شد.\n"
+                f"💼 موجودی فعلی: {new_balance}$"
+            ),
+            reply_markup=self._build_private_menu(),
+        )
+
+        if self._stats_enabled():
+            await self._stats.record_daily_bonus(self._safe_int(user.id), amount)
+
     async def _clear_game_messages(self, game: Game, chat_id: ChatId) -> None:
         """Deletes all temporary messages related to the current hand."""
         logger.debug("Clearing game messages", extra={"chat_id": chat_id})
@@ -1600,42 +1826,90 @@ class PokerBotModel:
 
         await self._clear_game_messages(game, chat_id)
 
+        hand_id = game.id
+        pot_total = game.pot
+        payouts: Dict[int, int] = defaultdict(int)
+        hand_labels: Dict[int, Optional[str]] = {}
+
         if not contenders:
             # سناریوی نادر که همه قبل از showdown فولد کرده‌اند
             active_players = game.players_by(states=(PlayerState.ACTIVE,))
             if len(active_players) == 1:
                 winner = active_players[0]
-                await winner.wallet.inc(game.pot)
+                amount = pot_total
+                if amount > 0:
+                    await winner.wallet.inc(amount)
+                    payouts[self._safe_int(winner.user_id)] += amount
+                hand_labels[self._safe_int(winner.user_id)] = "پیروزی با فولد رقبا"
                 await self._view.send_message(
                     chat_id,
-                    f"🏆 تمام بازیکنان دیگر فولد کردند! {winner.mention_markdown} برنده {game.pot}$ شد.",
+                    f"🏆 تمام بازیکنان دیگر فولد کردند! {winner.mention_markdown} برنده {amount}$ شد.",
                 )
         else:
             # ۱. تعیین برندگان و تقسیم تمام پات‌ها (اصلی و فرعی)
-            winners_by_pot = self._determine_winners(game, contenders)
+            determine_output = self._determine_winners(game, contenders)
+            if isinstance(determine_output, tuple):
+                winners_by_pot = list(determine_output[0] or [])
+                contender_details = (
+                    list(determine_output[1] or [])
+                    if len(determine_output) > 1
+                    else []
+                )
+            else:
+                winners_by_pot = list(determine_output or [])
+                contender_details = []
+
+            for detail in contender_details:
+                player = detail.get("player")
+                if not player:
+                    continue
+                label = self._hand_type_to_label(detail.get("hand_type"))
+                if label:
+                    hand_labels[self._safe_int(player.user_id)] = label
 
             if winners_by_pot:
-                # این حلقه روی تمام پات‌های ساخته شده (اصلی و فرعی) حرکت می‌کند
                 for pot in winners_by_pot:
                     pot_amount = pot.get("amount", 0)
                     winners_info = pot.get("winners", [])
-
                     if pot_amount > 0 and winners_info:
-                        win_amount_per_player = pot_amount // len(winners_info)
-                        for winner in winners_info:
-                            player = winner["player"]
-                            await player.wallet.inc(win_amount_per_player)
+                        base_share, remainder = divmod(pot_amount, len(winners_info))
+                        for index, winner in enumerate(winners_info):
+                            player = winner.get("player")
+                            if not player:
+                                continue
+                            win_amount = base_share + (1 if index < remainder else 0)
+                            if win_amount > 0:
+                                await player.wallet.inc(win_amount)
+                                payouts[self._safe_int(player.user_id)] += win_amount
+                            winner_label = self._hand_type_to_label(
+                                winner.get("hand_type")
+                            )
+                            if winner_label and self._safe_int(player.user_id) not in hand_labels:
+                                hand_labels[self._safe_int(player.user_id)] = winner_label
             else:
                 await self._view.send_message(
                     chat_id,
                     "ℹ️ هیچ برنده‌ای در این دست مشخص نشد. مشکلی در منطق بازی رخ داده است.",
                 )
 
-            # ۲. فراخوانی View برای نمایش نتایج
-            # View باید آپدیت شود تا این ساختار داده جدید را به زیبایی نمایش دهد
             await _send_with_retry(
                 self._view.send_showdown_results, chat_id, game, winners_by_pot
             )
+
+        if self._stats_enabled():
+            stats_results = self._build_hand_statistics_results(
+                game,
+                dict(payouts),
+                hand_labels,
+            )
+            await self._stats.finish_hand(
+                hand_id=hand_id,
+                chat_id=self._safe_int(chat_id),
+                results=stats_results,
+                pot_total=pot_total,
+            )
+
+        game.pot = 0
 
         # ۳. آماده‌سازی برای دست بعدی
         remaining_players = []

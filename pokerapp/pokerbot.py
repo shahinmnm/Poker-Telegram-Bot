@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+import asyncio
 import logging
 from dataclasses import dataclass
 from typing import Optional, Sequence, TYPE_CHECKING
@@ -12,6 +13,7 @@ from pokerapp.pokerbotcontrol import PokerBotCotroller
 from pokerapp.pokerbotmodel import PokerBotModel
 from pokerapp.pokerbotview import PokerBotViewer
 from pokerapp.table_manager import TableManager
+from pokerapp.stats import NullStatsService, StatsService
 from pokerapp.logging_config import setup_logging
 
 setup_logging(logging.INFO)
@@ -67,6 +69,14 @@ class PokerBot:
         )
 
         table_manager = TableManager(kv_async)
+        if cfg.DATABASE_URL:
+            stats_service = StatsService(
+                cfg.DATABASE_URL,
+                echo=getattr(cfg, "DATABASE_ECHO", False),
+            )
+        else:
+            stats_service = NullStatsService()
+        self._stats_service = stats_service
         view = PokerBotViewer(
             bot=self._application.bot,
             admin_chat_id=cfg.ADMIN_CHAT_ID,
@@ -78,6 +88,7 @@ class PokerBot:
             kv=kv_async,
             cfg=cfg,
             table_manager=table_manager,
+            stats_service=stats_service,
         )
         self._controller = PokerBotCotroller(model, self._application)
 
@@ -135,6 +146,16 @@ class PokerBot:
             raise
         finally:
             logger.info("Polling stopped.")
+            try:
+                asyncio.run(self._stats_service.close())
+            except RuntimeError:
+                loop = asyncio.new_event_loop()
+                try:
+                    loop.run_until_complete(self._stats_service.close())
+                finally:
+                    loop.close()
+            except Exception:
+                logger.exception("Failed to close statistics service after polling stop.")
 
     def _handle_webhook_start_failure(self, exc: Exception) -> bool:
         """Handle failures when starting the webhook listener.
@@ -268,6 +289,11 @@ class PokerBot:
             )
         else:
             logger.info("Webhook successfully removed from Telegram.")
+
+        try:
+            await self._stats_service.close()
+        except Exception:
+            logger.exception("Failed to close statistics service cleanly.")
 
     async def _handle_error(
         self, update: object, context: ContextTypes.DEFAULT_TYPE

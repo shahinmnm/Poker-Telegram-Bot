@@ -1,4 +1,5 @@
 import logging
+import logging
 import os
 from typing import List, Optional, Tuple
 from urllib.parse import urljoin
@@ -34,6 +35,12 @@ class Config:
             "POKERBOT_REDIS_DB",
             default="0"
         ))
+        self.DATABASE_URL: str = os.getenv(
+            "POKERBOT_DATABASE_URL",
+            default="",
+        ).strip()
+        database_echo_raw = os.getenv("POKERBOT_DATABASE_ECHO", "0").strip().lower()
+        self.DATABASE_ECHO: bool = database_echo_raw in {"1", "true", "yes", "on"}
         self.TOKEN: str = os.getenv(
             "POKERBOT_TOKEN",
             default="",
