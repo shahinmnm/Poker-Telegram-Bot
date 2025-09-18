@@ -58,6 +58,42 @@ The winner is determinated by various combinations of Poker hands rank from five
   frequently rate limited or raise it if you need to burst above the default
   throughput.
 
+### Statistics & database setup
+
+The bot ships with a production-ready statistics engine that keeps track of
+advanced player analytics (win/loss counts, streaks, ROI, favourite winning
+hands, all-in success rate, pot sizes, bonus usage, and more). Statistics are
+only shown in private chat to the requesting player.
+
+1. Provision a PostgreSQL (recommended) or MySQL database and set the
+   connection string via `POKERBOT_DATABASE_URL`, e.g.
+
+   ```bash
+   export POKERBOT_DATABASE_URL="postgresql+asyncpg://user:pass@db/pokerbot"
+   ```
+
+2. Apply the schema found in `migrations/001_create_statistics_tables.sql` to
+   the database before launching the bot. The script is idempotent and can be
+   executed with any SQL client.
+
+3. (Optional) enable verbose SQL logging during development with
+   `POKERBOT_DATABASE_ECHO=1`.
+
+Install the appropriate async driver for your database engine (`asyncpg` for
+PostgreSQL, `aiomysql` for MySQL) alongside the base requirements.
+
+When players interact with the bot in private chat they receive a Persian
+keyboard containing quick actions:
+
+- `🎁 بونوس روزانه` — claims the daily bonus in private chat.
+- `📊 آمار بازی` — fetches the full statistics report with Persian copy and
+  emoji-rich formatting.
+- `⚙️ تنظیمات` — placeholder for future wallet controls.
+- `🃏 شروع بازی` — instructs the user how to launch games inside a group.
+
+All statistics updates are recorded automatically at the end of each hand and
+are future-proofed for upcoming wallet/deposit/withdrawal features.
+
 ### FAQ
 
 1. It shows `not enough players` after `/start`.

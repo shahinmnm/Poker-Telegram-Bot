@@ -98,6 +98,37 @@ class PokerBotCotroller:
     async def _handle_text_buttons(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Handles clicks on custom reply keyboard buttons."""
         text = update.message.text
+        chat = update.effective_chat
+        if text == "📊 آمار بازی":
+            if chat.type != chat.PRIVATE:
+                await self._view.send_message(
+                    chat.id,
+                    "ℹ️ برای مشاهده آمار دقیق، لطفاً در گفت‌وگوی خصوصی ربات دکمه «📊 آمار بازی» را بزنید.",
+                )
+            else:
+                await self._model._send_statistics_report(update, context)
+            return
+        if text == "🎁 بونوس روزانه":
+            if chat.type != chat.PRIVATE:
+                await self._view.send_message(
+                    chat.id,
+                    "🎁 برای دریافت بونوس روزانه، این گزینه را در چت خصوصی انتخاب کنید.",
+                )
+            else:
+                await self._model.bonus(update, context)
+            return
+        if text == "⚙️ تنظیمات":
+            await self._view.send_message(
+                chat.id,
+                "⚙️ بخش تنظیمات به‌زودی با گزینه‌های شخصی‌سازی و مدیریت کیف‌پول فعال می‌شود.",
+            )
+            return
+        if text == "🃏 شروع بازی":
+            await self._view.send_message(
+                chat.id,
+                "🃏 برای راه‌اندازی میز جدید، در گروه مورد نظر دستور /newgame را ارسال کنید یا از مدیر گروه بخواهید بازی را آغاز کند.",
+            )
+            return
         normalized = text.replace("✅ ", "").replace("🔁 ", "")
         if normalized == "فلاپ":
             game, chat_id = await self._model._get_game(update, context)
