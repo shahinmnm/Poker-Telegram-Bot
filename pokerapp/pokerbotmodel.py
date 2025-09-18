@@ -1406,7 +1406,7 @@ class PokerBotModel:
         all_in_amount = await current_player.wallet.value()
 
         if all_in_amount <= 0:
-            self._view.send_message(
+            await self._view.send_message(
                 chat_id,
                 f"👀 {current_player.mention_markdown} موجودی برای آل-این ندارد و چک می‌کند.",
             )
@@ -1448,7 +1448,7 @@ class PokerBotModel:
         await self._table_manager.create_game(chat_id)
         game = await self._table_manager.get_game(chat_id)
         await self._send_join_prompt(game, chat_id)
-        self._view.send_message(chat_id, "بازی جدید ایجاد شد.")
+        await self._view.send_message(chat_id, "بازی جدید ایجاد شد.")
 
     async def _go_to_next_street(
         self, game: Game, chat_id: ChatId, context: CallbackContext
