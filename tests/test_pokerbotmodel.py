@@ -359,6 +359,39 @@ async def test_auto_start_tick_skips_save_when_message_unchanged():
 
 
 @pytest.mark.asyncio
+async def test_auto_start_tick_decrements_before_rendering_countdown():
+    chat_id = -779
+    view = MagicMock()
+    bot = MagicMock()
+    cfg = MagicMock(DEBUG=False)
+    kv = MagicMock()
+    table_manager = MagicMock()
+    game = Game()
+    game.ready_message_main_id = 777
+    game.ready_message_main_text = "prompt"
+    table_manager.get_game = AsyncMock(return_value=game)
+    table_manager.save_game = AsyncMock()
+
+    model = PokerBotModel(view=view, bot=bot, cfg=cfg, kv=kv, table_manager=table_manager)
+    model._safe_edit_message_text = AsyncMock(return_value=777)
+
+    job = SimpleNamespace(chat_id=chat_id)
+    job.schedule_removal = MagicMock()
+    context = SimpleNamespace(job=job, chat_data={"start_countdown": 60})
+
+    await model._auto_start_tick(context)
+
+    model._safe_edit_message_text.assert_awaited_once()
+    call_args = model._safe_edit_message_text.await_args
+    button_text = call_args.kwargs["reply_markup"].inline_keyboard[0][1].text
+    assert button_text == "شروع بازی (59)"
+    assert call_args.args[1] == 777
+    assert context.chat_data["start_countdown"] == 59
+    table_manager.save_game.assert_not_awaited()
+    assert context.chat_data[KEY_CHAT_DATA_GAME] is game
+
+
+@pytest.mark.asyncio
 async def test_start_game_assigns_blinds_to_occupied_seats():
     view = MagicMock()
     view.send_cards = AsyncMock()
