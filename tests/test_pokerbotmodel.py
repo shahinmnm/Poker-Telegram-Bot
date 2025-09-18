@@ -521,6 +521,7 @@ async def test_start_game_assigns_blinds_to_occupied_seats():
     view = MagicMock()
     view.send_cards = AsyncMock()
     view.send_message = AsyncMock()
+    view.delete_message = AsyncMock()
     bot = MagicMock()
     cfg = MagicMock(DEBUG=False)
     kv = MagicMock()
@@ -532,6 +533,9 @@ async def test_start_game_assigns_blinds_to_occupied_seats():
     model._round_rate._set_player_blind = AsyncMock()
 
     game = Game()
+    ready_message_id = 444
+    game.ready_message_main_id = ready_message_id
+    game.ready_message_main_text = "prompt"
     game.dealer_index = 0
 
     wallet_a = MagicMock()
@@ -561,6 +565,9 @@ async def test_start_game_assigns_blinds_to_occupied_seats():
 
     await model._start_game(context, game, chat_id)
 
+    view.delete_message.assert_awaited_once_with(chat_id, ready_message_id)
+    assert game.ready_message_main_id is None
+    assert game.ready_message_main_text == ""
     assert game.dealer_index == 3
     assert game.small_blind_index == 3
     assert game.big_blind_index == 0
@@ -572,6 +579,50 @@ async def test_start_game_assigns_blinds_to_occupied_seats():
         call.args[1].user_id for call in model._round_rate._set_player_blind.await_args_list
     }
     assert blind_players == {1, 2}
+
+
+@pytest.mark.asyncio
+async def test_start_game_keeps_ready_message_id_when_deletion_fails():
+    view = MagicMock()
+    view.send_cards = AsyncMock()
+    view.send_message = AsyncMock()
+    view.delete_message = AsyncMock(side_effect=BadRequest("not found"))
+    bot = MagicMock()
+    cfg = MagicMock(DEBUG=False)
+    kv = MagicMock()
+    table_manager = MagicMock()
+
+    model = PokerBotModel(view=view, bot=bot, cfg=cfg, kv=kv, table_manager=table_manager)
+    model._divide_cards = AsyncMock()
+    model._round_rate.set_blinds = AsyncMock()
+
+    game = Game()
+    ready_message_id = 321
+    game.ready_message_main_id = ready_message_id
+    game.ready_message_main_text = "prompt"
+    game.dealer_index = -1
+
+    wallet = MagicMock()
+    wallet.value.return_value = 1000
+    wallet.authorize = MagicMock()
+    player = Player(
+        user_id=5,
+        mention_markdown="@player",
+        wallet=wallet,
+        ready_message_id="ready",
+    )
+    game.add_player(player, seat_index=0)
+
+    context = SimpleNamespace(chat_data={}, job_queue=None)
+    chat_id = -456
+
+    await model._start_game(context, game, chat_id)
+
+    view.delete_message.assert_awaited_once_with(chat_id, ready_message_id)
+    assert game.ready_message_main_id == ready_message_id
+    assert game.ready_message_main_text == ""
+    model._divide_cards.assert_awaited_once_with(game, chat_id)
+    model._round_rate.set_blinds.assert_awaited_once_with(game, chat_id)
 
 
 def test_send_turn_message_replaces_previous_message():
