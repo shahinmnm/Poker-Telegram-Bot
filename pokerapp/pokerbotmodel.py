@@ -141,91 +141,83 @@ class PokerBotModel:
                 game.ready_message_main_text = "برای نشستن سر میز دکمه را بزن"
                 await self._table_manager.save_game(chat_id, game)
 
+    def _build_ready_message(
+        self, game: Game, countdown: Optional[int]
+    ) -> Tuple[str, InlineKeyboardMarkup]:
+        ready_items = [
+            f"{idx+1}. (صندلی {idx+1}) {p.mention_markdown} 🟢"
+            for idx, p in enumerate(game.seats)
+            if p
+        ]
+        ready_list = "\n".join(ready_items) if ready_items else "هنوز بازیکنی آماده نیست."
+
+        lines: List[str] = ["👥 *لیست بازیکنان آماده*", "", ready_list, ""]
+        lines.append(f"📊 {game.seated_count()}/{MAX_PLAYERS} بازیکن آماده")
+        lines.append("")
+
+        if countdown is None:
+            lines.append("🚀 برای شروع بازی /start را بزنید یا منتظر بمانید.")
+        elif countdown <= 0:
+            lines.append("🚀 بازی در حال شروع است...")
+        else:
+            lines.append(f"⏳ بازی تا {countdown} ثانیه دیگر شروع می‌شود.")
+            lines.append("🚀 برای شروع سریع‌تر بازی /start را بزنید یا صبر کنید.")
+
+        text = "\n".join(lines)
+
+        keyboard_buttons: List[List[InlineKeyboardButton]] = [
+            [InlineKeyboardButton(text="نشستن سر میز", callback_data="join_game")]
+        ]
+
+        if countdown is None:
+            if game.seated_count() >= self._min_players:
+                keyboard_buttons[0].append(
+                    InlineKeyboardButton(text="شروع بازی", callback_data="start_game")
+                )
+        else:
+            start_label = "شروع بازی (اکنون)" if countdown <= 0 else f"شروع بازی ({countdown})"
+            keyboard_buttons[0].append(
+                InlineKeyboardButton(text=start_label, callback_data="start_game")
+            )
+
+        keyboard = InlineKeyboardMarkup(keyboard_buttons)
+        return text, keyboard
+
     async def _auto_start_tick(self, context: CallbackContext) -> None:
         job = context.job
         chat_id = job.chat_id
         game = await self._table_manager.get_game(chat_id)
         context.chat_data[KEY_CHAT_DATA_GAME] = game
-        remaining = context.chat_data.get("start_countdown", 0)
+        remaining = context.chat_data.get("start_countdown")
+        if remaining is None:
+            job.schedule_removal()
+            context.chat_data.pop("start_countdown_job", None)
+            return
+
         if remaining <= 0:
             job.schedule_removal()
             context.chat_data.pop("start_countdown_job", None)
-            context.chat_data.pop("start_countdown_last_rendered", None)
+            context.chat_data.pop("start_countdown", None)
             await self._start_game(context, game, chat_id)
             await self._table_manager.save_game(chat_id, game)
             return
         next_remaining = max(remaining - 1, 0)
-        context.chat_data["start_countdown"] = next_remaining
+        text, keyboard = self._build_ready_message(game, next_remaining)
 
-        last_rendered = context.chat_data.get("start_countdown_last_rendered")
-
-        should_render = False
-        if last_rendered is None:
-            should_render = True
-        elif next_remaining <= 5:
-            should_render = next_remaining != last_rendered
-        elif next_remaining % 4 == 0:
-            should_render = next_remaining != last_rendered
-
-        if not should_render:
-            return
-
-        context.chat_data["start_countdown_last_rendered"] = next_remaining
-        keyboard_buttons = [
-            [
-                InlineKeyboardButton(text="نشستن سر میز", callback_data="join_game"),
-                InlineKeyboardButton(
-                    text=f"شروع بازی ({next_remaining})", callback_data="start_game"
-                ),
-            ]
-        ]
-        keyboard = InlineKeyboardMarkup(keyboard_buttons)
-        stored_text = getattr(game, "ready_message_main_text", "")
-        message_text = stored_text
         message_id = game.ready_message_main_id
-
-        markup_only = bool(message_id) and message_text == stored_text
-        if markup_only:
-            markup_updated = False
-            try:
-                markup_updated = await self._view.edit_message_reply_markup(
-                    chat_id, message_id, keyboard
-                )
-            except BadRequest as e:
-                err = str(e).lower()
-                if "message is not modified" in err:
-                    markup_updated = True
-                else:
-                    logger.warning(
-                        "Failed to edit reply markup",
-                        extra={
-                            "chat_id": chat_id,
-                            "message_id": message_id,
-                            "error_type": type(e).__name__,
-                        },
-                    )
-            except Exception as e:  # pragma: no cover - defensive logging
-                logger.warning(
-                    "Unexpected error editing reply markup",
-                    extra={
-                        "chat_id": chat_id,
-                        "message_id": message_id,
-                        "error_type": type(e).__name__,
-                    },
-                )
-            if markup_updated:
-                return
-
         new_message_id = await self._safe_edit_message_text(
             chat_id,
             message_id,
-            message_text,
+            text,
             reply_markup=keyboard,
         )
-        if new_message_id and new_message_id != game.ready_message_main_id:
-            game.ready_message_main_id = new_message_id
-            game.ready_message_main_text = message_text
-            await self._table_manager.save_game(chat_id, game)
+        if new_message_id:
+            if new_message_id != game.ready_message_main_id:
+                game.ready_message_main_id = new_message_id
+                await self._table_manager.save_game(chat_id, game)
+            game.ready_message_main_text = text
+
+        context.chat_data["start_countdown"] = next_remaining
 
     async def _schedule_auto_start(self, context: CallbackContext, game: Game, chat_id: ChatId) -> None:
         if context.chat_data.get("start_countdown_job"):
@@ -236,7 +228,6 @@ class PokerBotModel:
             return
 
         context.chat_data["start_countdown"] = 60
-        context.chat_data.pop("start_countdown_last_rendered", None)
         job = context.job_queue.run_repeating(
             self._auto_start_tick, interval=1, chat_id=chat_id
         )
@@ -247,7 +238,6 @@ class PokerBotModel:
         if job:
             job.schedule_removal()
         context.chat_data.pop("start_countdown", None)
-        context.chat_data.pop("start_countdown_last_rendered", None)
 
     async def send_cards(
         self,
@@ -458,34 +448,13 @@ class PokerBotModel:
                 await self._view.send_message(chat_id, "🚪 اتاق پر است!")
                 return
 
-        ready_list = "\n".join(
-            [
-                f"{idx+1}. (صندلی {idx+1}) {p.mention_markdown} 🟢"
-                for idx, p in enumerate(game.seats)
-                if p
-            ]
-        )
-        text = (
-            f"👥 *لیست بازیکنان آماده*\n\n{ready_list}\n\n"
-            f"📊 {game.seated_count()}/{MAX_PLAYERS} بازیکن آماده\n\n"
-            f"🚀 برای شروع بازی /start را بزنید یا منتظر بمانید."
-        )
-
-        keyboard_buttons = [
-            [InlineKeyboardButton(text="نشستن سر میز", callback_data="join_game")]
-        ]
         if game.seated_count() >= self._min_players:
             await self._schedule_auto_start(context, game, chat_id)
-            countdown = context.chat_data.get("start_countdown", 60)
-            keyboard_buttons[0].append(
-                InlineKeyboardButton(
-                    text=f"شروع بازی ({countdown})", callback_data="start_game"
-                )
-            )
         else:
             self._cancel_auto_start(context)
 
-        keyboard = InlineKeyboardMarkup(keyboard_buttons)
+        countdown_value = context.chat_data.get("start_countdown")
+        text, keyboard = self._build_ready_message(game, countdown_value)
         current_text = getattr(game, "ready_message_main_text", "")
 
         if game.ready_message_main_id:
@@ -499,6 +468,8 @@ class PokerBotModel:
                 if new_id:
                     game.ready_message_main_id = new_id
                     game.ready_message_main_text = text
+            else:
+                game.ready_message_main_text = current_text
         else:
             msg = await self._view.send_message_return_id(
                 chat_id, text, reply_markup=keyboard
@@ -1331,10 +1302,10 @@ class PokerBotModel:
 
         game.reset()
         await self._table_manager.save_game(chat_id, game)
-        await self._send_join_prompt(game, chat_id)
 
         await asyncio.sleep(0.1)
         await _send_with_retry(self._view.send_new_hand_ready_message, chat_id)
+        await self._send_join_prompt(game, chat_id)
 
     async def _end_hand(
         self, game: Game, chat_id: ChatId, context: CallbackContext

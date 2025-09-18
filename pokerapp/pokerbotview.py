@@ -179,7 +179,10 @@ class PokerBotViewer:
         self._admin_chat_id = admin_chat_id
         # 0.1s base delay to allow faster message delivery while avoiding limits
         self._rate_limiter = RateLimitedSender(
-            delay=0.1, error_delay=0.1, notify_admin=self.notify_admin
+            delay=0.1,
+            error_delay=0.1,
+            notify_admin=self.notify_admin,
+            max_per_minute=60,
         )
 
     async def notify_admin(self, log_data: Dict[str, Any]) -> None:
