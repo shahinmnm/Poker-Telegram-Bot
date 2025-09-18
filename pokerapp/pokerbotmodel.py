@@ -54,6 +54,10 @@ DICES = "⚀⚁⚂⚃⚄⚅"
 # legacy keys kept for backward compatibility but unused
 KEY_OLD_PLAYERS = "old_players"
 KEY_CHAT_DATA_GAME = "game"
+KEY_STOP_REQUEST = "stop_request"
+
+STOP_CONFIRM_CALLBACK = "stop:confirm"
+STOP_RESUME_CALLBACK = "stop:resume"
 
 # MAX_PLAYERS = 8 (Defined in entities)
 # MIN_PLAYERS = 2 (Defined in entities)
@@ -546,9 +550,296 @@ class PokerBotModel:
             )
         await self._table_manager.save_game(chat_id, game)
 
-    async def stop(self, user_id: int) -> None:
-        """Stop the current game for the chat where the user plays."""
-        game, chat_id = await self._get_game_by_user(user_id)
+    async def stop(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        """درخواست توقف بازی را ثبت می‌کند و رأی‌گیری را آغاز می‌کند."""
+        user_id = update.effective_user.id
+
+        try:
+            game, chat_id = await self._get_game(update, context)
+        except Exception:
+            game, chat_id = await self._get_game_by_user(user_id)
+            context.chat_data[KEY_CHAT_DATA_GAME] = game
+
+        if game.state == GameState.INITIAL:
+            raise UserException("بازی فعالی برای توقف وجود ندارد.")
+
+        if not any(player.user_id == user_id for player in game.seated_players()):
+            raise UserException("فقط بازیکنان حاضر می‌توانند درخواست توقف بدهند.")
+
+        await self._request_stop(context, game, chat_id, user_id)
+        await self._table_manager.save_game(chat_id, game)
+
+    async def _request_stop(
+        self,
+        context: ContextTypes.DEFAULT_TYPE,
+        game: Game,
+        chat_id: ChatId,
+        requester_id: UserId,
+    ) -> None:
+        """Create or update a stop request vote and announce it to the chat."""
+
+        active_players = [
+            p
+            for p in game.seated_players()
+            if p.state in (PlayerState.ACTIVE, PlayerState.ALL_IN)
+        ]
+        if not active_players:
+            raise UserException("هیچ بازیکن فعالی برای رأی‌گیری وجود ندارد.")
+
+        stop_request = context.chat_data.get(KEY_STOP_REQUEST)
+        if not stop_request or stop_request.get("game_id") != game.id:
+            stop_request = {
+                "game_id": game.id,
+                "active_players": [p.user_id for p in active_players],
+                "votes": set(),
+                "initiator": requester_id,
+                "message_id": None,
+                "manager_override": False,
+            }
+        else:
+            stop_request.setdefault("votes", set())
+            stop_request.setdefault("active_players", [])
+            stop_request.setdefault("manager_override", False)
+            stop_request["active_players"] = [p.user_id for p in active_players]
+
+        votes = set(stop_request.get("votes", set()))
+        if requester_id in stop_request["active_players"]:
+            votes.add(requester_id)
+        stop_request["votes"] = votes
+
+        message_text = self._render_stop_request_message(
+            game=game,
+            stop_request=stop_request,
+            context=context,
+        )
+
+        message_id = await self._safe_edit_message_text(
+            chat_id,
+            stop_request.get("message_id"),
+            message_text,
+            reply_markup=self._build_stop_request_markup(),
+        )
+        stop_request["message_id"] = message_id
+        context.chat_data[KEY_STOP_REQUEST] = stop_request
+
+    def _build_stop_request_markup(self) -> InlineKeyboardMarkup:
+        """Return the inline keyboard used for stop confirmations."""
+
+        keyboard = [
+            [
+                InlineKeyboardButton(
+                    text="تأیید توقف", callback_data=STOP_CONFIRM_CALLBACK
+                ),
+                InlineKeyboardButton(
+                    text="ادامه بازی", callback_data=STOP_RESUME_CALLBACK
+                ),
+            ]
+        ]
+        return InlineKeyboardMarkup(inline_keyboard=keyboard)
+
+    def _render_stop_request_message(
+        self,
+        game: Game,
+        stop_request: Dict[str, object],
+        context: ContextTypes.DEFAULT_TYPE,
+    ) -> str:
+        """Build the Markdown message describing the current stop vote."""
+
+        active_ids = set(stop_request.get("active_players", []))
+        votes = set(stop_request.get("votes", set()))
+        active_players = [
+            player
+            for player in game.seated_players()
+            if player.user_id in active_ids
+        ]
+        initiator_id = stop_request.get("initiator")
+        initiator_player = next(
+            (p for p in game.seated_players() if p.user_id == initiator_id),
+            None,
+        )
+        if initiator_player:
+            initiator_text = initiator_player.mention_markdown
+        else:
+            initiator_text = format_mention_markdown(initiator_id, str(initiator_id))
+
+        manager_id = context.chat_data.get("game_manager_id")
+        manager_player = None
+        if manager_id:
+            manager_player = next(
+                (p for p in game.seated_players() if p.user_id == manager_id),
+                None,
+            )
+
+        required_votes = (len(active_players) // 2) + 1 if active_players else 0
+        confirmed_votes = len(votes & {p.user_id for p in active_players})
+
+        active_lines = []
+        for player in active_players:
+            mark = "✅" if player.user_id in votes else "⬜️"
+            active_lines.append(f"{mark} {player.mention_markdown}")
+        if not active_lines:
+            active_lines.append("—")
+
+        lines = [
+            "🛑 *درخواست توقف بازی*",
+            f"درخواست توسط {initiator_text}",
+            "",
+            "بازیکنان فعال:",
+            *active_lines,
+            "",
+        ]
+
+        if active_players:
+            lines.append(f"آراء تأیید: {confirmed_votes}/{required_votes}")
+        else:
+            lines.append("آراء تأیید: 0/0")
+
+        if manager_player:
+            lines.extend(
+                [
+                    "",
+                    f"👤 مدیر بازی: {manager_player.mention_markdown}",
+                    "او می‌تواند به تنهایی رأی توقف را تأیید کند.",
+                ]
+            )
+
+        if votes - {p.user_id for p in active_players}:
+            extra_voters = votes - {p.user_id for p in active_players}
+            voter_mentions = []
+            for voter_id in extra_voters:
+                player = next(
+                    (p for p in game.seated_players() if p.user_id == voter_id),
+                    None,
+                )
+                if player:
+                    voter_mentions.append(player.mention_markdown)
+                else:
+                    voter_mentions.append(
+                        format_mention_markdown(voter_id, str(voter_id))
+                    )
+            lines.extend(
+                [
+                    "",
+                    "رأی سایر افراد:",
+                    *voter_mentions,
+                ]
+            )
+
+        return "\n".join(lines)
+
+    async def confirm_stop_vote(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        """Handle a confirmation vote for stopping the current hand."""
+
+        game, chat_id = await self._get_game(update, context)
+        stop_request = context.chat_data.get(KEY_STOP_REQUEST)
+        if not stop_request or stop_request.get("game_id") != game.id:
+            raise UserException("درخواست توقف فعالی وجود ندارد.")
+
+        user_id = update.callback_query.from_user.id
+        manager_id = context.chat_data.get("game_manager_id")
+
+        active_ids = set(stop_request.get("active_players", []))
+        votes = set(stop_request.get("votes", set()))
+
+        if user_id not in active_ids and user_id != manager_id:
+            raise UserException("تنها بازیکنان فعال یا مدیر می‌توانند رأی دهند.")
+
+        votes.add(user_id)
+        stop_request["votes"] = votes
+        stop_request["manager_override"] = bool(manager_id and user_id == manager_id)
+
+        message_text = self._render_stop_request_message(
+            game=game,
+            stop_request=stop_request,
+            context=context,
+        )
+
+        message_id = await self._safe_edit_message_text(
+            chat_id,
+            stop_request.get("message_id"),
+            message_text,
+            reply_markup=self._build_stop_request_markup(),
+        )
+        stop_request["message_id"] = message_id
+        context.chat_data[KEY_STOP_REQUEST] = stop_request
+
+        active_votes = len(votes & active_ids)
+        required_votes = (len(active_ids) // 2) + 1 if active_ids else 0
+
+        if stop_request.get("manager_override"):
+            await self._cancel_hand(game, chat_id, context, stop_request)
+            return
+
+        if active_ids and active_votes >= required_votes:
+            await self._cancel_hand(game, chat_id, context, stop_request)
+
+    async def resume_stop_vote(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        """Cancel the stop request and keep the current game running."""
+
+        game, chat_id = await self._get_game(update, context)
+        stop_request = context.chat_data.get(KEY_STOP_REQUEST)
+        if not stop_request or stop_request.get("game_id") != game.id:
+            raise UserException("درخواست توقفی برای لغو وجود ندارد.")
+
+        message_id = stop_request.get("message_id")
+        context.chat_data.pop(KEY_STOP_REQUEST, None)
+
+        resume_text = "✅ رأی به ادامه‌ی بازی داده شد. بازی ادامه می‌یابد."
+        await self._safe_edit_message_text(
+            chat_id, message_id, resume_text, reply_markup=None
+        )
+
+    async def _cancel_hand(
+        self,
+        game: Game,
+        chat_id: ChatId,
+        context: ContextTypes.DEFAULT_TYPE,
+        stop_request: Dict[str, object],
+    ) -> None:
+        """Cancel the current hand, refund players, and reset the game."""
+
+        original_game_id = game.id
+        players_snapshot = list(game.seated_players())
+
+        for player in players_snapshot:
+            if player.wallet:
+                player.wallet.cancel(original_game_id)
+
+        game.pot = 0
+
+        active_ids = set(stop_request.get("active_players", []))
+        votes = set(stop_request.get("votes", set()))
+        manager_override = stop_request.get("manager_override", False)
+
+        approved_votes = len(votes & active_ids)
+        required_votes = (len(active_ids) // 2) + 1 if active_ids else 0
+
+        if manager_override:
+            summary_line = "🛑 *مدیر بازی بازی را متوقف کرد.*"
+        else:
+            summary_line = "🛑 *بازی با رأی اکثریت متوقف شد.*"
+
+        details = (
+            f"آراء تأیید: {approved_votes}/{required_votes}"
+            if active_ids
+            else "هیچ رأی فعالی ثبت نشد."
+        )
+
+        await self._safe_edit_message_text(
+            chat_id,
+            stop_request.get("message_id"),
+            "\n".join([summary_line, details]),
+            reply_markup=None,
+        )
+
+        context.chat_data.pop(KEY_STOP_REQUEST, None)
+
         game.reset()
         await self._table_manager.save_game(chat_id, game)
         await self._view.send_message(chat_id, "🛑 بازی متوقف شد.")

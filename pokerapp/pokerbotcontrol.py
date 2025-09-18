@@ -13,7 +13,11 @@ from telegram.ext import (
 import traceback  # <--- برای لاگ دقیق خطا اضافه شد
 
 from pokerapp.entities import PlayerAction, UserException
-from pokerapp.pokerbotmodel import PokerBotModel
+from pokerapp.pokerbotmodel import (
+    PokerBotModel,
+    STOP_CONFIRM_CALLBACK,
+    STOP_RESUME_CALLBACK,
+)
 
 class PokerBotCotroller:
     def __init__(self, model: PokerBotModel, application: Application):
@@ -39,6 +43,12 @@ class PokerBotCotroller:
         application.add_handler(CallbackQueryHandler(self._handle_start, pattern="^start_game$"))
         application.add_handler(CallbackQueryHandler(self._handle_join_game, pattern="^join_game$"))
         application.add_handler(CallbackQueryHandler(self._handle_board_card, pattern="^board_card_"))
+        application.add_handler(
+            CallbackQueryHandler(
+                self._handle_stop_vote,
+                pattern=f"^({'|'.join([STOP_CONFIRM_CALLBACK, STOP_RESUME_CALLBACK])})$",
+            )
+        )
         application.add_handler(CallbackQueryHandler(self.middleware_user_turn))
 
 
@@ -108,7 +118,28 @@ class PokerBotCotroller:
         await self._model.start(update, context)
 
     async def _handle_stop(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        await self._model.stop(user_id=update.effective_message.from_user.id)
+        try:
+            await self._model.stop(update, context)
+        except UserException as ex:
+            await self._view.send_message(update.effective_chat.id, str(ex))
+
+    async def _handle_stop_vote(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        query = update.callback_query
+        if not query or not query.data:
+            return
+
+        try:
+            if query.data == STOP_CONFIRM_CALLBACK:
+                await self._model.confirm_stop_vote(update, context)
+                await query.answer()
+            elif query.data == STOP_RESUME_CALLBACK:
+                await self._model.resume_stop_vote(update, context)
+                await query.answer()
+        except UserException as exc:
+            await query.answer(text=str(exc), show_alert=True)
+            await self._view.send_message(update.effective_chat.id, str(exc))
 
     async def _handle_ban(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await self._model.ban_player(update, context)
