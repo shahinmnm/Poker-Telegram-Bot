@@ -3,10 +3,11 @@
 import asyncio
 import unittest
 from types import SimpleNamespace
-from typing import List, Tuple
+from typing import List, Tuple, Optional
 from unittest.mock import AsyncMock, MagicMock
 
 import fakeredis
+import fakeredis.aioredis
 import pytest
 
 from pokerapp.cards import Cards, Card
@@ -32,152 +33,159 @@ def with_cards(p: Player) -> Tuple[Player, Cards]:
     return (p, [Card("6♥"), Card("A♥"), Card("A♣"), Card("A♠")])
 
 
-class TestRoundRateModel(unittest.TestCase):
+def make_wallet_mock(value: Optional[int] = None):
+    wallet = MagicMock()
+    wallet.value = AsyncMock(return_value=value)
+    wallet.authorize = AsyncMock()
+    wallet.inc = AsyncMock()
+    wallet.cancel = AsyncMock()
+    wallet.approve = AsyncMock()
+    wallet.authorized_money = AsyncMock()
+    return wallet
+
+
+class TestRoundRateModel(unittest.IsolatedAsyncioTestCase):
     def __init__(self, *args, **kwargs):
         super(TestRoundRateModel, self).__init__(*args, **kwargs)
         self._user_id = 0
         self._round_rate = RoundRateModel()
-        self._kv = fakeredis.FakeRedis()
+        self._kv = fakeredis.aioredis.FakeRedis()
 
-    def _next_player(self, game: Game, autorized: Money) -> Player:
+    async def asyncSetUp(self):
+        await self._kv.flushall()
+
+    async def _next_player(self, game: Game, autorized: Money) -> Player:
         self._user_id += 1
         wallet_manager = WalletManagerModel(self._user_id, kv=self._kv)
-        wallet_manager.authorize_all("clean_wallet_game")
-        wallet_manager.inc(autorized)
-        wallet_manager.authorize(game.id, autorized)
+        await wallet_manager.authorize_all('clean_wallet_game')
+        await wallet_manager.inc(autorized)
+        await wallet_manager.authorize(game.id, autorized)
         game.pot += autorized
         p = Player(
             user_id=self._user_id,
-            mention_markdown="@test",
+            mention_markdown='@test',
             wallet=wallet_manager,
-            ready_message_id="",
+            ready_message_id='',
         )
         game.players.append(p)
-
         return p
 
-    def _approve_all(self, game: Game) -> None:
+    async def _approve_all(self, game: Game) -> None:
         for player in game.players:
-            player.wallet.approve(game.id)
+            await player.wallet.approve(game.id)
 
-    def assert_authorized_money_zero(self, game_id: str, *players: Player):
+    async def assert_authorized_money_zero(self, game_id: str, *players: Player):
         for (i, p) in enumerate(players):
-            authorized = p.wallet.authorized_money(game_id=game_id)
-            self.assertEqual(0, authorized, "player[" + str(i) + "]")
+            authorized = await p.wallet.authorized_money(game_id=game_id)
+            self.assertEqual(0, authorized, 'player[' + str(i) + ']')
 
-    def test_finish_rate_single_winner(self):
+    async def test_finish_rate_single_winner(self):
         g = Game()
-        winner = self._next_player(g, 50)
-        loser = self._next_player(g, 50)
+        winner = await self._next_player(g, 50)
+        loser = await self._next_player(g, 50)
 
-        self._round_rate.finish_rate(g, player_scores={
+        await self._round_rate.finish_rate(g, player_scores={
             1: [with_cards(winner)],
             0: [with_cards(loser)],
         })
-        self._approve_all(g)
+        await self._approve_all(g)
 
-        self.assertAlmostEqual(100, winner.wallet.value(), places=1)
-        self.assertAlmostEqual(0, loser.wallet.value(), places=1)
-        self.assert_authorized_money_zero(g.id, winner, loser)
+        self.assertAlmostEqual(100, await winner.wallet.value(), places=1)
+        self.assertAlmostEqual(0, await loser.wallet.value(), places=1)
+        await self.assert_authorized_money_zero(g.id, winner, loser)
 
-    def test_finish_rate_two_winners(self):
+    async def test_finish_rate_two_winners(self):
         g = Game()
-        first_winner = self._next_player(g, 50)
-        second_winner = self._next_player(g, 50)
-        loser = self._next_player(g, 100)
+        first_winner = await self._next_player(g, 50)
+        second_winner = await self._next_player(g, 50)
+        loser = await self._next_player(g, 100)
 
-        self._round_rate.finish_rate(g, player_scores={
+        await self._round_rate.finish_rate(g, player_scores={
             1: [with_cards(first_winner), with_cards(second_winner)],
             0: [with_cards(loser)],
         })
-        self._approve_all(g)
+        await self._approve_all(g)
 
-        self.assertAlmostEqual(100, first_winner.wallet.value(), places=1)
-        self.assertAlmostEqual(100, second_winner.wallet.value(), places=1)
-        self.assertAlmostEqual(0, loser.wallet.value(), places=1)
-        self.assert_authorized_money_zero(
+        self.assertAlmostEqual(100, await first_winner.wallet.value(), places=1)
+        self.assertAlmostEqual(100, await second_winner.wallet.value(), places=1)
+        self.assertAlmostEqual(0, await loser.wallet.value(), places=1)
+        await self.assert_authorized_money_zero(
             g.id,
             first_winner,
             second_winner,
             loser,
         )
 
-    def test_finish_rate_all_in_one_extra_winner(self):
+    async def test_finish_rate_all_in_one_extra_winner(self):
         g = Game()
-        first_winner = self._next_player(g, 15)  # All in.
-        second_winner = self._next_player(g, 5)  # All in.
-        extra_winner = self._next_player(g, 90)  # All in.
-        loser = self._next_player(g, 90)  # Call.
+        first_winner = await self._next_player(g, 15)  # All in.
+        second_winner = await self._next_player(g, 5)  # All in.
+        extra_winner = await self._next_player(g, 90)  # All in.
+        loser = await self._next_player(g, 90)  # Call.
 
-        self._round_rate.finish_rate(g, player_scores={
+        await self._round_rate.finish_rate(g, player_scores={
             2: [with_cards(first_winner), with_cards(second_winner)],
             1: [with_cards(extra_winner)],
             0: [with_cards(loser)],
         })
-        self._approve_all(g)
+        await self._approve_all(g)
 
-        # authorized * len(players)
-        self.assertAlmostEqual(60, first_winner.wallet.value(), places=1)
-        # authorized * len(players)
-        self.assertAlmostEqual(20, second_winner.wallet.value(), places=1)
-        # pot - winners
-        self.assertAlmostEqual(120, extra_winner.wallet.value(), places=1)
+        self.assertAlmostEqual(60, await first_winner.wallet.value(), places=1)
+        self.assertAlmostEqual(20, await second_winner.wallet.value(), places=1)
+        self.assertAlmostEqual(120, await extra_winner.wallet.value(), places=1)
+        self.assertAlmostEqual(0, await loser.wallet.value(), places=1)
 
-        self.assertAlmostEqual(0, loser.wallet.value(), places=1)
-
-        self.assert_authorized_money_zero(
+        await self.assert_authorized_money_zero(
             g.id, first_winner, second_winner, extra_winner, loser,
         )
 
-    def test_finish_rate_all_winners(self):
+    async def test_finish_rate_all_winners(self):
         g = Game()
-        first_winner = self._next_player(g, 50)
-        second_winner = self._next_player(g, 100)
-        third_winner = self._next_player(g, 150)
+        first_winner = await self._next_player(g, 50)
+        second_winner = await self._next_player(g, 100)
+        third_winner = await self._next_player(g, 150)
 
-        self._round_rate.finish_rate(g, player_scores={
+        await self._round_rate.finish_rate(g, player_scores={
             1: [
                 with_cards(first_winner),
                 with_cards(second_winner),
                 with_cards(third_winner),
             ],
         })
-        self._approve_all(g)
+        await self._approve_all(g)
 
-        self.assertAlmostEqual(50, first_winner.wallet.value(), places=1)
+        self.assertAlmostEqual(50, await first_winner.wallet.value(), places=1)
         self.assertAlmostEqual(
-            100, second_winner.wallet.value(), places=1)
-        self.assertAlmostEqual(150, third_winner.wallet.value(), places=1)
-        self.assert_authorized_money_zero(
+            100, await second_winner.wallet.value(), places=1)
+        self.assertAlmostEqual(150, await third_winner.wallet.value(), places=1)
+        await self.assert_authorized_money_zero(
             g.id, first_winner, second_winner, third_winner,
         )
 
-    def test_finish_rate_all_in_all(self):
+    async def test_finish_rate_all_in_all(self):
         g = Game()
 
-        first_winner = self._next_player(g, 3)  # All in.
-        second_winner = self._next_player(g, 60)  # All in.
-        third_loser = self._next_player(g, 10)  # All in.
-        fourth_loser = self._next_player(g, 10)  # All in.
+        first_winner = await self._next_player(g, 3)  # All in.
+        second_winner = await self._next_player(g, 60)  # All in.
+        third_loser = await self._next_player(g, 10)  # All in.
+        fourth_loser = await self._next_player(g, 10)  # All in.
 
-        self._round_rate.finish_rate(g, player_scores={
+        await self._round_rate.finish_rate(g, player_scores={
             3: [with_cards(first_winner), with_cards(second_winner)],
             2: [with_cards(third_loser)],
             1: [with_cards(fourth_loser)],
         })
-        self._approve_all(g)
+        await self._approve_all(g)
 
-        # pot * (autorized / winners_authorized)
-        self.assertAlmostEqual(4, first_winner.wallet.value(), places=1)
-        self.assertAlmostEqual(79, second_winner.wallet.value(), places=1)
+        self.assertAlmostEqual(4, await first_winner.wallet.value(), places=1)
+        self.assertAlmostEqual(79, await second_winner.wallet.value(), places=1)
 
-        self.assertAlmostEqual(0, third_loser.wallet.value(), places=1)
-        self.assertAlmostEqual(0, fourth_loser.wallet.value(), places=1)
+        self.assertAlmostEqual(0, await third_loser.wallet.value(), places=1)
+        self.assertAlmostEqual(0, await fourth_loser.wallet.value(), places=1)
 
-        self.assert_authorized_money_zero(
+        await self.assert_authorized_money_zero(
             g.id, first_winner, second_winner, third_loser, fourth_loser
         )
-
 
 if __name__ == '__main__':
     unittest.main()
@@ -193,10 +201,11 @@ def _build_model_with_game():
     table_manager = MagicMock()
     model = PokerBotModel(view=view, bot=bot, cfg=cfg, kv=kv, table_manager=table_manager)
     game = Game()
+    wallet = make_wallet_mock()
     player = Player(
         user_id=123,
         mention_markdown="[Player](tg://user?id=123)",
-        wallet=MagicMock(),
+        wallet=wallet,
         ready_message_id="ready",
     )
     game.add_player(player, seat_index=0)
@@ -220,7 +229,7 @@ async def test_request_stop_creates_vote_prompt():
     model = PokerBotModel(view=view, bot=bot, cfg=cfg, kv=kv, table_manager=table_manager)
 
     game = Game()
-    wallet_a = MagicMock()
+    wallet_a = make_wallet_mock()
     player_a = Player(
         user_id=1,
         mention_markdown="@player_a",
@@ -229,7 +238,7 @@ async def test_request_stop_creates_vote_prompt():
     )
     game.add_player(player_a, seat_index=0)
 
-    wallet_b = MagicMock()
+    wallet_b = make_wallet_mock()
     player_b = Player(
         user_id=2,
         mention_markdown="@player_b",
@@ -276,7 +285,7 @@ async def test_confirm_stop_vote_triggers_cancel_on_majority():
     model = PokerBotModel(view=view, bot=bot, cfg=cfg, kv=kv, table_manager=table_manager)
 
     game = Game()
-    wallet_a = MagicMock()
+    wallet_a = make_wallet_mock()
     player_a = Player(
         user_id=10,
         mention_markdown="@p10",
@@ -285,7 +294,7 @@ async def test_confirm_stop_vote_triggers_cancel_on_majority():
     )
     game.add_player(player_a, seat_index=0)
 
-    wallet_b = MagicMock()
+    wallet_b = make_wallet_mock()
     player_b = Player(
         user_id=11,
         mention_markdown="@p11",
@@ -332,8 +341,8 @@ async def test_cancel_hand_refunds_wallets_and_announces():
     model = PokerBotModel(view=view, bot=bot, cfg=cfg, kv=kv, table_manager=table_manager)
 
     game = Game()
-    wallet_a = MagicMock()
-    wallet_b = MagicMock()
+    wallet_a = make_wallet_mock()
+    wallet_b = make_wallet_mock()
     player_a = Player(
         user_id=20,
         mention_markdown="@p20",
@@ -364,8 +373,8 @@ async def test_cancel_hand_refunds_wallets_and_announces():
 
     await model._cancel_hand(game, chat_id, context, stop_request)
 
-    wallet_a.cancel.assert_called_once_with(original_game_id)
-    wallet_b.cancel.assert_called_once_with(original_game_id)
+    wallet_a.cancel.assert_awaited_once_with(original_game_id)
+    wallet_b.cancel.assert_awaited_once_with(original_game_id)
     assert game.pot == 0
     assert KEY_STOP_REQUEST not in context.chat_data
     assert view.edit_message_text.await_count == 1
@@ -675,8 +684,7 @@ async def test_showdown_sends_new_hand_message_before_join_prompt():
     model._determine_winners = MagicMock(return_value=[])
 
     game = Game()
-    wallet = MagicMock()
-    wallet.value.return_value = 100
+    wallet = make_wallet_mock(100)
     player = Player(
         user_id=1,
         mention_markdown="@player",
@@ -718,9 +726,7 @@ async def test_start_game_assigns_blinds_to_occupied_seats():
     game.ready_message_main_text = "prompt"
     game.dealer_index = 0
 
-    wallet_a = MagicMock()
-    wallet_a.value.return_value = 1000
-    wallet_a.authorize = MagicMock()
+    wallet_a = make_wallet_mock(1000)
     player_a = Player(
         user_id=1,
         mention_markdown="@a",
@@ -729,9 +735,7 @@ async def test_start_game_assigns_blinds_to_occupied_seats():
     )
     game.add_player(player_a, seat_index=0)
 
-    wallet_b = MagicMock()
-    wallet_b.value.return_value = 1000
-    wallet_b.authorize = MagicMock()
+    wallet_b = make_wallet_mock(1000)
     player_b = Player(
         user_id=2,
         mention_markdown="@b",
@@ -782,9 +786,7 @@ async def test_start_game_keeps_ready_message_id_when_deletion_fails():
     game.ready_message_main_text = "prompt"
     game.dealer_index = -1
 
-    wallet = MagicMock()
-    wallet.value.return_value = 1000
-    wallet.authorize = MagicMock()
+    wallet = make_wallet_mock(1000)
     player = Player(
         user_id=5,
         mention_markdown="@player",

@@ -4,7 +4,8 @@ import asyncio
 import datetime
 from typing import List, Tuple, Dict, Optional
 
-import redis
+import redis.asyncio as aioredis
+from redis.exceptions import NoScriptError
 from telegram import (
     ReplyKeyboardMarkup,
     InlineKeyboardButton,
@@ -82,7 +83,7 @@ class PokerBotModel:
         view: PokerBotViewer,
         bot: Bot,
         cfg: Config,
-        kv: redis.Redis,
+        kv: aioredis.Redis,
         table_manager: TableManager,
     ):
         self._view: PokerBotViewer = view
@@ -455,7 +456,7 @@ class PokerBotModel:
             return
 
         wallet = WalletManagerModel(user.id, self._kv)
-        if wallet.value() < SMALL_BLIND * 2:
+        if await wallet.value() < SMALL_BLIND * 2:
             await self._view.send_message(
                 chat_id,
                 f"💸 موجودی شما برای ورود به بازی کافی نیست (حداقل {SMALL_BLIND * 2}$ نیاز است).",
@@ -809,7 +810,7 @@ class PokerBotModel:
 
         for player in players_snapshot:
             if player.wallet:
-                player.wallet.cancel(original_game_id)
+                await player.wallet.cancel(original_game_id)
 
         game.pot = 0
 
@@ -1108,7 +1109,7 @@ class PokerBotModel:
 
     async def _send_turn_message(self, game: Game, player: Player, chat_id: ChatId):
         """پیام نوبت را ارسال کرده و شناسه آن را برای حذف در آینده ذخیره می‌کند."""
-        money = player.wallet.value()
+        money = await player.wallet.value()
         recent_actions = game.last_actions
 
         previous_message_id = game.turn_message_id
@@ -1172,7 +1173,7 @@ class PokerBotModel:
 
         try:
             if call_amount > 0:
-                current_player.wallet.authorize(game.id, call_amount)
+                await current_player.wallet.authorize(game.id, call_amount)
                 current_player.round_rate += call_amount
                 current_player.total_bet += call_amount
                 game.pot += call_amount
@@ -1209,7 +1210,7 @@ class PokerBotModel:
         total_amount_to_bet = call_amount + raise_amount
 
         try:
-            current_player.wallet.authorize(game.id, total_amount_to_bet)
+            await current_player.wallet.authorize(game.id, total_amount_to_bet)
             current_player.round_rate += total_amount_to_bet
             current_player.total_bet += total_amount_to_bet
             game.pot += total_amount_to_bet
@@ -1248,7 +1249,7 @@ class PokerBotModel:
         current_player = self._current_turn_player(game)
         if not current_player:
             return
-        all_in_amount = current_player.wallet.value()
+        all_in_amount = await current_player.wallet.value()
 
         if all_in_amount <= 0:
             self._view.send_message(
@@ -1260,7 +1261,7 @@ class PokerBotModel:
             )  # این حرکت معادل چک است
             return
 
-        current_player.wallet.authorize(game.id, all_in_amount)
+        await current_player.wallet.authorize(game.id, all_in_amount)
         current_player.round_rate += all_in_amount
         current_player.total_bet += all_in_amount
         game.pot += all_in_amount
@@ -1604,7 +1605,7 @@ class PokerBotModel:
             active_players = game.players_by(states=(PlayerState.ACTIVE,))
             if len(active_players) == 1:
                 winner = active_players[0]
-                winner.wallet.inc(game.pot)
+                await winner.wallet.inc(game.pot)
                 await self._view.send_message(
                     chat_id,
                     f"🏆 تمام بازیکنان دیگر فولد کردند! {winner.mention_markdown} برنده {game.pot}$ شد.",
@@ -1623,7 +1624,7 @@ class PokerBotModel:
                         win_amount_per_player = pot_amount // len(winners_info)
                         for winner in winners_info:
                             player = winner["player"]
-                            player.wallet.inc(win_amount_per_player)
+                            await player.wallet.inc(win_amount_per_player)
             else:
                 await self._view.send_message(
                     chat_id,
@@ -1637,7 +1638,10 @@ class PokerBotModel:
             )
 
         # ۳. آماده‌سازی برای دست بعدی
-        remaining_players = [p for p in game.players if p.wallet.value() > 0]
+        remaining_players = []
+        for p in game.players:
+            if await p.wallet.value() > 0:
+                remaining_players.append(p)
         context.chat_data[KEY_OLD_PLAYERS] = [p.user_id for p in remaining_players]
 
         game.reset()
@@ -1657,9 +1661,11 @@ class PokerBotModel:
 
         # ۲. ذخیره بازیکنان برای دست بعدی
         # این باعث می‌شود در بازی بعدی، لازم نباشد همه دوباره دکمهٔ نشستن سر میز را بزنند
-        context.chat_data[KEY_OLD_PLAYERS] = [
-            p.user_id for p in game.players if p.wallet.value() > 0
-        ]
+        old_players: List[UserId] = []
+        for p in game.players:
+            if await p.wallet.value() > 0:
+                old_players.append(p.user_id)
+        context.chat_data[KEY_OLD_PLAYERS] = old_players
 
         # ۳. ریست کردن کامل آبجکت بازی برای شروع یک دست جدید و تمیز
         # یک آبجکت جدید Game می‌سازیم تا هیچ داده‌ای از دست قبل باقی نماند
@@ -1688,7 +1694,7 @@ class RoundRateModel:
     def __init__(
         self,
         view: PokerBotViewer = None,
-        kv: redis.Redis = None,
+        kv: aioredis.Redis = None,
         model: "PokerBotModel" = None,
     ):
         self._view = view
@@ -1754,11 +1760,12 @@ class RoundRateModel:
             if self._model:
                 await self._model._send_turn_message(game, player_turn, chat_id)
             else:
+                player_money = await player_turn.wallet.value()
                 msg_id = await self._view.send_turn_actions(
                     chat_id=chat_id,
                     game=game,
                     player=player_turn,
-                    money=player_turn.wallet.value(),
+                    money=player_money,
                     recent_actions=game.last_actions,
                 )
                 if msg_id:
@@ -1773,7 +1780,7 @@ class RoundRateModel:
         chat_id: ChatId,
     ):
         try:
-            player.wallet.authorize(game_id=str(chat_id), amount=amount)
+            await player.wallet.authorize(game_id=str(chat_id), amount=amount)
             player.round_rate += amount
             player.total_bet += amount  # ← این خط اضافه شود
             game.pot += amount
@@ -1792,17 +1799,18 @@ class RoundRateModel:
                             game, current_player, chat_id
                         )
                     else:
+                        current_money = await current_player.wallet.value()
                         await self._view.send_turn_actions(
                             chat_id=chat_id,
                             game=game,
                             player=current_player,
-                            money=current_player.wallet.value(),
+                            money=current_money,
                             message_id=game.turn_message_id,
                             recent_actions=game.last_actions,
                         )
         except UserException as e:
-            available_money = player.wallet.value()
-            player.wallet.authorize(game_id=str(chat_id), amount=available_money)
+            available_money = await player.wallet.value()
+            await player.wallet.authorize(game_id=str(chat_id), amount=available_money)
             player.round_rate += available_money
             player.total_bet += available_money  # ← این خط هم اضافه شود
             game.pot += available_money
@@ -1812,7 +1820,7 @@ class RoundRateModel:
                 f"⚠️ {player.mention_markdown} موجودی کافی برای بلایند نداشت و All-in شد ({available_money}$).",
             )
 
-    def finish_rate(
+    async def finish_rate(
         self, game: Game, player_scores: Dict[Score, List[Tuple[Player, Cards]]]
     ) -> None:
         """Split the pot among players based on their hand scores.
@@ -1826,23 +1834,24 @@ class RoundRateModel:
 
         for score in sorted(player_scores.keys(), reverse=True):
             group = player_scores[score]
-            caps = [
-                p.wallet.authorized_money(game.id) * total_players for p, _ in group
-            ]
+            caps: List[Money] = []
+            for p, _ in group:
+                authorized = await p.wallet.authorized_money(game.id)
+                caps.append(authorized * total_players)
             group_total = sum(caps)
             if group_total == 0:
                 continue
             scale = min(1, remaining_pot / group_total)
             for (player, _), cap in zip(group, caps):
                 payout = cap * scale
-                player.wallet.inc(int(round(payout)))
+                await player.wallet.inc(int(round(payout)))
                 remaining_pot -= payout
             if remaining_pot <= 0:
                 break
 
         for group in player_scores.values():
             for player, _ in group:
-                player.wallet.approve(game.id)
+                await player.wallet.approve(game.id)
 
         game.pot = int(remaining_pot)
 
@@ -1860,9 +1869,9 @@ class WalletManagerModel(Wallet):
     این کلاس به صورت اتمی (atomic) کار می‌کند تا از مشکلات همزمانی (race condition) جلوگیری کند.
     """
 
-    def __init__(self, user_id: UserId, kv: redis.Redis):
+    def __init__(self, user_id: UserId, kv: aioredis.Redis):
         self._user_id = user_id
-        self._kv: redis.Redis = kv
+        self._kv: aioredis.Redis = kv
         self._val_key = f"u_m:{user_id}"
         self._daily_bonus_key = f"u_db:{user_id}"
         self._authorized_money_key = f"u_am:{user_id}"  # برای پول رزرو شده در بازی
@@ -1886,19 +1895,20 @@ class WalletManagerModel(Wallet):
         """
         )
 
-    def value(self) -> Money:
+    async def value(self) -> Money:
         """موجودی فعلی بازیکن را برمی‌گرداند. اگر بازیکن وجود نداشته باشد، با مقدار پیش‌فرض ایجاد می‌شود."""
-        val = self._kv.get(self._val_key)
+        val = await self._kv.get(self._val_key)
         if val is None:
-            self._kv.set(self._val_key, DEFAULT_MONEY)
+            await self._kv.set(self._val_key, DEFAULT_MONEY)
             return DEFAULT_MONEY
         return int(val)
 
-    def inc(self, amount: Money = 0) -> Money:
+    async def inc(self, amount: Money = 0) -> Money:
         """موجودی بازیکن را به مقدار مشخص شده افزایش می‌دهد."""
-        return self._kv.incrby(self._val_key, amount)
+        result = await self._kv.incrby(self._val_key, amount)
+        return int(result)
 
-    def dec(self, amount: Money) -> Money:
+    async def dec(self, amount: Money) -> Money:
         """
         موجودی بازیکن را به مقدار مشخص شده کاهش می‌دهد، تنها اگر موجودی کافی باشد.
         این عملیات به صورت اتمی با استفاده از اسکریپت Lua انجام می‌شود.
@@ -1906,21 +1916,21 @@ class WalletManagerModel(Wallet):
         if amount < 0:
             raise ValueError("Amount to decrease cannot be negative.")
         if amount == 0:
-            return self.value()
+            return await self.value()
 
         try:
-            result = self._LUA_DECR_IF_GE(
+            result = await self._LUA_DECR_IF_GE(
                 keys=[self._val_key], args=[amount, DEFAULT_MONEY]
             )
-        except (redis.exceptions.NoScriptError, ModuleNotFoundError):
-            current = self._kv.get(self._val_key)
-            if current is None:
-                self._kv.set(self._val_key, DEFAULT_MONEY)
+        except (NoScriptError, ModuleNotFoundError):
+            current_raw = await self._kv.get(self._val_key)
+            if current_raw is None:
+                await self._kv.set(self._val_key, DEFAULT_MONEY)
                 current = DEFAULT_MONEY
             else:
-                current = int(current)
+                current = int(current_raw)
             if current >= amount:
-                self._kv.decrby(self._val_key, amount)
+                await self._kv.decrby(self._val_key, amount)
                 result = current - amount
             else:
                 result = -1
@@ -1928,13 +1938,14 @@ class WalletManagerModel(Wallet):
             raise UserException("موجودی شما کافی نیست.")
         return int(result)
 
-    def has_daily_bonus(self) -> bool:
+    async def has_daily_bonus(self) -> bool:
         """چک می‌کند آیا بازیکن پاداش روزانه خود را دریافت کرده است یا خیر."""
-        return self._kv.exists(self._daily_bonus_key) > 0
+        result = await self._kv.exists(self._daily_bonus_key)
+        return bool(result)
 
-    def add_daily(self, amount: Money) -> Money:
-        """پاداش روزانه را به بازیکن می‌دهد و زمان آن را تا روز بعد ثبت می‌کند."""
-        if self.has_daily_bonus():
+    async def add_daily(self, amount: Money) -> Money:
+        """پاداش روزانه را به بازیکن می‌دهد و زمان آن را تا روز بعد ثبت می‌ند."""
+        if await self.has_daily_bonus():
             raise UserException("شما قبلاً پاداش روزانه خود را دریافت کرده‌اید.")
 
         now = datetime.datetime.now()
@@ -1943,46 +1954,41 @@ class WalletManagerModel(Wallet):
         ) + datetime.timedelta(days=1)
         ttl = int((tomorrow - now).total_seconds())
 
-        self._kv.setex(self._daily_bonus_key, ttl, "1")
-        return self.inc(amount)
+        await self._kv.setex(self._daily_bonus_key, ttl, "1")
+        return await self.inc(amount)
 
     # --- متدهای مربوط به تراکنش‌های بازی (برای تطابق با Wallet ABC) ---
-    def inc_authorized_money(self, game_id: str, amount: Money) -> None:
+    async def inc_authorized_money(self, game_id: str, amount: Money) -> None:
         """Increase reserved money for a specific game."""
-        self._kv.hincrby(self._authorized_money_key, game_id, amount)
+        await self._kv.hincrby(self._authorized_money_key, game_id, amount)
 
-    def authorized_money(self, game_id: str) -> Money:
+    async def authorized_money(self, game_id: str) -> Money:
         """Return the amount of money currently reserved for ``game_id``."""
-        val = self._kv.hget(self._authorized_money_key, game_id)
+        val = await self._kv.hget(self._authorized_money_key, game_id)
         return int(val) if val else 0
 
-    def authorize_all(self, game_id: str) -> Money:
+    async def authorize_all(self, game_id: str) -> Money:
         """Reserve the entire wallet for ``game_id`` and return that amount."""
-        current = self.value()
+        current = await self.value()
         if current > 0:
-            self.dec(current)
-            self._kv.hincrby(self._authorized_money_key, game_id, current)
+            await self.dec(current)
+            await self._kv.hincrby(self._authorized_money_key, game_id, current)
         return current
 
-    def authorize(self, game_id: str, amount: Money) -> None:
+    async def authorize(self, game_id: str, amount: Money) -> None:
         """مبلغی از پول بازیکن را برای یک بازی خاص رزرو (dec) می‌کند."""
-        # در این پیاده‌سازی، ما مستقیماً پول را کم می‌کنیم.
-        # متد dec خودش در صورت کمبود موجودی، خطا می‌دهد.
-        self.dec(amount)
-        self._kv.hincrby(self._authorized_money_key, game_id, amount)
+        await self.dec(amount)
+        await self._kv.hincrby(self._authorized_money_key, game_id, amount)
 
-    def approve(self, game_id: str) -> None:
+    async def approve(self, game_id: str) -> None:
         """تراکنش موفق یک بازی را تایید می‌کند (پول خرج شده و نیاز به بازگشت نیست)."""
-        # پول قبلاً در authorize/dec کم شده است، فقط مبلغ رزرو شده را پاک می‌کنیم.
-        self._kv.hdel(self._authorized_money_key, game_id)
+        await self._kv.hdel(self._authorized_money_key, game_id)
 
-    def cancel(self, game_id: str) -> None:
+    async def cancel(self, game_id: str) -> None:
         """تراکنش ناموفق را لغو و پول رزرو شده را به بازیکن برمی‌گرداند."""
-        # مبلغی که برای این بازی رزرو شده بود را به کیف پول برمی‌گردانیم.
-        # hget returns bytes, so convert to int. Default to 0 if key doesn't exist.
-        amount_to_return_bytes = self._kv.hget(self._authorized_money_key, game_id)
+        amount_to_return_bytes = await self._kv.hget(self._authorized_money_key, game_id)
         if amount_to_return_bytes:
             amount_to_return = int(amount_to_return_bytes)
             if amount_to_return > 0:
-                self.inc(amount_to_return)
-                self._kv.hdel(self._authorized_money_key, game_id)
+                await self.inc(amount_to_return)
+                await self._kv.hdel(self._authorized_money_key, game_id)

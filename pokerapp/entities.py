@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 
-from abc import abstractmethod
+from abc import ABC, abstractmethod
 import enum
 import datetime
 from typing import Tuple, List, Optional
@@ -18,40 +18,49 @@ Mention = str
 Score = int
 Money = int
 
-@abstractmethod
-class Wallet:
+class Wallet(ABC):
     @staticmethod
     def _prefix(id: int, suffix: str = ""):
         pass
 
-    def add_daily(self, amount: Money) -> Money:
+    @abstractmethod
+    async def add_daily(self, amount: Money) -> Money:
         pass
 
-    def has_daily_bonus(self) -> bool:
+    @abstractmethod
+    async def has_daily_bonus(self) -> bool:
         pass
 
-    def inc(self, amount: Money = 0) -> None:
+    @abstractmethod
+    async def inc(self, amount: Money = 0) -> Money:
         pass
 
-    def inc_authorized_money(self, game_id: str, amount: Money) -> None:
+    @abstractmethod
+    async def inc_authorized_money(self, game_id: str, amount: Money) -> None:
         pass
 
-    def authorized_money(self, game_id: str) -> Money:
+    @abstractmethod
+    async def authorized_money(self, game_id: str) -> Money:
         pass
 
-    def authorize(self, game_id: str, amount: Money) -> None:
+    @abstractmethod
+    async def authorize(self, game_id: str, amount: Money) -> None:
         pass
 
-    def authorize_all(self, game_id: str) -> Money:
+    @abstractmethod
+    async def authorize_all(self, game_id: str) -> Money:
         pass
 
-    def value(self) -> Money:
+    @abstractmethod
+    async def value(self) -> Money:
         pass
 
-    def approve(self, game_id: str) -> None:
+    @abstractmethod
+    async def approve(self, game_id: str) -> None:
         pass
 
-    def cancel(self, game_id: str) -> None:
+    @abstractmethod
+    async def cancel(self, game_id: str) -> None:
         pass
 
 class Player:

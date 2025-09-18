@@ -13,8 +13,7 @@ from pokerapp.table_manager import TableManager
 async def test_table_manager_multiple_chats():
     server = fakeredis.FakeServer()
     redis_async = fakeredis.aioredis.FakeRedis(server=server)
-    redis_sync = fakeredis.FakeRedis(server=server)
-    tm = TableManager(redis_async, redis_sync)
+    tm = TableManager(redis_async)
 
     chat1, chat2 = 100, 200
 
@@ -37,20 +36,19 @@ async def test_table_manager_multiple_chats():
 @pytest.mark.asyncio
 async def test_wallet_recreated_on_load():
     server = fakeredis.FakeServer()
-    redis_sync = fakeredis.FakeRedis(server=server)
     redis_async = fakeredis.aioredis.FakeRedis(server=server)
-    tm = TableManager(redis_async, redis_sync)
+    tm = TableManager(redis_async)
 
     chat = 123
     game = await tm.create_game(chat)
 
-    wallet = WalletManagerModel("user1", redis_sync)
+    wallet = WalletManagerModel("user1", redis_async)
     player = Player(user_id="user1", mention_markdown="@u1", wallet=wallet, ready_message_id="ready")
     game.add_player(player, seat_index=0)
     await tm.save_game(chat, game)
 
     # Use a new TableManager to ensure the game is loaded from Redis
-    tm = TableManager(redis_async, redis_sync)
+    tm = TableManager(redis_async)
     loaded_game = await tm.get_game(chat)
     loaded_player = loaded_game.seats[0]
 
@@ -62,12 +60,11 @@ async def test_wallet_recreated_on_load():
 async def test_find_game_by_user():
     server = fakeredis.FakeServer()
     redis_async = fakeredis.aioredis.FakeRedis(server=server)
-    redis_sync = fakeredis.FakeRedis(server=server)
-    tm = TableManager(redis_async, redis_sync)
+    tm = TableManager(redis_async)
 
     chat = 321
     game = await tm.create_game(chat)
-    wallet = WalletManagerModel("user1", redis_sync)
+    wallet = WalletManagerModel("user1", redis_async)
     player = Player(user_id="user1", mention_markdown="@u1", wallet=wallet, ready_message_id="ready")
     game.add_player(player, seat_index=0)
     await tm.save_game(chat, game)
@@ -81,12 +78,11 @@ async def test_find_game_by_user():
 async def test_find_game_by_user_after_restart_loads_from_disk():
     server = fakeredis.FakeServer()
     redis_async = fakeredis.aioredis.FakeRedis(server=server)
-    redis_sync = fakeredis.FakeRedis(server=server)
-    tm = TableManager(redis_async, redis_sync)
+    tm = TableManager(redis_async)
 
     chat = -100123
     game = await tm.create_game(chat)
-    wallet = WalletManagerModel("user42", redis_sync)
+    wallet = WalletManagerModel("user42", redis_async)
     player = Player(
         user_id="user42",
         mention_markdown="@u42",
@@ -99,8 +95,7 @@ async def test_find_game_by_user_after_restart_loads_from_disk():
 
     # simulate application restart by creating a new TableManager instance
     redis_async_new = fakeredis.aioredis.FakeRedis(server=server)
-    redis_sync_new = fakeredis.FakeRedis(server=server)
-    tm_restarted = TableManager(redis_async_new, redis_sync_new)
+    tm_restarted = TableManager(redis_async_new)
 
     loaded_game, loaded_chat = await tm_restarted.find_game_by_user("user42")
 

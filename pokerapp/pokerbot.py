@@ -3,7 +3,6 @@ import logging
 from dataclasses import dataclass
 from typing import Optional, Sequence, TYPE_CHECKING
 
-import redis
 import redis.asyncio as aioredis
 from telegram.error import TelegramError
 from telegram.ext import ApplicationBuilder, ContextTypes, JobQueue
@@ -58,14 +57,8 @@ class PokerBot:
         self._application = builder.build()
         self._application.add_error_handler(self._handle_error)
 
-        # Separate Redis clients for synchronous wallet operations and
+        # Shared async Redis client for both wallet operations and
         # asynchronous table persistence
-        kv_sync = redis.Redis(
-            host=cfg.REDIS_HOST,
-            port=cfg.REDIS_PORT,
-            db=cfg.REDIS_DB,
-            password=cfg.REDIS_PASS if cfg.REDIS_PASS != "" else None,
-        )
         kv_async = aioredis.Redis(
             host=cfg.REDIS_HOST,
             port=cfg.REDIS_PORT,
@@ -73,7 +66,7 @@ class PokerBot:
             password=cfg.REDIS_PASS if cfg.REDIS_PASS != "" else None,
         )
 
-        table_manager = TableManager(kv_async, kv_sync)
+        table_manager = TableManager(kv_async)
         view = PokerBotViewer(
             bot=self._application.bot,
             admin_chat_id=cfg.ADMIN_CHAT_ID,
@@ -82,7 +75,7 @@ class PokerBot:
         model = PokerBotModel(
             view=view,
             bot=self._application.bot,
-            kv=kv_sync,
+            kv=kv_async,
             cfg=cfg,
             table_manager=table_manager,
         )
