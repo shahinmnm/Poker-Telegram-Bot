@@ -1,25 +1,25 @@
 #!/usr/bin/env python3
 
-import unittest
-import fakeredis
+import pytest
+import fakeredis.aioredis
 
 from pokerapp.pokerbotmodel import WalletManagerModel
 
 
-class TestWalletManagerModel(unittest.TestCase):
-    def test_dec_without_lupa(self):
-        kv = fakeredis.FakeRedis()
-        wallet = WalletManagerModel("user", kv)
-        start = wallet.value()
+@pytest.mark.asyncio
+async def test_dec_without_lupa():
+    kv = fakeredis.aioredis.FakeRedis()
+    wallet = WalletManagerModel("user", kv)
+    start = await wallet.value()
 
-        def raise_module_not_found(*args, **kwargs):
-            raise ModuleNotFoundError("lupa")
+    async def raise_module_not_found(*args, **kwargs):
+        raise ModuleNotFoundError("lupa")
 
-        wallet._LUA_DECR_IF_GE = raise_module_not_found
-        result = wallet.dec(100)
-        self.assertEqual(start - 100, result)
-        self.assertEqual(start - 100, wallet.value())
+    wallet._LUA_DECR_IF_GE = raise_module_not_found
+    result = await wallet.dec(100)
+    assert start - 100 == result
+    assert start - 100 == await wallet.value()
 
 
 if __name__ == "__main__":
-    unittest.main()
+    pytest.main()
