@@ -12,6 +12,8 @@ from telegram.constants import ParseMode
 from telegram.error import BadRequest, Forbidden, RetryAfter, TelegramError
 from io import BytesIO
 from typing import Optional, Callable, Awaitable, Dict, Any, List
+from dataclasses import dataclass
+from collections import defaultdict
 import asyncio
 import logging
 import json
@@ -56,7 +58,7 @@ class RateLimitedSender:
         max_per_minute: int = 20,
         max_per_second: Optional[float] = None,
     ):
-        self._lock = asyncio.Lock()
+        self._global_lock = asyncio.Lock()
         self._max_retries = max_retries
         self._error_delay = error_delay
         self._notify_admin = notify_admin
@@ -69,21 +71,42 @@ class RateLimitedSender:
             computed_delay = 1.0 / per_second_limit
         self._delay = delay if delay is not None else computed_delay
         self._buckets: Dict[ChatId, Dict[str, float]] = {}
+        self._locks: Dict[ChatId, asyncio.Lock] = defaultdict(asyncio.Lock)
 
-    async def _wait_for_token(self, chat_id: ChatId) -> Dict[str, float]:
-        bucket = self._buckets.setdefault(
-            chat_id, {"tokens": self._max_tokens, "ts": time.monotonic()}
-        )
+    @dataclass
+    class _TokenPermit:
+        remaining: float
+        delay: float
+
+    def _get_lock(self, chat_id: Optional[ChatId]) -> asyncio.Lock:
+        if chat_id is None:
+            return self._global_lock
+        return self._locks[chat_id]
+
+    async def _wait_for_token(self, chat_id: ChatId) -> "RateLimitedSender._TokenPermit":
+        lock = self._get_lock(chat_id)
         while True:
-            now = time.monotonic()
-            elapsed = now - bucket["ts"]
-            bucket["tokens"] = min(
-                self._max_tokens, bucket["tokens"] + elapsed * self._refill_rate
-            )
-            bucket["ts"] = now
-            if bucket["tokens"] >= 1:
-                return bucket
-            wait_time = (1 - bucket["tokens"]) / self._refill_rate
+            async with lock:
+                bucket = self._buckets.setdefault(
+                    chat_id, {"tokens": self._max_tokens, "ts": time.monotonic()}
+                )
+                now = time.monotonic()
+                elapsed = now - bucket["ts"]
+                bucket["tokens"] = min(
+                    self._max_tokens, bucket["tokens"] + elapsed * self._refill_rate
+                )
+                bucket["ts"] = now
+                if bucket["tokens"] >= 1:
+                    bucket["tokens"] -= 1
+                    remaining = bucket["tokens"]
+                    delay = self._delay
+                    if remaining < 5:
+                        shortage = max(0.0, 5 - remaining)
+                        delay += min(shortage * 0.2, 0.9)
+                    return RateLimitedSender._TokenPermit(
+                        remaining=remaining, delay=delay
+                    )
+                wait_time = (1 - bucket["tokens"]) / self._refill_rate
             await asyncio.sleep(wait_time)
 
     async def send(
@@ -95,70 +118,63 @@ class RateLimitedSender:
         should_notify_failure = False
         should_return_none = False
 
-        async with self._lock:
-            bucket = None
-            if chat_id is not None:
-                bucket = await self._wait_for_token(chat_id)
-            attempts = 0
-            last_error: Optional[TelegramError] = None
-            while True:
-                try:
-                    result = await func(*args, **kwargs)
-                    remaining = None
-                    if bucket is not None:
-                        bucket["tokens"] -= 1
-                        remaining = bucket["tokens"]
-                    delay = self._delay
-                    if remaining is not None and remaining < 5:
-                        shortage = max(0.0, 5 - remaining)
-                        delay += min(shortage * 0.2, 0.9)
-                    await asyncio.sleep(delay)
-                    return result
-                except RetryAfter as e:
-                    await asyncio.sleep(e.retry_after)
-                except TelegramError as e:
-                    if attempts >= self._max_retries:
-                        last_error = e
-                        should_notify_failure = True
-                        break
-                    attempts += 1
-                    await asyncio.sleep(self._error_delay)
-                except Exception as e:
-                    logger.error(
-                        "Unexpected error in RateLimitedSender.send",
-                        extra={
-                            "error_type": type(e).__name__,
-                            "request_params": {"args": args, "kwargs": kwargs},
-                        },
-                    )
-                    if self._notify_admin:
-                        notifications.append(
-                            {
-                                "event": "rate_limiter_error",
-                                "error": str(e),
-                                "error_type": type(e).__name__,
-                            }
-                        )
-                    last_error = e if isinstance(e, TelegramError) else None
+        permit: Optional[RateLimitedSender._TokenPermit] = None
+        attempts = 0
+        last_error: Optional[TelegramError] = None
+        while True:
+            if chat_id is not None and permit is None:
+                permit = await self._wait_for_token(chat_id)
+            try:
+                result = await func(*args, **kwargs)
+                remaining = permit.remaining if permit is not None else None
+                delay = permit.delay if permit is not None else self._delay
+                await asyncio.sleep(delay)
+                return result
+            except RetryAfter as e:
+                await asyncio.sleep(e.retry_after)
+            except TelegramError as e:
+                if attempts >= self._max_retries:
+                    last_error = e
                     should_notify_failure = True
-                    if last_error is None:
-                        should_return_none = True
                     break
-            if should_notify_failure:
-                notifications.append(
-                    {
-                        "event": "rate_limiter_failed",
-                        "request_params": {"args": str(args), "kwargs": str(kwargs)},
-                    }
+                attempts += 1
+                await asyncio.sleep(self._error_delay)
+            except Exception as e:
+                logger.error(
+                    "Unexpected error in RateLimitedSender.send",
+                    extra={
+                        "error_type": type(e).__name__,
+                        "request_params": {"args": args, "kwargs": kwargs},
+                    },
                 )
-                logger.warning(
-                    "RateLimitedSender.send failed after retries",
-                    extra={"request_params": {"args": args, "kwargs": kwargs}},
-                )
-                if last_error is not None:
-                    error_to_raise = last_error
-                else:
+                if self._notify_admin:
+                    notifications.append(
+                        {
+                            "event": "rate_limiter_error",
+                            "error": str(e),
+                            "error_type": type(e).__name__,
+                        }
+                    )
+                last_error = e if isinstance(e, TelegramError) else None
+                should_notify_failure = True
+                if last_error is None:
                     should_return_none = True
+                break
+        if should_notify_failure:
+            notifications.append(
+                {
+                    "event": "rate_limiter_failed",
+                    "request_params": {"args": str(args), "kwargs": str(kwargs)},
+                }
+            )
+            logger.warning(
+                "RateLimitedSender.send failed after retries",
+                extra={"request_params": {"args": args, "kwargs": kwargs}},
+            )
+            if last_error is not None:
+                error_to_raise = last_error
+            else:
+                should_return_none = True
 
         if self._notify_admin:
             for payload in notifications:
