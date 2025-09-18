@@ -950,6 +950,66 @@ class PokerBotViewer:
             )
         return None
 
+    async def edit_message_reply_markup(
+        self,
+        chat_id: ChatId,
+        message_id: MessageId,
+        reply_markup: Optional[InlineKeyboardMarkup | ReplyKeyboardMarkup] = None,
+    ) -> bool:
+        """Update a message's inline keyboard while handling common failures."""
+        if not message_id:
+            return False
+        try:
+            result = await self._rate_limiter.send(
+                lambda: self._bot.edit_message_reply_markup(
+                    chat_id=chat_id,
+                    message_id=message_id,
+                    reply_markup=reply_markup,
+                ),
+                chat_id=chat_id,
+            )
+            if isinstance(result, Message):
+                return True
+            if result is True or result is None:
+                return True
+            return bool(result)
+        except BadRequest as e:
+            err = str(e).lower()
+            if "message is not modified" in err:
+                logger.info(
+                    "Reply markup already up to date",
+                    extra={"chat_id": chat_id, "message_id": message_id},
+                )
+                return True
+            if "message to edit not found" not in err:
+                logger.warning(
+                    "BadRequest editing reply markup",
+                    extra={
+                        "error_type": type(e).__name__,
+                        "chat_id": chat_id,
+                        "message_id": message_id,
+                    },
+                )
+        except Forbidden as e:
+            logger.info(
+                "Cannot edit reply markup, bot unauthorized",
+                extra={
+                    "error_type": type(e).__name__,
+                    "chat_id": chat_id,
+                    "message_id": message_id,
+                },
+            )
+        except Exception as e:
+            logger.error(
+                "Unexpected error editing reply markup",
+                extra={
+                    "error_type": type(e).__name__,
+                    "chat_id": chat_id,
+                    "message_id": message_id,
+                },
+            )
+        return False
+
     @staticmethod
     def _get_turns_markup(check_call_text: str, check_call_action: PlayerAction) -> InlineKeyboardMarkup:
         keyboard = [[

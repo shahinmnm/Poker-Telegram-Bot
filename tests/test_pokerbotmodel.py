@@ -18,6 +18,7 @@ from pokerapp.pokerbotmodel import (
     WalletManagerModel,
     KEY_CHAT_DATA_GAME,
 )
+from telegram.error import BadRequest
 
 
 HANDS_FILE = "./tests/hands.txt"
@@ -314,6 +315,7 @@ async def test_auto_start_tick_persists_replacement_message():
     table_manager.save_game = AsyncMock()
 
     model = PokerBotModel(view=view, bot=bot, cfg=cfg, kv=kv, table_manager=table_manager)
+    view.edit_message_reply_markup = AsyncMock(return_value=False)
     model._safe_edit_message_text = AsyncMock(return_value=222)
 
     job = SimpleNamespace(chat_id=chat_id)
@@ -322,6 +324,7 @@ async def test_auto_start_tick_persists_replacement_message():
 
     await model._auto_start_tick(context)
 
+    view.edit_message_reply_markup.assert_awaited_once()
     assert game.ready_message_main_id == 222
     assert game.ready_message_main_text == "prompt"
     table_manager.save_game.assert_awaited_once_with(chat_id, game)
@@ -345,6 +348,7 @@ async def test_auto_start_tick_skips_save_when_message_unchanged():
     table_manager.save_game = AsyncMock()
 
     model = PokerBotModel(view=view, bot=bot, cfg=cfg, kv=kv, table_manager=table_manager)
+    view.edit_message_reply_markup = AsyncMock(return_value=True)
     model._safe_edit_message_text = AsyncMock(return_value=555)
 
     job = SimpleNamespace(chat_id=chat_id)
@@ -359,6 +363,7 @@ async def test_auto_start_tick_skips_save_when_message_unchanged():
 
     await model._auto_start_tick(context)
 
+    view.edit_message_reply_markup.assert_not_awaited()
     model._safe_edit_message_text.assert_not_awaited()
     assert game.ready_message_main_id == 555
     table_manager.save_game.assert_not_awaited()
@@ -382,6 +387,7 @@ async def test_auto_start_tick_decrements_before_rendering_countdown():
     table_manager.save_game = AsyncMock()
 
     model = PokerBotModel(view=view, bot=bot, cfg=cfg, kv=kv, table_manager=table_manager)
+    view.edit_message_reply_markup = AsyncMock(return_value=True)
     model._safe_edit_message_text = AsyncMock(return_value=777)
 
     job = SimpleNamespace(chat_id=chat_id)
@@ -390,11 +396,12 @@ async def test_auto_start_tick_decrements_before_rendering_countdown():
 
     await model._auto_start_tick(context)
 
-    model._safe_edit_message_text.assert_awaited_once()
-    call_args = model._safe_edit_message_text.await_args
-    button_text = call_args.kwargs["reply_markup"].inline_keyboard[0][1].text
+    view.edit_message_reply_markup.assert_awaited_once()
+    call_args = view.edit_message_reply_markup.await_args
+    button_text = call_args.args[2].inline_keyboard[0][1].text
     assert button_text == "شروع بازی (59)"
     assert call_args.args[1] == 777
+    model._safe_edit_message_text.assert_not_awaited()
     assert context.chat_data["start_countdown"] == 59
     assert context.chat_data["start_countdown_last_rendered"] == 59
     table_manager.save_game.assert_not_awaited()
@@ -416,6 +423,7 @@ async def test_auto_start_tick_renders_on_multiple_of_four():
     table_manager.save_game = AsyncMock()
 
     model = PokerBotModel(view=view, bot=bot, cfg=cfg, kv=kv, table_manager=table_manager)
+    view.edit_message_reply_markup = AsyncMock(return_value=True)
     model._safe_edit_message_text = AsyncMock(return_value=888)
 
     job = SimpleNamespace(chat_id=chat_id)
@@ -430,10 +438,45 @@ async def test_auto_start_tick_renders_on_multiple_of_four():
 
     await model._auto_start_tick(context)
 
-    model._safe_edit_message_text.assert_awaited_once()
+    view.edit_message_reply_markup.assert_awaited_once()
+    model._safe_edit_message_text.assert_not_awaited()
     assert context.chat_data["start_countdown"] == 8
     assert context.chat_data["start_countdown_last_rendered"] == 8
     table_manager.save_game.assert_not_awaited()
+    assert context.chat_data[KEY_CHAT_DATA_GAME] is game
+
+
+@pytest.mark.asyncio
+async def test_auto_start_tick_handles_bad_request_without_replacement():
+    chat_id = -781
+    view = MagicMock()
+    bot = MagicMock()
+    cfg = MagicMock(DEBUG=False)
+    kv = MagicMock()
+    table_manager = MagicMock()
+    game = Game()
+    game.ready_message_main_id = 999
+    game.ready_message_main_text = "prompt"
+    table_manager.get_game = AsyncMock(return_value=game)
+    table_manager.save_game = AsyncMock()
+
+    model = PokerBotModel(view=view, bot=bot, cfg=cfg, kv=kv, table_manager=table_manager)
+    view.edit_message_reply_markup = AsyncMock(
+        side_effect=BadRequest("Message is not modified")
+    )
+    model._safe_edit_message_text = AsyncMock()
+
+    job = SimpleNamespace(chat_id=chat_id)
+    job.schedule_removal = MagicMock()
+    context = SimpleNamespace(job=job, chat_data={"start_countdown": 15})
+
+    await model._auto_start_tick(context)
+
+    view.edit_message_reply_markup.assert_awaited_once()
+    model._safe_edit_message_text.assert_not_awaited()
+    table_manager.save_game.assert_not_awaited()
+    assert context.chat_data["start_countdown"] == 14
+    assert context.chat_data["start_countdown_last_rendered"] == 14
     assert context.chat_data[KEY_CHAT_DATA_GAME] is game
 
 

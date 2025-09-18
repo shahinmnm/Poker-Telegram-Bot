@@ -171,14 +171,53 @@ class PokerBotModel:
 
         context.chat_data["start_countdown_last_rendered"] = next_remaining
         keyboard_buttons = [
-            [InlineKeyboardButton(text="نشستن سر میز", callback_data="join_game"),
-             InlineKeyboardButton(text=f"شروع بازی ({next_remaining})", callback_data="start_game")]
+            [
+                InlineKeyboardButton(text="نشستن سر میز", callback_data="join_game"),
+                InlineKeyboardButton(
+                    text=f"شروع بازی ({next_remaining})", callback_data="start_game"
+                ),
+            ]
         ]
         keyboard = InlineKeyboardMarkup(keyboard_buttons)
-        message_text = getattr(game, "ready_message_main_text", "")
+        stored_text = getattr(game, "ready_message_main_text", "")
+        message_text = stored_text
+        message_id = game.ready_message_main_id
+
+        markup_only = bool(message_id) and message_text == stored_text
+        if markup_only:
+            markup_updated = False
+            try:
+                markup_updated = await self._view.edit_message_reply_markup(
+                    chat_id, message_id, keyboard
+                )
+            except BadRequest as e:
+                err = str(e).lower()
+                if "message is not modified" in err:
+                    markup_updated = True
+                else:
+                    logger.warning(
+                        "Failed to edit reply markup",
+                        extra={
+                            "chat_id": chat_id,
+                            "message_id": message_id,
+                            "error_type": type(e).__name__,
+                        },
+                    )
+            except Exception as e:  # pragma: no cover - defensive logging
+                logger.warning(
+                    "Unexpected error editing reply markup",
+                    extra={
+                        "chat_id": chat_id,
+                        "message_id": message_id,
+                        "error_type": type(e).__name__,
+                    },
+                )
+            if markup_updated:
+                return
+
         new_message_id = await self._safe_edit_message_text(
             chat_id,
-            game.ready_message_main_id,
+            message_id,
             message_text,
             reply_markup=keyboard,
         )
