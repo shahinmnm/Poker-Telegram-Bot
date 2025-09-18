@@ -16,6 +16,7 @@ import asyncio
 import logging
 import json
 import time
+from pokerapp.config import DEFAULT_RATE_LIMIT_PER_MINUTE
 from pokerapp.winnerdetermination import HAND_NAMES_TRANSLATIONS
 from pokerapp.desk import DeskImageGenerator
 from pokerapp.cards import Cards, Card
@@ -183,7 +184,13 @@ class PokerBotViewer:
 
         return mention_markdown
 
-    def __init__(self, bot: Bot, admin_chat_id: Optional[int] = None):
+    def __init__(
+        self,
+        bot: Bot,
+        admin_chat_id: Optional[int] = None,
+        *,
+        rate_limit_per_minute: int = DEFAULT_RATE_LIMIT_PER_MINUTE,
+    ):
         self._bot = bot
         self._desk_generator = DeskImageGenerator()
         self._admin_chat_id = admin_chat_id
@@ -192,7 +199,7 @@ class PokerBotViewer:
             delay=0.1,
             error_delay=0.1,
             notify_admin=self.notify_admin,
-            max_per_minute=60,
+            max_per_minute=rate_limit_per_minute,
         )
 
     async def notify_admin(self, log_data: Dict[str, Any]) -> None:

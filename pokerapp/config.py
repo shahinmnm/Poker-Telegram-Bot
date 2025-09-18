@@ -10,6 +10,10 @@ logger = logging.getLogger(__name__)
 DEFAULT_WEBHOOK_LISTEN = "127.0.0.1"
 DEFAULT_WEBHOOK_PORT = 3000
 DEFAULT_WEBHOOK_PATH = "/telegram/webhook-poker2025"
+# Telegram Bot API documentation recommends avoiding more than one message per
+# second in a chat and limits groups to 20 messages per minute.
+DEFAULT_RATE_LIMIT_PER_SECOND = 1
+DEFAULT_RATE_LIMIT_PER_MINUTE = 20
 
 
 class Config:
@@ -93,6 +97,25 @@ class Config:
             max_connections_raw,
             env_var=max_connections_source,
         )
+        rate_limit_per_minute_raw = os.getenv("POKERBOT_RATE_LIMIT_PER_MINUTE")
+        parsed_rate_limit_per_minute = self._parse_positive_int(
+            rate_limit_per_minute_raw,
+            env_var="POKERBOT_RATE_LIMIT_PER_MINUTE",
+        )
+        if parsed_rate_limit_per_minute is None:
+            self.RATE_LIMIT_PER_MINUTE: int = DEFAULT_RATE_LIMIT_PER_MINUTE
+        else:
+            self.RATE_LIMIT_PER_MINUTE = parsed_rate_limit_per_minute
+
+        rate_limit_per_second_raw = os.getenv("POKERBOT_RATE_LIMIT_PER_SECOND")
+        parsed_rate_limit_per_second = self._parse_positive_int(
+            rate_limit_per_second_raw,
+            env_var="POKERBOT_RATE_LIMIT_PER_SECOND",
+        )
+        if parsed_rate_limit_per_second is None:
+            self.RATE_LIMIT_PER_SECOND: int = DEFAULT_RATE_LIMIT_PER_SECOND
+        else:
+            self.RATE_LIMIT_PER_SECOND = parsed_rate_limit_per_second
 
     @staticmethod
     def _normalize_webhook_path(path: str) -> str:
