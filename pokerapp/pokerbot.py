@@ -81,6 +81,7 @@ class PokerBot:
             bot=self._application.bot,
             admin_chat_id=cfg.ADMIN_CHAT_ID,
             rate_limit_per_minute=cfg.RATE_LIMIT_PER_MINUTE,
+            rate_limit_per_second=cfg.RATE_LIMIT_PER_SECOND,
         )
         model = PokerBotModel(
             view=view,

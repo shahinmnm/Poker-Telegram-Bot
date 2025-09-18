@@ -38,7 +38,7 @@ def test_rate_limited_sender_uses_explicit_delay():
 async def test_rate_limited_sender_waits_longer_for_low_tokens(monkeypatch):
     sender = RateLimitedSender(delay=0.2, max_per_minute=30)
 
-    permit = RateLimitedSender._TokenPermit(remaining=0.5, delay=1.1)
+    permit = RateLimitedSender._TokenPermit(remaining=0.5, wait_before=1.1)
     sender._wait_for_token = AsyncMock(return_value=permit)
 
     sleep_calls = []
@@ -55,7 +55,7 @@ async def test_rate_limited_sender_waits_longer_for_low_tokens(monkeypatch):
 
     assert result == "ok"
     assert permit.remaining == pytest.approx(0.5)
-    assert sleep_calls[-1] == pytest.approx(1.1)
+    assert sleep_calls == [pytest.approx(1.1)]
 
 
 @pytest.mark.asyncio

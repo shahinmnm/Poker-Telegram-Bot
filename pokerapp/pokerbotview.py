@@ -72,11 +72,12 @@ class RateLimitedSender:
         self._delay = delay if delay is not None else computed_delay
         self._buckets: Dict[ChatId, Dict[str, float]] = {}
         self._locks: Dict[ChatId, asyncio.Lock] = defaultdict(asyncio.Lock)
+        self._next_available_ts: Dict[ChatId, float] = defaultdict(float)
 
     @dataclass
     class _TokenPermit:
         remaining: float
-        delay: float
+        wait_before: float
 
     def _get_lock(self, chat_id: Optional[ChatId]) -> asyncio.Lock:
         if chat_id is None:
@@ -103,8 +104,13 @@ class RateLimitedSender:
                     if remaining < 5:
                         shortage = max(0.0, 5 - remaining)
                         delay += min(shortage * 0.2, 0.9)
+                    next_available = self._next_available_ts[chat_id]
+                    scheduled_time = max(now, next_available)
+                    wait_before = max(0.0, scheduled_time - now)
+                    cooldown = delay
+                    self._next_available_ts[chat_id] = scheduled_time + cooldown
                     return RateLimitedSender._TokenPermit(
-                        remaining=remaining, delay=delay
+                        remaining=remaining, wait_before=wait_before
                     )
                 wait_time = (1 - bucket["tokens"]) / self._refill_rate
             await asyncio.sleep(wait_time)
@@ -118,17 +124,16 @@ class RateLimitedSender:
         should_notify_failure = False
         should_return_none = False
 
-        permit: Optional[RateLimitedSender._TokenPermit] = None
         attempts = 0
         last_error: Optional[TelegramError] = None
         while True:
-            if chat_id is not None and permit is None:
+            permit: Optional[RateLimitedSender._TokenPermit] = None
+            if chat_id is not None:
                 permit = await self._wait_for_token(chat_id)
+                if permit.wait_before > 0:
+                    await asyncio.sleep(permit.wait_before)
             try:
                 result = await func(*args, **kwargs)
-                remaining = permit.remaining if permit is not None else None
-                delay = permit.delay if permit is not None else self._delay
-                await asyncio.sleep(delay)
                 return result
             except RetryAfter as e:
                 await asyncio.sleep(e.retry_after)
