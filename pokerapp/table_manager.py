@@ -21,6 +21,14 @@ class TableManager:
     def _game_key(chat_id: ChatId) -> str:
         return f"chat:{chat_id}:game"
 
+    @staticmethod
+    def _player_chat_key(user_id: str) -> str:
+        return f"player:{user_id}:chat"
+
+    @staticmethod
+    def _chat_players_key(chat_id: ChatId) -> str:
+        return f"chat:{chat_id}:players"
+
     # Public API ---------------------------------------------------------
     async def create_game(self, chat_id: ChatId) -> Game:
         """Create a new game for the chat and persist it."""
@@ -64,8 +72,54 @@ class TableManager:
         for chat_id, game in self._tables.items():
             if any(p.user_id == user_id for p in game.players):
                 return game, chat_id
-        raise LookupError(f"No game found for user {user_id}")
+
+        chat_id_data = await self._redis.get(self._player_chat_key(str(user_id)))
+        if chat_id_data is None:
+            raise LookupError(f"No game found for user {user_id}")
+
+        if isinstance(chat_id_data, bytes):
+            chat_id_value = chat_id_data.decode()
+        else:
+            chat_id_value = chat_id_data
+
+        if isinstance(chat_id_value, str):
+            try:
+                chat_id_parsed = int(chat_id_value)
+            except (TypeError, ValueError):
+                chat_id_parsed = chat_id_value
+        else:
+            chat_id_parsed = chat_id_value
+
+        game = await self.get_game(chat_id_parsed)
+        return game, chat_id_parsed
 
     # Internal -----------------------------------------------------------
     async def _save(self, chat_id: ChatId, game: Game) -> None:
         await self._redis.set(self._game_key(chat_id), pickle.dumps(game))
+        await self._update_player_index(chat_id, game)
+
+    async def _update_player_index(self, chat_id: ChatId, game: Game) -> None:
+        players = {str(player.user_id) for player in game.players}
+        players_key = self._chat_players_key(chat_id)
+
+        previous_players_raw = await self._redis.smembers(players_key)
+        previous_players = {
+            member.decode() if isinstance(member, bytes) else str(member)
+            for member in previous_players_raw
+        }
+
+        stale_players = previous_players - players
+        if stale_players:
+            stale_keys = [self._player_chat_key(player_id) for player_id in stale_players]
+            await self._redis.delete(*stale_keys)
+
+        if players:
+            mapping = {
+                self._player_chat_key(player_id): str(chat_id)
+                for player_id in players
+            }
+            await self._redis.mset(mapping)
+
+        await self._redis.delete(players_key)
+        if players:
+            await self._redis.sadd(players_key, *players)
