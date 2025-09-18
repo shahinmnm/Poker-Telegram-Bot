@@ -1,5 +1,4 @@
 import asyncio
-import time
 from unittest.mock import AsyncMock
 
 import pytest
@@ -39,8 +38,8 @@ def test_rate_limited_sender_uses_explicit_delay():
 async def test_rate_limited_sender_waits_longer_for_low_tokens(monkeypatch):
     sender = RateLimitedSender(delay=0.2, max_per_minute=30)
 
-    bucket = {"tokens": 1.5, "ts": time.monotonic()}
-    sender._wait_for_token = AsyncMock(return_value=bucket)
+    permit = RateLimitedSender._TokenPermit(remaining=0.5, delay=1.1)
+    sender._wait_for_token = AsyncMock(return_value=permit)
 
     sleep_calls = []
 
@@ -55,5 +54,29 @@ async def test_rate_limited_sender_waits_longer_for_low_tokens(monkeypatch):
     result = await sender.send(dummy_call, chat_id=123)
 
     assert result == "ok"
-    assert bucket["tokens"] == pytest.approx(0.5)
-    assert sleep_calls[-1] == pytest.approx(0.2 + 0.9)
+    assert permit.remaining == pytest.approx(0.5)
+    assert sleep_calls[-1] == pytest.approx(1.1)
+
+
+@pytest.mark.asyncio
+async def test_rate_limited_sender_allows_parallel_chats():
+    sender = RateLimitedSender(delay=0.0, max_per_minute=120)
+
+    start_events = {1: asyncio.Event(), 2: asyncio.Event()}
+    release_event = asyncio.Event()
+
+    async def fake_call(target_chat: int):
+        start_events[target_chat].set()
+        await release_event.wait()
+        return target_chat
+
+    task_one = asyncio.create_task(sender.send(fake_call, 1, chat_id=1))
+    task_two = asyncio.create_task(sender.send(fake_call, 2, chat_id=2))
+
+    await asyncio.wait_for(start_events[1].wait(), timeout=0.5)
+    await asyncio.wait_for(start_events[2].wait(), timeout=0.5)
+
+    release_event.set()
+
+    results = await asyncio.gather(task_one, task_two)
+    assert set(results) == {1, 2}
