@@ -16,7 +16,7 @@ import asyncio
 import logging
 import json
 import time
-from pokerapp.config import DEFAULT_RATE_LIMIT_PER_MINUTE
+from pokerapp.config import DEFAULT_RATE_LIMIT_PER_MINUTE, DEFAULT_RATE_LIMIT_PER_SECOND
 from pokerapp.winnerdetermination import HAND_NAMES_TRANSLATIONS
 from pokerapp.desk import DeskImageGenerator
 from pokerapp.cards import Cards, Card
@@ -48,19 +48,26 @@ class RateLimitedSender:
 
     def __init__(
         self,
-        delay: float = 0.1,
+        delay: Optional[float] = None,
+        *,
         max_retries: int = 3,
         error_delay: float = 0.1,
         notify_admin: Optional[Callable[[Dict[str, Any]], Awaitable[None]]] = None,
         max_per_minute: int = 20,
+        max_per_second: Optional[float] = None,
     ):
-        self._delay = delay
         self._lock = asyncio.Lock()
         self._max_retries = max_retries
         self._error_delay = error_delay
         self._notify_admin = notify_admin
         self._max_tokens = max_per_minute
         self._refill_rate = max_per_minute / 60.0  # tokens per second
+        per_second_limit = max_per_second if max_per_second is not None else self._refill_rate
+        if per_second_limit <= 0:
+            computed_delay = 0.0
+        else:
+            computed_delay = 1.0 / per_second_limit
+        self._delay = delay if delay is not None else computed_delay
         self._buckets: Dict[ChatId, Dict[str, float]] = {}
 
     async def _wait_for_token(self, chat_id: ChatId) -> Dict[str, float]:
@@ -190,16 +197,18 @@ class PokerBotViewer:
         admin_chat_id: Optional[int] = None,
         *,
         rate_limit_per_minute: int = DEFAULT_RATE_LIMIT_PER_MINUTE,
+        rate_limit_per_second: Optional[int] = DEFAULT_RATE_LIMIT_PER_SECOND,
+        rate_limiter_delay: Optional[float] = None,
     ):
         self._bot = bot
         self._desk_generator = DeskImageGenerator()
         self._admin_chat_id = admin_chat_id
-        # 0.1s base delay to allow faster message delivery while avoiding limits
         self._rate_limiter = RateLimitedSender(
-            delay=0.1,
+            delay=rate_limiter_delay,
             error_delay=0.1,
             notify_admin=self.notify_admin,
             max_per_minute=rate_limit_per_minute,
+            max_per_second=rate_limit_per_second,
         )
 
     async def notify_admin(self, log_data: Dict[str, Any]) -> None:

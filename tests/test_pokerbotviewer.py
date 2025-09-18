@@ -3,11 +3,16 @@ import json
 import logging
 from unittest.mock import AsyncMock, MagicMock
 
+import pytest
 from telegram import ReplyKeyboardMarkup
 from telegram.error import BadRequest, Forbidden
 
 from pokerapp.cards import Card
-from pokerapp.config import DEFAULT_RATE_LIMIT_PER_MINUTE
+
+from pokerapp.config import (
+    DEFAULT_RATE_LIMIT_PER_MINUTE,
+    DEFAULT_RATE_LIMIT_PER_SECOND,
+)
 from pokerapp.pokerbotview import PokerBotViewer
 
 
@@ -27,11 +32,20 @@ def _row_texts(row):
 def test_pokerbotviewer_uses_configured_rate_limit():
     default_viewer = PokerBotViewer(bot=MagicMock())
     assert default_viewer._rate_limiter._max_tokens == DEFAULT_RATE_LIMIT_PER_MINUTE
+    assert default_viewer._rate_limiter._delay == pytest.approx(
+        1 / DEFAULT_RATE_LIMIT_PER_SECOND
+    )
 
     viewer = PokerBotViewer(bot=MagicMock(), rate_limit_per_minute=123)
 
     assert viewer._rate_limiter._max_tokens == 123
     assert viewer._rate_limiter._refill_rate == 123 / 60.0
+
+    fast_viewer = PokerBotViewer(
+        bot=MagicMock(), rate_limit_per_minute=120, rate_limit_per_second=3
+    )
+
+    assert fast_viewer._rate_limiter._delay == pytest.approx(1 / 3)
 
 
 def test_delete_message_ignores_missing_message(caplog):
