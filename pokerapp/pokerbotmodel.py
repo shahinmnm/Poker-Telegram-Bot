@@ -211,7 +211,18 @@ class PokerBotModel:
             text,
             reply_markup=keyboard,
         )
-        if new_message_id:
+        if new_message_id is None:
+            if message_id and message_id in game.message_ids_to_delete:
+                game.message_ids_to_delete.remove(message_id)
+            game.ready_message_main_id = None
+            replacement_id = await self._view.send_message_return_id(
+                chat_id, text, reply_markup=keyboard
+            )
+            if replacement_id:
+                game.ready_message_main_id = replacement_id
+                game.ready_message_main_text = text
+                await self._table_manager.save_game(chat_id, game)
+        elif new_message_id:
             if new_message_id != game.ready_message_main_id:
                 game.ready_message_main_id = new_message_id
                 await self._table_manager.save_game(chat_id, game)
@@ -343,6 +354,16 @@ class PokerBotModel:
             err = str(e).lower()
             if "message is not modified" in err:
                 return message_id
+            if "message to edit not found" in err or "message identifier is not valid" in err:
+                logger.info(
+                    "Message to edit is missing; will request replacement",
+                    extra={
+                        "chat_id": chat_id,
+                        "message_id": message_id,
+                        "error_type": type(e).__name__,
+                    },
+                )
+                return None
         except Exception as e:
             logger.error(
                 "Error editing message",
@@ -465,7 +486,18 @@ class PokerBotModel:
                     text,
                     reply_markup=keyboard,
                 )
-                if new_id:
+                if new_id is None:
+                    old_id = game.ready_message_main_id
+                    if old_id and old_id in game.message_ids_to_delete:
+                        game.message_ids_to_delete.remove(old_id)
+                    game.ready_message_main_id = None
+                    msg = await self._view.send_message_return_id(
+                        chat_id, text, reply_markup=keyboard
+                    )
+                    if msg:
+                        game.ready_message_main_id = msg
+                        game.ready_message_main_text = text
+                elif new_id:
                     game.ready_message_main_id = new_id
                     game.ready_message_main_text = text
             else:
@@ -1145,7 +1177,19 @@ class PokerBotModel:
                 reply_markup=None,
                 parse_mode=ParseMode.MARKDOWN,
             )
-            if new_msg_id and new_msg_id != game.board_message_id:
+            if new_msg_id is None:
+                old_id = game.board_message_id
+                if old_id and old_id in game.message_ids_to_delete:
+                    game.message_ids_to_delete.remove(old_id)
+                game.board_message_id = None
+                replacement_id = await self._view.send_message_return_id(
+                    chat_id, street_name, reply_markup=None
+                )
+                if replacement_id:
+                    game.board_message_id = replacement_id
+                    if replacement_id not in game.message_ids_to_delete:
+                        game.message_ids_to_delete.append(replacement_id)
+            elif new_msg_id != game.board_message_id:
                 if game.board_message_id in game.message_ids_to_delete:
                     game.message_ids_to_delete.remove(game.board_message_id)
                 game.board_message_id = new_msg_id
