@@ -551,12 +551,22 @@ class PokerBotModel:
         """مراحل شروع یک دست جدید بازی را انجام می‌دهد."""
         self._cancel_auto_start(context)
         if game.ready_message_main_id:
-            logger.debug(
-                "Skipping deletion of message %s in chat %s",
-                game.ready_message_main_id,
-                chat_id,
-            )
-            game.ready_message_main_id = None
+            deleted_ready_message = False
+            try:
+                await self._view.delete_message(chat_id, game.ready_message_main_id)
+                deleted_ready_message = True
+            except Exception as e:
+                logger.warning(
+                    "Failed to delete ready message",
+                    extra={
+                        "chat_id": chat_id,
+                        "message_id": game.ready_message_main_id,
+                        "error_type": type(e).__name__,
+                    },
+                )
+            if deleted_ready_message:
+                game.ready_message_main_id = None
+            game.ready_message_main_text = ""
 
         # Ensure dealer_index is initialized before use
         if not hasattr(game, "dealer_index"):
