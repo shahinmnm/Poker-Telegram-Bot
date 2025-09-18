@@ -400,6 +400,47 @@ async def test_auto_start_tick_creates_message_when_missing():
 
 
 @pytest.mark.asyncio
+async def test_auto_start_tick_recreates_missing_message_after_bad_request():
+    chat_id = -779
+    view = MagicMock()
+    view.edit_message_text = AsyncMock(
+        side_effect=BadRequest("message to edit not found")
+    )
+    view.send_message_return_id = AsyncMock(return_value=4242)
+    bot = MagicMock()
+    cfg = MagicMock(DEBUG=False)
+    kv = MagicMock()
+    table_manager = MagicMock()
+    game = Game()
+    game.ready_message_main_id = 555
+    game.ready_message_main_text = "old"
+    game.message_ids_to_delete.append(555)
+    table_manager.get_game = AsyncMock(return_value=game)
+    table_manager.save_game = AsyncMock()
+
+    model = PokerBotModel(view=view, bot=bot, cfg=cfg, kv=kv, table_manager=table_manager)
+
+    job = SimpleNamespace(chat_id=chat_id)
+    job.schedule_removal = MagicMock()
+    context = SimpleNamespace(job=job, chat_data={"start_countdown": 2})
+
+    await model._auto_start_tick(context)
+
+    assert view.edit_message_text.await_count == 1
+    assert view.send_message_return_id.await_count == 1
+    send_args = view.send_message_return_id.await_args
+    assert send_args.args[0] == chat_id
+    new_text = send_args.args[1]
+    assert "1 ثانیه" in new_text
+    assert send_args.kwargs.get("reply_markup") is not None
+    assert game.ready_message_main_id == 4242
+    assert game.ready_message_main_text == new_text
+    assert 555 not in game.message_ids_to_delete
+    table_manager.save_game.assert_awaited_once_with(chat_id, game)
+    assert context.chat_data["start_countdown"] == 1
+    assert context.chat_data[KEY_CHAT_DATA_GAME] is game
+
+@pytest.mark.asyncio
 async def test_showdown_sends_new_hand_message_before_join_prompt():
     chat_id = -900
     call_order: List[str] = []
