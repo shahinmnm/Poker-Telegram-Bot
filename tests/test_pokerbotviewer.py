@@ -7,6 +7,7 @@ from telegram import ReplyKeyboardMarkup
 from telegram.error import BadRequest, Forbidden
 
 from pokerapp.cards import Card
+from pokerapp.config import DEFAULT_RATE_LIMIT_PER_MINUTE
 from pokerapp.pokerbotview import PokerBotViewer
 
 
@@ -21,6 +22,16 @@ def run(coro):
 
 def _row_texts(row):
     return [getattr(button, "text", button) for button in row]
+
+
+def test_pokerbotviewer_uses_configured_rate_limit():
+    default_viewer = PokerBotViewer(bot=MagicMock())
+    assert default_viewer._rate_limiter._max_tokens == DEFAULT_RATE_LIMIT_PER_MINUTE
+
+    viewer = PokerBotViewer(bot=MagicMock(), rate_limit_per_minute=123)
+
+    assert viewer._rate_limiter._max_tokens == 123
+    assert viewer._rate_limiter._refill_rate == 123 / 60.0
 
 
 def test_delete_message_ignores_missing_message(caplog):

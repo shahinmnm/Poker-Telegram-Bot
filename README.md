@@ -50,6 +50,14 @@ The winner is determinated by various combinations of Poker hands rank from five
     > Get token from [@BotFather](https://telegram.me/BotFather).
 3. Start the bot `make up`.
 
+#### Optional environment variables
+
+- `POKERBOT_RATE_LIMIT_PER_MINUTE`: Overrides the per-chat message rate limit
+  enforced by the bot. The default is `20`, matching Telegram's guidance for
+  group chats when using webhooks. Lower the value if your deployment is
+  frequently rate limited or raise it if you need to burst above the default
+  throughput.
+
 ### FAQ
 
 1. It shows `not enough players` after `/start`.

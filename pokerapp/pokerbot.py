@@ -73,7 +73,11 @@ class PokerBot:
         )
 
         table_manager = TableManager(kv_async, kv_sync)
-        view = PokerBotViewer(bot=self._application.bot, admin_chat_id=cfg.ADMIN_CHAT_ID)
+        view = PokerBotViewer(
+            bot=self._application.bot,
+            admin_chat_id=cfg.ADMIN_CHAT_ID,
+            rate_limit_per_minute=cfg.RATE_LIMIT_PER_MINUTE,
+        )
         model = PokerBotModel(
             view=view,
             bot=self._application.bot,
