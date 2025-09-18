@@ -334,6 +334,42 @@ async def test_auto_start_tick_persists_replacement_message():
 
 
 @pytest.mark.asyncio
+async def test_auto_start_tick_saves_after_starting_game():
+    chat_id = -776
+    view = MagicMock()
+    bot = MagicMock()
+    cfg = MagicMock(DEBUG=False)
+    kv = MagicMock()
+    table_manager = MagicMock()
+    game = Game()
+    table_manager.get_game = AsyncMock(return_value=game)
+    table_manager.save_game = AsyncMock()
+
+    model = PokerBotModel(view=view, bot=bot, cfg=cfg, kv=kv, table_manager=table_manager)
+    model._start_game = AsyncMock()
+
+    job = SimpleNamespace(chat_id=chat_id)
+    job.schedule_removal = MagicMock()
+    context = SimpleNamespace(
+        job=job,
+        chat_data={
+            "start_countdown": 0,
+            "start_countdown_job": object(),
+            "start_countdown_last_rendered": 1,
+        },
+    )
+
+    await model._auto_start_tick(context)
+
+    model._start_game.assert_awaited_once_with(context, game, chat_id)
+    table_manager.save_game.assert_awaited_once_with(chat_id, game)
+    job.schedule_removal.assert_called_once()
+    assert "start_countdown_job" not in context.chat_data
+    assert "start_countdown_last_rendered" not in context.chat_data
+    assert context.chat_data[KEY_CHAT_DATA_GAME] is game
+
+
+@pytest.mark.asyncio
 async def test_auto_start_tick_skips_save_when_message_unchanged():
     chat_id = -778
     view = MagicMock()
