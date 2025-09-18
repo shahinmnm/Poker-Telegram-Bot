@@ -152,9 +152,15 @@ class PokerBotModel:
             context.chat_data.pop("start_countdown_job", None)
             await self._start_game(context, game, chat_id)
             return
+        next_remaining = max(remaining - 1, 0)
+        if next_remaining == remaining:
+            # Nothing to update; ensure countdown stays in sync and exit early.
+            context.chat_data["start_countdown"] = next_remaining
+            return
+        context.chat_data["start_countdown"] = next_remaining
         keyboard_buttons = [
             [InlineKeyboardButton(text="نشستن سر میز", callback_data="join_game"),
-             InlineKeyboardButton(text=f"شروع بازی ({remaining})", callback_data="start_game")]
+             InlineKeyboardButton(text=f"شروع بازی ({next_remaining})", callback_data="start_game")]
         ]
         keyboard = InlineKeyboardMarkup(keyboard_buttons)
         message_text = getattr(game, "ready_message_main_text", "")
@@ -168,7 +174,6 @@ class PokerBotModel:
             game.ready_message_main_id = new_message_id
             game.ready_message_main_text = message_text
             await self._table_manager.save_game(chat_id, game)
-        context.chat_data["start_countdown"] = remaining - 1
 
     async def _schedule_auto_start(self, context: CallbackContext, game: Game, chat_id: ChatId) -> None:
         if context.chat_data.get("start_countdown_job"):
