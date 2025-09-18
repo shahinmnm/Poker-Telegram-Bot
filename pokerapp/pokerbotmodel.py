@@ -152,6 +152,7 @@ class PokerBotModel:
             context.chat_data.pop("start_countdown_job", None)
             context.chat_data.pop("start_countdown_last_rendered", None)
             await self._start_game(context, game, chat_id)
+            await self._table_manager.save_game(chat_id, game)
             return
         next_remaining = max(remaining - 1, 0)
         context.chat_data["start_countdown"] = next_remaining
