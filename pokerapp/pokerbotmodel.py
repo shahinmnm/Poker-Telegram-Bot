@@ -114,6 +114,11 @@ class PokerBotModel:
         try:
             return await self._table_manager.find_game_by_user(user_id)
         except LookupError as exc:
+            await self._view.send_message(
+                user_id,
+                "❌ هیچ بازی فعالی برای شما پیدا نشد. اگر بازی تازه راه‌اندازی شده،"
+                " دوباره تلاش کنید.",
+            )
             raise UserException("بازی‌ای برای توقف یافت نشد.") from exc
 
     @staticmethod
