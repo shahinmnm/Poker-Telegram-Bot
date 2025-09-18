@@ -11,14 +11,18 @@ import pytest
 
 from pokerapp.cards import Cards, Card
 from pokerapp.config import Config
-from pokerapp.entities import Money, Player, Game, PlayerState
+from pokerapp.entities import Money, Player, Game, PlayerState, GameState
 from pokerapp.pokerbotmodel import (
     PokerBotModel,
     RoundRateModel,
     WalletManagerModel,
     KEY_CHAT_DATA_GAME,
+    KEY_STOP_REQUEST,
+    STOP_CONFIRM_CALLBACK,
+    STOP_RESUME_CALLBACK,
 )
 from telegram.error import BadRequest
+from telegram import InlineKeyboardMarkup
 
 
 HANDS_FILE = "./tests/hands.txt"
@@ -198,6 +202,176 @@ def _build_model_with_game():
     game.add_player(player, seat_index=0)
     player.cards = [Card("A♠"), Card("K♦")]
     return model, game, player, view
+
+
+@pytest.mark.asyncio
+async def test_request_stop_creates_vote_prompt():
+    chat_id = -1200
+    view = MagicMock()
+    view.send_message_return_id = AsyncMock(return_value=77)
+    view.edit_message_text = AsyncMock()
+    view.send_message = AsyncMock()
+    bot = MagicMock()
+    cfg = MagicMock(DEBUG=False)
+    kv = MagicMock()
+    table_manager = MagicMock()
+    table_manager.save_game = AsyncMock()
+
+    model = PokerBotModel(view=view, bot=bot, cfg=cfg, kv=kv, table_manager=table_manager)
+
+    game = Game()
+    wallet_a = MagicMock()
+    player_a = Player(
+        user_id=1,
+        mention_markdown="@player_a",
+        wallet=wallet_a,
+        ready_message_id="ra",
+    )
+    game.add_player(player_a, seat_index=0)
+
+    wallet_b = MagicMock()
+    player_b = Player(
+        user_id=2,
+        mention_markdown="@player_b",
+        wallet=wallet_b,
+        ready_message_id="rb",
+    )
+    player_b.state = PlayerState.ALL_IN
+    game.add_player(player_b, seat_index=1)
+
+    context = SimpleNamespace(chat_data={KEY_CHAT_DATA_GAME: game})
+
+    await model._request_stop(context, game, chat_id, requester_id=player_a.user_id)
+
+    assert KEY_STOP_REQUEST in context.chat_data
+    stop_request = context.chat_data[KEY_STOP_REQUEST]
+    assert stop_request["message_id"] == 77
+    assert stop_request["votes"] == {player_a.user_id}
+    assert set(stop_request["active_players"]) == {player_a.user_id, player_b.user_id}
+
+    send_args = view.send_message_return_id.await_args
+    assert send_args.args[0] == chat_id
+    message_text = send_args.args[1]
+    assert "آراء تأیید" in message_text
+    markup = send_args.kwargs["reply_markup"]
+    assert isinstance(markup, InlineKeyboardMarkup)
+    buttons = markup.inline_keyboard[0]
+    assert buttons[0].callback_data == STOP_CONFIRM_CALLBACK
+    assert buttons[1].callback_data == STOP_RESUME_CALLBACK
+
+
+@pytest.mark.asyncio
+async def test_confirm_stop_vote_triggers_cancel_on_majority():
+    chat_id = -1300
+    view = MagicMock()
+    view.send_message_return_id = AsyncMock(return_value=88)
+    view.edit_message_text = AsyncMock(return_value=88)
+    view.send_message = AsyncMock()
+    bot = MagicMock()
+    cfg = MagicMock(DEBUG=False)
+    kv = MagicMock()
+    table_manager = MagicMock()
+    table_manager.save_game = AsyncMock()
+
+    model = PokerBotModel(view=view, bot=bot, cfg=cfg, kv=kv, table_manager=table_manager)
+
+    game = Game()
+    wallet_a = MagicMock()
+    player_a = Player(
+        user_id=10,
+        mention_markdown="@p10",
+        wallet=wallet_a,
+        ready_message_id="r10",
+    )
+    game.add_player(player_a, seat_index=0)
+
+    wallet_b = MagicMock()
+    player_b = Player(
+        user_id=11,
+        mention_markdown="@p11",
+        wallet=wallet_b,
+        ready_message_id="r11",
+    )
+    game.add_player(player_b, seat_index=1)
+
+    context = SimpleNamespace(chat_data={KEY_CHAT_DATA_GAME: game})
+
+    await model._request_stop(context, game, chat_id, requester_id=player_a.user_id)
+
+    model._cancel_hand = AsyncMock()
+
+    update = SimpleNamespace(
+        effective_chat=SimpleNamespace(id=chat_id),
+        callback_query=SimpleNamespace(
+            data=STOP_CONFIRM_CALLBACK,
+            from_user=SimpleNamespace(id=player_b.user_id),
+        ),
+    )
+
+    await model.confirm_stop_vote(update, context)
+
+    model._cancel_hand.assert_awaited_once()
+    args = model._cancel_hand.await_args.args
+    assert args[0] is game
+    assert args[1] == chat_id
+
+
+@pytest.mark.asyncio
+async def test_cancel_hand_refunds_wallets_and_announces():
+    chat_id = -1400
+    view = MagicMock()
+    view.send_message_return_id = AsyncMock()
+    view.edit_message_text = AsyncMock(return_value=99)
+    view.send_message = AsyncMock()
+    bot = MagicMock()
+    cfg = MagicMock(DEBUG=False)
+    kv = MagicMock()
+    table_manager = MagicMock()
+    table_manager.save_game = AsyncMock()
+
+    model = PokerBotModel(view=view, bot=bot, cfg=cfg, kv=kv, table_manager=table_manager)
+
+    game = Game()
+    wallet_a = MagicMock()
+    wallet_b = MagicMock()
+    player_a = Player(
+        user_id=20,
+        mention_markdown="@p20",
+        wallet=wallet_a,
+        ready_message_id="r20",
+    )
+    game.add_player(player_a, seat_index=0)
+    player_b = Player(
+        user_id=21,
+        mention_markdown="@p21",
+        wallet=wallet_b,
+        ready_message_id="r21",
+    )
+    game.add_player(player_b, seat_index=1)
+    game.pot = 300
+
+    stop_request = {
+        "game_id": game.id,
+        "message_id": 99,
+        "active_players": [player_a.user_id, player_b.user_id],
+        "votes": {player_a.user_id, player_b.user_id},
+        "manager_override": False,
+    }
+
+    context = SimpleNamespace(chat_data={KEY_STOP_REQUEST: stop_request})
+
+    original_game_id = game.id
+
+    await model._cancel_hand(game, chat_id, context, stop_request)
+
+    wallet_a.cancel.assert_called_once_with(original_game_id)
+    wallet_b.cancel.assert_called_once_with(original_game_id)
+    assert game.pot == 0
+    assert KEY_STOP_REQUEST not in context.chat_data
+    assert view.edit_message_text.await_count == 1
+    assert view.send_message.await_count == 1
+    table_manager.save_game.assert_awaited_once_with(chat_id, game)
+    assert game.state == GameState.INITIAL
 
 
 def test_add_cards_to_table_sends_plain_message_without_keyboard():
