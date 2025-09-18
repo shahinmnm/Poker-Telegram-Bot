@@ -1179,6 +1179,12 @@ class PokerBotViewer:
             "♻️ دست به پایان رسید. بازیکنان باقی‌مانده برای دست بعد حفظ شدند.\n"
             "برای شروع دست جدید، /start را بزنید یا بازیکنان جدید می‌توانند با دکمهٔ «نشستن سر میز» وارد شوند."
         )
+        reply_keyboard = ReplyKeyboardMarkup(
+            keyboard=[["/start", "نشستن سر میز"], ["/stop"]],
+            resize_keyboard=True,
+            one_time_keyboard=False,
+            selective=False,
+        )
         try:
             await self._rate_limiter.send(
                 lambda: self._bot.send_message(
@@ -1187,6 +1193,7 @@ class PokerBotViewer:
                     parse_mode=ParseMode.MARKDOWN,
                     disable_notification=True,
                     disable_web_page_preview=True,
+                    reply_markup=reply_keyboard,
                 ),
                 chat_id=chat_id,
             )

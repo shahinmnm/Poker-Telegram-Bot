@@ -2,6 +2,7 @@ import asyncio
 import logging
 from unittest.mock import AsyncMock, MagicMock
 
+from telegram import ReplyKeyboardMarkup
 from telegram.error import BadRequest, Forbidden
 
 from pokerapp.cards import Card
@@ -180,3 +181,21 @@ def test_table_markup_excludes_show_table_button():
     stage_row = _row_texts(markup.keyboard[1])
     assert "👁️ نمایش میز" not in stage_row
     assert stage_row == ["پری فلاپ", "✅ فلاپ", "ترن", "ریور"]
+
+
+def test_new_hand_ready_message_uses_reply_keyboard():
+    viewer = PokerBotViewer(bot=MagicMock())
+    viewer._rate_limiter.send = _passthrough_rate_limit  # type: ignore[assignment]
+    viewer._bot.send_message = AsyncMock()
+
+    run(viewer.send_new_hand_ready_message(chat_id=987))
+
+    assert viewer._bot.send_message.await_count == 1
+    call = viewer._bot.send_message.await_args
+    markup = call.kwargs.get("reply_markup")
+    assert isinstance(markup, ReplyKeyboardMarkup)
+    assert markup.resize_keyboard is True
+    assert markup.one_time_keyboard is False
+    assert markup.selective is False
+    assert _row_texts(markup.keyboard[0]) == ["/start", "نشستن سر میز"]
+    assert _row_texts(markup.keyboard[1]) == ["/stop"]
