@@ -1,4 +1,5 @@
 import asyncio
+import json
 import logging
 from unittest.mock import AsyncMock, MagicMock
 
@@ -78,6 +79,28 @@ def test_delete_message_logs_error_for_unexpected_exception(caplog):
         record.levelno == logging.ERROR and "Error deleting message" in record.message
         for record in caplog.records
     )
+
+
+def test_notify_admin_failure_does_not_deadlock():
+    viewer = PokerBotViewer(bot=MagicMock(), admin_chat_id=999)
+    viewer._rate_limiter._delay = 0
+    viewer._rate_limiter._error_delay = 0
+
+    failing_call = AsyncMock(side_effect=RuntimeError("boom"))
+    viewer._bot.send_message = AsyncMock(return_value=MagicMock(message_id=1))
+
+    async def invoke_send():
+        return await viewer._rate_limiter.send(failing_call, chat_id=555)
+
+    result = run(asyncio.wait_for(invoke_send(), timeout=0.5))
+
+    assert result is None
+    assert viewer._bot.send_message.await_count == 2
+    chat_ids = {call.kwargs["chat_id"] for call in viewer._bot.send_message.await_args_list}
+    assert chat_ids == {999}
+    events = [json.loads(call.kwargs["text"])["event"] for call in viewer._bot.send_message.await_args_list]
+    assert events.count("rate_limiter_error") == 1
+    assert events.count("rate_limiter_failed") == 1
 
 
 async def _passthrough_rate_limit(func, *args, **kwargs):

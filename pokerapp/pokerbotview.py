@@ -82,6 +82,11 @@ class RateLimitedSender:
         self, func: Callable[..., Awaitable[Any]], *args, chat_id: Optional[ChatId] = None, **kwargs
     ):
         """Execute ``func`` with args, respecting per-chat limits and retrying."""
+        notifications: List[Dict[str, Any]] = []
+        error_to_raise: Optional[TelegramError] = None
+        should_notify_failure = False
+        should_return_none = False
+
         async with self._lock:
             bucket = None
             if chat_id is not None:
@@ -106,6 +111,7 @@ class RateLimitedSender:
                 except TelegramError as e:
                     if attempts >= self._max_retries:
                         last_error = e
+                        should_notify_failure = True
                         break
                     attempts += 1
                     await asyncio.sleep(self._error_delay)
@@ -118,7 +124,7 @@ class RateLimitedSender:
                         },
                     )
                     if self._notify_admin:
-                        await self._notify_admin(
+                        notifications.append(
                             {
                                 "event": "rate_limiter_error",
                                 "error": str(e),
@@ -126,31 +132,34 @@ class RateLimitedSender:
                             }
                         )
                     last_error = e if isinstance(e, TelegramError) else None
+                    should_notify_failure = True
+                    if last_error is None:
+                        should_return_none = True
                     break
-            if last_error:
-                if self._notify_admin:
-                    await self._notify_admin(
-                        {
-                            "event": "rate_limiter_failed",
-                            "request_params": {"args": str(args), "kwargs": str(kwargs)},
-                        }
-                    )
-                logger.warning(
-                    "RateLimitedSender.send failed after retries",
-                    extra={"request_params": {"args": args, "kwargs": kwargs}},
-                )
-                raise last_error
-            if self._notify_admin:
-                await self._notify_admin(
+            if should_notify_failure:
+                notifications.append(
                     {
                         "event": "rate_limiter_failed",
                         "request_params": {"args": str(args), "kwargs": str(kwargs)},
                     }
                 )
-            logger.warning(
-                "RateLimitedSender.send failed after retries",
-                extra={"request_params": {"args": args, "kwargs": kwargs}},
-            )
+                logger.warning(
+                    "RateLimitedSender.send failed after retries",
+                    extra={"request_params": {"args": args, "kwargs": kwargs}},
+                )
+                if last_error is not None:
+                    error_to_raise = last_error
+                else:
+                    should_return_none = True
+
+        if self._notify_admin:
+            for payload in notifications:
+                await self._notify_admin(payload)
+
+        if error_to_raise is not None:
+            raise error_to_raise
+
+        if should_return_none:
             return None
 
 class PokerBotViewer:
