@@ -28,7 +28,6 @@ from pokerapp.pokerbotmodel import (
 )
 from telegram.error import BadRequest
 from telegram import InlineKeyboardMarkup
-from pokerapp.utils.request_tracker import RequestTracker
 
 
 HANDS_FILE = "./tests/hands.txt"
@@ -50,10 +49,6 @@ def make_wallet_mock(value: Optional[int] = None):
 
 
 def _prepare_view_mock(view: MagicMock) -> MagicMock:
-    view.request_tracker = RequestTracker()
-    view.reset_round_context = AsyncMock()
-    view.set_round_context = MagicMock()
-    view.remember_text_payload = AsyncMock()
     view.edit_message_text = AsyncMock(return_value=None)
     view.send_message_return_id = AsyncMock(return_value=None)
     view.send_message = AsyncMock()
@@ -1012,28 +1007,3 @@ def test_send_turn_message_keeps_previous_when_new_message_missing():
     assert game.turn_message_id == 333
 
 
-@pytest.mark.asyncio
-async def test_stage_and_turn_requests_within_budget():
-    model, game, player, view = _build_model_with_game()
-    chat_id = -1600
-    round_id = game.id
-    view.set_round_context(chat_id, round_id)
-    view.send_message_return_id = AsyncMock(side_effect=[201, 202, 203, 204])
-    view.edit_message_text = AsyncMock(return_value=201)
-    async def fake_turn_actions(*args, **kwargs):
-        await model._request_tracker.try_consume(chat_id, round_id, "turn")
-        return 301
-
-    view.send_turn_actions = AsyncMock(side_effect=fake_turn_actions)
-    view.delete_message = AsyncMock()
-    player.wallet.value = AsyncMock(return_value=1000)
-
-    await model.add_cards_to_table(3, game, chat_id, "🃏 فلاپ")
-    await model.add_cards_to_table(1, game, chat_id, "🃏 ترن")
-    await model.add_cards_to_table(1, game, chat_id, "🃏 ریور")
-    await model._send_turn_message(game, player, chat_id)
-
-    stats = await model._request_tracker.snapshot(chat_id, round_id)
-    assert stats.stage == 3
-    assert stats.turn == 1
-    assert stats.total() <= model._request_tracker.limit

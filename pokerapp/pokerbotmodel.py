@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 
 import asyncio
-import inspect
 import datetime
 import random
 import uuid
@@ -23,7 +22,7 @@ from telegram import (
     User,
 )
 from telegram.constants import ParseMode
-from telegram.error import BadRequest, RetryAfter
+from telegram.error import BadRequest, RetryAfter, TelegramError
 from telegram.ext import CallbackContext, ContextTypes
 from telegram.helpers import mention_markdown as format_mention_markdown
 
@@ -167,7 +166,6 @@ class PokerBotModel:
         )
         self._private_chat_ids: Dict[int, int] = {}
         self._chat_locks: Dict[int, ReentrantAsyncLock] = {}
-        self._request_tracker = self._view.request_tracker
         self._countdown_cache: LRUCache[int, _CountdownCacheEntry] = LRUCache(
             maxsize=64, getsizeof=lambda entry: 1
         )
@@ -215,28 +213,6 @@ class PokerBotModel:
             private_chat_id=private_chat_id,
         )
         await self._stats.register_player_profile(identity)
-
-    async def _remember_message_payload(
-        self,
-        *,
-        chat_id: ChatId,
-        message_id: MessageId,
-        text: str,
-        reply_markup: Optional[InlineKeyboardMarkup | ReplyKeyboardMarkup],
-        parse_mode: str,
-    ) -> None:
-        remember = getattr(self._view, "remember_text_payload", None)
-        if remember is None:
-            return
-        result = remember(
-            chat_id=chat_id,
-            message_id=message_id,
-            text=text,
-            reply_markup=reply_markup,
-            parse_mode=parse_mode,
-        )
-        if inspect.isawaitable(result):
-            await result
 
     def _build_private_menu(self) -> ReplyKeyboardMarkup:
         return ReplyKeyboardMarkup(
@@ -919,33 +895,20 @@ class PokerBotModel:
             broadcast_performed = False
 
             if should_broadcast:
-                if not await self._request_tracker.try_consume(
-                    self._safe_int(chat_id), game.id, "countdown"
-                ):
-                    should_broadcast = False
-
-            if should_broadcast:
                 new_message_id = await self._safe_edit_message_text(
                     chat_id,
                     message_id,
                     text,
                     reply_markup=keyboard,
                     log_context="countdown",
-                    request_category="countdown",
-                    request_reserved=True,
                 )
                 if new_message_id is None:
                     if message_id and message_id in game.message_ids_to_delete:
                         game.message_ids_to_delete.remove(message_id)
                     game.ready_message_main_id = None
-                    if await self._request_tracker.try_consume(
-                        self._safe_int(chat_id), game.id, "countdown"
-                    ):
-                        replacement_id = await self._view.send_message_return_id(
-                            chat_id, text, reply_markup=keyboard
-                        )
-                    else:
-                        replacement_id = None
+                    replacement_id = await self._view.send_message_return_id(
+                        chat_id, text, reply_markup=keyboard
+                    )
                     if replacement_id:
                         game.ready_message_main_id = replacement_id
                         game.ready_message_main_text = text
@@ -1083,8 +1046,6 @@ class PokerBotModel:
         reply_markup: Optional[InlineKeyboardMarkup | ReplyKeyboardMarkup] = None,
         parse_mode: str = ParseMode.MARKDOWN,
         log_context: Optional[str] = None,
-        request_category: Optional[str] = None,
-        request_reserved: bool = False,
     ) -> Optional[MessageId]:
         """
         Safely edit a message's text, retrying on rate limits and
@@ -1096,18 +1057,9 @@ class PokerBotModel:
         """
 
         if not message_id:
-            new_id = await self._view.send_message_return_id(
+            return await self._view.send_message_return_id(
                 chat_id, text, reply_markup=reply_markup
             )
-            if new_id:
-                await self._remember_message_payload(
-                    chat_id=chat_id,
-                    message_id=new_id,
-                    text=text,
-                    reply_markup=reply_markup,
-                    parse_mode=parse_mode,
-                )
-            return new_id
 
         try:
             result = await self._view.edit_message_text(
@@ -1116,8 +1068,6 @@ class PokerBotModel:
                 text=text,
                 reply_markup=reply_markup,
                 parse_mode=parse_mode,
-                request_category=request_category,
-                request_reserved=request_reserved,
             )
         except RetryAfter as exc:
             await asyncio.sleep(exc.retry_after)
@@ -1127,8 +1077,6 @@ class PokerBotModel:
                 text=text,
                 reply_markup=reply_markup,
                 parse_mode=parse_mode,
-                request_category=request_category,
-                request_reserved=request_reserved,
             )
         except BadRequest as exc:
             error_message = getattr(exc, "message", None) or str(exc)
@@ -1147,17 +1095,21 @@ class PokerBotModel:
                 },
             )
             result = None
-        if result:
-            await self._remember_message_payload(
-                chat_id=chat_id,
-                message_id=result,
-                text=text,
-                reply_markup=reply_markup,
-                parse_mode=parse_mode,
+        except TelegramError as exc:
+            logger.error(
+                "TelegramError when editing message; will send a replacement",
+                extra={
+                    "chat_id": chat_id,
+                    "message_id": message_id,
+                    "context": log_context or "general",
+                    "error_type": type(exc).__name__,
+                },
             )
-            return result
+            result = None
+        else:
+            if result:
+                return result
 
-        # If editing failed, send a new message instead.
         new_id = await self._view.send_message_return_id(
             chat_id, text, reply_markup=reply_markup
         )
@@ -1180,14 +1132,6 @@ class PokerBotModel:
                     "old_message_id": message_id,
                     "new_message_id": new_id,
                 },
-            )
-        if new_id:
-            await self._remember_message_payload(
-                chat_id=chat_id,
-                message_id=new_id,
-                text=text,
-                reply_markup=reply_markup,
-                parse_mode=parse_mode,
             )
         return new_id
 
@@ -1342,7 +1286,6 @@ class PokerBotModel:
             return
 
         if game.state == GameState.FINISHED:
-            await self._view.reset_round_context(chat_id, game.id)
             game.reset()
             # بازیکنان قبلی را برای دور جدید نگه دار
             old_players_ids = context.chat_data.get(KEY_OLD_PLAYERS, [])
@@ -1648,7 +1591,6 @@ class PokerBotModel:
 
         context.chat_data.pop(KEY_STOP_REQUEST, None)
 
-        await self._view.reset_round_context(chat_id, game.id)
         game.reset()
         await self._table_manager.save_game(chat_id, game)
         await self._view.send_message(chat_id, "🛑 بازی متوقف شد.")
@@ -1658,7 +1600,6 @@ class PokerBotModel:
     ) -> None:
         """مراحل شروع یک دست جدید بازی را انجام می‌دهد."""
         async with self._chat_guard(chat_id):
-            self._view.set_round_context(chat_id, game.id)
             self._cancel_auto_start(context)
             if game.ready_message_main_id:
                 deleted_ready_message = False
@@ -1731,7 +1672,6 @@ class PokerBotModel:
                 await self._view.send_message(
                     chat_id, "کارت‌های کافی در دسته وجود ندارد! بازی ریست می‌شود."
                 )
-                await self._view.reset_round_context(chat_id, game.id)
                 game.reset()
                 return
 
@@ -2286,46 +2226,29 @@ class PokerBotModel:
             stage = self._view._derive_stage_from_table(game.cards_table)
 
             if not game.board_message_id:
-                if await self._request_tracker.try_consume(
-                    self._safe_int(chat_id), game.id, "stage"
-                ):
-                    msg_id = await self._view.send_message_return_id(
-                        chat_id, street_name, reply_markup=None
-                    )
-                else:
-                    msg_id = None
+                msg_id = await self._view.send_message_return_id(
+                    chat_id, street_name, reply_markup=None
+                )
                 if msg_id:
                     game.board_message_id = msg_id
                     if msg_id not in game.message_ids_to_delete:
                         game.message_ids_to_delete.append(msg_id)
             else:
-                if await self._request_tracker.try_consume(
-                    self._safe_int(chat_id), game.id, "stage"
-                ):
-                    new_msg_id = await self._safe_edit_message_text(
-                        chat_id,
-                        game.board_message_id,
-                        street_name,
-                        reply_markup=None,
-                        parse_mode=ParseMode.MARKDOWN,
-                        request_category="stage",
-                        request_reserved=True,
-                    )
-                else:
-                    new_msg_id = game.board_message_id
+                new_msg_id = await self._safe_edit_message_text(
+                    chat_id,
+                    game.board_message_id,
+                    street_name,
+                    reply_markup=None,
+                    parse_mode=ParseMode.MARKDOWN,
+                )
                 if new_msg_id is None:
                     old_id = game.board_message_id
                     if old_id and old_id in game.message_ids_to_delete:
                         game.message_ids_to_delete.remove(old_id)
                     game.board_message_id = None
-                    if await self._request_tracker.try_consume(
-                        self._safe_int(chat_id), game.id, "stage"
-                    ):
-                        replacement_id = await self._view.send_message_return_id(
-                            chat_id, street_name, reply_markup=None
-                        )
-                    else:
-                        replacement_id = None
+                    replacement_id = await self._view.send_message_return_id(
+                        chat_id, street_name, reply_markup=None
+                    )
                     if replacement_id:
                         game.board_message_id = replacement_id
                         if replacement_id not in game.message_ids_to_delete:
@@ -2622,7 +2545,6 @@ class PokerBotModel:
                 remaining_players.append(p)
         context.chat_data[KEY_OLD_PLAYERS] = [p.user_id for p in remaining_players]
 
-        await self._view.reset_round_context(chat_id, hand_id)
         game.reset()
         await self._table_manager.save_game(chat_id, game)
 
