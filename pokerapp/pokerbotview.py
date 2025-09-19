@@ -34,7 +34,7 @@ from pokerapp.entities import (
     PlayerState,
 )
 from pokerapp.telegram_validation import TelegramPayloadValidator
-from pokerapp.utils.messenger import TelegramMessenger
+from pokerapp.utils.messaging_service import MessagingService
 
 
 logger = logging.getLogger(__name__)
@@ -118,8 +118,8 @@ class PokerBotViewer:
         self._validator = TelegramPayloadValidator(
             logger_=logger.getChild("validation")
         )
-        self._messenger = TelegramMessenger(
-            bot, logger_=logger.getChild("messenger")
+        self._messenger = MessagingService(
+            bot, logger_=logger.getChild("messaging_service")
         )
         # Legacy rate-limit attributes are retained for backwards compatibility
         # with configuration code but do not influence runtime behaviour.
@@ -364,7 +364,7 @@ class PokerBotViewer:
         parse_mode: str = ParseMode.MARKDOWN,
         disable_web_page_preview: bool = False,
     ) -> Optional[MessageId]:
-        """Edit a message using the central ``TelegramMessenger``."""
+        """Edit a message using the central ``MessagingService``."""
         context = self._build_context(
             "edit_message_text", chat_id=chat_id, message_id=message_id
         )
@@ -406,7 +406,7 @@ class PokerBotViewer:
     ) -> None:
         """Delete a message while keeping the cache in sync."""
         try:
-            await self._bot.delete_message(chat_id=chat_id, message_id=message_id)
+            await self._messenger.delete_message(chat_id=chat_id, message_id=message_id)
         except (BadRequest, Forbidden) as e:
             error_message = getattr(e, "message", None) or str(e) or ""
             normalized_message = error_message.lower()
