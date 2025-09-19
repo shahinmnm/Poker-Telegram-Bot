@@ -946,44 +946,35 @@ class PokerBotModel:
         """
 
         if not message_id:
-            return await self._view.send_message_return_id(
+            new_id = await self._view.send_message_return_id(
                 chat_id, text, reply_markup=reply_markup
             )
+            if new_id:
+                self._view.remember_text_payload(
+                    chat_id=chat_id,
+                    message_id=new_id,
+                    text=text,
+                    reply_markup=reply_markup,
+                    parse_mode=parse_mode,
+                )
+            return new_id
 
-        try:
-            result = await self._view.edit_message_text(
+        result = await self._view.edit_message_text(
+            chat_id=chat_id,
+            message_id=message_id,
+            text=text,
+            reply_markup=reply_markup,
+            parse_mode=parse_mode,
+        )
+        if result:
+            self._view.remember_text_payload(
                 chat_id=chat_id,
-                message_id=message_id,
+                message_id=result,
                 text=text,
                 reply_markup=reply_markup,
                 parse_mode=parse_mode,
             )
-            if result:
-                return message_id
-        except BadRequest as e:
-            err = str(e).lower()
-            if "message is not modified" in err:
-                return message_id
-            if "message to edit not found" in err or "message identifier is not valid" in err:
-                logger.info(
-                    "Message to edit is missing; will request replacement",
-                    extra={
-                        "chat_id": chat_id,
-                        "message_id": message_id,
-                        "error_type": type(e).__name__,
-                    },
-                )
-                return None
-        except Exception as e:
-            logger.error(
-                "Error editing message",
-                extra={
-                    "error_type": type(e).__name__,
-                    "chat_id": chat_id,
-                    "message_id": message_id,
-                    "request_params": {"text": text},
-                },
-            )
+            return result
 
         # If editing failed, send a new message instead.
         new_id = await self._view.send_message_return_id(
@@ -1008,6 +999,14 @@ class PokerBotModel:
                     "old_message_id": message_id,
                     "new_message_id": new_id,
                 },
+            )
+        if new_id:
+            self._view.remember_text_payload(
+                chat_id=chat_id,
+                message_id=new_id,
+                text=text,
+                reply_markup=reply_markup,
+                parse_mode=parse_mode,
             )
         return new_id
 

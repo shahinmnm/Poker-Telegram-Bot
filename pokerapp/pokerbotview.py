@@ -11,9 +11,9 @@ from telegram import (
 from telegram.constants import ParseMode
 from telegram.error import BadRequest, Forbidden, RetryAfter, TelegramError
 from io import BytesIO
-from typing import Optional, Callable, Awaitable, Dict, Any, List
-from dataclasses import dataclass
-from collections import defaultdict
+from typing import Optional, Callable, Awaitable, Dict, Any, List, Deque, Tuple
+from dataclasses import dataclass, field
+from collections import defaultdict, deque
 import asyncio
 import logging
 import json
@@ -192,6 +192,249 @@ class RateLimitedSender:
         if should_return_none:
             return None
 
+
+class ChatUpdateQueue:
+    """Debounces per-chat Telegram edits to avoid redundant updates."""
+
+    @dataclass
+    class _LastPayload:
+        text: Optional[str] = None
+        markup_hash: Optional[str] = None
+        parse_mode: Optional[str] = None
+
+    @dataclass
+    class _PendingUpdate:
+        chat_id: ChatId
+        message_id: MessageId
+        text: str
+        reply_markup: Optional[InlineKeyboardMarkup | ReplyKeyboardMarkup]
+        parse_mode: Optional[str]
+        context: str
+        ready: asyncio.Event = field(default_factory=asyncio.Event)
+        future: asyncio.Future = field(
+            default_factory=lambda: asyncio.get_running_loop().create_future()
+        )
+        timer_task: Optional[asyncio.Task] = None
+        markup_hash: Optional[str] = None
+        disable_web_page_preview: bool = False
+
+    @dataclass
+    class _ChatState:
+        pending: Dict[MessageId, "ChatUpdateQueue._PendingUpdate"] = field(
+            default_factory=dict
+        )
+        order: Deque[MessageId] = field(default_factory=deque)
+        new_item: asyncio.Event = field(default_factory=asyncio.Event)
+        worker: Optional[asyncio.Task] = None
+
+    def __init__(
+        self,
+        bot: Bot,
+        rate_limiter: RateLimitedSender,
+        *,
+        debounce_window: float = 0.3,
+    ) -> None:
+        self._bot = bot
+        self._rate_limiter = rate_limiter
+        self._debounce = debounce_window
+        self._chat_states: Dict[ChatId, ChatUpdateQueue._ChatState] = {}
+        self._last_payloads: Dict[
+            Tuple[ChatId, MessageId], ChatUpdateQueue._LastPayload
+        ] = {}
+
+    def _serialize_markup(
+        self, markup: Optional[InlineKeyboardMarkup | ReplyKeyboardMarkup]
+    ) -> Optional[str]:
+        if markup is None:
+            return None
+        serializer = getattr(markup, "to_dict", None)
+        if callable(serializer):
+            try:
+                return json.dumps(serializer(), sort_keys=True, ensure_ascii=False)
+            except TypeError:
+                pass
+        try:
+            return json.dumps(markup, sort_keys=True, ensure_ascii=False, default=str)
+        except (TypeError, ValueError):
+            return repr(markup)
+
+    def _ensure_state(self, chat_id: ChatId) -> "ChatUpdateQueue._ChatState":
+        state = self._chat_states.get(chat_id)
+        if state is None:
+            state = ChatUpdateQueue._ChatState()
+            self._chat_states[chat_id] = state
+        if state.worker is None or state.worker.done():
+            state.worker = asyncio.create_task(self._chat_worker(chat_id, state))
+        return state
+
+    async def _chat_worker(
+        self, chat_id: ChatId, state: "ChatUpdateQueue._ChatState"
+    ) -> None:
+        try:
+            while True:
+                if not state.order:
+                    state.new_item.clear()
+                    if not state.order:
+                        await state.new_item.wait()
+                        continue
+                message_id = state.order[0]
+                pending = state.pending.get(message_id)
+                if pending is None:
+                    state.order.popleft()
+                    continue
+                await pending.ready.wait()
+                result = await self._execute_pending(pending)
+                state.pending.pop(message_id, None)
+                state.order.popleft()
+                if result is not None:
+                    self._last_payloads[(chat_id, result)] = ChatUpdateQueue._LastPayload(
+                        text=pending.text,
+                        markup_hash=pending.markup_hash,
+                        parse_mode=pending.parse_mode,
+                    )
+                if pending.timer_task and not pending.timer_task.done():
+                    pending.timer_task.cancel()
+                if not pending.future.done():
+                    pending.future.set_result(result)
+        except asyncio.CancelledError:
+            return
+        except Exception:
+            logger.exception(
+                "Unexpected error in ChatUpdateQueue worker", extra={"chat_id": chat_id}
+            )
+
+    async def _execute_pending(
+        self, pending: "ChatUpdateQueue._PendingUpdate"
+    ) -> Optional[MessageId]:
+        try:
+            response = await self._rate_limiter.send(
+                lambda: self._bot.edit_message_text(
+                    chat_id=pending.chat_id,
+                    message_id=pending.message_id,
+                    text=pending.text,
+                    reply_markup=pending.reply_markup,
+                    parse_mode=pending.parse_mode,
+                    disable_web_page_preview=pending.disable_web_page_preview,
+                ),
+                chat_id=pending.chat_id,
+            )
+            if isinstance(response, Message):
+                return response.message_id
+            if response is True:
+                return pending.message_id
+            if isinstance(response, int):
+                return response
+        except BadRequest as e:
+            err = str(e).lower()
+            if "message is not modified" in err:
+                return pending.message_id
+            logger.debug(
+                "ChatUpdateQueue edit rejected",
+                extra={
+                    "chat_id": pending.chat_id,
+                    "message_id": pending.message_id,
+                    "context": pending.context,
+                    "error_type": type(e).__name__,
+                },
+            )
+        except Exception as e:
+            logger.error(
+                "ChatUpdateQueue failed to edit message",
+                extra={
+                    "error_type": type(e).__name__,
+                    "chat_id": pending.chat_id,
+                    "message_id": pending.message_id,
+                    "context": pending.context,
+                },
+            )
+        return None
+
+    def record_payload(
+        self,
+        chat_id: ChatId,
+        message_id: MessageId,
+        *,
+        text: Optional[str],
+        reply_markup: Optional[InlineKeyboardMarkup | ReplyKeyboardMarkup],
+        parse_mode: Optional[str],
+    ) -> None:
+        markup_hash = self._serialize_markup(reply_markup)
+        self._last_payloads[(chat_id, message_id)] = ChatUpdateQueue._LastPayload(
+            text=text,
+            markup_hash=markup_hash,
+            parse_mode=parse_mode,
+        )
+
+    async def enqueue_text_edit(
+        self,
+        *,
+        chat_id: ChatId,
+        message_id: MessageId,
+        text: str,
+        reply_markup: Optional[InlineKeyboardMarkup | ReplyKeyboardMarkup],
+        parse_mode: Optional[str],
+        context: str,
+        force: bool = False,
+        disable_web_page_preview: bool = False,
+    ) -> Optional[MessageId]:
+        markup_hash = self._serialize_markup(reply_markup)
+        last_payload = self._last_payloads.get((chat_id, message_id))
+        if (
+            last_payload
+            and not force
+            and last_payload.text == text
+            and last_payload.markup_hash == markup_hash
+            and last_payload.parse_mode == parse_mode
+        ):
+            return message_id
+
+        state = self._ensure_state(chat_id)
+        pending = state.pending.get(message_id)
+        if pending is None:
+            pending = ChatUpdateQueue._PendingUpdate(
+                chat_id=chat_id,
+                message_id=message_id,
+                text=text,
+                reply_markup=reply_markup,
+                parse_mode=parse_mode,
+                context=context,
+                markup_hash=markup_hash,
+                disable_web_page_preview=disable_web_page_preview,
+            )
+            state.pending[message_id] = pending
+            state.order.append(message_id)
+            state.new_item.set()
+        else:
+            pending.text = text
+            pending.reply_markup = reply_markup
+            pending.parse_mode = parse_mode
+            pending.context = context
+            pending.markup_hash = markup_hash
+            pending.disable_web_page_preview = disable_web_page_preview
+            pending.ready.clear()
+        if pending.timer_task and not pending.timer_task.done():
+            pending.timer_task.cancel()
+        pending.timer_task = asyncio.create_task(
+            self._schedule_ready(chat_id, message_id, pending)
+        )
+        return await asyncio.shield(pending.future)
+
+    async def _schedule_ready(
+        self,
+        chat_id: ChatId,
+        message_id: MessageId,
+        pending: "ChatUpdateQueue._PendingUpdate",
+    ) -> None:
+        try:
+            await asyncio.sleep(self._debounce)
+        except asyncio.CancelledError:
+            return
+        pending.ready.set()
+        state = self._chat_states.get(chat_id)
+        if state:
+            state.new_item.set()
+
+
 class PokerBotViewer:
     _ZERO_WIDTH_SPACE = "\u2063"
 
@@ -229,6 +472,7 @@ class PokerBotViewer:
         rate_limit_per_minute: int = DEFAULT_RATE_LIMIT_PER_MINUTE,
         rate_limit_per_second: Optional[int] = DEFAULT_RATE_LIMIT_PER_SECOND,
         rate_limiter_delay: Optional[float] = None,
+        update_debounce: float = 0.3,
     ):
         self._bot = bot
         self._desk_generator = DeskImageGenerator()
@@ -242,6 +486,11 @@ class PokerBotViewer:
             notify_admin=self.notify_admin,
             max_per_minute=rate_limit_per_minute,
             max_per_second=rate_limit_per_second,
+        )
+        self._update_queue = ChatUpdateQueue(
+            bot,
+            self._rate_limiter,
+            debounce_window=update_debounce,
         )
 
     async def notify_admin(self, log_data: Dict[str, Any]) -> None:
@@ -365,6 +614,48 @@ class PokerBotViewer:
             )
         return None
 
+    async def _enqueue_text_edit(
+        self,
+        *,
+        chat_id: ChatId,
+        message_id: MessageId,
+        text: str,
+        reply_markup: Optional[InlineKeyboardMarkup | ReplyKeyboardMarkup],
+        parse_mode: Optional[str],
+        context: str,
+        force: bool = False,
+        disable_web_page_preview: bool = False,
+    ) -> Optional[MessageId]:
+        return await self._update_queue.enqueue_text_edit(
+            chat_id=chat_id,
+            message_id=message_id,
+            text=text,
+            reply_markup=reply_markup,
+            parse_mode=parse_mode,
+            context=context,
+            force=force,
+            disable_web_page_preview=disable_web_page_preview,
+        )
+
+    def remember_text_payload(
+        self,
+        *,
+        chat_id: ChatId,
+        message_id: MessageId,
+        text: Optional[str],
+        reply_markup: Optional[InlineKeyboardMarkup | ReplyKeyboardMarkup],
+        parse_mode: Optional[str],
+    ) -> None:
+        if not message_id:
+            return
+        self._update_queue.record_payload(
+            chat_id,
+            message_id,
+            text=text,
+            reply_markup=reply_markup,
+            parse_mode=parse_mode,
+        )
+
     async def send_photo(self, chat_id: ChatId) -> None:
         async def _send():
             with open("./assets/poker_hand.jpg", "rb") as f:
@@ -472,33 +763,14 @@ class PokerBotViewer:
                 extra={"context": context},
             )
             return None
-        try:
-            message = await self._rate_limiter.send(
-                lambda: self._bot.edit_message_text(
-                    chat_id=chat_id,
-                    message_id=message_id,
-                    text=normalized_text,
-                    parse_mode=parse_mode,
-                    reply_markup=reply_markup,
-                ),
-                chat_id=chat_id,
-            )
-            if isinstance(message, Message):
-                return message.message_id
-            if message is True:
-                return message_id
-            return message_id
-        except Exception as e:
-            logger.error(
-                "Error editing message",
-                extra={
-                    "error_type": type(e).__name__,
-                    "chat_id": chat_id,
-                    "message_id": message_id,
-                    "request_params": {"text": text},
-                },
-            )
-        return None
+        return await self._enqueue_text_edit(
+            chat_id=chat_id,
+            message_id=message_id,
+            text=normalized_text,
+            reply_markup=reply_markup,
+            parse_mode=parse_mode,
+            context="edit_message_text",
+        )
 
     async def delete_message(
         self, chat_id: ChatId, message_id: MessageId
@@ -850,43 +1122,17 @@ class PokerBotViewer:
                 return None
 
             if message_id:
-                try:
-                    result = await self._rate_limiter.send(
-                        lambda: self._bot.edit_message_text(
-                            chat_id=chat_id,
-                            message_id=message_id,
-                            text=normalized_hidden_text,
-                            parse_mode=ParseMode.MARKDOWN,
-                            reply_markup=markup,
-                            disable_web_page_preview=True,
-                        ),
-                        chat_id=chat_id,
-                    )
-                    if isinstance(result, Message):
-                        return result.message_id
-                    if result is True:
-                        return message_id
-                except BadRequest as e:
-                    err = str(e).lower()
-                    if "message is not modified" in err:
-                        return message_id
-                    logger.debug(
-                        "Failed editing hidden cards keyboard",
-                        extra={
-                            "error_type": type(e).__name__,
-                            "chat_id": chat_id,
-                            "message_id": message_id,
-                        },
-                    )
-                except Exception as e:
-                    logger.error(
-                        "Error editing hidden cards keyboard",
-                        extra={
-                            "error_type": type(e).__name__,
-                            "chat_id": chat_id,
-                            "message_id": message_id,
-                        },
-                    )
+                edited_id = await self._enqueue_text_edit(
+                    chat_id=chat_id,
+                    message_id=message_id,
+                    text=normalized_hidden_text,
+                    reply_markup=markup,
+                    parse_mode=ParseMode.MARKDOWN,
+                    context="send_cards_hidden_edit",
+                    disable_web_page_preview=True,
+                )
+                if edited_id:
+                    return edited_id
 
             try:
                 async def _send_keyboard() -> Message:
@@ -1139,32 +1385,15 @@ class PokerBotViewer:
                 extra={"context": context},
             )
             return None
-        try:
-            message = await self._rate_limiter.send(
-                lambda: self._bot.edit_message_text(
-                    chat_id=chat_id,
-                    message_id=message_id,
-                    text=normalized_text,
-                    reply_markup=reply_markup,
-                    parse_mode=ParseMode.MARKDOWN,
-                    disable_web_page_preview=True,
-                ),
-                chat_id=chat_id,
-            )
-            if isinstance(message, Message):
-                return message.message_id
-            if message is True:
-                return message_id
-        except Exception as e:
-            logger.error(
-                "Error editing turn actions",
-                extra={
-                    "error_type": type(e).__name__,
-                    "chat_id": chat_id,
-                    "request_params": {"message_id": message_id},
-                },
-            )
-        return None
+        return await self._enqueue_text_edit(
+            chat_id=chat_id,
+            message_id=message_id,
+            text=normalized_text,
+            reply_markup=reply_markup,
+            parse_mode=ParseMode.MARKDOWN,
+            context="edit_turn_actions",
+            disable_web_page_preview=True,
+        )
 
     async def edit_message_reply_markup(
         self,
