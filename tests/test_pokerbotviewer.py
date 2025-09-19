@@ -189,6 +189,35 @@ def test_send_cards_hidden_text_replies_to_ready_message():
     assert viewer._bot.delete_message.await_count == 0
 
 
+def test_send_cards_hidden_edit_failure_sends_new_message_and_deletes_old():
+    viewer = PokerBotViewer(bot=MagicMock())
+    viewer._bot.send_message = AsyncMock(return_value=MagicMock(message_id=321))
+    viewer._bot.delete_message = AsyncMock()
+    viewer._bot.edit_message_text = AsyncMock(side_effect=BadRequest("cannot edit"))
+
+    cards = [Card("A♠"), Card("K♦")]
+
+    result = run(
+        viewer.send_cards(
+            chat_id=123,
+            cards=cards,
+            mention_markdown=MENTION_MARKDOWN,
+            hide_hand_text=True,
+            message_id=555,
+        )
+    )
+
+    assert result == 321
+    assert viewer._bot.edit_message_text.await_count == 1
+    assert viewer._bot.send_message.await_count == 1
+    send_call = viewer._bot.send_message.await_args
+    assert "reply_to_message_id" not in send_call.kwargs
+    assert send_call.kwargs["text"] == HIDDEN_MENTION_TEXT
+    assert viewer._bot.delete_message.await_count == 1
+    delete_call = viewer._bot.delete_message.await_args
+    assert delete_call.kwargs == {"chat_id": 123, "message_id": 555}
+
+
 def test_send_cards_includes_hand_details_by_default():
     viewer = PokerBotViewer(bot=MagicMock())
     viewer._bot.send_message = AsyncMock(return_value=MagicMock(message_id=24))
