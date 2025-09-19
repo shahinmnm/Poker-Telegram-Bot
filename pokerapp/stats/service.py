@@ -2,7 +2,10 @@ from __future__ import annotations
 
 import asyncio
 import datetime as dt
+import logging
+import re
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Dict, Iterable, List, Optional
 
 from sqlalchemy import (
@@ -16,9 +19,20 @@ from sqlalchemy import (
     func,
     delete,
 )
-from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker, create_async_engine
+from sqlalchemy.ext.asyncio import (
+    AsyncConnection,
+    AsyncEngine,
+    AsyncSession,
+    async_sessionmaker,
+    create_async_engine,
+)
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 from sqlalchemy.pool import StaticPool
+
+
+logger = logging.getLogger(__name__)
+
+MIGRATIONS_DIR = Path(__file__).resolve().parents[2] / "migrations"
 
 
 class Base(DeclarativeBase):
@@ -282,6 +296,88 @@ class StatsService(BaseStatsService):
         except (TypeError, ValueError):
             return 0
 
+    @staticmethod
+    def _split_sql_statements(sql: str) -> List[str]:
+        statements: List[str] = []
+        buffer: List[str] = []
+        for line in sql.splitlines():
+            stripped = line.strip()
+            if not stripped or stripped.startswith("--"):
+                continue
+            buffer.append(line)
+            if stripped.endswith(";"):
+                statement = "\n".join(buffer).strip()
+                buffer.clear()
+                if statement.endswith(";"):
+                    statement = statement[:-1].rstrip()
+                if statement:
+                    statements.append(statement)
+        remainder = "\n".join(buffer).strip()
+        if remainder:
+            statements.append(remainder.rstrip(";"))
+        return statements
+
+    @staticmethod
+    def _prepare_statement_for_sqlite(statement: str) -> str:
+        updated = re.sub(
+            r"SERIAL\s+PRIMARY\s+KEY",
+            "INTEGER PRIMARY KEY AUTOINCREMENT",
+            statement,
+            flags=re.IGNORECASE,
+        )
+        updated = re.sub(
+            r"DEFAULT\s+NOW\s*\(\)",
+            "DEFAULT CURRENT_TIMESTAMP",
+            updated,
+            flags=re.IGNORECASE,
+        )
+        return updated
+
+    async def _run_migrations(self, conn: AsyncConnection) -> None:
+        if not MIGRATIONS_DIR.exists():
+            return
+        backend = getattr(conn.dialect, "name", "").lower()
+        for path in sorted(MIGRATIONS_DIR.glob("*.sql")):
+            try:
+                sql = path.read_text(encoding="utf-8")
+            except OSError as exc:
+                logger.warning("Unable to read migration %s: %s", path, exc)
+                continue
+            statements = self._split_sql_statements(sql)
+            if not statements:
+                continue
+            logger.debug("Applying migration %s", path.name)
+            for statement in statements:
+                text = statement
+                if backend == "sqlite":
+                    text = self._prepare_statement_for_sqlite(text)
+                if not text.strip():
+                    continue
+                try:
+                    await conn.exec_driver_sql(text)
+                except Exception:
+                    logger.exception("Failed to apply migration statement from %s", path.name)
+                    raise
+
+    async def ensure_ready(self) -> None:
+        if not self._enabled:
+            return
+        await self._ensure_schema()
+
+    def ensure_ready_blocking(self) -> None:
+        if not self._enabled:
+            return
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            loop = asyncio.new_event_loop()
+            try:
+                loop.run_until_complete(self.ensure_ready())
+            finally:
+                loop.close()
+        else:
+            loop.create_task(self.ensure_ready())
+
     async def close(self) -> None:
         if self._engine is not None:
             await self._engine.dispose()
@@ -295,6 +391,7 @@ class StatsService(BaseStatsService):
             assert self._engine is not None
             async with self._engine.begin() as conn:
                 await conn.run_sync(Base.metadata.create_all)
+                await self._run_migrations(conn)
             self._initialized = True
 
     def _normalize_identity(self, identity: PlayerIdentity) -> PlayerIdentity:
