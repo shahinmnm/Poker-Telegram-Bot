@@ -1827,16 +1827,9 @@ class PokerBotModel:
 
             previous_message_id = game.turn_message_id
 
-            turn_result = await self._view.send_turn_actions(
-                chat_id,
-                game,
-                player,
-                money,
-                message_id=previous_message_id,
-                recent_actions=recent_actions,
+            new_message_id = await self._view.send_turn_actions(
+                chat_id, game, player, money, recent_actions=recent_actions
             )
-
-            new_message_id = turn_result.message_id if turn_result else None
 
             if new_message_id:
                 if (
@@ -1854,14 +1847,6 @@ class PokerBotModel:
                                 "error_type": type(e).__name__,
                             },
                         )
-                elif previous_message_id and turn_result:
-                    await self._view.remember_text_payload(
-                        chat_id=chat_id,
-                        message_id=new_message_id,
-                        text=turn_result.text,
-                        reply_markup=turn_result.reply_markup,
-                        parse_mode=turn_result.parse_mode,
-                    )
                 game.turn_message_id = new_message_id
 
             game.last_turn_time = datetime.datetime.now()
@@ -2036,9 +2021,6 @@ class PokerBotModel:
         4. پخش کردن کارت‌های جدید روی میز (فلاپ، ترن، ریور).
         5. پیدا کردن اولین بازیکن فعال برای شروع دور شرط‌بندی جدید.
         6. اگر فقط یک بازیکن باقی مانده باشد، او را برنده اعلام می‌کند.
-        7. با اتکا به ویرایش پیام‌های قبلی، بودجهٔ ۱۰ درخواستی تلگرام
-           (P ویرایش بازیکنان + یک ویرایش کارت‌های میز + یک ویرایش نوبت)
-           حفظ می‌شود و نیازی به ارسال/حذف پیام جدید نیست.
         """
         async with self._chat_guard(chat_id):
             # پیام‌های نوبت قبلی را حذف نمی‌کنیم
@@ -2627,15 +2609,15 @@ class RoundRateModel:
                 await self._model._send_turn_message(game, player_turn, chat_id)
             else:
                 player_money = await player_turn.wallet.value()
-                turn_result = await self._view.send_turn_actions(
+                msg_id = await self._view.send_turn_actions(
                     chat_id=chat_id,
                     game=game,
                     player=player_turn,
                     money=player_money,
                     recent_actions=game.last_actions,
                 )
-                if turn_result and turn_result.message_id:
-                    game.turn_message_id = turn_result.message_id
+                if msg_id:
+                    game.turn_message_id = msg_id
 
     async def _set_player_blind(
         self,
