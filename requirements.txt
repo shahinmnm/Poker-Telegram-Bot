@@ -1,4 +1,5 @@
 python-telegram-bot[job-queue,webhooks]>=20
+aiogram>=3.4
 SQLAlchemy[asyncio]>=2.0
 asyncpg>=0.27
 aiosqlite>=0.20
@@ -8,3 +9,5 @@ PySocks==1.7.1
 redis==4.5.4
 python-dotenv==0.20.0
 fakeredis==2.19.0
+cachetools>=5.3
+pytest-asyncio>=1.2

@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
 
 import asyncio
+import inspect
 import datetime
 import random
 import uuid
 from collections import defaultdict
 from dataclasses import dataclass
-from typing import Dict, Iterable, List, Optional, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 import redis.asyncio as aioredis
 from redis.exceptions import NoScriptError
@@ -59,6 +60,7 @@ from pokerapp.stats import (
     PlayerHandResult,
     PlayerIdentity,
 )
+from pokerapp.utils.cache import PlayerReportCache
 
 DICE_MULT = 10
 DICE_DELAY_SEC = 5
@@ -148,6 +150,9 @@ class PokerBotModel:
         self._winner_determine: WinnerDetermination = WinnerDetermination()
         self._round_rate = RoundRateModel(view=self._view, kv=self._kv, model=self)
         self._stats: BaseStatsService = stats_service or NullStatsService()
+        self._player_report_cache = PlayerReportCache(
+            logger_=logger.getChild("player_report_cache")
+        )
         self._private_chat_ids: Dict[int, int] = {}
 
     @property
@@ -176,6 +181,28 @@ class PokerBotModel:
             private_chat_id=private_chat_id,
         )
         await self._stats.register_player_profile(identity)
+
+    async def _remember_message_payload(
+        self,
+        *,
+        chat_id: ChatId,
+        message_id: MessageId,
+        text: str,
+        reply_markup: Optional[InlineKeyboardMarkup | ReplyKeyboardMarkup],
+        parse_mode: str,
+    ) -> None:
+        remember = getattr(self._view, "remember_text_payload", None)
+        if remember is None:
+            return
+        result = remember(
+            chat_id=chat_id,
+            message_id=message_id,
+            text=text,
+            reply_markup=reply_markup,
+            parse_mode=parse_mode,
+        )
+        if inspect.isawaitable(result):
+            await result
 
     def _build_private_menu(self) -> ReplyKeyboardMarkup:
         return ReplyKeyboardMarkup(
@@ -264,7 +291,12 @@ class PokerBotModel:
             )
             return
 
-        report = await self._stats.build_player_report(self._safe_int(user.id))
+        user_id_int = self._safe_int(user.id)
+
+        async def _load_report() -> Optional[Any]:
+            return await self._stats.build_player_report(user_id_int)
+
+        report = await self._player_report_cache.get(user_id_int, _load_report)
         if report is None or (
             report.stats.total_games <= 0 and not report.recent_games
         ):
@@ -609,6 +641,9 @@ class PokerBotModel:
 
         if self._stats_enabled():
             await self._stats.finish_hand(match_id, chat_id, results, pot_total)
+            self._player_report_cache.invalidate_many(
+                self._safe_int(player.user_id) for player in game.players
+            )
 
         game.state = GameState.FINISHED
         await self._table_manager.save_game(chat_id, game)
@@ -817,6 +852,12 @@ class PokerBotModel:
                     await self._table_manager.save_game(chat_id, game)
                     broadcast_performed = True
             elif new_message_id:
+                if (
+                    message_id
+                    and new_message_id != message_id
+                    and message_id in game.message_ids_to_delete
+                ):
+                    game.message_ids_to_delete.remove(message_id)
                 if new_message_id != game.ready_message_main_id:
                     game.ready_message_main_id = new_message_id
                     await self._table_manager.save_game(chat_id, game)
@@ -950,7 +991,7 @@ class PokerBotModel:
                 chat_id, text, reply_markup=reply_markup
             )
             if new_id:
-                self._view.remember_text_payload(
+                await self._remember_message_payload(
                     chat_id=chat_id,
                     message_id=new_id,
                     text=text,
@@ -959,15 +1000,27 @@ class PokerBotModel:
                 )
             return new_id
 
-        result = await self._view.edit_message_text(
-            chat_id=chat_id,
-            message_id=message_id,
-            text=text,
-            reply_markup=reply_markup,
-            parse_mode=parse_mode,
-        )
+        try:
+            result = await self._view.edit_message_text(
+                chat_id=chat_id,
+                message_id=message_id,
+                text=text,
+                reply_markup=reply_markup,
+                parse_mode=parse_mode,
+            )
+        except RetryAfter as exc:
+            await asyncio.sleep(exc.retry_after)
+            result = await self._view.edit_message_text(
+                chat_id=chat_id,
+                message_id=message_id,
+                text=text,
+                reply_markup=reply_markup,
+                parse_mode=parse_mode,
+            )
+        except BadRequest:
+            result = None
         if result:
-            self._view.remember_text_payload(
+            await self._remember_message_payload(
                 chat_id=chat_id,
                 message_id=result,
                 text=text,
@@ -1001,7 +1054,7 @@ class PokerBotModel:
                 },
             )
         if new_id:
-            self._view.remember_text_payload(
+            await self._remember_message_payload(
                 chat_id=chat_id,
                 message_id=new_id,
                 text=text,
@@ -2242,7 +2295,9 @@ class PokerBotModel:
         )
 
         if self._stats_enabled():
-            await self._stats.record_daily_bonus(self._safe_int(user.id), amount)
+            user_id_int = self._safe_int(user.id)
+            await self._stats.record_daily_bonus(user_id_int, amount)
+            self._player_report_cache.invalidate(user_id_int)
 
     async def _clear_game_messages(self, game: Game, chat_id: ChatId) -> None:
         """Deletes all temporary messages related to the current hand."""
@@ -2391,6 +2446,9 @@ class PokerBotModel:
                 chat_id=self._safe_int(chat_id),
                 results=stats_results,
                 pot_total=pot_total,
+            )
+            self._player_report_cache.invalidate_many(
+                self._safe_int(player.user_id) for player in game.players
             )
 
         game.pot = 0
