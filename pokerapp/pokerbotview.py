@@ -65,6 +65,7 @@ class ChatUpdateQueue:
         disable_web_page_preview: bool = False
         force: bool = False
         skip_cache_check: bool = False
+        cancelled: bool = False
 
     @dataclass
     class _ChatState:
@@ -131,6 +132,12 @@ class ChatUpdateQueue:
                     state.order.popleft()
                     continue
                 await pending.ready.wait()
+                if pending.cancelled:
+                    state.pending.pop(message_id, None)
+                    state.order.popleft()
+                    if not pending.future.done():
+                        pending.future.set_result(None)
+                    continue
                 result = await self._execute_pending(pending)
                 state.pending.pop(message_id, None)
                 state.order.popleft()
@@ -301,6 +308,19 @@ class ChatUpdateQueue:
         state = self._chat_states.get(chat_id)
         if state:
             state.new_item.set()
+
+    def cancel_pending(self, chat_id: ChatId, message_id: MessageId) -> None:
+        state = self._chat_states.get(chat_id)
+        if not state:
+            return
+        pending = state.pending.get(message_id)
+        if not pending:
+            return
+        pending.cancelled = True
+        if pending.timer_task and not pending.timer_task.done():
+            pending.timer_task.cancel()
+        pending.ready.set()
+        state.new_item.set()
 
 
 class PokerBotViewer:
@@ -512,6 +532,11 @@ class PokerBotViewer:
             disable_web_page_preview=disable_web_page_preview,
         )
 
+    def cancel_pending_edit(self, chat_id: ChatId, message_id: MessageId) -> None:
+        """Drop any queued edits for ``message_id`` before destructive actions."""
+
+        self._update_queue.cancel_pending(chat_id, message_id)
+
     async def remember_text_payload(
         self,
         *,
@@ -647,6 +672,7 @@ class PokerBotViewer:
     ) -> None:
         """Delete a message while keeping the cache in sync."""
         try:
+            self.cancel_pending_edit(chat_id, message_id)
             await self._bot.delete_message(chat_id=chat_id, message_id=message_id)
             await self._message_cache.forget(chat_id, message_id)
         except (BadRequest, Forbidden) as e:
@@ -1077,23 +1103,15 @@ class PokerBotViewer:
 
             if message_id and new_message_id and new_message_id != message_id:
                 try:
-                    await self._bot.delete_message(
-                        chat_id=chat_id,
-                        message_id=message_id,
-                    )
-                except BadRequest:
-                    # پیام ممکن است قبلاً حذف شده باشد؛ صرفاً ادامه می‌دهیم.
-                    pass
-                except Exception as e:
-                    logger.error(
-                        "Error deleting previous cards message",
+                    await self.delete_message(chat_id, message_id)
+                except Exception:
+                    logger.debug(
+                        "Failed to delete previous cards message",
                         extra={
-                            "error_type": type(e).__name__,
                             "chat_id": chat_id,
                             "request_params": {"message_id": message_id},
                         },
                     )
-                await self._message_cache.forget(chat_id, message_id)
 
             if new_message_id:
                 await self.remember_text_payload(
@@ -1203,22 +1221,15 @@ class PokerBotViewer:
                 )
                 if message_id:
                     try:
-                        await self._bot.delete_message(
-                            chat_id=chat_id,
-                            message_id=message_id,
-                        )
-                    except BadRequest:
-                        pass
-                    except Exception as e:
+                        await self.delete_message(chat_id, message_id)
+                    except Exception:
                         logger.debug(
                             "Failed to delete stale turn message",
                             extra={
-                                "error_type": type(e).__name__,
                                 "chat_id": chat_id,
                                 "message_id": message_id,
                             },
                         )
-                    await self._message_cache.forget(chat_id, message_id)
                 return new_message_id
         except Exception as e:
             logger.error(

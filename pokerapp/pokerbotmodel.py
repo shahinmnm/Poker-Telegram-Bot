@@ -6,6 +6,7 @@ import datetime
 import random
 import uuid
 from collections import defaultdict
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
@@ -61,6 +62,7 @@ from pokerapp.stats import (
     PlayerIdentity,
 )
 from pokerapp.utils.cache import PlayerReportCache
+from pokerapp.utils.locks import ReentrantAsyncLock
 
 DICE_MULT = 10
 DICE_DELAY_SEC = 5
@@ -154,6 +156,7 @@ class PokerBotModel:
             logger_=logger.getChild("player_report_cache")
         )
         self._private_chat_ids: Dict[int, int] = {}
+        self._chat_locks: Dict[int, ReentrantAsyncLock] = {}
 
     @property
     def _min_players(self):
@@ -161,6 +164,22 @@ class PokerBotModel:
 
     def _stats_enabled(self) -> bool:
         return not isinstance(self._stats, NullStatsService)
+
+    def _get_chat_lock(self, chat_id: ChatId) -> ReentrantAsyncLock:
+        normalized = self._safe_int(chat_id)
+        lock = self._chat_locks.get(normalized)
+        if lock is None:
+            lock = ReentrantAsyncLock()
+            self._chat_locks[normalized] = lock
+        return lock
+
+    @asynccontextmanager
+    async def _chat_guard(self, chat_id: ChatId):
+        """Serialize stateful operations for a chat while allowing nesting."""
+
+        lock = self._get_chat_lock(chat_id)
+        async with lock:
+            yield
 
     async def _register_player_identity(
         self,
@@ -788,94 +807,95 @@ class PokerBotModel:
     async def _auto_start_tick(self, context: CallbackContext) -> None:
         job = context.job
         chat_id = job.chat_id
-        game = await self._table_manager.get_game(chat_id)
-        context.chat_data[KEY_CHAT_DATA_GAME] = game
-        remaining = context.chat_data.get("start_countdown")
-        if remaining is None:
-            job.schedule_removal()
-            context.chat_data.pop("start_countdown_job", None)
-            context.chat_data.pop(KEY_START_COUNTDOWN_LAST_TEXT, None)
-            context.chat_data.pop(KEY_START_COUNTDOWN_LAST_TIMESTAMP, None)
-            return
+        async with self._chat_guard(chat_id):
+            game = await self._table_manager.get_game(chat_id)
+            context.chat_data[KEY_CHAT_DATA_GAME] = game
+            remaining = context.chat_data.get("start_countdown")
+            if remaining is None:
+                job.schedule_removal()
+                context.chat_data.pop("start_countdown_job", None)
+                context.chat_data.pop(KEY_START_COUNTDOWN_LAST_TEXT, None)
+                context.chat_data.pop(KEY_START_COUNTDOWN_LAST_TIMESTAMP, None)
+                return
 
-        if remaining <= 0:
-            job.schedule_removal()
-            context.chat_data.pop("start_countdown_job", None)
-            context.chat_data.pop("start_countdown", None)
-            context.chat_data.pop(KEY_START_COUNTDOWN_LAST_TEXT, None)
-            context.chat_data.pop(KEY_START_COUNTDOWN_LAST_TIMESTAMP, None)
-            await self._start_game(context, game, chat_id)
-            await self._table_manager.save_game(chat_id, game)
-            return
-        next_remaining = max(remaining - 1, 0)
-        text, keyboard = self._build_ready_message(game, next_remaining)
+            if remaining <= 0:
+                job.schedule_removal()
+                context.chat_data.pop("start_countdown_job", None)
+                context.chat_data.pop("start_countdown", None)
+                context.chat_data.pop(KEY_START_COUNTDOWN_LAST_TEXT, None)
+                context.chat_data.pop(KEY_START_COUNTDOWN_LAST_TIMESTAMP, None)
+                await self._start_game(context, game, chat_id)
+                await self._table_manager.save_game(chat_id, game)
+                return
+            next_remaining = max(remaining - 1, 0)
+            text, keyboard = self._build_ready_message(game, next_remaining)
 
-        message_id = game.ready_message_main_id
-        last_text = context.chat_data.get(KEY_START_COUNTDOWN_LAST_TEXT)
-        last_timestamp = context.chat_data.get(KEY_START_COUNTDOWN_LAST_TIMESTAMP)
-        now = datetime.datetime.now(datetime.timezone.utc)
+            message_id = game.ready_message_main_id
+            last_text = context.chat_data.get(KEY_START_COUNTDOWN_LAST_TEXT)
+            last_timestamp = context.chat_data.get(KEY_START_COUNTDOWN_LAST_TIMESTAMP)
+            now = datetime.datetime.now(datetime.timezone.utc)
 
-        force_broadcast = message_id is None or next_remaining <= 0
-        should_broadcast = True
+            force_broadcast = message_id is None or next_remaining <= 0
+            should_broadcast = True
 
-        if message_id and text == game.ready_message_main_text:
-            should_broadcast = False
-        elif not force_broadcast:
-            if last_text == text:
+            if message_id and text == game.ready_message_main_text:
                 should_broadcast = False
-            elif (
-                next_remaining > 0
-                and last_timestamp
-                and now - last_timestamp < AUTO_START_MIN_UPDATE_INTERVAL
-            ):
-                should_broadcast = False
-
-        broadcast_performed = False
-
-        if should_broadcast:
-            new_message_id = await self._safe_edit_message_text(
-                chat_id,
-                message_id,
-                text,
-                reply_markup=keyboard,
-            )
-            if new_message_id is None:
-                if message_id and message_id in game.message_ids_to_delete:
-                    game.message_ids_to_delete.remove(message_id)
-                game.ready_message_main_id = None
-                replacement_id = await self._view.send_message_return_id(
-                    chat_id, text, reply_markup=keyboard
-                )
-                if replacement_id:
-                    game.ready_message_main_id = replacement_id
-                    game.ready_message_main_text = text
-                    await self._table_manager.save_game(chat_id, game)
-                    broadcast_performed = True
-            elif new_message_id:
-                if (
-                    message_id
-                    and new_message_id != message_id
-                    and message_id in game.message_ids_to_delete
+            elif not force_broadcast:
+                if last_text == text:
+                    should_broadcast = False
+                elif (
+                    next_remaining > 0
+                    and last_timestamp
+                    and now - last_timestamp < AUTO_START_MIN_UPDATE_INTERVAL
                 ):
-                    game.message_ids_to_delete.remove(message_id)
-                if new_message_id != game.ready_message_main_id:
-                    game.ready_message_main_id = new_message_id
-                    await self._table_manager.save_game(chat_id, game)
-                game.ready_message_main_text = text
-                broadcast_performed = True
+                    should_broadcast = False
 
-        if broadcast_performed:
-            context.chat_data[KEY_START_COUNTDOWN_LAST_TEXT] = text
-            context.chat_data[KEY_START_COUNTDOWN_LAST_TIMESTAMP] = now
-        else:
-            context.chat_data.setdefault(
-                KEY_START_COUNTDOWN_LAST_TEXT, game.ready_message_main_text
-            )
-            context.chat_data.setdefault(
-                KEY_START_COUNTDOWN_LAST_TIMESTAMP, now
-            )
+            broadcast_performed = False
 
-        context.chat_data["start_countdown"] = next_remaining
+            if should_broadcast:
+                new_message_id = await self._safe_edit_message_text(
+                    chat_id,
+                    message_id,
+                    text,
+                    reply_markup=keyboard,
+                )
+                if new_message_id is None:
+                    if message_id and message_id in game.message_ids_to_delete:
+                        game.message_ids_to_delete.remove(message_id)
+                    game.ready_message_main_id = None
+                    replacement_id = await self._view.send_message_return_id(
+                        chat_id, text, reply_markup=keyboard
+                    )
+                    if replacement_id:
+                        game.ready_message_main_id = replacement_id
+                        game.ready_message_main_text = text
+                        await self._table_manager.save_game(chat_id, game)
+                        broadcast_performed = True
+                elif new_message_id:
+                    if (
+                        message_id
+                        and new_message_id != message_id
+                        and message_id in game.message_ids_to_delete
+                    ):
+                        game.message_ids_to_delete.remove(message_id)
+                    if new_message_id != game.ready_message_main_id:
+                        game.ready_message_main_id = new_message_id
+                        await self._table_manager.save_game(chat_id, game)
+                    game.ready_message_main_text = text
+                    broadcast_performed = True
+
+            if broadcast_performed:
+                context.chat_data[KEY_START_COUNTDOWN_LAST_TEXT] = text
+                context.chat_data[KEY_START_COUNTDOWN_LAST_TIMESTAMP] = now
+            else:
+                context.chat_data.setdefault(
+                    KEY_START_COUNTDOWN_LAST_TEXT, game.ready_message_main_text
+                )
+                context.chat_data.setdefault(
+                    KEY_START_COUNTDOWN_LAST_TIMESTAMP, now
+                )
+
+            context.chat_data["start_countdown"] = next_remaining
 
     async def _schedule_auto_start(self, context: CallbackContext, game: Game, chat_id: ChatId) -> None:
         if context.chat_data.get("start_countdown_job"):
@@ -1527,70 +1547,71 @@ class PokerBotModel:
         self, context: CallbackContext, game: Game, chat_id: ChatId
     ) -> None:
         """مراحل شروع یک دست جدید بازی را انجام می‌دهد."""
-        self._cancel_auto_start(context)
-        if game.ready_message_main_id:
-            deleted_ready_message = False
-            try:
-                await self._view.delete_message(chat_id, game.ready_message_main_id)
-                deleted_ready_message = True
-            except Exception as e:
-                logger.warning(
-                    "Failed to delete ready message",
-                    extra={
-                        "chat_id": chat_id,
-                        "message_id": game.ready_message_main_id,
-                        "error_type": type(e).__name__,
-                    },
+        async with self._chat_guard(chat_id):
+            self._cancel_auto_start(context)
+            if game.ready_message_main_id:
+                deleted_ready_message = False
+                try:
+                    await self._view.delete_message(chat_id, game.ready_message_main_id)
+                    deleted_ready_message = True
+                except Exception as e:
+                    logger.warning(
+                        "Failed to delete ready message",
+                        extra={
+                            "chat_id": chat_id,
+                            "message_id": game.ready_message_main_id,
+                            "error_type": type(e).__name__,
+                        },
+                    )
+                if deleted_ready_message:
+                    game.ready_message_main_id = None
+                game.ready_message_main_text = ""
+
+            # Ensure dealer_index is initialized before use
+            if not hasattr(game, "dealer_index"):
+                game.dealer_index = -1
+
+            new_dealer_index = game.advance_dealer()
+            if new_dealer_index == -1:
+                new_dealer_index = game.next_occupied_seat(-1)
+                game.dealer_index = new_dealer_index
+
+            if game.dealer_index == -1:
+                logger.warning("Cannot start game without an occupied dealer seat")
+                return
+
+            if self._stats_enabled():
+                identities = [
+                    self._build_identity_from_player(player)
+                    for player in game.seated_players()
+                ]
+                await self._stats.start_hand(
+                    hand_id=game.id,
+                    chat_id=self._safe_int(chat_id),
+                    players=identities,
                 )
-            if deleted_ready_message:
-                game.ready_message_main_id = None
-            game.ready_message_main_text = ""
 
-        # Ensure dealer_index is initialized before use
-        if not hasattr(game, "dealer_index"):
-            game.dealer_index = -1
+            game.state = GameState.ROUND_PRE_FLOP
+            await self._divide_cards(game, chat_id)
 
-        new_dealer_index = game.advance_dealer()
-        if new_dealer_index == -1:
-            new_dealer_index = game.next_occupied_seat(-1)
-            game.dealer_index = new_dealer_index
+            # این متد به تنهایی تمام کارهای لازم برای شروع راند را انجام می‌دهد.
+            # از جمله تعیین بلایندها، تعیین نوبت اول و ارسال پیام نوبت.
+            await self._round_rate.set_blinds(game, chat_id)
 
-        if game.dealer_index == -1:
-            logger.warning("Cannot start game without an occupied dealer seat")
-            return
+            action_str = "بازی شروع شد"
+            game.last_actions.append(action_str)
+            if len(game.last_actions) > 4:
+                game.last_actions.pop(0)
+            if game.turn_message_id:
+                current_player = game.get_player_by_seat(game.current_player_index)
+                if current_player:
+                    await self._send_turn_message(game, current_player, chat_id)
 
-        if self._stats_enabled():
-            identities = [
-                self._build_identity_from_player(player)
-                for player in game.seated_players()
-            ]
-            await self._stats.start_hand(
-                hand_id=game.id,
-                chat_id=self._safe_int(chat_id),
-                players=identities,
-            )
+            # نیازی به هیچ کد دیگری در اینجا نیست.
+            # کدهای اضافی حذف شدند.
 
-        game.state = GameState.ROUND_PRE_FLOP
-        await self._divide_cards(game, chat_id)
-
-        # این متد به تنهایی تمام کارهای لازم برای شروع راند را انجام می‌دهد.
-        # از جمله تعیین بلایندها، تعیین نوبت اول و ارسال پیام نوبت.
-        await self._round_rate.set_blinds(game, chat_id)
-
-        action_str = "بازی شروع شد"
-        game.last_actions.append(action_str)
-        if len(game.last_actions) > 4:
-            game.last_actions.pop(0)
-        if game.turn_message_id:
-            current_player = game.get_player_by_seat(game.current_player_index)
-            if current_player:
-                await self._send_turn_message(game, current_player, chat_id)
-
-        # نیازی به هیچ کد دیگری در اینجا نیست.
-        # کدهای اضافی حذف شدند.
-
-        # ذخیره بازیکنان برای دست بعدی (این خط می‌تواند بماند)
-        context.chat_data[KEY_OLD_PLAYERS] = [p.user_id for p in game.players]
+            # ذخیره بازیکنان برای دست بعدی (این خط می‌تواند بماند)
+            context.chat_data[KEY_OLD_PLAYERS] = [p.user_id for p in game.players]
 
     async def _divide_cards(self, game: Game, chat_id: ChatId):
         """کارت‌ها را فقط در گروه همراه با کیبورد انتخابی توزیع می‌کند."""
@@ -1800,34 +1821,35 @@ class PokerBotModel:
 
     async def _send_turn_message(self, game: Game, player: Player, chat_id: ChatId):
         """پیام نوبت را ارسال کرده و شناسه آن را برای حذف در آینده ذخیره می‌کند."""
-        money = await player.wallet.value()
-        recent_actions = game.last_actions
+        async with self._chat_guard(chat_id):
+            money = await player.wallet.value()
+            recent_actions = game.last_actions
 
-        previous_message_id = game.turn_message_id
+            previous_message_id = game.turn_message_id
 
-        new_message_id = await self._view.send_turn_actions(
-            chat_id, game, player, money, recent_actions=recent_actions
-        )
+            new_message_id = await self._view.send_turn_actions(
+                chat_id, game, player, money, recent_actions=recent_actions
+            )
 
-        if new_message_id:
-            if (
-                previous_message_id
-                and previous_message_id != new_message_id
-            ):
-                try:
-                    await self._view.delete_message(chat_id, previous_message_id)
-                except Exception as e:
-                    logger.debug(
-                        "Failed to delete previous turn message",
-                        extra={
-                            "chat_id": chat_id,
-                            "previous_message_id": previous_message_id,
-                            "error_type": type(e).__name__,
-                        },
-                    )
-            game.turn_message_id = new_message_id
+            if new_message_id:
+                if (
+                    previous_message_id
+                    and previous_message_id != new_message_id
+                ):
+                    try:
+                        await self._view.delete_message(chat_id, previous_message_id)
+                    except Exception as e:
+                        logger.debug(
+                            "Failed to delete previous turn message",
+                            extra={
+                                "chat_id": chat_id,
+                                "previous_message_id": previous_message_id,
+                                "error_type": type(e).__name__,
+                            },
+                        )
+                game.turn_message_id = new_message_id
 
-        game.last_turn_time = datetime.datetime.now()
+            game.last_turn_time = datetime.datetime.now()
 
     # --- Player Action Handlers ---
     # این بخش تمام حرکات ممکن بازیکنان در نوبتشان را مدیریت می‌کند.
@@ -2000,61 +2022,62 @@ class PokerBotModel:
         5. پیدا کردن اولین بازیکن فعال برای شروع دور شرط‌بندی جدید.
         6. اگر فقط یک بازیکن باقی مانده باشد، او را برنده اعلام می‌کند.
         """
-        # پیام‌های نوبت قبلی را حذف نمی‌کنیم
-        if game.turn_message_id:
-            logger.debug(
-                "Keeping turn message %s in chat %s",
-                game.turn_message_id,
-                chat_id,
-            )
+        async with self._chat_guard(chat_id):
+            # پیام‌های نوبت قبلی را حذف نمی‌کنیم
+            if game.turn_message_id:
+                logger.debug(
+                    "Keeping turn message %s in chat %s",
+                    game.turn_message_id,
+                    chat_id,
+                )
 
-        # بررسی می‌کنیم چند بازیکن هنوز در بازی هستند (Active یا All-in)
-        contenders = game.players_by(states=(PlayerState.ACTIVE, PlayerState.ALL_IN))
-        if len(contenders) <= 1:
-            # اگر فقط یک نفر باقی مانده، مستقیم به showdown می‌رویم تا برنده مشخص شود
-            await self._showdown(game, chat_id, context)
-            return
+            # بررسی می‌کنیم چند بازیکن هنوز در بازی هستند (Active یا All-in)
+            contenders = game.players_by(states=(PlayerState.ACTIVE, PlayerState.ALL_IN))
+            if len(contenders) <= 1:
+                # اگر فقط یک نفر باقی مانده، مستقیم به showdown می‌رویم تا برنده مشخص شود
+                await self._showdown(game, chat_id, context)
+                return
 
-        # جمع‌آوری پول‌های شرط‌بندی شده در این دور و ریست کردن وضعیت بازیکنان
-        self._round_rate.collect_bets_for_pot(game)
-        for p in game.players:
-            p.has_acted = False  # <-- این خط برای دور بعدی حیاتی است
+            # جمع‌آوری پول‌های شرط‌بندی شده در این دور و ریست کردن وضعیت بازیکنان
+            self._round_rate.collect_bets_for_pot(game)
+            for p in game.players:
+                p.has_acted = False  # <-- این خط برای دور بعدی حیاتی است
 
-        # رفتن به مرحله بعدی بر اساس وضعیت فعلی بازی
-        if game.state == GameState.ROUND_PRE_FLOP:
-            game.state = GameState.ROUND_FLOP
-            await self.add_cards_to_table(3, game, chat_id, "🃏 فلاپ")
-        elif game.state == GameState.ROUND_FLOP:
-            game.state = GameState.ROUND_TURN
-            await self.add_cards_to_table(1, game, chat_id, "🃏 ترن")
-        elif game.state == GameState.ROUND_TURN:
-            game.state = GameState.ROUND_RIVER
-            await self.add_cards_to_table(1, game, chat_id, "🃏 ریور")
-        elif game.state == GameState.ROUND_RIVER:
-            # بعد از ریور، دور شرط‌بندی تمام شده و باید showdown انجام شود
-            await self._showdown(game, chat_id, context)
-            return  # <-- مهم: بعد از فراخوانی showdown، ادامه نمی‌دهیم
+            # رفتن به مرحله بعدی بر اساس وضعیت فعلی بازی
+            if game.state == GameState.ROUND_PRE_FLOP:
+                game.state = GameState.ROUND_FLOP
+                await self.add_cards_to_table(3, game, chat_id, "🃏 فلاپ")
+            elif game.state == GameState.ROUND_FLOP:
+                game.state = GameState.ROUND_TURN
+                await self.add_cards_to_table(1, game, chat_id, "🃏 ترن")
+            elif game.state == GameState.ROUND_TURN:
+                game.state = GameState.ROUND_RIVER
+                await self.add_cards_to_table(1, game, chat_id, "🃏 ریور")
+            elif game.state == GameState.ROUND_RIVER:
+                # بعد از ریور، دور شرط‌بندی تمام شده و باید showdown انجام شود
+                await self._showdown(game, chat_id, context)
+                return  # <-- مهم: بعد از فراخوانی showdown، ادامه نمی‌دهیم
 
-        # اگر هنوز بازیکنی برای بازی وجود دارد، نوبت را به نفر اول می‌دهیم
-        active_players = game.players_by(states=(PlayerState.ACTIVE,))
-        if not active_players:
-            # اگر هیچ بازیکن فعالی نمانده (همه All-in هستند)، مستقیم به مراحل بعدی می‌رویم
-            # تا همه کارت‌ها رو شوند.
-            await self._go_to_next_street(game, chat_id, context)
-            return
+            # اگر هنوز بازیکنی برای بازی وجود دارد، نوبت را به نفر اول می‌دهیم
+            active_players = game.players_by(states=(PlayerState.ACTIVE,))
+            if not active_players:
+                # اگر هیچ بازیکن فعالی نمانده (همه All-in هستند)، مستقیم به مراحل بعدی می‌رویم
+                # تا همه کارت‌ها رو شوند.
+                await self._go_to_next_street(game, chat_id, context)
+                return
 
-        # پیدا کردن اولین بازیکن برای شروع دور جدید (معمولاً اولین فرد فعال بعد از دیلر)
-        first_player_index = self._get_first_player_index(game)
-        game.current_player_index = first_player_index
+            # پیدا کردن اولین بازیکن برای شروع دور جدید (معمولاً اولین فرد فعال بعد از دیلر)
+            first_player_index = self._get_first_player_index(game)
+            game.current_player_index = first_player_index
 
-        # اگر بازیکنی برای بازی پیدا شد، حلقه بازی را مجدداً شروع می‌کنیم
-        if game.current_player_index != -1:
-            next_player = await self._process_playing(chat_id, game, context)
-            if next_player:
-                await self._send_turn_message(game, next_player, chat_id)
-        else:
-            # اگر به هر دلیلی بازیکنی پیدا نشد، به مرحله بعد می‌رویم
-            await self._go_to_next_street(game, chat_id, context)
+            # اگر بازیکنی برای بازی پیدا شد، حلقه بازی را مجدداً شروع می‌کنیم
+            if game.current_player_index != -1:
+                next_player = await self._process_playing(chat_id, game, context)
+                if next_player:
+                    await self._send_turn_message(game, next_player, chat_id)
+            else:
+                # اگر به هر دلیلی بازیکنی پیدا نشد، به مرحله بعد می‌رویم
+                await self._go_to_next_street(game, chat_id, context)
 
     def _determine_all_scores(self, game: Game) -> List[Dict]:
         """
@@ -2139,82 +2162,83 @@ class PokerBotModel:
         اگر ``count=0`` باشد، فقط کارت‌های فعلی نمایش داده می‌شود. با تنظیم
         ``send_message=False`` می‌توان فقط کارت‌ها را اضافه کرد بدون ارسال پیام.
         """
-        if count > 0:
-            for _ in range(count):
-                if game.remain_cards:
-                    game.cards_table.append(game.remain_cards.pop())
+        async with self._chat_guard(chat_id):
+            if count > 0:
+                for _ in range(count):
+                    if game.remain_cards:
+                        game.cards_table.append(game.remain_cards.pop())
 
-        if not send_message:
-            return
+            if not send_message:
+                return
 
-        stage = self._view._derive_stage_from_table(game.cards_table)
+            stage = self._view._derive_stage_from_table(game.cards_table)
 
-        if not game.board_message_id:
-            msg_id = await self._view.send_message_return_id(
-                chat_id, street_name, reply_markup=None
-            )
-            if msg_id:
-                game.board_message_id = msg_id
-                if msg_id not in game.message_ids_to_delete:
-                    game.message_ids_to_delete.append(msg_id)
-        else:
-            new_msg_id = await self._safe_edit_message_text(
-                chat_id,
-                game.board_message_id,
-                street_name,
-                reply_markup=None,
-                parse_mode=ParseMode.MARKDOWN,
-            )
-            if new_msg_id is None:
-                old_id = game.board_message_id
-                if old_id and old_id in game.message_ids_to_delete:
-                    game.message_ids_to_delete.remove(old_id)
-                game.board_message_id = None
-                replacement_id = await self._view.send_message_return_id(
+            if not game.board_message_id:
+                msg_id = await self._view.send_message_return_id(
                     chat_id, street_name, reply_markup=None
                 )
-                if replacement_id:
-                    game.board_message_id = replacement_id
-                    if replacement_id not in game.message_ids_to_delete:
-                        game.message_ids_to_delete.append(replacement_id)
-            elif new_msg_id != game.board_message_id:
-                if game.board_message_id in game.message_ids_to_delete:
-                    game.message_ids_to_delete.remove(game.board_message_id)
-                game.board_message_id = new_msg_id
-                if new_msg_id not in game.message_ids_to_delete:
-                    game.message_ids_to_delete.append(new_msg_id)
+                if msg_id:
+                    game.board_message_id = msg_id
+                    if msg_id not in game.message_ids_to_delete:
+                        game.message_ids_to_delete.append(msg_id)
+            else:
+                new_msg_id = await self._safe_edit_message_text(
+                    chat_id,
+                    game.board_message_id,
+                    street_name,
+                    reply_markup=None,
+                    parse_mode=ParseMode.MARKDOWN,
+                )
+                if new_msg_id is None:
+                    old_id = game.board_message_id
+                    if old_id and old_id in game.message_ids_to_delete:
+                        game.message_ids_to_delete.remove(old_id)
+                    game.board_message_id = None
+                    replacement_id = await self._view.send_message_return_id(
+                        chat_id, street_name, reply_markup=None
+                    )
+                    if replacement_id:
+                        game.board_message_id = replacement_id
+                        if replacement_id not in game.message_ids_to_delete:
+                            game.message_ids_to_delete.append(replacement_id)
+                elif new_msg_id != game.board_message_id:
+                    if game.board_message_id in game.message_ids_to_delete:
+                        game.message_ids_to_delete.remove(game.board_message_id)
+                    game.board_message_id = new_msg_id
+                    if new_msg_id not in game.message_ids_to_delete:
+                        game.message_ids_to_delete.append(new_msg_id)
 
-        # به‌روزرسانی کیبورد پیام کارت‌های بازیکنان با کارت‌های میز
-        for player in game.seated_players():
-            if not player.cards:
-                continue
-            existing_keyboard_id = getattr(player, "cards_keyboard_message_id", None)
-            send_kwargs = dict(
-                chat_id=chat_id,
-                cards=player.cards,
-                mention_markdown=player.mention_markdown,
-                ready_message_id=player.ready_message_id,
-                table_cards=game.cards_table,
-                hide_hand_text=True,
-                stage=stage,
-                reply_to_ready_message=False,
-            )
-            if existing_keyboard_id:
-                send_kwargs["message_id"] = existing_keyboard_id
-            keyboard_message_id = await self._view.send_cards(**send_kwargs)
-            await self._track_player_keyboard_message(
-                game,
-                chat_id,
-                player,
-                keyboard_message_id,
-            )
-            # Legacy pacing delay removed; cache-driven queuing now smooths bursts.
+            # به‌روزرسانی کیبورد پیام کارت‌های بازیکنان با کارت‌های میز
+            for player in game.seated_players():
+                if not player.cards:
+                    continue
+                existing_keyboard_id = getattr(player, "cards_keyboard_message_id", None)
+                send_kwargs = dict(
+                    chat_id=chat_id,
+                    cards=player.cards,
+                    mention_markdown=player.mention_markdown,
+                    ready_message_id=player.ready_message_id,
+                    table_cards=game.cards_table,
+                    hide_hand_text=True,
+                    stage=stage,
+                    reply_to_ready_message=False,
+                )
+                if existing_keyboard_id:
+                    send_kwargs["message_id"] = existing_keyboard_id
+                keyboard_message_id = await self._view.send_cards(**send_kwargs)
+                await self._track_player_keyboard_message(
+                    game,
+                    chat_id,
+                    player,
+                    keyboard_message_id,
+                )
+                # Legacy pacing delay removed; cache-driven queuing now smooths bursts.
 
-        # پس از ارسال/ویرایش تصویر میز، پیام نوبت باید آخرین پیام باشد
-        if count == 0 and game.turn_message_id:
-            current_player = self._current_turn_player(game)
-            if current_player:
-                await self._send_turn_message(game, current_player, chat_id)
+            # پس از ارسال/ویرایش تصویر میز، پیام نوبت باید آخرین پیام باشد
+            if count == 0 and game.turn_message_id:
+                current_player = self._current_turn_player(game)
+                if current_player:
+                    await self._send_turn_message(game, current_player, chat_id)
 
     def _hand_name_from_score(self, score: int) -> str:
         """تبدیل عدد امتیاز به نام دست پوکر"""
@@ -2301,41 +2325,50 @@ class PokerBotModel:
 
     async def _clear_game_messages(self, game: Game, chat_id: ChatId) -> None:
         """Deletes all temporary messages related to the current hand."""
-        logger.debug("Clearing game messages", extra={"chat_id": chat_id})
+        async with self._chat_guard(chat_id):
+            logger.debug("Clearing game messages", extra={"chat_id": chat_id})
 
-        ids_to_delete = set(game.message_ids_to_delete)
+            ids_to_delete = set(game.message_ids_to_delete)
 
-        if game.board_message_id:
-            ids_to_delete.add(game.board_message_id)
-            game.board_message_id = None
+            if game.board_message_id:
+                ids_to_delete.add(game.board_message_id)
+                game.board_message_id = None
 
-        if game.turn_message_id:
-            ids_to_delete.add(game.turn_message_id)
-            game.turn_message_id = None
+            if game.turn_message_id:
+                ids_to_delete.add(game.turn_message_id)
+                game.turn_message_id = None
 
-        for player in game.seated_players():
-            keyboard_message_id = getattr(player, "cards_keyboard_message_id", None)
-            if keyboard_message_id:
-                ids_to_delete.add(keyboard_message_id)
-                player.cards_keyboard_message_id = None
+            for player in game.seated_players():
+                keyboard_message_id = getattr(player, "cards_keyboard_message_id", None)
+                if keyboard_message_id:
+                    ids_to_delete.add(keyboard_message_id)
+                    player.cards_keyboard_message_id = None
 
-        for message_id in ids_to_delete:
-            try:
-                await self._view.delete_message(chat_id, message_id)
-            except Exception as e:
-                logger.debug(
-                    "Failed to delete message",
-                    extra={
-                        "chat_id": chat_id,
-                        "message_id": message_id,
-                        "error_type": type(e).__name__,
-                    },
-                )
+            for message_id in ids_to_delete:
+                try:
+                    await self._view.delete_message(chat_id, message_id)
+                except Exception as e:
+                    logger.debug(
+                        "Failed to delete message",
+                        extra={
+                            "chat_id": chat_id,
+                            "message_id": message_id,
+                            "error_type": type(e).__name__,
+                        },
+                    )
 
-        game.message_ids_to_delete.clear()
-        game.message_ids.clear()
+            game.message_ids_to_delete.clear()
+            game.message_ids.clear()
 
     async def _showdown(
+        self, game: Game, chat_id: ChatId, context: CallbackContext
+    ) -> None:
+        """Serialize showdown processing so Telegram calls stay ordered."""
+
+        async with self._chat_guard(chat_id):
+            await self._showdown_impl(game, chat_id, context)
+
+    async def _showdown_impl(
         self, game: Game, chat_id: ChatId, context: CallbackContext
     ) -> None:
         """
