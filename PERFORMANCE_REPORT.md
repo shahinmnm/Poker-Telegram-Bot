@@ -34,6 +34,18 @@ logging around the heaviest Telegram interactions.
   signal for production monitoring while keeping webhook handlers under the
   1-second execution target.
 
+## Request Budget Summary
+
+| Flow segment | Baseline request count (per round) | Optimized request count |
+| --- | --- | --- |
+| Countdown readiness ticker | Up to 60 `editMessageText` calls (one per second) plus fallbacks | 4 updates (initial + 3 threshold edits) via LRU gated cache |
+| Board street transitions | 6–8 total (send + repeated edit retries across flop/turn/river) | 3 edits, one per street, guarded by the shared stage budget |
+| Turn notification lifecycle | 12+ (new message for each action when edits failed) | 1 message + bounded edits reused across the street (LFU cache) |
+
+The consolidated tracker verifies that a full street progression consumes just
+four Telegram calls (three stage edits and one turn refresh), keeping the total
+well below the 10-call ceiling.【b3c8d5†L1-L7】
+
 ## Follow-up Opportunities
 - Expose cache metrics via Prometheus exporters once the ops stack is ready.
 - Extend the middleware chain with adaptive rate limiting hooks driven by

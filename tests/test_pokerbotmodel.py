@@ -27,6 +27,7 @@ from pokerapp.pokerbotmodel import (
 )
 from telegram.error import BadRequest
 from telegram import InlineKeyboardMarkup
+from pokerapp.utils.request_tracker import RequestTracker
 
 
 HANDS_FILE = "./tests/hands.txt"
@@ -45,6 +46,17 @@ def make_wallet_mock(value: Optional[int] = None):
     wallet.approve = AsyncMock()
     wallet.authorized_money = AsyncMock()
     return wallet
+
+
+def _prepare_view_mock(view: MagicMock) -> MagicMock:
+    view.request_tracker = RequestTracker()
+    view.reset_round_context = AsyncMock()
+    view.set_round_context = MagicMock()
+    view.remember_text_payload = AsyncMock()
+    view.edit_message_text = AsyncMock(return_value=None)
+    view.send_message_return_id = AsyncMock(return_value=None)
+    view.send_message = AsyncMock()
+    return view
 
 
 class TestRoundRateModel(unittest.IsolatedAsyncioTestCase):
@@ -195,7 +207,7 @@ if __name__ == '__main__':
 
 
 def _build_model_with_game():
-    view = MagicMock()
+    view = _prepare_view_mock(MagicMock())
     view.send_cards = AsyncMock(return_value=None)
     view.send_message = AsyncMock()
     bot = MagicMock()
@@ -219,7 +231,7 @@ def _build_model_with_game():
 @pytest.mark.asyncio
 async def test_request_stop_creates_vote_prompt():
     chat_id = -1200
-    view = MagicMock()
+    view = _prepare_view_mock(MagicMock())
     view.send_message_return_id = AsyncMock(return_value=77)
     view.edit_message_text = AsyncMock()
     view.send_message = AsyncMock()
@@ -275,7 +287,7 @@ async def test_request_stop_creates_vote_prompt():
 @pytest.mark.asyncio
 async def test_confirm_stop_vote_triggers_cancel_on_majority():
     chat_id = -1300
-    view = MagicMock()
+    view = _prepare_view_mock(MagicMock())
     view.send_message_return_id = AsyncMock(return_value=88)
     view.edit_message_text = AsyncMock(return_value=88)
     view.send_message = AsyncMock()
@@ -331,7 +343,7 @@ async def test_confirm_stop_vote_triggers_cancel_on_majority():
 @pytest.mark.asyncio
 async def test_cancel_hand_refunds_wallets_and_announces():
     chat_id = -1400
-    view = MagicMock()
+    view = _prepare_view_mock(MagicMock())
     view.send_message_return_id = AsyncMock()
     view.edit_message_text = AsyncMock(return_value=99)
     view.send_message = AsyncMock()
@@ -489,7 +501,7 @@ def test_clear_game_messages_deletes_player_card_messages():
 @pytest.mark.asyncio
 async def test_auto_start_tick_updates_text_with_countdown():
     chat_id = -777
-    view = MagicMock()
+    view = _prepare_view_mock(MagicMock())
     bot = MagicMock()
     cfg = MagicMock(DEBUG=False)
     kv = MagicMock()
@@ -526,7 +538,7 @@ async def test_auto_start_tick_updates_text_with_countdown():
 @pytest.mark.asyncio
 async def test_auto_start_tick_finishes_without_rate_limit_tail_sleep(monkeypatch):
     chat_id = -779
-    view = MagicMock()
+    view = _prepare_view_mock(MagicMock())
     bot = MagicMock()
     cfg = MagicMock(DEBUG=False)
     kv = MagicMock()
@@ -565,7 +577,7 @@ async def test_auto_start_tick_finishes_without_rate_limit_tail_sleep(monkeypatc
 @pytest.mark.asyncio
 async def test_auto_start_tick_throttles_and_resumes_updates():
     chat_id = -775
-    view = MagicMock()
+    view = _prepare_view_mock(MagicMock())
     bot = MagicMock()
     cfg = MagicMock(DEBUG=False)
     kv = MagicMock()
@@ -607,7 +619,7 @@ async def test_auto_start_tick_throttles_and_resumes_updates():
 @pytest.mark.asyncio
 async def test_auto_start_tick_forces_update_when_timer_hits_zero():
     chat_id = -774
-    view = MagicMock()
+    view = _prepare_view_mock(MagicMock())
     bot = MagicMock()
     cfg = MagicMock(DEBUG=False)
     kv = MagicMock()
@@ -647,7 +659,7 @@ async def test_auto_start_tick_forces_update_when_timer_hits_zero():
 @pytest.mark.asyncio
 async def test_auto_start_tick_starts_game_and_cleans_state():
     chat_id = -776
-    view = MagicMock()
+    view = _prepare_view_mock(MagicMock())
     bot = MagicMock()
     cfg = MagicMock(DEBUG=False)
     kv = MagicMock()
@@ -684,7 +696,7 @@ async def test_auto_start_tick_starts_game_and_cleans_state():
 @pytest.mark.asyncio
 async def test_auto_start_tick_creates_message_when_missing():
     chat_id = -778
-    view = MagicMock()
+    view = _prepare_view_mock(MagicMock())
     bot = MagicMock()
     cfg = MagicMock(DEBUG=False)
     kv = MagicMock()
@@ -715,7 +727,7 @@ async def test_auto_start_tick_creates_message_when_missing():
 @pytest.mark.asyncio
 async def test_auto_start_tick_recreates_missing_message_after_bad_request():
     chat_id = -779
-    view = MagicMock()
+    view = _prepare_view_mock(MagicMock())
     view.edit_message_text = AsyncMock(
         side_effect=BadRequest("message to edit not found")
     )
@@ -764,7 +776,7 @@ async def test_showdown_sends_new_hand_message_before_join_prompt():
     async def record_join_prompt(*args, **kwargs):
         call_order.append("join_prompt")
 
-    view = MagicMock()
+    view = _prepare_view_mock(MagicMock())
     view.send_showdown_results = AsyncMock()
     view.send_new_hand_ready_message = AsyncMock(side_effect=record_new_hand)
     view.send_message = AsyncMock()
@@ -802,7 +814,7 @@ async def test_showdown_sends_new_hand_message_before_join_prompt():
 
 @pytest.mark.asyncio
 async def test_start_game_assigns_blinds_to_occupied_seats():
-    view = MagicMock()
+    view = _prepare_view_mock(MagicMock())
     view.send_cards = AsyncMock()
     view.send_message = AsyncMock()
     view.delete_message = AsyncMock()
@@ -863,7 +875,7 @@ async def test_start_game_assigns_blinds_to_occupied_seats():
 
 @pytest.mark.asyncio
 async def test_start_game_keeps_ready_message_id_when_deletion_fails():
-    view = MagicMock()
+    view = _prepare_view_mock(MagicMock())
     view.send_cards = AsyncMock()
     view.send_message = AsyncMock()
     view.delete_message = AsyncMock(side_effect=BadRequest("not found"))
@@ -939,3 +951,30 @@ def test_send_turn_message_keeps_previous_when_new_message_missing():
     view.send_turn_actions.assert_awaited_once()
     view.delete_message.assert_not_awaited()
     assert game.turn_message_id == 333
+
+
+@pytest.mark.asyncio
+async def test_stage_and_turn_requests_within_budget():
+    model, game, player, view = _build_model_with_game()
+    chat_id = -1600
+    round_id = game.id
+    view.set_round_context(chat_id, round_id)
+    view.send_message_return_id = AsyncMock(side_effect=[201, 202, 203, 204])
+    view.edit_message_text = AsyncMock(return_value=201)
+    async def fake_turn_actions(*args, **kwargs):
+        await model._request_tracker.try_consume(chat_id, round_id, "turn")
+        return 301
+
+    view.send_turn_actions = AsyncMock(side_effect=fake_turn_actions)
+    view.delete_message = AsyncMock()
+    player.wallet.value = AsyncMock(return_value=1000)
+
+    await model.add_cards_to_table(3, game, chat_id, "🃏 فلاپ")
+    await model.add_cards_to_table(1, game, chat_id, "🃏 ترن")
+    await model.add_cards_to_table(1, game, chat_id, "🃏 ریور")
+    await model._send_turn_message(game, player, chat_id)
+
+    stats = await model._request_tracker.snapshot(chat_id, round_id)
+    assert stats.stage == 3
+    assert stats.turn == 1
+    assert stats.total() <= model._request_tracker.limit

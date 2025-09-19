@@ -1,6 +1,7 @@
 import datetime as dt
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
+from types import SimpleNamespace
 
 import fakeredis.aioredis
 import pytest
@@ -8,6 +9,7 @@ from telegram.error import BadRequest
 
 from pokerapp.pokerbotmodel import PokerBotModel
 from pokerapp.stats import PlayerHandResult, PlayerIdentity, StatsService
+from pokerapp.utils.request_tracker import RequestTracker
 
 
 def _build_model(stats_service: StatsService):
@@ -19,7 +21,12 @@ def _build_model(stats_service: StatsService):
         return None
 
     send_message.side_effect = safe_send_message
-    view = SimpleNamespace(send_message=send_message)
+    view = SimpleNamespace(
+        send_message=send_message,
+        request_tracker=RequestTracker(),
+        reset_round_context=AsyncMock(),
+        set_round_context=MagicMock(),
+    )
     bot = SimpleNamespace()
     cfg = SimpleNamespace(DEBUG=False)
     kv = fakeredis.aioredis.FakeRedis()

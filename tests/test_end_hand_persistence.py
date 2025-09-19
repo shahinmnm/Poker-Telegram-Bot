@@ -7,6 +7,7 @@ from unittest.mock import AsyncMock, MagicMock
 from pokerapp.config import Config
 from pokerapp.table_manager import TableManager
 from pokerapp.pokerbotmodel import PokerBotModel, KEY_CHAT_DATA_GAME
+from pokerapp.utils.request_tracker import RequestTracker
 
 
 @pytest.mark.asyncio
@@ -20,6 +21,9 @@ async def test_end_hand_persists_game_and_reuses_instance():
     view = SimpleNamespace(
         send_message=AsyncMock(),
         send_message_return_id=AsyncMock(return_value=1),
+        request_tracker=RequestTracker(),
+        reset_round_context=AsyncMock(),
+        set_round_context=MagicMock(),
     )
     model = PokerBotModel(view, bot, Config(), redis_sync, table_manager)
 
