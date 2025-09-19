@@ -5,6 +5,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from telegram import ReplyKeyboardMarkup
+from telegram.constants import ParseMode
 from telegram.error import BadRequest, Forbidden
 
 from pokerapp.cards import Card
@@ -247,3 +248,27 @@ def test_new_hand_ready_message_uses_reply_keyboard():
     assert markup.selective is False
     assert _row_texts(markup.keyboard[0]) == ["/start", "نشستن سر میز"]
     assert _row_texts(markup.keyboard[1]) == ["/stop"]
+
+
+def test_send_message_uses_validated_payload():
+    viewer = PokerBotViewer(bot=MagicMock())
+    viewer._rate_limiter.send = _passthrough_rate_limit  # type: ignore[assignment]
+    viewer._bot.send_message = AsyncMock(return_value=MagicMock(message_id=7))
+    viewer._validator.normalize_text = MagicMock(return_value="cleaned")
+
+    run(viewer.send_message(chat_id=123, text="raw", parse_mode=ParseMode.MARKDOWN))
+
+    assert viewer._validator.normalize_text.call_count == 1
+    call = viewer._bot.send_message.await_args
+    assert call.kwargs["text"] == "cleaned"
+
+
+def test_send_message_skips_when_validation_fails():
+    viewer = PokerBotViewer(bot=MagicMock())
+    viewer._rate_limiter.send = AsyncMock()
+    viewer._validator.normalize_text = MagicMock(return_value=None)
+
+    result = run(viewer.send_message(chat_id=55, text="bad", parse_mode=ParseMode.MARKDOWN))
+
+    assert result is None
+    assert viewer._rate_limiter.send.await_count == 0

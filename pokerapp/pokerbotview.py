@@ -32,6 +32,7 @@ from pokerapp.entities import (
     Money,
     PlayerState,
 )
+from pokerapp.telegram_validation import TelegramPayloadValidator
 
 
 logger = logging.getLogger(__name__)
@@ -212,6 +213,14 @@ class PokerBotViewer:
 
         return mention_markdown
 
+    @staticmethod
+    def _build_context(method: str, **values: Any) -> Dict[str, Any]:
+        context: Dict[str, Any] = {"method": method}
+        for key, value in values.items():
+            if value is not None:
+                context[key] = value
+        return context
+
     def __init__(
         self,
         bot: Bot,
@@ -224,6 +233,9 @@ class PokerBotViewer:
         self._bot = bot
         self._desk_generator = DeskImageGenerator()
         self._admin_chat_id = admin_chat_id
+        self._validator = TelegramPayloadValidator(
+            logger_=logger.getChild("validation")
+        )
         self._rate_limiter = RateLimitedSender(
             delay=rate_limiter_delay,
             error_delay=0.1,
@@ -235,11 +247,23 @@ class PokerBotViewer:
     async def notify_admin(self, log_data: Dict[str, Any]) -> None:
         if not self._admin_chat_id:
             return
+        context = self._build_context("notify_admin", chat_id=self._admin_chat_id)
+        text = self._validator.normalize_text(
+            json.dumps(log_data, ensure_ascii=False),
+            parse_mode=None,
+            context=context,
+        )
+        if text is None:
+            logger.warning(
+                "Dropping admin notification due to invalid payload",
+                extra={"context": context},
+            )
+            return
         try:
             await self._rate_limiter.send(
                 lambda: self._bot.send_message(
                     chat_id=self._admin_chat_id,
-                    text=json.dumps(log_data, ensure_ascii=False),
+                    text=text,
                 ),
                 chat_id=self._admin_chat_id,
             )
@@ -259,12 +283,24 @@ class PokerBotViewer:
         reply_markup: ReplyKeyboardMarkup = None,
     ) -> Optional[MessageId]:
         """Sends a message and returns its ID, or None if not applicable."""
+        context = self._build_context("send_message_return_id", chat_id=chat_id)
+        normalized_text = self._validator.normalize_text(
+            text,
+            parse_mode=ParseMode.MARKDOWN,
+            context=context,
+        )
+        if normalized_text is None:
+            logger.warning(
+                "Skipping send_message_return_id due to invalid text",
+                extra={"context": context},
+            )
+            return None
         try:
             message = await self._rate_limiter.send(
                 lambda: self._bot.send_message(
                     chat_id=chat_id,
                     parse_mode=ParseMode.MARKDOWN,
-                    text=text,
+                    text=normalized_text,
                     reply_markup=reply_markup,
                     disable_notification=True,
                     disable_web_page_preview=True,
@@ -292,12 +328,24 @@ class PokerBotViewer:
         reply_markup: ReplyKeyboardMarkup = None,
         parse_mode: str = ParseMode.MARKDOWN,  # <--- پارامتر جدید اضافه شد
     ) -> Optional[MessageId]:
+        context = self._build_context("send_message", chat_id=chat_id)
+        normalized_text = self._validator.normalize_text(
+            text,
+            parse_mode=parse_mode,
+            context=context,
+        )
+        if normalized_text is None:
+            logger.warning(
+                "Skipping send_message due to invalid text",
+                extra={"context": context},
+            )
+            return None
         try:
             message = await self._rate_limiter.send(
                 lambda: self._bot.send_message(
                     chat_id=chat_id,
                     parse_mode=parse_mode,
-                    text=text,
+                    text=normalized_text,
                     reply_markup=reply_markup,
                     disable_notification=True,
                     disable_web_page_preview=True,
@@ -337,6 +385,9 @@ class PokerBotViewer:
     async def send_dice_reply(
         self, chat_id: ChatId, message_id: MessageId, emoji='🎲'
     ) -> Optional[Message]:
+        context = self._build_context(
+            "send_dice_reply", chat_id=chat_id, message_id=message_id
+        )
         try:
             return await self._rate_limiter.send(
                 lambda: self._bot.send_dice(
@@ -362,13 +413,27 @@ class PokerBotViewer:
     async def send_message_reply(
         self, chat_id: ChatId, message_id: MessageId, text: str
     ) -> None:
+        context = self._build_context(
+            "send_message_reply", chat_id=chat_id, message_id=message_id
+        )
+        normalized_text = self._validator.normalize_text(
+            text,
+            parse_mode=ParseMode.MARKDOWN,
+            context=context,
+        )
+        if normalized_text is None:
+            logger.warning(
+                "Skipping send_message_reply due to invalid text",
+                extra={"context": context},
+            )
+            return
         try:
             await self._rate_limiter.send(
                 lambda: self._bot.send_message(
                     reply_to_message_id=message_id,
                     chat_id=chat_id,
                     parse_mode=ParseMode.MARKDOWN,
-                    text=text,
+                    text=normalized_text,
                     disable_notification=True,
                 ),
                 chat_id=chat_id,
@@ -393,12 +458,26 @@ class PokerBotViewer:
         parse_mode: str = ParseMode.MARKDOWN,
     ) -> Optional[MessageId]:
         """Edit a message's text using the rate limiter."""
+        context = self._build_context(
+            "edit_message_text", chat_id=chat_id, message_id=message_id
+        )
+        normalized_text = self._validator.normalize_text(
+            text,
+            parse_mode=parse_mode,
+            context=context,
+        )
+        if normalized_text is None:
+            logger.warning(
+                "Skipping edit_message_text due to invalid text",
+                extra={"context": context},
+            )
+            return None
         try:
             message = await self._rate_limiter.send(
                 lambda: self._bot.edit_message_text(
                     chat_id=chat_id,
                     message_id=message_id,
-                    text=text,
+                    text=normalized_text,
                     parse_mode=parse_mode,
                     reply_markup=reply_markup,
                 ),
@@ -511,6 +590,18 @@ class PokerBotViewer:
         reply_markup: Optional[ReplyKeyboardMarkup] = None,
     ) -> Optional[Message]:
         """Sends desk cards image and returns the message object."""
+        context = self._build_context("send_desk_cards_img", chat_id=chat_id)
+        normalized_caption = self._validator.normalize_caption(
+            caption,
+            parse_mode=parse_mode,
+            context=context,
+        )
+        if caption and normalized_caption is None:
+            logger.warning(
+                "Skipping send_desk_cards_img due to invalid caption",
+                extra={"context": context},
+            )
+            return None
         try:
             im_cards = self._desk_generator.generate_desk(cards)
             bio = BytesIO()
@@ -521,7 +612,7 @@ class PokerBotViewer:
                 lambda: self._bot.send_photo(
                     chat_id=chat_id,
                     photo=bio,
-                    caption=caption,
+                    caption=normalized_caption,
                     parse_mode=parse_mode,
                     disable_notification=disable_notification,
                     reply_markup=reply_markup,
@@ -560,7 +651,23 @@ class PokerBotViewer:
             bio.name = "desk.png"
             im_cards.save(bio, "PNG")
             bio.seek(0)
-            media = InputMediaPhoto(media=bio, caption=caption, parse_mode=parse_mode)
+            context = self._build_context(
+                "edit_desk_cards_img", chat_id=chat_id, message_id=message_id
+            )
+            normalized_caption = self._validator.normalize_caption(
+                caption,
+                parse_mode=parse_mode,
+                context=context,
+            )
+            if caption and normalized_caption is None:
+                logger.warning(
+                    "Skipping edit_desk_cards_img due to invalid caption",
+                    extra={"context": context},
+                )
+                return None
+            media = InputMediaPhoto(
+                media=bio, caption=normalized_caption, parse_mode=parse_mode
+            )
             await self._rate_limiter.send(
                 lambda: self._bot.edit_message_media(
                     chat_id=chat_id,
@@ -727,13 +834,28 @@ class PokerBotViewer:
             else:
                 hidden_text = PokerBotViewer._ZERO_WIDTH_SPACE
 
+            context_hidden = self._build_context(
+                "send_cards_hidden", chat_id=chat_id, message_id=message_id
+            )
+            normalized_hidden_text = self._validator.normalize_text(
+                hidden_text,
+                parse_mode=ParseMode.MARKDOWN,
+                context=context_hidden,
+            )
+            if normalized_hidden_text is None:
+                logger.warning(
+                    "Skipping hidden cards update due to invalid text",
+                    extra={"context": context_hidden},
+                )
+                return None
+
             if message_id:
                 try:
                     result = await self._rate_limiter.send(
                         lambda: self._bot.edit_message_text(
                             chat_id=chat_id,
                             message_id=message_id,
-                            text=hidden_text,
+                            text=normalized_hidden_text,
                             parse_mode=ParseMode.MARKDOWN,
                             reply_markup=markup,
                             disable_web_page_preview=True,
@@ -773,7 +895,7 @@ class PokerBotViewer:
                         reply_kwargs["reply_to_message_id"] = ready_message_id
                     return await self._bot.send_message(
                         chat_id=chat_id,
-                        text=hidden_text,
+                        text=normalized_hidden_text,
                         parse_mode=ParseMode.MARKDOWN,
                         reply_markup=markup,
                         disable_notification=True,
@@ -803,11 +925,26 @@ class PokerBotViewer:
         )
         message_text = f"{mention_markdown}\n{message_body}"
 
+        context_visible = self._build_context(
+            "send_cards", chat_id=chat_id, message_id=message_id
+        )
+        normalized_message_text = self._validator.normalize_text(
+            message_text,
+            parse_mode=ParseMode.MARKDOWN,
+            context=context_visible,
+        )
+        if normalized_message_text is None:
+            logger.warning(
+                "Skipping visible cards message due to invalid text",
+                extra={"context": context_visible},
+            )
+            return None
+
         if message_id:
             updated_id = await self.edit_message_text(
                 chat_id=chat_id,
                 message_id=message_id,
-                text=message_text,
+                text=normalized_message_text,
                 reply_markup=markup,
                 parse_mode=ParseMode.MARKDOWN,
             )
@@ -821,7 +958,7 @@ class PokerBotViewer:
                     reply_kwargs["reply_to_message_id"] = ready_message_id
                 return await self._bot.send_message(
                     chat_id=chat_id,
-                    text=message_text,
+                    text=normalized_message_text,
                     parse_mode=ParseMode.MARKDOWN,
                     reply_markup=markup,
                     disable_notification=True,
@@ -912,9 +1049,24 @@ class PokerBotViewer:
         # کیبورد اینلاین
         markup = self._get_turns_markup(call_check_text, call_check_action)
 
+        context = self._build_context(
+            "send_turn_actions", chat_id=chat_id, message_id=message_id
+        )
+        normalized_text = self._validator.normalize_text(
+            text,
+            parse_mode=ParseMode.MARKDOWN,
+            context=context,
+        )
+        if normalized_text is None:
+            logger.warning(
+                "Skipping turn actions message due to invalid text",
+                extra={"context": context},
+            )
+            return None
+
         if message_id:
             edited_id = await self.edit_turn_actions(
-                chat_id, message_id, text, markup
+                chat_id, message_id, normalized_text, markup
             )
             if edited_id:
                 return edited_id
@@ -924,7 +1076,7 @@ class PokerBotViewer:
             message = await self._rate_limiter.send(
                 lambda: self._bot.send_message(
                     chat_id=chat_id,
-                    text=text,
+                    text=normalized_text,
                     reply_markup=markup,
                     parse_mode=ParseMode.MARKDOWN,
                     disable_notification=False,  # player gets notification
@@ -973,12 +1125,26 @@ class PokerBotViewer:
         reply_markup: InlineKeyboardMarkup,
     ) -> Optional[MessageId]:
         """ویرایش پیام موجود با متن و کیبورد جدید."""
+        context = self._build_context(
+            "edit_turn_actions", chat_id=chat_id, message_id=message_id
+        )
+        normalized_text = self._validator.normalize_text(
+            text,
+            parse_mode=ParseMode.MARKDOWN,
+            context=context,
+        )
+        if normalized_text is None:
+            logger.warning(
+                "Skipping edit_turn_actions due to invalid text",
+                extra={"context": context},
+            )
+            return None
         try:
             message = await self._rate_limiter.send(
                 lambda: self._bot.edit_message_text(
                     chat_id=chat_id,
                     message_id=message_id,
-                    text=text,
+                    text=normalized_text,
                     reply_markup=reply_markup,
                     parse_mode=ParseMode.MARKDOWN,
                     disable_web_page_preview=True,
@@ -1226,6 +1392,20 @@ class PokerBotViewer:
             "♻️ دست به پایان رسید. بازیکنان باقی‌مانده برای دست بعد حفظ شدند.\n"
             "برای شروع دست جدید، /start را بزنید یا بازیکنان جدید می‌توانند با دکمهٔ «نشستن سر میز» وارد شوند."
         )
+        context = self._build_context(
+            "send_new_hand_ready_message", chat_id=chat_id
+        )
+        normalized_message = self._validator.normalize_text(
+            message,
+            parse_mode=ParseMode.MARKDOWN,
+            context=context,
+        )
+        if normalized_message is None:
+            logger.warning(
+                "Skipping new hand ready message due to invalid text",
+                extra={"context": context},
+            )
+            return
         reply_keyboard = ReplyKeyboardMarkup(
             keyboard=[["/start", "نشستن سر میز"], ["/stop"]],
             resize_keyboard=True,
@@ -1236,7 +1416,7 @@ class PokerBotViewer:
             await self._rate_limiter.send(
                 lambda: self._bot.send_message(
                     chat_id=chat_id,
-                    text=message,
+                    text=normalized_message,
                     parse_mode=ParseMode.MARKDOWN,
                     disable_notification=True,
                     disable_web_page_preview=True,
