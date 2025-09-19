@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 
 import asyncio
+import datetime
 import unittest
 from types import SimpleNamespace
 from typing import List, Tuple, Optional
@@ -18,6 +19,8 @@ from pokerapp.pokerbotmodel import (
     RoundRateModel,
     WalletManagerModel,
     KEY_CHAT_DATA_GAME,
+    KEY_START_COUNTDOWN_LAST_TEXT,
+    KEY_START_COUNTDOWN_LAST_TIMESTAMP,
     KEY_STOP_REQUEST,
     STOP_CONFIRM_CALLBACK,
     STOP_RESUME_CALLBACK,
@@ -513,6 +516,10 @@ async def test_auto_start_tick_updates_text_with_countdown():
     assert "4 ثانیه" in rendered_text
     assert context.chat_data["start_countdown"] == 4
     assert game.ready_message_main_text == rendered_text
+    assert context.chat_data[KEY_START_COUNTDOWN_LAST_TEXT] == rendered_text
+    last_timestamp = context.chat_data[KEY_START_COUNTDOWN_LAST_TIMESTAMP]
+    assert isinstance(last_timestamp, datetime.datetime)
+    assert last_timestamp.tzinfo is not None
     table_manager.save_game.assert_not_awaited()
     assert context.chat_data[KEY_CHAT_DATA_GAME] is game
 
@@ -568,7 +575,7 @@ async def test_auto_start_tick_finishes_without_rate_limit_tail_sleep(monkeypatc
 
 
 @pytest.mark.asyncio
-async def test_auto_start_tick_handles_long_countdown_without_skipping():
+async def test_auto_start_tick_throttles_and_resumes_updates():
     chat_id = -775
     view = MagicMock()
     bot = MagicMock()
@@ -586,18 +593,66 @@ async def test_auto_start_tick_handles_long_countdown_without_skipping():
 
     job = SimpleNamespace(chat_id=chat_id)
     job.schedule_removal = MagicMock()
-    context = SimpleNamespace(job=job, chat_data={"start_countdown": 120})
+    context = SimpleNamespace(job=job, chat_data={"start_countdown": 5})
 
-    ticks = 3
-    for expected in range(119, 119 - ticks, -1):
-        await model._auto_start_tick(context)
-        assert context.chat_data["start_countdown"] == expected
+    await model._auto_start_tick(context)
+    assert model._safe_edit_message_text.await_count == 1
+    first_text = context.chat_data[KEY_START_COUNTDOWN_LAST_TEXT]
+    assert context.chat_data["start_countdown"] == 4
 
-    assert model._safe_edit_message_text.await_count == ticks
+    await model._auto_start_tick(context)
+    assert model._safe_edit_message_text.await_count == 1
+    assert context.chat_data["start_countdown"] == 3
+    assert context.chat_data[KEY_START_COUNTDOWN_LAST_TEXT] == first_text
+
+    context.chat_data[KEY_START_COUNTDOWN_LAST_TIMESTAMP] -= datetime.timedelta(seconds=10)
+
+    await model._auto_start_tick(context)
+    assert model._safe_edit_message_text.await_count == 2
+    assert context.chat_data["start_countdown"] == 2
+    assert context.chat_data[KEY_START_COUNTDOWN_LAST_TEXT] != first_text
     job.schedule_removal.assert_not_called()
     table_manager.save_game.assert_not_awaited()
-    last_text = model._safe_edit_message_text.await_args_list[-1].args[2]
-    assert f"{context.chat_data['start_countdown']} ثانیه" in last_text
+    assert context.chat_data[KEY_CHAT_DATA_GAME] is game
+
+
+@pytest.mark.asyncio
+async def test_auto_start_tick_forces_update_when_timer_hits_zero():
+    chat_id = -774
+    view = MagicMock()
+    bot = MagicMock()
+    cfg = MagicMock(DEBUG=False)
+    kv = MagicMock()
+    table_manager = MagicMock()
+    game = Game()
+    game.ready_message_main_id = 222
+    game.ready_message_main_text = "prompt"
+    table_manager.get_game = AsyncMock(return_value=game)
+    table_manager.save_game = AsyncMock()
+
+    model = PokerBotModel(view=view, bot=bot, cfg=cfg, kv=kv, table_manager=table_manager)
+    model._safe_edit_message_text = AsyncMock(return_value=222)
+
+    job = SimpleNamespace(chat_id=chat_id)
+    job.schedule_removal = MagicMock()
+    previous_timestamp = datetime.datetime.now(datetime.timezone.utc)
+    context = SimpleNamespace(
+        job=job,
+        chat_data={
+            "start_countdown": 1,
+            KEY_START_COUNTDOWN_LAST_TEXT: "old",
+            KEY_START_COUNTDOWN_LAST_TIMESTAMP: previous_timestamp,
+        },
+    )
+
+    await model._auto_start_tick(context)
+
+    model._safe_edit_message_text.assert_awaited_once()
+    final_text = model._safe_edit_message_text.await_args.args[2]
+    assert "بازی در حال شروع است" in final_text
+    assert context.chat_data["start_countdown"] == 0
+    assert context.chat_data[KEY_START_COUNTDOWN_LAST_TEXT] == final_text
+    assert context.chat_data[KEY_START_COUNTDOWN_LAST_TIMESTAMP] >= previous_timestamp
     assert context.chat_data[KEY_CHAT_DATA_GAME] is game
 
 
@@ -633,6 +688,8 @@ async def test_auto_start_tick_starts_game_and_cleans_state():
     job.schedule_removal.assert_called_once()
     assert "start_countdown_job" not in context.chat_data
     assert "start_countdown" not in context.chat_data
+    assert KEY_START_COUNTDOWN_LAST_TEXT not in context.chat_data
+    assert KEY_START_COUNTDOWN_LAST_TIMESTAMP not in context.chat_data
     assert context.chat_data[KEY_CHAT_DATA_GAME] is game
 
 
