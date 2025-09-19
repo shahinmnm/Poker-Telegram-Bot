@@ -14,6 +14,7 @@ from pokerapp.config import (
     DEFAULT_RATE_LIMIT_PER_SECOND,
 )
 from pokerapp.pokerbotview import PokerBotViewer
+from pokerapp.entities import PlayerAction
 
 
 MENTION_LINK = "tg://user?id=123"
@@ -131,130 +132,65 @@ def test_notify_admin_failure_logs_error(caplog):
     )
 
 
-def test_send_cards_hides_group_hand_text_keeps_keyboard_message():
-    viewer = PokerBotViewer(bot=MagicMock())
-    viewer._bot.send_message = AsyncMock(return_value=MagicMock(message_id=42))
-    viewer._bot.delete_message = AsyncMock()
 
-    cards = [Card("A♠"), Card("K♦")]
-    table_cards = [Card("2♣"), Card("3♣"), Card("4♣")]
+def test_update_player_anchor_creates_anchor_message():
+    viewer = PokerBotViewer(bot=MagicMock())
+    viewer._messenger.send_message = AsyncMock(return_value=MagicMock(message_id=42))
+
+    player = MagicMock(mention_markdown=MENTION_MARKDOWN, user_id=111)
+    board_cards = [Card('A♠'), Card('K♦'), Card('5♣')]
 
     result = run(
-        viewer.send_cards(
-            chat_id=123,
-            cards=cards,
-            mention_markdown=MENTION_MARKDOWN,
-            table_cards=table_cards,
-            hide_hand_text=True,
+        viewer.update_player_anchor(
+            chat_id=555,
+            player=player,
+            seat_number=3,
+            role_label='دیلر',
+            board_cards=board_cards,
+            active=True,
+            call_label='CALL',
+            call_action=PlayerAction.CALL,
         )
     )
 
     assert result == 42
-    assert viewer._bot.send_message.await_count == 1
-    call = viewer._bot.send_message.await_args
-    text = call.kwargs["text"]
-    assert text == HIDDEN_MENTION_TEXT
-    assert "Player" not in text
-    assert "🔒" not in text
-    assert "reply_to_message_id" not in call.kwargs
-    markup = call.kwargs["reply_markup"]
+    call = viewer._messenger.send_message.await_args
+    assert '🪑 صندلی: `3`' in call.kwargs['text']
+    assert '🎖️ نقش: دیلر' in call.kwargs['text']
+    assert '🃏 Board:' in call.kwargs['text']
+    markup = call.kwargs['reply_markup']
     assert markup is not None
-    assert _row_texts(markup.keyboard[0]) == ["A♠", "K♦"]
-    assert _row_texts(markup.keyboard[1]) == ["2♣", "3♣", "4♣"]
-    assert _row_texts(markup.keyboard[2]) == ["🔁 پری فلاپ", "✅ فلاپ", "🔁 ترن", "🔁 ریور"]
-    assert viewer._bot.delete_message.await_count == 0
+    first_row = [button.text for button in markup.inline_keyboard[0]]
+    assert PlayerAction.FOLD.value in first_row
+    assert PlayerAction.ALL_IN.value in first_row
+    assert any(label.startswith('CALL') for label in first_row)
 
 
-def test_send_cards_hidden_text_replies_to_ready_message():
+def test_update_player_anchor_inactive_removes_keyboard():
     viewer = PokerBotViewer(bot=MagicMock())
-    viewer._bot.send_message = AsyncMock(return_value=MagicMock(message_id=99))
-    viewer._bot.delete_message = AsyncMock()
+    viewer._messenger.edit_message_text = AsyncMock(return_value=77)
 
-    cards = [Card("A♠"), Card("K♦")]
+    player = MagicMock(mention_markdown=MENTION_MARKDOWN, user_id=222)
+    board_cards = [Card('Q♠'), Card('J♦'), Card('9♣'), Card('2♥')]
 
     result = run(
-        viewer.send_cards(
-            chat_id=123,
-            cards=cards,
-            mention_markdown=MENTION_MARKDOWN,
-            ready_message_id="777",
-            hide_hand_text=True,
+        viewer.update_player_anchor(
+            chat_id=888,
+            player=player,
+            seat_number=4,
+            role_label='بازیکن',
+            board_cards=board_cards,
+            active=False,
+            call_label='CHECK',
+            call_action=PlayerAction.CHECK,
+            message_id=77,
         )
     )
 
-    assert result == 99
-    call = viewer._bot.send_message.await_args
-    assert call.kwargs["reply_to_message_id"] == "777"
-    assert call.kwargs["text"] == HIDDEN_MENTION_TEXT
-    assert viewer._bot.delete_message.await_count == 0
-
-
-def test_send_cards_hidden_edit_failure_sends_new_message_and_deletes_old():
-    viewer = PokerBotViewer(bot=MagicMock())
-    viewer._bot.send_message = AsyncMock(return_value=MagicMock(message_id=321))
-    viewer._bot.delete_message = AsyncMock()
-    viewer._bot.edit_message_text = AsyncMock(side_effect=BadRequest("cannot edit"))
-
-    cards = [Card("A♠"), Card("K♦")]
-
-    result = run(
-        viewer.send_cards(
-            chat_id=123,
-            cards=cards,
-            mention_markdown=MENTION_MARKDOWN,
-            hide_hand_text=True,
-            message_id=555,
-        )
-    )
-
-    assert result == 321
-    assert viewer._bot.edit_message_text.await_count == 1
-    assert viewer._bot.send_message.await_count == 1
-    send_call = viewer._bot.send_message.await_args
-    assert "reply_to_message_id" not in send_call.kwargs
-    assert send_call.kwargs["text"] == HIDDEN_MENTION_TEXT
-    assert viewer._bot.delete_message.await_count == 1
-    delete_call = viewer._bot.delete_message.await_args
-    assert delete_call.kwargs == {"chat_id": 123, "message_id": 555}
-
-
-def test_send_cards_includes_hand_details_by_default():
-    viewer = PokerBotViewer(bot=MagicMock())
-    viewer._bot.send_message = AsyncMock(return_value=MagicMock(message_id=24))
-
-    cards = [Card("Q♥"), Card("J♥")]
-    table_cards = [Card("10♥"), Card("9♥"), Card("8♥")]
-
-    run(
-        viewer.send_cards(
-            chat_id=456,
-            cards=cards,
-            mention_markdown=MENTION_MARKDOWN,
-            table_cards=table_cards,
-        )
-    )
-
-    assert viewer._bot.send_message.await_count == 1
-    call = viewer._bot.send_message.await_args
-    text = call.kwargs["text"]
-    assert "Q♥" in text and "J♥" in text
-    assert "10♥" in text and "9♥" in text and "8♥" in text
-    markup = call.kwargs["reply_markup"]
-    assert _row_texts(markup.keyboard[0]) == ["Q♥", "J♥"]
-    assert _row_texts(markup.keyboard[1]) == ["10♥", "9♥", "8♥"]
-    assert _row_texts(markup.keyboard[2])[1].startswith("✅")
-
-
-def test_table_markup_excludes_show_table_button():
-    table_cards = [Card("A♠"), Card("K♦"), Card("Q♣")]
-
-    markup = PokerBotViewer._get_table_markup(table_cards, stage="flop")
-
-    assert _row_texts(markup.keyboard[0]) == ["A♠", "K♦", "Q♣"]
-    stage_row = _row_texts(markup.keyboard[1])
-    assert "👁️ نمایش میز" not in stage_row
-    assert stage_row == ["پری فلاپ", "✅ فلاپ", "ترن", "ریور"]
-
+    assert result == 77
+    call = viewer._messenger.edit_message_text.await_args
+    assert call.kwargs['reply_markup'] is None
+    assert '🃏 Board:' in call.kwargs['text']
 
 def test_new_hand_ready_message_uses_reply_keyboard():
     viewer = PokerBotViewer(bot=MagicMock())

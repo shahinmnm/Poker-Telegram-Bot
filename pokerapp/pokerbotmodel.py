@@ -45,6 +45,7 @@ from pokerapp.entities import (
     UserException,
     Money,
     PlayerState,
+    PlayerAction,
     Score,
     Wallet,
     Mention,
@@ -970,21 +971,6 @@ class PokerBotModel:
         context.chat_data.pop(KEY_START_COUNTDOWN_LAST_TEXT, None)
         context.chat_data.pop(KEY_START_COUNTDOWN_LAST_TIMESTAMP, None)
 
-    async def send_cards(
-        self,
-        chat_id: ChatId,
-        cards: Cards,
-        mention_markdown: Mention,
-        ready_message_id: MessageId,
-    ) -> Optional[MessageId]:
-        """Delegate to the viewer for sending player cards."""
-        return await self._view.send_cards(
-            chat_id=chat_id,
-            cards=cards,
-            mention_markdown=mention_markdown,
-            ready_message_id=ready_message_id,
-        )
-
     async def _track_player_keyboard_message(
         self,
         game: Game,
@@ -992,33 +978,13 @@ class PokerBotModel:
         player: Player,
         new_message_id: Optional[MessageId],
     ) -> None:
-        """Update bookkeeping for a player's hidden keyboard message."""
-
-        previous_id = getattr(player, "cards_keyboard_message_id", None)
+        """Record the anchor message for ``player`` so it can be cleaned up."""
 
         if not new_message_id:
-            if previous_id and previous_id not in game.message_ids_to_delete:
-                game.message_ids_to_delete.append(previous_id)
             return
 
-        if previous_id and previous_id != new_message_id:
-            deleted_previous = False
-            try:
-                await self._view.delete_message(chat_id, previous_id)
-                deleted_previous = True
-            except Exception as e:
-                logger.debug(
-                    "Failed to delete previous keyboard message",
-                    extra={
-                        "chat_id": chat_id,
-                        "previous_message_id": previous_id,
-                        "error_type": type(e).__name__,
-                    },
-                )
-            if deleted_previous and previous_id in game.message_ids_to_delete:
-                game.message_ids_to_delete.remove(previous_id)
-
         player.cards_keyboard_message_id = new_message_id
+        player.anchor_message = (chat_id, new_message_id)
         if new_message_id not in game.message_ids_to_delete:
             game.message_ids_to_delete.append(new_message_id)
 
@@ -1037,6 +1003,70 @@ class PokerBotModel:
                     chat_id,
                     e,
                 )
+
+    def _describe_player_role(self, game: Game, player: Player) -> str:
+        seat_index = player.seat_index if player.seat_index is not None else -1
+        roles: List[str] = []
+        if seat_index == game.dealer_index:
+            roles.append("دیلر")
+        if seat_index == game.small_blind_index:
+            roles.append("بلایند کوچک")
+        if seat_index == game.big_blind_index:
+            roles.append("بلایند بزرگ")
+        if not roles:
+            roles.append("بازیکن")
+        return "، ".join(dict.fromkeys(roles))
+
+    async def _update_player_anchor_messages(
+        self,
+        game: Game,
+        chat_id: ChatId,
+        *,
+        active_player: Player,
+        call_label: str,
+        call_action: PlayerAction,
+    ) -> None:
+        board_cards = list(game.cards_table)
+        for player in game.seated_players():
+            seat_number = (player.seat_index or 0) + 1
+            role_label = self._describe_player_role(game, player)
+            player.anchor_role = role_label
+
+            existing_id: Optional[MessageId] = None
+            if player.anchor_message and player.anchor_message[0] == chat_id:
+                existing_id = player.anchor_message[1]
+            elif getattr(player, "cards_keyboard_message_id", None):
+                existing_id = player.cards_keyboard_message_id
+
+            try:
+                message_id = await self._view.update_player_anchor(
+                    chat_id=chat_id,
+                    player=player,
+                    seat_number=seat_number,
+                    role_label=role_label,
+                    board_cards=board_cards,
+                    active=player.user_id == active_player.user_id,
+                    call_label=call_label,
+                    call_action=call_action,
+                    message_id=existing_id,
+                )
+            except Exception as exc:
+                logger.error(
+                    "Failed to update anchor message",
+                    extra={
+                        "chat_id": chat_id,
+                        "player_id": player.user_id,
+                        "error_type": type(exc).__name__,
+                    },
+                )
+                continue
+
+            await self._track_player_keyboard_message(
+                game,
+                chat_id,
+                player,
+                message_id,
+            )
 
     async def _safe_edit_message_text(
         self,
@@ -1688,24 +1718,6 @@ class PokerBotModel:
             cards = [game.remain_cards.pop(), game.remain_cards.pop()]
             player.cards = cards
 
-            stage = self._view._derive_stage_from_table(game.cards_table)
-            keyboard_message_id = await self._view.send_cards(
-                chat_id=chat_id,
-                cards=cards,
-                mention_markdown=player.mention_markdown,
-                ready_message_id=player.ready_message_id,
-                table_cards=game.cards_table,
-                hide_hand_text=True,
-                stage=stage,
-                reply_to_ready_message=False,
-            )
-            await self._track_player_keyboard_message(
-                game,
-                chat_id,
-                player,
-                keyboard_message_id,
-            )
-
     def _is_betting_round_over(self, game: Game) -> bool:
         """
         بررسی می‌کند که آیا دور شرط‌بندی فعلی به پایان رسیده است یا خیر.
@@ -1887,7 +1899,7 @@ class PokerBotModel:
             money = await player.wallet.value()
             recent_actions = list(game.last_actions)
 
-            new_message_id = await self._view.update_turn_message(
+            turn_update = await self._view.update_turn_message(
                 chat_id=chat_id,
                 game=game,
                 player=player,
@@ -1896,8 +1908,16 @@ class PokerBotModel:
                 recent_actions=recent_actions,
             )
 
-            if new_message_id:
-                game.turn_message_id = new_message_id
+            if turn_update.message_id:
+                game.turn_message_id = turn_update.message_id
+
+            await self._update_player_anchor_messages(
+                game,
+                chat_id,
+                active_player=player,
+                call_label=turn_update.call_label,
+                call_action=turn_update.call_action,
+            )
 
             game.last_turn_time = datetime.datetime.now()
 
@@ -2206,11 +2226,10 @@ class PokerBotModel:
         send_message: bool = True,
     ):
         """
-        کارت‌های جدید را به میز اضافه کرده و پیامی متنی بدون کیبورد سراسری ارسال
-        می‌کند. به‌روزرسانی صفحه‌کلیدها تنها از مسیر ``PokerBotViewer.send_cards``
-        انجام می‌شود تا دست و کارت‌های میز در یک کیبورد ترکیبی نمایش داده شوند.
-        اگر ``count=0`` باشد، فقط کارت‌های فعلی نمایش داده می‌شود. با تنظیم
-        ``send_message=False`` می‌توان فقط کارت‌ها را اضافه کرد بدون ارسال پیام.
+        کارت‌های جدید را به میز اضافه کرده و پیام برد را به‌روزرسانی می‌کند.
+
+        پیام‌های لنگر بازیکنان در جای دیگری (پیام نوبت مشترک) ویرایش می‌شوند تا
+        وضعیت دکمه‌های اینلاین و خطوط کارت‌ها با هم هماهنگ بمانند.
         """
         async with self._chat_guard(chat_id):
             if count > 0:
@@ -2220,8 +2239,6 @@ class PokerBotModel:
 
             if not send_message:
                 return
-
-            stage = self._view._derive_stage_from_table(game.cards_table)
 
             if not game.board_message_id:
                 msg_id = await self._view.send_message_return_id(
@@ -2257,32 +2274,6 @@ class PokerBotModel:
                     game.board_message_id = new_msg_id
                     if new_msg_id not in game.message_ids_to_delete:
                         game.message_ids_to_delete.append(new_msg_id)
-
-            # به‌روزرسانی کیبورد پیام کارت‌های بازیکنان با کارت‌های میز
-            for player in game.seated_players():
-                if not player.cards:
-                    continue
-                existing_keyboard_id = getattr(player, "cards_keyboard_message_id", None)
-                send_kwargs = dict(
-                    chat_id=chat_id,
-                    cards=player.cards,
-                    mention_markdown=player.mention_markdown,
-                    ready_message_id=player.ready_message_id,
-                    table_cards=game.cards_table,
-                    hide_hand_text=True,
-                    stage=stage,
-                    reply_to_ready_message=False,
-                )
-                if existing_keyboard_id:
-                    send_kwargs["message_id"] = existing_keyboard_id
-                keyboard_message_id = await self._view.send_cards(**send_kwargs)
-                await self._track_player_keyboard_message(
-                    game,
-                    chat_id,
-                    player,
-                    keyboard_message_id,
-                )
-                # Legacy pacing delay removed; cache-driven queuing now smooths bursts.
 
             # پس از ارسال/ویرایش تصویر میز، پیام نوبت باید آخرین پیام باشد
             if count == 0 and game.turn_message_id:
@@ -2393,6 +2384,8 @@ class PokerBotModel:
                 if keyboard_message_id:
                     ids_to_delete.add(keyboard_message_id)
                     player.cards_keyboard_message_id = None
+                player.anchor_message = None
+                player.anchor_role = "بازیکن"
 
             for message_id in ids_to_delete:
                 try:
@@ -2659,7 +2652,7 @@ class RoundRateModel:
                 await self._model._send_turn_message(game, player_turn, chat_id)
             else:
                 player_money = await player_turn.wallet.value()
-                msg_id = await self._view.update_turn_message(
+                turn_update = await self._view.update_turn_message(
                     chat_id=chat_id,
                     game=game,
                     player=player_turn,
@@ -2667,8 +2660,8 @@ class RoundRateModel:
                     message_id=game.turn_message_id,
                     recent_actions=list(game.last_actions),
                 )
-                if msg_id:
-                    game.turn_message_id = msg_id
+                if turn_update.message_id:
+                    game.turn_message_id = turn_update.message_id
 
     async def _set_player_blind(
         self,

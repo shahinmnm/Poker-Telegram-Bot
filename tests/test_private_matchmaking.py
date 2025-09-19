@@ -43,7 +43,7 @@ async def _build_model():
     view = MagicMock()
     view.send_message = AsyncMock()
     view.send_message_return_id = AsyncMock(return_value=None)
-    view.send_cards = AsyncMock()
+    view.update_player_anchor = AsyncMock()
     bot = MagicMock()
     cfg = Config()
     table_manager = TableManager(kv)

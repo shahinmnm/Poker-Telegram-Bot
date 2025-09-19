@@ -85,6 +85,8 @@ class Player:
         self.seat_index = seat_index
         # پیام کیبورد کارت‌ها در گروه برای پاک‌سازی مرحله‌ای
         self.cards_keyboard_message_id: Optional[MessageId] = None
+        self.anchor_message: Optional[Tuple[ChatId, MessageId]] = None
+        self.anchor_role: str = "بازیکن"
         # -------------------------
     def __repr__(self):
         return "{}({!r})".format(self.__class__.__name__, self.__dict__)
