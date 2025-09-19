@@ -51,6 +51,7 @@ from pokerapp.entities import (
     MAX_PLAYERS,
 )
 from pokerapp.pokerbotview import PokerBotViewer
+from pokerapp.utils.markdown import escape_markdown_v1
 from pokerapp.table_manager import TableManager
 from pokerapp.stats import (
     BaseStatsService,
@@ -483,7 +484,11 @@ class PokerBotModel:
             )
             await self._kv.expire(state_key, PRIVATE_MATCH_STATE_TTL)
             if info.chat_id:
-                opponent_name = opponent.display_name
+                opponent_name_raw = (
+                    opponent.display_name
+                    or str(self._safe_int(opponent.user_id))
+                )
+                opponent_name = escape_markdown_v1(opponent_name_raw)
                 message = (
                     "🤝 حریف شما پیدا شد!\n"
                     f"🎮 بازی خصوصی با {opponent_name} تا لحظاتی دیگر آغاز می‌شود.\n"
@@ -525,11 +530,16 @@ class PokerBotModel:
             return
 
         if status in {"matched", "playing"}:
-            opponent_name = state.get("opponent_name") or state.get("opponent")
+            opponent_name_raw = state.get("opponent_name") or state.get("opponent")
+            opponent_name = (
+                escape_markdown_v1(opponent_name_raw)
+                if opponent_name_raw
+                else "حریف"
+            )
             match_id = state.get("match_id") or "نامشخص"
             await self._view.send_message(
                 chat.id,
-                f"🎮 شما در حال حاضر در بازی با {opponent_name or 'حریف'} هستید. (شناسه: {match_id})",
+                f"🎮 شما در حال حاضر در بازی با {opponent_name} هستید. (شناسه: {match_id})",
                 reply_markup=self._build_private_menu(),
             )
             return
@@ -610,12 +620,14 @@ class PokerBotModel:
         player_one_chat = self._coerce_optional_int(match_data.get("player_one_chat"))
         player_two_chat = self._coerce_optional_int(match_data.get("player_two_chat"))
 
-        winner_name = (
+        winner_name_raw = (
             player_one_name if winner_id == player_one_id else player_two_name
         )
-        loser_name = (
+        loser_name_raw = (
             player_two_name if winner_id == player_one_id else player_one_name
         )
+        winner_name = escape_markdown_v1(winner_name_raw)
+        loser_name = escape_markdown_v1(loser_name_raw)
 
         message_winner = (
             "🏆 تبریک! شما برنده بازی خصوصی شدید.\n"

@@ -29,6 +29,8 @@ from sqlalchemy.ext.asyncio import (
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 from sqlalchemy.pool import StaticPool
 
+from pokerapp.utils.markdown import escape_markdown_v1
+
 
 logger = logging.getLogger(__name__)
 
@@ -844,7 +846,8 @@ class StatsService(BaseStatsService):
         lines: List[str] = []
         lines.append("📊 گزارش پیشرفته عملکرد شما")
         if stats.display_name:
-            lines.append(f"👤 نام: {stats.display_name}")
+            safe_display_name = escape_markdown_v1(stats.display_name)
+            lines.append(f"👤 نام: {safe_display_name}")
         if stats.username:
             lines.append(f"🔖 نام کاربری: @{stats.username}")
         lines.append(f"🎮 مجموع دست‌ها: {self._format_number(total_games)}")

@@ -4,13 +4,22 @@ from unittest.mock import AsyncMock, MagicMock
 
 import fakeredis.aioredis
 import pytest
+from telegram.error import BadRequest
 
 from pokerapp.pokerbotmodel import PokerBotModel
 from pokerapp.stats import PlayerHandResult, PlayerIdentity, StatsService
 
 
 def _build_model(stats_service: StatsService):
-    view = SimpleNamespace(send_message=AsyncMock())
+    send_message = AsyncMock()
+
+    async def safe_send_message(chat_id, text, *args, **kwargs):
+        if "user_[test]" in text:
+            raise BadRequest("Bad markdown detected: user_[test]")
+        return None
+
+    send_message.side_effect = safe_send_message
+    view = SimpleNamespace(send_message=send_message)
     bot = SimpleNamespace()
     cfg = SimpleNamespace(DEBUG=False)
     kv = fakeredis.aioredis.FakeRedis()
@@ -26,12 +35,19 @@ def _build_model(stats_service: StatsService):
     return model, view
 
 
-def _make_update(user_id: int, chat_id: int, username: str = "player") -> SimpleNamespace:
+def _make_update(
+    user_id: int,
+    chat_id: int,
+    username: str = "player",
+    *,
+    full_name: str | None = None,
+) -> SimpleNamespace:
     chat = SimpleNamespace(id=chat_id, type="private", PRIVATE="private")
+    name = full_name or f"{username} tester"
     user = SimpleNamespace(
         id=user_id,
-        full_name=f"{username} tester",
-        first_name=username,
+        full_name=name,
+        first_name=name,
         username=username,
     )
     return SimpleNamespace(effective_chat=chat, effective_user=user)
@@ -47,7 +63,7 @@ async def test_statistics_command_formats_report(tmp_path):
         model, view = _build_model(service)
         identity = PlayerIdentity(
             user_id=42,
-            display_name="علی قهرمان",
+            display_name="user_[test]",
             username="ali",
         )
 
@@ -128,7 +144,12 @@ async def test_statistics_command_formats_report(tmp_path):
             end_time=base_time + dt.timedelta(minutes=7),
         )
 
-        update = _make_update(identity.user_id, 999, username="ali")
+        update = _make_update(
+            identity.user_id,
+            999,
+            username="ali",
+            full_name="user_[test]",
+        )
         context = SimpleNamespace()
 
         await model._send_statistics_report(update, context)
@@ -146,6 +167,7 @@ async def test_statistics_command_formats_report(tmp_path):
         assert "🥇 پراکندگی دست‌های برنده:" in message
         assert "رویال فلاش" in message
         assert "📝 پنج دست اخیر:" in message
+        assert "👤 نام: user\\_\\[test]" in message
         assert kwargs.get("reply_markup") is not None
     finally:
         await service.close()

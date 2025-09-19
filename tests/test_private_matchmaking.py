@@ -5,6 +5,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import fakeredis.aioredis
 import pytest
+from telegram.error import BadRequest
 
 from pokerapp.config import Config
 from pokerapp.pokerbotmodel import (
@@ -15,11 +16,17 @@ from pokerapp.stats import BaseStatsService
 from pokerapp.table_manager import TableManager
 
 
-def _build_update(user_id: int, chat_id: int) -> Tuple[SimpleNamespace, SimpleNamespace]:
+def _build_update(
+    user_id: int,
+    chat_id: int,
+    *,
+    full_name: str | None = None,
+) -> Tuple[SimpleNamespace, SimpleNamespace]:
+    name = full_name or f"Player {user_id}"
     user = SimpleNamespace(
         id=user_id,
-        full_name=f"Player {user_id}",
-        first_name=f"Player{user_id}",
+        full_name=name,
+        first_name=name,
         username=f"player{user_id}",
     )
     chat = SimpleNamespace(id=chat_id, type="private", PRIVATE="private")
@@ -155,6 +162,39 @@ async def test_private_matchmaking_reports_results_updates_stats():
     assert finish_call.args[3] == expected_pot_total == 1
     messages = [call.args[1] for call in view.send_message.await_args_list]
     assert any("برنده" in message for message in messages)
+
+    await kv.flushall()
+
+
+@pytest.mark.asyncio
+async def test_private_matchmaking_escapes_markdown_names():
+    model, kv, view, stats = await _build_model()
+
+    unsafe_names = {"user_[test]", "ally_[test]"}
+
+    async def safe_send_message(chat_id, text, *args, **kwargs):
+        for unsafe in unsafe_names:
+            if unsafe in text:
+                raise BadRequest(f"Bad markdown detected: {unsafe}")
+        return None
+
+    view.send_message.side_effect = safe_send_message
+
+    update1, chat1 = _build_update(1010, 2010, full_name="user_[test]")
+    context1 = SimpleNamespace(chat_data={}, bot_data={}, user_data={})
+    await model.handle_private_matchmaking_request(update1, context1)
+
+    update2, chat2 = _build_update(2020, 3030, full_name="ally_[test]")
+    context2 = SimpleNamespace(chat_data={}, bot_data={}, user_data={})
+    await model.handle_private_matchmaking_request(update2, context2)
+
+    match_id = stats.start_hand.await_args.args[0]
+
+    await model.report_private_match_result(match_id, 1010)
+
+    sent_texts = [call.args[1] for call in view.send_message.await_args_list]
+    assert any("user\\_\\[test]" in text for text in sent_texts)
+    assert any("ally\\_\\[test]" in text for text in sent_texts)
 
     await kv.flushall()
 
