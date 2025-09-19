@@ -152,6 +152,9 @@ class Game:
         # 🆕 اضافه شده: پیام تصویر میز
         self.board_message_id: Optional[MessageId] = None
 
+        # پیام لیست صندلی‌ها که ابتدای هر دست ارسال می‌شود
+        self.seat_announcement_message_id: Optional[MessageId] = None
+
     # --- Seats / players helpers ----------------------------------------
     @property
     def players(self) -> List[Player]:

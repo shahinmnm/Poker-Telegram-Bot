@@ -1644,6 +1644,16 @@ class PokerBotModel:
                 )
 
             game.state = GameState.ROUND_PRE_FLOP
+
+            seat_message_id = await self._view.announce_player_seats(
+                chat_id=chat_id,
+                players=list(game.seated_players()),
+                dealer_index=game.dealer_index,
+                message_id=game.seat_announcement_message_id,
+            )
+            if seat_message_id:
+                game.seat_announcement_message_id = seat_message_id
+
             await self._divide_cards(game, chat_id)
 
             # این متد به تنهایی تمام کارهای لازم برای شروع راند را انجام می‌دهد.
@@ -1875,30 +1885,18 @@ class PokerBotModel:
         """پیام نوبت را ارسال کرده و شناسه آن را برای حذف در آینده ذخیره می‌کند."""
         async with self._chat_guard(chat_id):
             money = await player.wallet.value()
-            recent_actions = game.last_actions
+            recent_actions = list(game.last_actions)
 
-            previous_message_id = game.turn_message_id
-
-            new_message_id = await self._view.send_turn_actions(
-                chat_id, game, player, money, recent_actions=recent_actions
+            new_message_id = await self._view.update_turn_message(
+                chat_id=chat_id,
+                game=game,
+                player=player,
+                money=money,
+                message_id=game.turn_message_id,
+                recent_actions=recent_actions,
             )
 
             if new_message_id:
-                if (
-                    previous_message_id
-                    and previous_message_id != new_message_id
-                ):
-                    try:
-                        await self._view.delete_message(chat_id, previous_message_id)
-                    except Exception as e:
-                        logger.debug(
-                            "Failed to delete previous turn message",
-                            extra={
-                                "chat_id": chat_id,
-                                "previous_message_id": previous_message_id,
-                                "error_type": type(e).__name__,
-                            },
-                        )
                 game.turn_message_id = new_message_id
 
             game.last_turn_time = datetime.datetime.now()
@@ -2661,12 +2659,13 @@ class RoundRateModel:
                 await self._model._send_turn_message(game, player_turn, chat_id)
             else:
                 player_money = await player_turn.wallet.value()
-                msg_id = await self._view.send_turn_actions(
+                msg_id = await self._view.update_turn_message(
                     chat_id=chat_id,
                     game=game,
                     player=player_turn,
                     money=player_money,
-                    recent_actions=game.last_actions,
+                    message_id=game.turn_message_id,
+                    recent_actions=list(game.last_actions),
                 )
                 if msg_id:
                     game.turn_message_id = msg_id
@@ -2700,13 +2699,13 @@ class RoundRateModel:
                         )
                     else:
                         current_money = await current_player.wallet.value()
-                        await self._view.send_turn_actions(
+                        await self._view.update_turn_message(
                             chat_id=chat_id,
                             game=game,
                             player=current_player,
                             money=current_money,
                             message_id=game.turn_message_id,
-                            recent_actions=game.last_actions,
+                            recent_actions=list(game.last_actions),
                         )
         except UserException as e:
             available_money = await player.wallet.value()
