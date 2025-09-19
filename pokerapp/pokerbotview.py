@@ -323,6 +323,16 @@ class ChatUpdateQueue:
         state.new_item.set()
 
 
+@dataclass(slots=True)
+class TurnActionsResult:
+    """Result payload for a turn action update."""
+
+    message_id: Optional[MessageId]
+    text: Optional[str]
+    reply_markup: Optional[InlineKeyboardMarkup | ReplyKeyboardMarkup]
+    parse_mode: Optional[str]
+
+
 class PokerBotViewer:
     _ZERO_WIDTH_SPACE = "\u2063"
 
@@ -1146,7 +1156,7 @@ class PokerBotViewer:
         money: Money,
         message_id: Optional[MessageId] = None,
         recent_actions: Optional[List[str]] = None,
-    ) -> Optional[MessageId]:
+    ) -> Optional[TurnActionsResult]:
         """ارسال یا ویرایش پیام نوبت بازیکن با نمایش اکشن‌های اخیر."""
 
         # نمایش کارت‌های میز
@@ -1199,7 +1209,19 @@ class PokerBotViewer:
                 chat_id, message_id, normalized_text, markup
             )
             if edited_id:
-                return edited_id
+                await self.remember_text_payload(
+                    chat_id=chat_id,
+                    message_id=edited_id,
+                    text=normalized_text,
+                    reply_markup=markup,
+                    parse_mode=ParseMode.MARKDOWN,
+                )
+                return TurnActionsResult(
+                    message_id=edited_id,
+                    text=normalized_text,
+                    reply_markup=markup,
+                    parse_mode=ParseMode.MARKDOWN,
+                )
             # پیام اصلی دیگر قابل ویرایش نیست، پیام جدید ارسال می‌کنیم
 
         try:
@@ -1230,7 +1252,12 @@ class PokerBotViewer:
                                 "message_id": message_id,
                             },
                         )
-                return new_message_id
+                return TurnActionsResult(
+                    message_id=new_message_id,
+                    text=normalized_text,
+                    reply_markup=markup,
+                    parse_mode=ParseMode.MARKDOWN,
+                )
         except Exception as e:
             logger.error(
                 "Error sending turn actions",
