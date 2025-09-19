@@ -1,6 +1,8 @@
 import asyncio
 import datetime as _dt
 import logging
+import math
+import os
 from dataclasses import dataclass
 from typing import Dict, Optional, Tuple
 
@@ -66,11 +68,19 @@ class RequestTracker:
     skip the Telegram request.
     """
 
-    def __init__(self, *, limit: int = 10) -> None:
+    VERBOSE_ENV_VAR = "POKERBOT_REQUEST_TRACKER_VERBOSE"
+
+    def __init__(self, *, limit: int = 10, info_threshold: Optional[float] = 0.75) -> None:
         self._limit = limit
         self._lock = asyncio.Lock()
         self._stats: Dict[Tuple[int, str], RequestStats] = {}
         self._history: Dict[Tuple[int, str], list] = {}
+        if info_threshold is None or limit <= 0:
+            self._info_threshold: Optional[int] = None
+        else:
+            if not 0 < info_threshold <= 1:
+                raise ValueError("info_threshold must be between 0 and 1 when provided")
+            self._info_threshold = min(limit, max(1, math.ceil(limit * info_threshold)))
 
     @staticmethod
     def _key(chat_id: int, round_id: str) -> Tuple[int, str]:
@@ -89,7 +99,8 @@ class RequestTracker:
         key = self._key(chat_id, round_id)
         async with self._lock:
             stats = self._stats.setdefault(key, RequestStats())
-            if stats.total() >= self._limit:
+            prior_total = stats.total()
+            if prior_total >= self._limit:
                 logger.info(
                     "Request budget exhausted",
                     extra={
@@ -102,21 +113,38 @@ class RequestTracker:
                 )
                 return False
             stats.increment(category)
+            current_total = stats.total()
+            stats_snapshot = stats.as_dict()
             self._history.setdefault(key, []).append(
                 {
                     "ts": _dt.datetime.now(_dt.timezone.utc).isoformat(),
                     "category": category,
-                    "stats": stats.as_dict(),
+                    "stats": stats_snapshot,
                 }
             )
+            payload = {
+                "chat_id": chat_id,
+                "round_id": round_id,
+                "category": category,
+                "stats": stats_snapshot,
+                "limit": self._limit,
+            }
+            if (
+                self._info_threshold is not None
+                and prior_total < self._info_threshold <= current_total
+            ):
+                logger.info(
+                    "Telegram request usage nearing limit",
+                    extra={**payload, "trigger": "threshold"},
+                )
+            if self._verbose_logging_enabled():
+                logger.info(
+                    "Telegram request reservation (verbose)",
+                    extra={**payload, "trigger": "verbose"},
+                )
             logger.debug(
                 "Recorded Telegram request",
-                extra={
-                    "chat_id": chat_id,
-                    "round_id": round_id,
-                    "category": category,
-                    "stats": stats.as_dict(),
-                },
+                extra=payload,
             )
             return True
 
@@ -176,3 +204,8 @@ class RequestTracker:
     @property
     def limit(self) -> int:
         return self._limit
+
+    @classmethod
+    def _verbose_logging_enabled(cls) -> bool:
+        raw = os.getenv(cls.VERBOSE_ENV_VAR, "")
+        return raw.strip().lower() in {"1", "true", "yes", "on"}
