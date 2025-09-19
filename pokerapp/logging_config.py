@@ -14,6 +14,35 @@ class JsonFormatter(logging.Formatter):
         for key in ("chat_id", "message_id", "request_params", "error_type"):
             if key in record.__dict__:
                 log_record[key] = record.__dict__[key]
+
+        standard_attrs = {
+            "name",
+            "msg",
+            "args",
+            "levelname",
+            "levelno",
+            "pathname",
+            "filename",
+            "module",
+            "exc_info",
+            "exc_text",
+            "stack_info",
+            "lineno",
+            "funcName",
+            "created",
+            "msecs",
+            "relativeCreated",
+            "thread",
+            "threadName",
+            "processName",
+            "process",
+            "message",
+            "stacklevel",
+        }
+        for key, value in record.__dict__.items():
+            if key.startswith("_") or key in log_record or key in standard_attrs:
+                continue
+            log_record[key] = value
         if record.exc_info:
             log_record["exception"] = self.formatException(record.exc_info)
         return json.dumps(log_record, ensure_ascii=False)
