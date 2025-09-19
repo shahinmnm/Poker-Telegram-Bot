@@ -930,6 +930,7 @@ class PokerBotModel:
                     message_id,
                     text,
                     reply_markup=keyboard,
+                    log_context="countdown",
                 )
                 if new_message_id is None:
                     if message_id and message_id in game.message_ids_to_delete:
@@ -1079,6 +1080,7 @@ class PokerBotModel:
         text: str,
         reply_markup: Optional[InlineKeyboardMarkup | ReplyKeyboardMarkup] = None,
         parse_mode: str = ParseMode.MARKDOWN,
+        log_context: Optional[str] = None,
     ) -> Optional[MessageId]:
         """
         Safely edit a message's text, retrying on rate limits and
@@ -1120,7 +1122,22 @@ class PokerBotModel:
                 reply_markup=reply_markup,
                 parse_mode=parse_mode,
             )
-        except BadRequest:
+        except BadRequest as exc:
+            error_message = getattr(exc, "message", None) or str(exc)
+            preview = text
+            max_preview_length = 120
+            if len(preview) > max_preview_length:
+                preview = preview[: max_preview_length - 3] + "..."
+            logger.warning(
+                "BadRequest when editing message; will send a replacement",
+                extra={
+                    "chat_id": chat_id,
+                    "message_id": message_id,
+                    "context": log_context or "general",
+                    "error_message": error_message,
+                    "text_preview": preview,
+                },
+            )
             result = None
         if result:
             await self._remember_message_payload(

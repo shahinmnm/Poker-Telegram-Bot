@@ -2,6 +2,7 @@
 
 import asyncio
 import datetime
+import logging
 import unittest
 from types import SimpleNamespace
 from typing import List, Tuple, Optional
@@ -725,7 +726,7 @@ async def test_auto_start_tick_creates_message_when_missing():
 
 
 @pytest.mark.asyncio
-async def test_auto_start_tick_recreates_missing_message_after_bad_request():
+async def test_auto_start_tick_recreates_missing_message_after_bad_request(caplog):
     chat_id = -779
     view = _prepare_view_mock(MagicMock())
     view.edit_message_text = AsyncMock(
@@ -749,6 +750,8 @@ async def test_auto_start_tick_recreates_missing_message_after_bad_request():
     job.schedule_removal = MagicMock()
     context = SimpleNamespace(job=job, chat_data={"start_countdown": 2})
 
+    caplog.set_level(logging.WARNING)
+
     await model._auto_start_tick(context)
 
     assert view.edit_message_text.await_count == 1
@@ -758,12 +761,68 @@ async def test_auto_start_tick_recreates_missing_message_after_bad_request():
     new_text = send_args.args[1]
     assert "1 ثانیه" in new_text
     assert send_args.kwargs.get("reply_markup") is not None
+
+    records = [
+        record
+        for record in caplog.records
+        if getattr(record, "context", None) == "countdown"
+        and getattr(record, "message_id", None) == 555
+    ]
+    assert records, "Expected BadRequest warning log for countdown context"
+    log_record = records[0]
+    assert log_record.levelno == logging.WARNING
+    assert "BadRequest" in log_record.message
     assert game.ready_message_main_id == 4242
     assert game.ready_message_main_text == new_text
     assert 555 not in game.message_ids_to_delete
     table_manager.save_game.assert_awaited_once_with(chat_id, game)
     assert context.chat_data["start_countdown"] == 1
     assert context.chat_data[KEY_CHAT_DATA_GAME] is game
+
+
+@pytest.mark.asyncio
+async def test_safe_edit_message_text_logs_bad_request(caplog):
+    chat_id = -111
+    message_id = 222
+    text = "x" * 150
+    view = _prepare_view_mock(MagicMock())
+    view.edit_message_text = AsyncMock(
+        side_effect=BadRequest("message to edit not found")
+    )
+    view.send_message_return_id = AsyncMock(return_value=999)
+    bot = MagicMock()
+    cfg = MagicMock(DEBUG=False)
+    kv = MagicMock()
+    table_manager = MagicMock()
+
+    model = PokerBotModel(view=view, bot=bot, cfg=cfg, kv=kv, table_manager=table_manager)
+
+    caplog.set_level(logging.WARNING)
+
+    new_id = await model._safe_edit_message_text(
+        chat_id,
+        message_id,
+        text,
+        log_context="countdown",
+    )
+
+    assert new_id == 999
+    assert view.edit_message_text.await_count == 1
+    assert view.send_message_return_id.await_count == 1
+
+    log_records = [
+        record
+        for record in caplog.records
+        if getattr(record, "message_id", None) == message_id
+    ]
+    assert log_records
+    record = log_records[0]
+    assert record.levelno == logging.WARNING
+    assert record.context == "countdown"
+    assert record.chat_id == chat_id
+    assert record.error_message == "message to edit not found"
+    assert record.text_preview.endswith("...")
+    assert len(record.text_preview) == 120
 
 @pytest.mark.asyncio
 async def test_showdown_sends_new_hand_message_before_join_prompt():
