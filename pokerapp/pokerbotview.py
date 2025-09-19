@@ -15,8 +15,11 @@ from typing import Optional, Dict, Any, Deque, Tuple, List
 from dataclasses import dataclass, field
 from collections import deque
 import asyncio
+import datetime
+import hashlib
 import logging
 import json
+from cachetools import FIFOCache, LFUCache
 from pokerapp.config import DEFAULT_RATE_LIMIT_PER_MINUTE, DEFAULT_RATE_LIMIT_PER_SECOND
 from pokerapp.winnerdetermination import HAND_NAMES_TRANSLATIONS
 from pokerapp.desk import DeskImageGenerator
@@ -34,9 +37,24 @@ from pokerapp.entities import (
 from pokerapp.telegram_validation import TelegramPayloadValidator
 from pokerapp.aiogram_middlewares import MessageDiffMiddleware, MessageEditEvent
 from pokerapp.utils.cache import MessagePayload, MessageStateCache
+from pokerapp.utils.request_tracker import RequestTracker
 
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass(slots=True)
+class _TurnCacheEntry:
+    message_id: Optional[MessageId]
+    payload_hash: str
+    updated_at: datetime.datetime
+
+
+@dataclass(slots=True)
+class _InlineMarkupEntry:
+    markup: InlineKeyboardMarkup
+    markup_hash: str
+    updated_at: datetime.datetime
 
 
 class ChatUpdateQueue:
@@ -381,6 +399,79 @@ class PokerBotViewer:
             debounce_window=update_debounce,
             message_cache=self._message_cache,
         )
+        self._turn_payload_cache: LFUCache[Tuple[int, int], _TurnCacheEntry] = LFUCache(
+            maxsize=256, getsizeof=lambda entry: len(entry.payload_hash)
+        )
+        self._turn_cache_lock = asyncio.Lock()
+        self._inline_markup_cache: FIFOCache[Tuple[str, str], _InlineMarkupEntry] = FIFOCache(
+            maxsize=64, getsizeof=lambda entry: len(entry.markup_hash)
+        )
+        self._inline_markup_lock = asyncio.Lock()
+        self._request_tracker = RequestTracker()
+        self._round_context: Dict[int, str] = {}
+
+    @property
+    def request_tracker(self) -> RequestTracker:
+        return self._request_tracker
+
+    def set_round_context(self, chat_id: ChatId, round_id: Optional[str]) -> None:
+        normalized = int(chat_id)
+        if round_id:
+            self._round_context[normalized] = round_id
+        else:
+            self._round_context.pop(normalized, None)
+
+    async def reset_round_context(self, chat_id: ChatId, round_id: Optional[str]) -> None:
+        normalized = int(chat_id)
+        if normalized in self._round_context and round_id:
+            await self._request_tracker.reset(normalized, round_id)
+        self._round_context.pop(normalized, None)
+
+    def _current_round(self, chat_id: ChatId) -> Optional[str]:
+        return self._round_context.get(int(chat_id))
+
+    def _payload_hash(
+        self,
+        text: str,
+        reply_markup: Optional[InlineKeyboardMarkup | ReplyKeyboardMarkup],
+    ) -> str:
+        markup_hash = self._update_queue._serialize_markup(reply_markup) or ""
+        payload = f"{text}|{markup_hash}"
+        return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+    async def _try_consume_request(self, chat_id: ChatId, category: str) -> bool:
+        round_id = self._current_round(chat_id)
+        allowed = await self._request_tracker.try_consume(int(chat_id), round_id, category)
+        if not allowed:
+            logger.info(
+                "Skipping %s request due to exhausted budget",
+                category,
+                extra={"chat_id": chat_id, "round_id": round_id},
+            )
+        return allowed
+
+    async def _release_request(self, chat_id: ChatId, category: str) -> None:
+        round_id = self._current_round(chat_id)
+        await self._request_tracker.release(int(chat_id), round_id, category)
+
+    async def _remember_turn_cache(
+        self,
+        cache_key: Tuple[int, int],
+        message_id: Optional[MessageId],
+        payload_hash: str,
+    ) -> None:
+        entry = _TurnCacheEntry(
+            message_id=message_id,
+            payload_hash=payload_hash,
+            updated_at=datetime.datetime.now(datetime.timezone.utc),
+        )
+        async with self._turn_cache_lock:
+            self._turn_payload_cache[cache_key] = entry
+            logger.debug(
+                "Turn payload cache size %s",
+                self._turn_payload_cache.currsize,
+                extra={"cache_max": self._turn_payload_cache.maxsize},
+            )
 
     async def notify_admin(self, log_data: Dict[str, Any]) -> None:
         if not self._admin_chat_id:
@@ -1147,23 +1238,17 @@ class PokerBotViewer:
         message_id: Optional[MessageId] = None,
         recent_actions: Optional[List[str]] = None,
     ) -> Optional[MessageId]:
-        """ارسال یا ویرایش پیام نوبت بازیکن با نمایش اکشن‌های اخیر."""
+        """ارسال یا ویرایش پیام نوبت بازیکن با کنترل بودجه درخواست."""
 
-        # نمایش کارت‌های میز
-        if not game.cards_table:
-            cards_table = "🚫 کارتی روی میز نیست"
-        else:
-            cards_table = " ".join(game.cards_table)
-
-        # محاسبه CALL یا CHECK
+        cards_table = " ".join(game.cards_table) if game.cards_table else "🚫 کارتی روی میز نیست"
         call_amount = game.max_round_rate - player.round_rate
         call_check_action = self.define_check_call_action(game, player)
-        if call_check_action == PlayerAction.CALL:
-            call_check_text = f"{call_check_action.value} ({call_amount}$)"
-        else:
-            call_check_text = call_check_action.value
+        call_check_text = (
+            f"{call_check_action.value} ({call_amount}$)"
+            if call_check_action == PlayerAction.CALL
+            else call_check_action.value
+        )
 
-        # متن پیام با Markdown
         text = (
             f"🎯 **نوبت بازی {player.mention_markdown} (صندلی {player.seat_index+1})**\n\n"
             f"🃏 **کارت‌های روی میز:** {cards_table}\n"
@@ -1176,8 +1261,7 @@ class PokerBotViewer:
         if recent_actions:
             text += "\n\n🎬 **اکشن‌های اخیر:**\n" + "\n".join(recent_actions)
 
-        # کیبورد اینلاین
-        markup = self._get_turns_markup(call_check_text, call_check_action)
+        markup = await self._get_turns_markup(call_check_text, call_check_action)
 
         context = self._build_context(
             "send_turn_actions", chat_id=chat_id, message_id=message_id
@@ -1194,44 +1278,46 @@ class PokerBotViewer:
             )
             return None
 
+        payload_hash = self._payload_hash(normalized_text, markup)
+        cache_key = (int(chat_id), int(player.user_id))
+
+        async with self._turn_cache_lock:
+            cached_entry = self._turn_payload_cache.get(cache_key)
+        if cached_entry and cached_entry.payload_hash == payload_hash:
+            if message_id is None or cached_entry.message_id == message_id:
+                logger.debug(
+                    "Turn payload cache hit; skipping Telegram call",
+                    extra={
+                        "chat_id": chat_id,
+                        "player_id": player.user_id,
+                        "message_id": cached_entry.message_id,
+                    },
+                )
+                return cached_entry.message_id
+
         if message_id:
+            if not await self._try_consume_request(chat_id, "turn"):
+                return message_id
             edited_id = await self.edit_turn_actions(
                 chat_id, message_id, normalized_text, markup
             )
             if edited_id:
+                await self._remember_turn_cache(cache_key, edited_id, payload_hash)
                 return edited_id
-            # پیام اصلی دیگر قابل ویرایش نیست، پیام جدید ارسال می‌کنیم
+            await self._release_request(chat_id, "turn")
 
+        if not await self._try_consume_request(chat_id, "turn"):
+            return message_id
         try:
             message = await self._bot.send_message(
                 chat_id=chat_id,
                 text=normalized_text,
                 reply_markup=markup,
                 parse_mode=ParseMode.MARKDOWN,
-                disable_notification=False,  # player gets notification
+                disable_notification=False,
             )
-            if isinstance(message, Message):
-                new_message_id = message.message_id
-                await self.remember_text_payload(
-                    chat_id=chat_id,
-                    message_id=new_message_id,
-                    text=normalized_text,
-                    reply_markup=markup,
-                    parse_mode=ParseMode.MARKDOWN,
-                )
-                if message_id:
-                    try:
-                        await self.delete_message(chat_id, message_id)
-                    except Exception:
-                        logger.debug(
-                            "Failed to delete stale turn message",
-                            extra={
-                                "chat_id": chat_id,
-                                "message_id": message_id,
-                            },
-                        )
-                return new_message_id
         except Exception as e:
+            await self._release_request(chat_id, "turn")
             logger.error(
                 "Error sending turn actions",
                 extra={
@@ -1240,6 +1326,31 @@ class PokerBotViewer:
                     "request_params": {"player": player.user_id},
                 },
             )
+            return None
+
+        if isinstance(message, Message):
+            new_message_id = message.message_id
+            await self.remember_text_payload(
+                chat_id=chat_id,
+                message_id=new_message_id,
+                text=normalized_text,
+                reply_markup=markup,
+                parse_mode=ParseMode.MARKDOWN,
+            )
+            await self._remember_turn_cache(cache_key, new_message_id, payload_hash)
+            if message_id and message_id != new_message_id:
+                try:
+                    await self.delete_message(chat_id, message_id)
+                except Exception:
+                    logger.debug(
+                        "Failed to delete stale turn message",
+                        extra={
+                            "chat_id": chat_id,
+                            "message_id": message_id,
+                        },
+                    )
+            return new_message_id
+
         return None
 
     async def edit_turn_actions(
@@ -1282,6 +1393,8 @@ class PokerBotViewer:
     ) -> bool:
         """Update a message's inline keyboard while handling common failures."""
         if not message_id:
+            return False
+        if not await self._try_consume_request(chat_id, "inline"):
             return False
         try:
             result = await self._bot.edit_message_reply_markup(
@@ -1331,18 +1444,58 @@ class PokerBotViewer:
             )
         return False
 
-    @staticmethod
-    def _get_turns_markup(check_call_text: str, check_call_action: PlayerAction) -> InlineKeyboardMarkup:
-        keyboard = [[
-            InlineKeyboardButton(text=PlayerAction.FOLD.value, callback_data=PlayerAction.FOLD.value),
-            InlineKeyboardButton(text=PlayerAction.ALL_IN.value, callback_data=PlayerAction.ALL_IN.value),
-            InlineKeyboardButton(text=check_call_text, callback_data=check_call_action.value),
-        ], [
-            InlineKeyboardButton(text=str(PlayerAction.SMALL.value), callback_data=str(PlayerAction.SMALL.value)),
-            InlineKeyboardButton(text=str(PlayerAction.NORMAL.value), callback_data=str(PlayerAction.NORMAL.value)),
-            InlineKeyboardButton(text=str(PlayerAction.BIG.value), callback_data=str(PlayerAction.BIG.value)),
-        ]]
-        return InlineKeyboardMarkup(inline_keyboard=keyboard)
+    async def _get_turns_markup(
+        self, check_call_text: str, check_call_action: PlayerAction
+    ) -> InlineKeyboardMarkup:
+        key = (check_call_text, check_call_action.value)
+        async with self._inline_markup_lock:
+            cached = self._inline_markup_cache.get(key)
+            if cached:
+                return cached.markup
+
+            keyboard = [
+                [
+                    InlineKeyboardButton(
+                        text=PlayerAction.FOLD.value,
+                        callback_data=PlayerAction.FOLD.value,
+                    ),
+                    InlineKeyboardButton(
+                        text=PlayerAction.ALL_IN.value,
+                        callback_data=PlayerAction.ALL_IN.value,
+                    ),
+                    InlineKeyboardButton(
+                        text=check_call_text,
+                        callback_data=check_call_action.value,
+                    ),
+                ],
+                [
+                    InlineKeyboardButton(
+                        text=str(PlayerAction.SMALL.value),
+                        callback_data=str(PlayerAction.SMALL.value),
+                    ),
+                    InlineKeyboardButton(
+                        text=str(PlayerAction.NORMAL.value),
+                        callback_data=str(PlayerAction.NORMAL.value),
+                    ),
+                    InlineKeyboardButton(
+                        text=str(PlayerAction.BIG.value),
+                        callback_data=str(PlayerAction.BIG.value),
+                    ),
+                ],
+            ]
+            markup = InlineKeyboardMarkup(inline_keyboard=keyboard)
+            markup_hash = self._update_queue._serialize_markup(markup) or ""
+            self._inline_markup_cache[key] = _InlineMarkupEntry(
+                markup=markup,
+                markup_hash=markup_hash,
+                updated_at=datetime.datetime.now(datetime.timezone.utc),
+            )
+            logger.debug(
+                "Inline keyboard cache size %s",
+                self._inline_markup_cache.currsize,
+                extra={"cache_max": self._inline_markup_cache.maxsize},
+            )
+            return markup
 
 
     async def remove_markup(self, chat_id: ChatId, message_id: MessageId) -> None:

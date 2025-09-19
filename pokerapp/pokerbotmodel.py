@@ -10,6 +10,8 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
+from cachetools import LRUCache
+
 import redis.asyncio as aioredis
 from redis.exceptions import NoScriptError
 from telegram import (
@@ -108,6 +110,14 @@ class PrivateMatchPlayerInfo:
     username: Optional[str] = None
 
 
+@dataclass(slots=True)
+class _CountdownCacheEntry:
+    message_id: Optional[MessageId]
+    countdown: Optional[int]
+    text: str
+    updated_at: datetime.datetime
+
+
 class PokerBotModel:
     ACTIVE_GAME_STATES = {
         GameState.ROUND_PRE_FLOP,
@@ -157,6 +167,11 @@ class PokerBotModel:
         )
         self._private_chat_ids: Dict[int, int] = {}
         self._chat_locks: Dict[int, ReentrantAsyncLock] = {}
+        self._request_tracker = self._view.request_tracker
+        self._countdown_cache: LRUCache[int, _CountdownCacheEntry] = LRUCache(
+            maxsize=64, getsizeof=lambda entry: 1
+        )
+        self._countdown_cache_lock = asyncio.Lock()
 
     @property
     def _min_players(self):
@@ -762,6 +777,50 @@ class PokerBotModel:
                 game.ready_message_main_text = "برای نشستن سر میز دکمه را بزن"
                 await self._table_manager.save_game(chat_id, game)
 
+    async def _countdown_cache_should_skip(
+        self,
+        chat_id: ChatId,
+        countdown: Optional[int],
+        text: str,
+        message_id: Optional[MessageId],
+    ) -> bool:
+        key = self._safe_int(chat_id)
+        async with self._countdown_cache_lock:
+            entry = self._countdown_cache.get(key)
+        if not entry:
+            return False
+        if entry.text != text or entry.countdown != countdown:
+            return False
+        if message_id is not None and entry.message_id != message_id:
+            return False
+        logger.debug(
+            "Countdown cache hit; skipping edit",
+            extra={"chat_id": chat_id, "message_id": message_id},
+        )
+        return True
+
+    async def _update_countdown_cache(
+        self,
+        chat_id: ChatId,
+        countdown: Optional[int],
+        text: str,
+        message_id: Optional[MessageId],
+    ) -> None:
+        key = self._safe_int(chat_id)
+        entry = _CountdownCacheEntry(
+            message_id=message_id,
+            countdown=countdown,
+            text=text,
+            updated_at=datetime.datetime.now(datetime.timezone.utc),
+        )
+        async with self._countdown_cache_lock:
+            self._countdown_cache[key] = entry
+            logger.debug(
+                "Countdown cache size %s",
+                self._countdown_cache.currsize,
+                extra={"chat_id": chat_id, "cache_max": self._countdown_cache.maxsize},
+            )
+
     def _build_ready_message(
         self, game: Game, countdown: Optional[int]
     ) -> Tuple[str, InlineKeyboardMarkup]:
@@ -850,7 +909,20 @@ class PokerBotModel:
                 ):
                     should_broadcast = False
 
+            if should_broadcast:
+                skip_due_to_cache = await self._countdown_cache_should_skip(
+                    chat_id, next_remaining, text, message_id
+                )
+                if skip_due_to_cache:
+                    should_broadcast = False
+
             broadcast_performed = False
+
+            if should_broadcast:
+                if not await self._request_tracker.try_consume(
+                    self._safe_int(chat_id), game.id, "countdown"
+                ):
+                    should_broadcast = False
 
             if should_broadcast:
                 new_message_id = await self._safe_edit_message_text(
@@ -863,13 +935,21 @@ class PokerBotModel:
                     if message_id and message_id in game.message_ids_to_delete:
                         game.message_ids_to_delete.remove(message_id)
                     game.ready_message_main_id = None
-                    replacement_id = await self._view.send_message_return_id(
-                        chat_id, text, reply_markup=keyboard
-                    )
+                    if await self._request_tracker.try_consume(
+                        self._safe_int(chat_id), game.id, "countdown"
+                    ):
+                        replacement_id = await self._view.send_message_return_id(
+                            chat_id, text, reply_markup=keyboard
+                        )
+                    else:
+                        replacement_id = None
                     if replacement_id:
                         game.ready_message_main_id = replacement_id
                         game.ready_message_main_text = text
                         await self._table_manager.save_game(chat_id, game)
+                        await self._update_countdown_cache(
+                            chat_id, next_remaining, text, replacement_id
+                        )
                         broadcast_performed = True
                 elif new_message_id:
                     if (
@@ -882,6 +962,9 @@ class PokerBotModel:
                         game.ready_message_main_id = new_message_id
                         await self._table_manager.save_game(chat_id, game)
                     game.ready_message_main_text = text
+                    await self._update_countdown_cache(
+                        chat_id, next_remaining, text, new_message_id
+                    )
                     broadcast_performed = True
 
             if broadcast_performed:
@@ -1234,6 +1317,7 @@ class PokerBotModel:
             return
 
         if game.state == GameState.FINISHED:
+            await self._view.reset_round_context(chat_id, game.id)
             game.reset()
             # بازیکنان قبلی را برای دور جدید نگه دار
             old_players_ids = context.chat_data.get(KEY_OLD_PLAYERS, [])
@@ -1539,6 +1623,7 @@ class PokerBotModel:
 
         context.chat_data.pop(KEY_STOP_REQUEST, None)
 
+        await self._view.reset_round_context(chat_id, game.id)
         game.reset()
         await self._table_manager.save_game(chat_id, game)
         await self._view.send_message(chat_id, "🛑 بازی متوقف شد.")
@@ -1548,6 +1633,7 @@ class PokerBotModel:
     ) -> None:
         """مراحل شروع یک دست جدید بازی را انجام می‌دهد."""
         async with self._chat_guard(chat_id):
+            self._view.set_round_context(chat_id, game.id)
             self._cancel_auto_start(context)
             if game.ready_message_main_id:
                 deleted_ready_message = False
@@ -1620,6 +1706,7 @@ class PokerBotModel:
                 await self._view.send_message(
                     chat_id, "کارت‌های کافی در دسته وجود ندارد! بازی ریست می‌شود."
                 )
+                await self._view.reset_round_context(chat_id, game.id)
                 game.reset()
                 return
 
@@ -2174,29 +2261,44 @@ class PokerBotModel:
             stage = self._view._derive_stage_from_table(game.cards_table)
 
             if not game.board_message_id:
-                msg_id = await self._view.send_message_return_id(
-                    chat_id, street_name, reply_markup=None
-                )
+                if await self._request_tracker.try_consume(
+                    self._safe_int(chat_id), game.id, "stage"
+                ):
+                    msg_id = await self._view.send_message_return_id(
+                        chat_id, street_name, reply_markup=None
+                    )
+                else:
+                    msg_id = None
                 if msg_id:
                     game.board_message_id = msg_id
                     if msg_id not in game.message_ids_to_delete:
                         game.message_ids_to_delete.append(msg_id)
             else:
-                new_msg_id = await self._safe_edit_message_text(
-                    chat_id,
-                    game.board_message_id,
-                    street_name,
-                    reply_markup=None,
-                    parse_mode=ParseMode.MARKDOWN,
-                )
+                if await self._request_tracker.try_consume(
+                    self._safe_int(chat_id), game.id, "stage"
+                ):
+                    new_msg_id = await self._safe_edit_message_text(
+                        chat_id,
+                        game.board_message_id,
+                        street_name,
+                        reply_markup=None,
+                        parse_mode=ParseMode.MARKDOWN,
+                    )
+                else:
+                    new_msg_id = game.board_message_id
                 if new_msg_id is None:
                     old_id = game.board_message_id
                     if old_id and old_id in game.message_ids_to_delete:
                         game.message_ids_to_delete.remove(old_id)
                     game.board_message_id = None
-                    replacement_id = await self._view.send_message_return_id(
-                        chat_id, street_name, reply_markup=None
-                    )
+                    if await self._request_tracker.try_consume(
+                        self._safe_int(chat_id), game.id, "stage"
+                    ):
+                        replacement_id = await self._view.send_message_return_id(
+                            chat_id, street_name, reply_markup=None
+                        )
+                    else:
+                        replacement_id = None
                     if replacement_id:
                         game.board_message_id = replacement_id
                         if replacement_id not in game.message_ids_to_delete:
@@ -2493,6 +2595,7 @@ class PokerBotModel:
                 remaining_players.append(p)
         context.chat_data[KEY_OLD_PLAYERS] = [p.user_id for p in remaining_players]
 
+        await self._view.reset_round_context(chat_id, hand_id)
         game.reset()
         await self._table_manager.save_game(chat_id, game)
 
