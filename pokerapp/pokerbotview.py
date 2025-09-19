@@ -404,7 +404,7 @@ class PokerBotViewer:
         )
         self._turn_cache_lock = asyncio.Lock()
         self._inline_markup_cache: FIFOCache[Tuple[str, str], _InlineMarkupEntry] = FIFOCache(
-            maxsize=64, getsizeof=lambda entry: len(entry.markup_hash)
+            maxsize=64, getsizeof=lambda entry: 1
         )
         self._inline_markup_lock = asyncio.Lock()
         self._request_tracker = RequestTracker()
