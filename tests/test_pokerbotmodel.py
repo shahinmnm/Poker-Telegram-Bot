@@ -2,8 +2,6 @@
 
 import asyncio
 import datetime
-import sys
-import types
 import unittest
 from types import SimpleNamespace
 from typing import List, Tuple, Optional
@@ -12,31 +10,6 @@ from unittest.mock import AsyncMock, MagicMock
 import fakeredis
 import fakeredis.aioredis
 import pytest
-
-
-def _install_aiogram_stub() -> None:
-    if "aiogram" in sys.modules:
-        return
-    aiogram_module = types.ModuleType("aiogram")
-    dispatcher_module = types.ModuleType("aiogram.dispatcher")
-    middlewares_module = types.ModuleType("aiogram.dispatcher.middlewares")
-    base_module = types.ModuleType("aiogram.dispatcher.middlewares.base")
-
-    class _BaseMiddleware:  # minimal stub for tests
-        pass
-
-    base_module.BaseMiddleware = _BaseMiddleware
-    middlewares_module.base = base_module
-    dispatcher_module.middlewares = middlewares_module
-    aiogram_module.dispatcher = dispatcher_module
-
-    sys.modules["aiogram"] = aiogram_module
-    sys.modules["aiogram.dispatcher"] = dispatcher_module
-    sys.modules["aiogram.dispatcher.middlewares"] = middlewares_module
-    sys.modules["aiogram.dispatcher.middlewares.base"] = base_module
-
-
-_install_aiogram_stub()
 
 from pokerapp.cards import Cards, Card
 from pokerapp.config import Config
@@ -54,7 +27,6 @@ from pokerapp.pokerbotmodel import (
 )
 from telegram.error import BadRequest
 from telegram import InlineKeyboardMarkup
-from telegram.constants import ParseMode
 
 
 HANDS_FILE = "./tests/hands.txt"
@@ -226,7 +198,6 @@ def _build_model_with_game():
     view = MagicMock()
     view.send_cards = AsyncMock(return_value=None)
     view.send_message = AsyncMock()
-    view.remember_text_payload = AsyncMock()
     bot = MagicMock()
     cfg = MagicMock(DEBUG=False)
     kv = MagicMock()
@@ -939,14 +910,7 @@ def test_send_turn_message_replaces_previous_message():
     game.turn_message_id = 111
     game.last_actions = ["action"]
 
-    view.send_turn_actions = AsyncMock(
-        return_value=SimpleNamespace(
-            message_id=222,
-            text="payload",
-            reply_markup=None,
-            parse_mode=ParseMode.MARKDOWN,
-        )
-    )
+    view.send_turn_actions = AsyncMock(return_value=222)
     view.delete_message = AsyncMock()
 
     asyncio.run(model._send_turn_message(game, player, chat_id))
@@ -955,7 +919,6 @@ def test_send_turn_message_replaces_previous_message():
     call = view.send_turn_actions.await_args
     assert call.args == (chat_id, game, player, 450)
     assert call.kwargs["recent_actions"] == game.last_actions
-    assert call.kwargs["message_id"] == 111
 
     view.delete_message.assert_awaited_once_with(chat_id, 111)
     assert game.turn_message_id == 222
@@ -976,39 +939,3 @@ def test_send_turn_message_keeps_previous_when_new_message_missing():
     view.send_turn_actions.assert_awaited_once()
     view.delete_message.assert_not_awaited()
     assert game.turn_message_id == 333
-
-
-def test_send_turn_message_edits_in_place():
-    model, game, player, view = _build_model_with_game()
-    chat_id = -603
-    player.wallet.value.return_value = 500
-    game.turn_message_id = 444
-    game.last_actions = ["raise"]
-
-    markup = InlineKeyboardMarkup([])
-    view.delete_message = AsyncMock()
-    view.edit_turn_actions = AsyncMock(return_value=444)
-
-    async def fake_send_turn_actions(*args, **kwargs):
-        assert kwargs["message_id"] == 444
-        await view.edit_turn_actions(chat_id, 444, "new text", markup)
-        return SimpleNamespace(
-            message_id=444,
-            text="new text",
-            reply_markup=markup,
-            parse_mode=ParseMode.MARKDOWN,
-        )
-
-    view.send_turn_actions = AsyncMock(side_effect=fake_send_turn_actions)
-
-    asyncio.run(model._send_turn_message(game, player, chat_id))
-
-    view.edit_turn_actions.assert_awaited_once()
-    view.delete_message.assert_not_awaited()
-    view.remember_text_payload.assert_awaited_once_with(
-        chat_id=chat_id,
-        message_id=444,
-        text="new text",
-        reply_markup=markup,
-        parse_mode=ParseMode.MARKDOWN,
-    )
