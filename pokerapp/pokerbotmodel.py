@@ -62,6 +62,13 @@ DICE_DELAY_SEC = 5
 BONUSES = (5, 20, 40, 80, 160, 320)
 DICES = "⚀⚁⚂⚃⚄⚅"
 
+AUTO_START_MAX_UPDATES_PER_MINUTE = 20
+AUTO_START_MIN_UPDATE_INTERVAL = datetime.timedelta(
+    seconds=60 / AUTO_START_MAX_UPDATES_PER_MINUTE
+)
+KEY_START_COUNTDOWN_LAST_TEXT = "start_countdown_last_text"
+KEY_START_COUNTDOWN_LAST_TIMESTAMP = "start_countdown_last_timestamp"
+
 # legacy keys kept for backward compatibility but unused
 KEY_OLD_PLAYERS = "old_players"
 KEY_CHAT_DATA_GAME = "game"
@@ -317,12 +324,16 @@ class PokerBotModel:
         if remaining is None:
             job.schedule_removal()
             context.chat_data.pop("start_countdown_job", None)
+            context.chat_data.pop(KEY_START_COUNTDOWN_LAST_TEXT, None)
+            context.chat_data.pop(KEY_START_COUNTDOWN_LAST_TIMESTAMP, None)
             return
 
         if remaining <= 0:
             job.schedule_removal()
             context.chat_data.pop("start_countdown_job", None)
             context.chat_data.pop("start_countdown", None)
+            context.chat_data.pop(KEY_START_COUNTDOWN_LAST_TEXT, None)
+            context.chat_data.pop(KEY_START_COUNTDOWN_LAST_TIMESTAMP, None)
             await self._start_game(context, game, chat_id)
             await self._table_manager.save_game(chat_id, game)
             return
@@ -330,28 +341,63 @@ class PokerBotModel:
         text, keyboard = self._build_ready_message(game, next_remaining)
 
         message_id = game.ready_message_main_id
-        new_message_id = await self._safe_edit_message_text(
-            chat_id,
-            message_id,
-            text,
-            reply_markup=keyboard,
-        )
-        if new_message_id is None:
-            if message_id and message_id in game.message_ids_to_delete:
-                game.message_ids_to_delete.remove(message_id)
-            game.ready_message_main_id = None
-            replacement_id = await self._view.send_message_return_id(
-                chat_id, text, reply_markup=keyboard
+        last_text = context.chat_data.get(KEY_START_COUNTDOWN_LAST_TEXT)
+        last_timestamp = context.chat_data.get(KEY_START_COUNTDOWN_LAST_TIMESTAMP)
+        now = datetime.datetime.now(datetime.timezone.utc)
+
+        force_broadcast = message_id is None or next_remaining <= 0
+        should_broadcast = True
+
+        if message_id and text == game.ready_message_main_text:
+            should_broadcast = False
+        elif not force_broadcast:
+            if last_text == text:
+                should_broadcast = False
+            elif (
+                next_remaining > 0
+                and last_timestamp
+                and now - last_timestamp < AUTO_START_MIN_UPDATE_INTERVAL
+            ):
+                should_broadcast = False
+
+        broadcast_performed = False
+
+        if should_broadcast:
+            new_message_id = await self._safe_edit_message_text(
+                chat_id,
+                message_id,
+                text,
+                reply_markup=keyboard,
             )
-            if replacement_id:
-                game.ready_message_main_id = replacement_id
+            if new_message_id is None:
+                if message_id and message_id in game.message_ids_to_delete:
+                    game.message_ids_to_delete.remove(message_id)
+                game.ready_message_main_id = None
+                replacement_id = await self._view.send_message_return_id(
+                    chat_id, text, reply_markup=keyboard
+                )
+                if replacement_id:
+                    game.ready_message_main_id = replacement_id
+                    game.ready_message_main_text = text
+                    await self._table_manager.save_game(chat_id, game)
+                    broadcast_performed = True
+            elif new_message_id:
+                if new_message_id != game.ready_message_main_id:
+                    game.ready_message_main_id = new_message_id
+                    await self._table_manager.save_game(chat_id, game)
                 game.ready_message_main_text = text
-                await self._table_manager.save_game(chat_id, game)
-        elif new_message_id:
-            if new_message_id != game.ready_message_main_id:
-                game.ready_message_main_id = new_message_id
-                await self._table_manager.save_game(chat_id, game)
-            game.ready_message_main_text = text
+                broadcast_performed = True
+
+        if broadcast_performed:
+            context.chat_data[KEY_START_COUNTDOWN_LAST_TEXT] = text
+            context.chat_data[KEY_START_COUNTDOWN_LAST_TIMESTAMP] = now
+        else:
+            context.chat_data.setdefault(
+                KEY_START_COUNTDOWN_LAST_TEXT, game.ready_message_main_text
+            )
+            context.chat_data.setdefault(
+                KEY_START_COUNTDOWN_LAST_TIMESTAMP, now
+            )
 
         context.chat_data["start_countdown"] = next_remaining
 
@@ -364,6 +410,8 @@ class PokerBotModel:
             return
 
         context.chat_data["start_countdown"] = 60
+        context.chat_data[KEY_START_COUNTDOWN_LAST_TEXT] = game.ready_message_main_text
+        context.chat_data.pop(KEY_START_COUNTDOWN_LAST_TIMESTAMP, None)
         job = context.job_queue.run_repeating(
             self._auto_start_tick, interval=1, chat_id=chat_id
         )
@@ -374,6 +422,8 @@ class PokerBotModel:
         if job:
             job.schedule_removal()
         context.chat_data.pop("start_countdown", None)
+        context.chat_data.pop(KEY_START_COUNTDOWN_LAST_TEXT, None)
+        context.chat_data.pop(KEY_START_COUNTDOWN_LAST_TIMESTAMP, None)
 
     async def send_cards(
         self,
