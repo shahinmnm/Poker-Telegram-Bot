@@ -205,7 +205,9 @@ class PokerBotModel:
             return
 
         report = await self._stats.build_player_report(self._safe_int(user.id))
-        if report is None:
+        if report is None or (
+            report.stats.total_games <= 0 and not report.recent_games
+        ):
             await self._view.send_message(
                 chat.id,
                 "ℹ️ هنوز داده‌ای برای نمایش وجود ندارد. پس از شرکت در چند دست بازی دوباره تلاش کنید.",

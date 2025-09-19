@@ -1,6 +1,6 @@
 import logging
-import logging
 import os
+from pathlib import Path
 from typing import List, Optional, Tuple
 from urllib.parse import urljoin
 
@@ -35,10 +35,28 @@ class Config:
             "POKERBOT_REDIS_DB",
             default="0"
         ))
-        self.DATABASE_URL: str = os.getenv(
-            "POKERBOT_DATABASE_URL",
-            default="",
-        ).strip()
+        database_url_env = os.getenv("POKERBOT_DATABASE_URL", "").strip()
+        if database_url_env:
+            self.DATABASE_URL = database_url_env
+        else:
+            sqlite_path_env = os.getenv("POKERBOT_SQLITE_PATH", "").strip()
+            data_dir_env = os.getenv("POKERBOT_DATA_DIR", "").strip()
+            if sqlite_path_env:
+                sqlite_path = Path(sqlite_path_env).expanduser()
+            elif data_dir_env:
+                sqlite_path = Path(data_dir_env).expanduser() / "pokerbot_stats.sqlite3"
+            else:
+                sqlite_path = Path.cwd() / "pokerbot_stats.sqlite3"
+            try:
+                sqlite_path.parent.mkdir(parents=True, exist_ok=True)
+            except OSError as exc:
+                logger.warning(
+                    "Unable to create directory for SQLite database '%s': %s",
+                    sqlite_path.parent,
+                    exc,
+                )
+            resolved_sqlite_path = sqlite_path.resolve()
+            self.DATABASE_URL = f"sqlite+aiosqlite:///{resolved_sqlite_path.as_posix()}"
         database_echo_raw = os.getenv("POKERBOT_DATABASE_ECHO", "0").strip().lower()
         self.DATABASE_ECHO: bool = database_echo_raw in {"1", "true", "yes", "on"}
         self.TOKEN: str = os.getenv(

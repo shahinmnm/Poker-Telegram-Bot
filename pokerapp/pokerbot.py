@@ -70,10 +70,15 @@ class PokerBot:
 
         table_manager = TableManager(kv_async)
         if cfg.DATABASE_URL:
-            stats_service = StatsService(
-                cfg.DATABASE_URL,
-                echo=getattr(cfg, "DATABASE_ECHO", False),
-            )
+            try:
+                stats_service = StatsService(
+                    cfg.DATABASE_URL,
+                    echo=getattr(cfg, "DATABASE_ECHO", False),
+                )
+                stats_service.ensure_ready_blocking()
+            except Exception:
+                logger.exception("Failed to initialize statistics service; using null backend.")
+                stats_service = NullStatsService()
         else:
             stats_service = NullStatsService()
         self._stats_service = stats_service
