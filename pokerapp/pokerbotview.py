@@ -598,7 +598,7 @@ class PokerBotViewer:
             maxsize=64, getsizeof=lambda entry: 1
         )
         self._inline_markup_lock = asyncio.Lock()
-        self._request_tracker = RequestTracker()
+        self._request_tracker = RequestTracker(limit=100)
         self._round_context: Dict[int, str] = {}
 
     @property
