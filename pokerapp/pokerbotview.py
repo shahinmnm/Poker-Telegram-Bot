@@ -33,6 +33,8 @@ from pokerapp.entities import (
     PlayerState,
 )
 from pokerapp.telegram_validation import TelegramPayloadValidator
+from pokerapp.aiogram_middlewares import MessageDiffMiddleware, MessageEditEvent
+from pokerapp.utils.cache import MessagePayload, MessageStateCache
 
 
 logger = logging.getLogger(__name__)
@@ -217,6 +219,8 @@ class ChatUpdateQueue:
         timer_task: Optional[asyncio.Task] = None
         markup_hash: Optional[str] = None
         disable_web_page_preview: bool = False
+        force: bool = False
+        skip_cache_check: bool = False
 
     @dataclass
     class _ChatState:
@@ -233,14 +237,16 @@ class ChatUpdateQueue:
         rate_limiter: RateLimitedSender,
         *,
         debounce_window: float = 0.3,
+        message_cache: Optional[MessageStateCache] = None,
     ) -> None:
         self._bot = bot
         self._rate_limiter = rate_limiter
         self._debounce = debounce_window
         self._chat_states: Dict[ChatId, ChatUpdateQueue._ChatState] = {}
-        self._last_payloads: Dict[
-            Tuple[ChatId, MessageId], ChatUpdateQueue._LastPayload
-        ] = {}
+        self._message_cache = message_cache or MessageStateCache()
+        self._diff_middleware = MessageDiffMiddleware(
+            self._message_cache, logger_=logger.getChild("diff_middleware")
+        )
 
     def _serialize_markup(
         self, markup: Optional[InlineKeyboardMarkup | ReplyKeyboardMarkup]
@@ -286,12 +292,6 @@ class ChatUpdateQueue:
                 result = await self._execute_pending(pending)
                 state.pending.pop(message_id, None)
                 state.order.popleft()
-                if result is not None:
-                    self._last_payloads[(chat_id, result)] = ChatUpdateQueue._LastPayload(
-                        text=pending.text,
-                        markup_hash=pending.markup_hash,
-                        parse_mode=pending.parse_mode,
-                    )
                 if pending.timer_task and not pending.timer_task.done():
                     pending.timer_task.cancel()
                 if not pending.future.done():
@@ -306,50 +306,69 @@ class ChatUpdateQueue:
     async def _execute_pending(
         self, pending: "ChatUpdateQueue._PendingUpdate"
     ) -> Optional[MessageId]:
-        try:
-            response = await self._rate_limiter.send(
-                lambda: self._bot.edit_message_text(
-                    chat_id=pending.chat_id,
-                    message_id=pending.message_id,
-                    text=pending.text,
-                    reply_markup=pending.reply_markup,
-                    parse_mode=pending.parse_mode,
-                    disable_web_page_preview=pending.disable_web_page_preview,
-                ),
-                chat_id=pending.chat_id,
-            )
-            if isinstance(response, Message):
-                return response.message_id
-            if response is True:
-                return pending.message_id
-            if isinstance(response, int):
-                return response
-        except BadRequest as e:
-            err = str(e).lower()
-            if "message is not modified" in err:
-                return pending.message_id
-            logger.debug(
-                "ChatUpdateQueue edit rejected",
-                extra={
-                    "chat_id": pending.chat_id,
-                    "message_id": pending.message_id,
-                    "context": pending.context,
-                    "error_type": type(e).__name__,
-                },
-            )
-        except Exception as e:
-            logger.error(
-                "ChatUpdateQueue failed to edit message",
-                extra={
-                    "error_type": type(e).__name__,
-                    "chat_id": pending.chat_id,
-                    "message_id": pending.message_id,
-                    "context": pending.context,
-                },
-            )
-        return None
+        event = MessageEditEvent(
+            chat_id=pending.chat_id,
+            message_id=pending.message_id,
+            text=pending.text,
+            reply_markup=pending.reply_markup,
+            markup_hash=pending.markup_hash,
+            parse_mode=pending.parse_mode,
+            context=pending.context,
+            disable_web_page_preview=pending.disable_web_page_preview,
+        )
 
-    def record_payload(
+        async def _send(event_: MessageEditEvent) -> Optional[MessageId]:
+            try:
+                response = await self._rate_limiter.send(
+                    lambda: self._bot.edit_message_text(
+                        chat_id=event_.chat_id,
+                        message_id=event_.message_id,
+                        text=event_.text,
+                        reply_markup=event_.reply_markup,
+                        parse_mode=event_.parse_mode,
+                        disable_web_page_preview=event_.disable_web_page_preview,
+                    ),
+                    chat_id=event_.chat_id,
+                )
+                if isinstance(response, Message):
+                    return response.message_id
+                if response is True:
+                    return event_.message_id
+                if isinstance(response, int):
+                    return response
+            except BadRequest as e:
+                err = str(e).lower()
+                if "message is not modified" in err:
+                    return event_.message_id
+                logger.debug(
+                    "ChatUpdateQueue edit rejected",
+                    extra={
+                        "chat_id": event_.chat_id,
+                        "message_id": event_.message_id,
+                        "context": event_.context,
+                        "error_type": type(e).__name__,
+                    },
+                )
+            except Exception as e:
+                logger.error(
+                    "ChatUpdateQueue failed to edit message",
+                    extra={
+                        "error_type": type(e).__name__,
+                        "chat_id": event_.chat_id,
+                        "message_id": event_.message_id,
+                        "context": event_.context,
+                    },
+                )
+            return None
+
+        return await self._diff_middleware.run(
+            _send,
+            event,
+            force=pending.force,
+            skip_cache_check=pending.skip_cache_check,
+        )
+
+    async def record_payload(
         self,
         chat_id: ChatId,
         message_id: MessageId,
@@ -359,11 +378,10 @@ class ChatUpdateQueue:
         parse_mode: Optional[str],
     ) -> None:
         markup_hash = self._serialize_markup(reply_markup)
-        self._last_payloads[(chat_id, message_id)] = ChatUpdateQueue._LastPayload(
-            text=text,
-            markup_hash=markup_hash,
-            parse_mode=parse_mode,
+        payload = MessagePayload(
+            text=text, markup_hash=markup_hash, parse_mode=parse_mode
         )
+        await self._message_cache.update(chat_id, message_id, payload)
 
     async def enqueue_text_edit(
         self,
@@ -378,15 +396,20 @@ class ChatUpdateQueue:
         disable_web_page_preview: bool = False,
     ) -> Optional[MessageId]:
         markup_hash = self._serialize_markup(reply_markup)
-        last_payload = self._last_payloads.get((chat_id, message_id))
-        if (
-            last_payload
-            and not force
-            and last_payload.text == text
-            and last_payload.markup_hash == markup_hash
-            and last_payload.parse_mode == parse_mode
-        ):
-            return message_id
+        payload = MessagePayload(text=text, markup_hash=markup_hash, parse_mode=parse_mode)
+        skip_cache_check = False
+        if not force:
+            if await self._message_cache.matches(chat_id, message_id, payload):
+                logger.debug(
+                    "Skipping queued edit due to cached payload",
+                    extra={
+                        "chat_id": chat_id,
+                        "message_id": message_id,
+                        "context": context,
+                    },
+                )
+                return message_id
+            skip_cache_check = True
 
         state = self._ensure_state(chat_id)
         pending = state.pending.get(message_id)
@@ -400,6 +423,8 @@ class ChatUpdateQueue:
                 context=context,
                 markup_hash=markup_hash,
                 disable_web_page_preview=disable_web_page_preview,
+                force=force,
+                skip_cache_check=skip_cache_check,
             )
             state.pending[message_id] = pending
             state.order.append(message_id)
@@ -411,6 +436,8 @@ class ChatUpdateQueue:
             pending.context = context
             pending.markup_hash = markup_hash
             pending.disable_web_page_preview = disable_web_page_preview
+            pending.force = force
+            pending.skip_cache_check = skip_cache_check
             pending.ready.clear()
         if pending.timer_task and not pending.timer_task.done():
             pending.timer_task.cancel()
@@ -487,10 +514,14 @@ class PokerBotViewer:
             max_per_minute=rate_limit_per_minute,
             max_per_second=rate_limit_per_second,
         )
+        self._message_cache = MessageStateCache(
+            logger_=logger.getChild("message_cache")
+        )
         self._update_queue = ChatUpdateQueue(
             bot,
             self._rate_limiter,
             debounce_window=update_debounce,
+            message_cache=self._message_cache,
         )
 
     async def notify_admin(self, log_data: Dict[str, Any]) -> None:
@@ -557,6 +588,13 @@ class PokerBotViewer:
                 chat_id=chat_id,
             )
             if isinstance(message, Message):
+                await self.remember_text_payload(
+                    chat_id=chat_id,
+                    message_id=message.message_id,
+                    text=normalized_text,
+                    reply_markup=reply_markup,
+                    parse_mode=ParseMode.MARKDOWN,
+                )
                 return message.message_id
         except Exception as e:
             logger.error(
@@ -602,6 +640,13 @@ class PokerBotViewer:
                 chat_id=chat_id,
             )
             if isinstance(message, Message):
+                await self.remember_text_payload(
+                    chat_id=chat_id,
+                    message_id=message.message_id,
+                    text=normalized_text,
+                    reply_markup=reply_markup,
+                    parse_mode=parse_mode,
+                )
                 return message.message_id
         except Exception as e:
             logger.error(
@@ -637,7 +682,7 @@ class PokerBotViewer:
             disable_web_page_preview=disable_web_page_preview,
         )
 
-    def remember_text_payload(
+    async def remember_text_payload(
         self,
         *,
         chat_id: ChatId,
@@ -648,7 +693,7 @@ class PokerBotViewer:
     ) -> None:
         if not message_id:
             return
-        self._update_queue.record_payload(
+        await self._update_queue.record_payload(
             chat_id,
             message_id,
             text=text,
@@ -783,6 +828,7 @@ class PokerBotViewer:
                 ),
                 chat_id=chat_id,
             )
+            await self._message_cache.forget(chat_id, message_id)
         except (BadRequest, Forbidden) as e:
             error_message = getattr(e, "message", None) or str(e) or ""
             normalized_message = error_message.lower()
@@ -801,6 +847,7 @@ class PokerBotViewer:
                         "error_message": error_message,
                     },
                 )
+                await self._message_cache.forget(chat_id, message_id)
                 return
             logger.warning(
                 "Failed to delete message",
@@ -875,10 +922,9 @@ class PokerBotViewer:
             )
             return None
         try:
-            im_cards = self._desk_generator.generate_desk(cards)
-            bio = BytesIO()
+            desk_bytes = self._desk_generator.render_cached_png(cards)
+            bio = BytesIO(desk_bytes)
             bio.name = "desk.png"
-            im_cards.save(bio, "PNG")
             bio.seek(0)
             message = await self._rate_limiter.send(
                 lambda: self._bot.send_photo(
@@ -918,10 +964,9 @@ class PokerBotViewer:
         sent instead of editing, otherwise ``None``.
         """
         try:
-            im_cards = self._desk_generator.generate_desk(cards)
-            bio = BytesIO()
+            desk_bytes = self._desk_generator.render_cached_png(cards)
+            bio = BytesIO(desk_bytes)
             bio.name = "desk.png"
-            im_cards.save(bio, "PNG")
             bio.seek(0)
             context = self._build_context(
                 "edit_desk_cards_img", chat_id=chat_id, message_id=message_id
@@ -1154,6 +1199,13 @@ class PokerBotViewer:
 
                 message_id = getattr(message, "message_id", None) if message else None
                 if message_id:
+                    await self.remember_text_payload(
+                        chat_id=chat_id,
+                        message_id=message_id,
+                        text=normalized_hidden_text,
+                        reply_markup=markup,
+                        parse_mode=ParseMode.MARKDOWN,
+                    )
                     return message_id
             except Exception as e:
                 logger.error(
@@ -1235,8 +1287,16 @@ class PokerBotViewer:
                             "request_params": {"message_id": message_id},
                         },
                     )
+                await self._message_cache.forget(chat_id, message_id)
 
             if new_message_id:
+                await self.remember_text_payload(
+                    chat_id=chat_id,
+                    message_id=new_message_id,
+                    text=normalized_message_text,
+                    reply_markup=markup,
+                    parse_mode=ParseMode.MARKDOWN,
+                )
                 return new_message_id
         except Exception as e:
             logger.error(
@@ -1331,6 +1391,13 @@ class PokerBotViewer:
             )
             if isinstance(message, Message):
                 new_message_id = message.message_id
+                await self.remember_text_payload(
+                    chat_id=chat_id,
+                    message_id=new_message_id,
+                    text=normalized_text,
+                    reply_markup=markup,
+                    parse_mode=ParseMode.MARKDOWN,
+                )
                 if message_id:
                     try:
                         await self._rate_limiter.send(
@@ -1351,6 +1418,7 @@ class PokerBotViewer:
                                 "message_id": message_id,
                             },
                         )
+                    await self._message_cache.forget(chat_id, message_id)
                 return new_message_id
         except Exception as e:
             logger.error(
