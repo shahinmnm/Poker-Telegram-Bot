@@ -1,4 +1,5 @@
 import asyncio
+import json
 import logging
 import sys
 from pathlib import Path
@@ -7,6 +8,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
+from pokerapp.logging_config import JsonFormatter
 from pokerapp.utils.request_tracker import RequestTracker
 
 
@@ -59,3 +61,31 @@ def test_request_tracker_verbose_logging(monkeypatch, caplog):
     totals = [record.stats["total"] for record in verbose_records]
     assert totals == [1, 2]
     assert all(record.limit == 5 for record in verbose_records)
+
+
+def test_json_formatter_includes_request_tracker_fields():
+    formatter = JsonFormatter()
+    record = logging.LogRecord(
+        name="request-tracker",
+        level=logging.INFO,
+        pathname=__file__,
+        lineno=0,
+        msg="Request tracker update",
+        args=(),
+        exc_info=None,
+    )
+    extras = {
+        "chat_id": 99,
+        "round_id": "round-extra",
+        "category": "river",
+        "limit": 15,
+        "stats": {"total": 3},
+        "trigger": "threshold",
+    }
+    for key, value in extras.items():
+        setattr(record, key, value)
+
+    payload = json.loads(formatter.format(record))
+
+    for key, value in extras.items():
+        assert payload[key] == value
