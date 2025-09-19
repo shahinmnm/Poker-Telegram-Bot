@@ -52,6 +52,8 @@ def _prepare_view_mock(view: MagicMock) -> MagicMock:
     view.edit_message_text = AsyncMock(return_value=None)
     view.send_message_return_id = AsyncMock(return_value=None)
     view.send_message = AsyncMock()
+    view.announce_player_seats = AsyncMock(return_value=None)
+    view.update_turn_message = AsyncMock(return_value=None)
     return view
 
 
@@ -969,24 +971,26 @@ async def test_start_game_keeps_ready_message_id_when_deletion_fails():
     model._round_rate.set_blinds.assert_awaited_once_with(game, chat_id)
 
 
-def test_send_turn_message_replaces_previous_message():
+def test_send_turn_message_updates_existing_message():
     model, game, player, view = _build_model_with_game()
     chat_id = -601
     player.wallet.value.return_value = 450
     game.turn_message_id = 111
     game.last_actions = ["action"]
 
-    view.send_turn_actions = AsyncMock(return_value=222)
-    view.delete_message = AsyncMock()
+    view.update_turn_message = AsyncMock(return_value=222)
 
     asyncio.run(model._send_turn_message(game, player, chat_id))
 
-    assert view.send_turn_actions.await_count == 1
-    call = view.send_turn_actions.await_args
-    assert call.args == (chat_id, game, player, 450)
+    assert view.update_turn_message.await_count == 1
+    call = view.update_turn_message.await_args
+    assert call.kwargs["chat_id"] == chat_id
+    assert call.kwargs["game"] == game
+    assert call.kwargs["player"] == player
+    assert call.kwargs["money"] == 450
+    assert call.kwargs["message_id"] == 111
     assert call.kwargs["recent_actions"] == game.last_actions
 
-    view.delete_message.assert_awaited_once_with(chat_id, 111)
     assert game.turn_message_id == 222
 
 
@@ -997,13 +1001,11 @@ def test_send_turn_message_keeps_previous_when_new_message_missing():
     game.turn_message_id = 333
     game.last_actions = ["action"]
 
-    view.send_turn_actions = AsyncMock(return_value=None)
-    view.delete_message = AsyncMock()
+    view.update_turn_message = AsyncMock(return_value=None)
 
     asyncio.run(model._send_turn_message(game, player, chat_id))
 
-    view.send_turn_actions.assert_awaited_once()
-    view.delete_message.assert_not_awaited()
+    view.update_turn_message.assert_awaited_once()
     assert game.turn_message_id == 333
 
 

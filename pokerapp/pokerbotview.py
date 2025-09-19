@@ -11,14 +11,21 @@ from telegram import (
 from telegram.constants import ParseMode
 from telegram.error import BadRequest, Forbidden, RetryAfter, TelegramError
 from io import BytesIO
-from typing import Optional, Dict, Any, Deque, Tuple, List, Callable, Awaitable
+from typing import (
+    Optional,
+    Dict,
+    Any,
+    Tuple,
+    List,
+    Sequence,
+)
 from dataclasses import dataclass
 import asyncio
-import datetime
 import hashlib
 import logging
 import json
-from cachetools import FIFOCache, LFUCache
+import time
+from cachetools import LRUCache
 from pokerapp.config import DEFAULT_RATE_LIMIT_PER_MINUTE, DEFAULT_RATE_LIMIT_PER_SECOND
 from pokerapp.winnerdetermination import HAND_NAMES_TRANSLATIONS
 from pokerapp.desk import DeskImageGenerator
@@ -38,18 +45,53 @@ from pokerapp.utils.messaging_service import MessagingService
 
 
 logger = logging.getLogger(__name__)
-@dataclass(slots=True)
-class _TurnCacheEntry:
-    message_id: Optional[MessageId]
-    payload_hash: str
-    updated_at: datetime.datetime
+
+_CARD_SPACER = "     "
 
 
 @dataclass(slots=True)
-class _InlineMarkupEntry:
-    markup: InlineKeyboardMarkup
-    markup_hash: str
-    updated_at: datetime.datetime
+class _CacheRecord:
+    value: bool
+    timestamp: float
+
+
+class _TimedLRUCache(LRUCache):
+    """LRU cache with a simple time-to-live eviction policy."""
+
+    def __init__(self, *, maxsize: int, ttl: float) -> None:
+        super().__init__(maxsize=maxsize)
+        self._ttl = ttl
+
+    def __contains__(self, key: object) -> bool:  # type: ignore[override]
+        try:
+            record = LRUCache.__getitem__(self, key)
+        except KeyError:
+            return False
+        if time.monotonic() - record.timestamp <= self._ttl:
+            return True
+        LRUCache.__delitem__(self, key)
+        return False
+
+    def __getitem__(self, key: object) -> bool:  # type: ignore[override]
+        record = LRUCache.__getitem__(self, key)
+        if time.monotonic() - record.timestamp > self._ttl:
+            LRUCache.__delitem__(self, key)
+            raise KeyError(key)
+        return record.value
+
+    def get(self, key: object, default: Optional[bool] = None) -> Optional[bool]:
+        try:
+            return self.__getitem__(key)
+        except KeyError:
+            return default
+
+    def __setitem__(self, key: object, value: bool) -> None:  # type: ignore[override]
+        record = _CacheRecord(value=value, timestamp=time.monotonic())
+        LRUCache.__setitem__(self, key, record)
+
+    def popitem(self, last: bool = True) -> Tuple[object, bool]:  # type: ignore[override]
+        key, record = LRUCache.popitem(self, last=last)
+        return key, record.value
 
 
 class PokerBotViewer:
@@ -126,14 +168,13 @@ class PokerBotViewer:
         self._legacy_rate_limit_per_minute = rate_limit_per_minute
         self._legacy_rate_limit_per_second = rate_limit_per_second
         self._legacy_rate_limiter_delay = rate_limiter_delay
-        self._turn_payload_cache: LFUCache[Tuple[int, int], _TurnCacheEntry] = LFUCache(
-            maxsize=256, getsizeof=lambda entry: len(entry.payload_hash)
+
+        self._message_update_cache: _TimedLRUCache = _TimedLRUCache(
+            maxsize=500,
+            ttl=3.0,
         )
-        self._turn_cache_lock = asyncio.Lock()
-        self._inline_markup_cache: FIFOCache[Tuple[str, str], _InlineMarkupEntry] = FIFOCache(
-            maxsize=64, getsizeof=lambda entry: 1
-        )
-        self._inline_markup_lock = asyncio.Lock()
+        self._message_update_locks: Dict[Tuple[int, int], asyncio.Lock] = {}
+        self._message_update_guard = asyncio.Lock()
 
     def _payload_hash(
         self,
@@ -144,24 +185,168 @@ class PokerBotViewer:
         payload = f"{text}|{markup_hash}"
         return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
-    async def _remember_turn_cache(
-        self,
-        cache_key: Tuple[int, int],
-        message_id: Optional[MessageId],
-        payload_hash: str,
-    ) -> None:
-        entry = _TurnCacheEntry(
-            message_id=message_id,
-            payload_hash=payload_hash,
-            updated_at=datetime.datetime.now(datetime.timezone.utc),
+    @staticmethod
+    def _safe_int(value: Optional[int | str]) -> int:
+        try:
+            return int(value)  # type: ignore[arg-type]
+        except (TypeError, ValueError):
+            return 0
+
+    async def _acquire_message_lock(
+        self, chat_id: ChatId, message_id: Optional[MessageId]
+    ) -> asyncio.Lock:
+        normalized_chat = self._safe_int(chat_id)
+        normalized_message = (
+            self._safe_int(message_id) if message_id is not None else -1
         )
-        async with self._turn_cache_lock:
-            self._turn_payload_cache[cache_key] = entry
-            logger.debug(
-                "Turn payload cache size %s",
-                self._turn_payload_cache.currsize,
-                extra={"cache_max": self._turn_payload_cache.maxsize},
+        key = (normalized_chat, normalized_message)
+        async with self._message_update_guard:
+            lock = self._message_update_locks.get(key)
+            if lock is None:
+                lock = asyncio.Lock()
+                self._message_update_locks[key] = lock
+        return lock
+
+    async def _update_message(
+        self,
+        *,
+        chat_id: ChatId,
+        message_id: Optional[MessageId],
+        text: str,
+        reply_markup: Optional[InlineKeyboardMarkup | ReplyKeyboardMarkup] = None,
+        parse_mode: str = ParseMode.MARKDOWN,
+        disable_web_page_preview: bool = True,
+        disable_notification: bool = False,
+    ) -> Optional[MessageId]:
+        context = self._build_context(
+            "update_message", chat_id=chat_id, message_id=message_id
+        )
+        normalized_text = self._validator.normalize_text(
+            text,
+            parse_mode=parse_mode,
+            context=context,
+        )
+        if normalized_text is None:
+            logger.warning(
+                "Skipping update_message due to invalid text",
+                extra={"context": context},
             )
+            return message_id
+
+        payload_hash = self._payload_hash(normalized_text, reply_markup)
+        normalized_chat = self._safe_int(chat_id)
+        normalized_message = (
+            self._safe_int(message_id) if message_id is not None else 0
+        )
+        cache_key: Tuple[int, int, str] = (
+            normalized_chat,
+            normalized_message,
+            payload_hash,
+        )
+        if message_id is not None and self._message_update_cache.get(cache_key):
+            return message_id
+
+        lock = await self._acquire_message_lock(chat_id, message_id)
+        async with lock:
+            if message_id is not None and self._message_update_cache.get(cache_key):
+                return message_id
+
+            try:
+                if message_id is None:
+                    result = await self._messenger.send_message(
+                        chat_id=chat_id,
+                        text=normalized_text,
+                        reply_markup=reply_markup,
+                        parse_mode=parse_mode,
+                        disable_web_page_preview=disable_web_page_preview,
+                        disable_notification=disable_notification,
+                    )
+                    new_message_id: Optional[MessageId] = getattr(
+                        result, "message_id", None
+                    )
+                else:
+                    result = await self._messenger.edit_message_text(
+                        chat_id=chat_id,
+                        message_id=message_id,
+                        text=normalized_text,
+                        reply_markup=reply_markup,
+                        parse_mode=parse_mode,
+                        disable_web_page_preview=disable_web_page_preview,
+                    )
+                    if hasattr(result, "message_id"):
+                        new_message_id = result.message_id  # type: ignore[assignment]
+                    elif isinstance(result, int):
+                        new_message_id = result
+                    else:
+                        new_message_id = message_id
+            except (BadRequest, Forbidden, RetryAfter, TelegramError) as exc:
+                logger.error(
+                    "Failed to update message",
+                    extra={
+                        "chat_id": chat_id,
+                        "message_id": message_id,
+                        "error_type": type(exc).__name__,
+                    },
+                )
+                return message_id
+
+            if new_message_id is None:
+                return message_id
+
+            normalized_new_message = self._safe_int(new_message_id)
+            cache_key = (
+                normalized_chat,
+                normalized_new_message,
+                payload_hash,
+            )
+            self._message_update_cache[cache_key] = True
+            return new_message_id
+
+    @staticmethod
+    def _render_cards(cards: Sequence[Card]) -> str:
+        if not cards:
+            return "—"
+        return _CARD_SPACER.join(str(card) for card in cards)
+
+    @classmethod
+    def _format_card_line(cls, label: str, cards: Sequence[Card]) -> str:
+        return f"{label}: {cls._render_cards(cards)}"
+
+    async def announce_player_seats(
+        self,
+        *,
+        chat_id: ChatId,
+        players: Sequence[Player],
+        dealer_index: int,
+        message_id: Optional[MessageId] = None,
+    ) -> Optional[MessageId]:
+        """Send or update the seat map for the current hand."""
+
+        sorted_players = sorted(
+            players,
+            key=lambda p: (p.seat_index if p.seat_index is not None else 0),
+        )
+
+        lines: List[str] = ["👥 *بازیکنان حاضر در میز*", ""]
+        for player in sorted_players:
+            seat_no = (player.seat_index or 0) + 1
+            dealer_suffix = " — دیلر" if player.seat_index == dealer_index else ""
+            lines.append(
+                f"`{seat_no:>2}` │ {player.mention_markdown}{dealer_suffix}"
+            )
+
+        if not sorted_players:
+            lines.append("هنوز بازیکنی در میز حضور ندارد.")
+
+        text = "\n".join(lines)
+        return await self._update_message(
+            chat_id=chat_id,
+            message_id=message_id,
+            text=text,
+            reply_markup=None,
+            parse_mode=ParseMode.MARKDOWN,
+            disable_notification=True,
+        )
 
     async def notify_admin(self, log_data: Dict[str, Any]) -> None:
         if not self._admin_chat_id:
@@ -709,9 +894,6 @@ class PokerBotViewer:
         markup = self._get_hand_and_board_markup(
             cards, table_cards or [], resolved_stage
         )
-        hand_text = " ".join(str(card) for card in cards)
-        table_values = list(table_cards or [])
-        table_text = " ".join(str(card) for card in table_values) if table_values else "❔"
         if hide_hand_text:
             hidden_mention = PokerBotViewer._build_hidden_mention(mention_markdown)
             if hidden_mention:
@@ -788,8 +970,8 @@ class PokerBotViewer:
             return None
 
         message_body = (
-            f"🃏 دست: {hand_text}\n"
-            f"🃎 میز: {table_text}"
+            f"{self._format_card_line('🃏 دست', cards)}\n"
+            f"{self._format_card_line('🃎 میز', table_cards or [])}"
         )
         message_text = f"{mention_markdown}\n{message_body}"
 
@@ -863,8 +1045,9 @@ class PokerBotViewer:
             return PlayerAction.CHECK
         return PlayerAction.CALL
 
-    async def send_turn_actions(
+    async def update_turn_message(
         self,
+        *,
         chat_id: ChatId,
         game: Game,
         player: Player,
@@ -872,154 +1055,89 @@ class PokerBotViewer:
         message_id: Optional[MessageId] = None,
         recent_actions: Optional[List[str]] = None,
     ) -> Optional[MessageId]:
-        """ارسال یا ویرایش پیام نوبت بازیکن."""
+        """Send or edit the persistent turn message for the active player."""
 
-        cards_table = " ".join(game.cards_table) if game.cards_table else "🚫 کارتی روی میز نیست"
-        call_amount = game.max_round_rate - player.round_rate
-        call_check_action = self.define_check_call_action(game, player)
-        call_check_text = (
-            f"{call_check_action.value} ({call_amount}$)"
-            if call_check_action == PlayerAction.CALL
-            else call_check_action.value
+        call_amount = max(game.max_round_rate - player.round_rate, 0)
+        call_action = self.define_check_call_action(game, player)
+        call_text = (
+            f"{call_action.value} ({call_amount}$)"
+            if call_action == PlayerAction.CALL and call_amount > 0
+            else call_action.value
         )
+        keyboard = self._build_turn_keyboard(call_text, call_action)
 
-        text = (
-            f"🎯 **نوبت بازی {player.mention_markdown} (صندلی {player.seat_index+1})**\n\n"
-            f"🃏 **کارت‌های روی میز:** {cards_table}\n"
-            f"💰 **پات فعلی:** `{game.pot}$`\n"
-            f"💵 **موجودی شما:** `{money}$`\n"
-            f"🎲 **بِت فعلی شما:** `{player.round_rate}$`\n"
-            f"📈 **حداکثر شرط این دور:** `{game.max_round_rate}$`\n\n"
-            f"⬇️ حرکت خود را انتخاب کنید:"
+        seat_number = (player.seat_index or 0) + 1
+        board_line = self._format_card_line("🃏 Board", game.cards_table)
+
+        info_lines = [
+            f"🎯 **نوبت بازی {player.mention_markdown} (صندلی {seat_number})**",
+            "",
+            board_line,
+            f"💰 **پات فعلی:** `{game.pot}$`",
+            f"💵 **موجودی شما:** `{money}$`",
+            f"🎲 **بِت فعلی شما:** `{player.round_rate}$`",
+            f"📈 **حداکثر شرط این دور:** `{game.max_round_rate}$`",
+            "",
+            "⬇️ حرکت خود را انتخاب کنید:",
+        ]
+
+        history = list(
+            (recent_actions if recent_actions is not None else game.last_actions)[-3:]
         )
-        if recent_actions:
-            text += "\n\n🎬 **اکشن‌های اخیر:**\n" + "\n".join(recent_actions)
+        if history:
+            info_lines.append("")
+            info_lines.append("🎬 **اکشن‌های اخیر:**")
+            info_lines.extend(f"• {action}" for action in history)
 
-        markup = await self._get_turns_markup(call_check_text, call_check_action)
+        text = "\n".join(info_lines)
 
-        context = self._build_context(
-            "send_turn_actions", chat_id=chat_id, message_id=message_id
-        )
-        normalized_text = self._validator.normalize_text(
-            text,
+        return await self._update_message(
+            chat_id=chat_id,
+            message_id=message_id,
+            text=text,
+            reply_markup=keyboard,
             parse_mode=ParseMode.MARKDOWN,
-            context=context,
+            disable_web_page_preview=True,
+            disable_notification=message_id is not None,
         )
-        if normalized_text is None:
-            logger.warning(
-                "Skipping turn actions message due to invalid text",
-                extra={"context": context},
-            )
-            return None
 
-        payload_hash = self._payload_hash(normalized_text, markup)
-        cache_key = (int(chat_id), int(player.user_id))
+    @staticmethod
+    def _build_turn_keyboard(
+        call_text: str, call_action: PlayerAction
+    ) -> InlineKeyboardMarkup:
+        keyboard = [
+            [
+                InlineKeyboardButton(
+                    text=PlayerAction.FOLD.value,
+                    callback_data=PlayerAction.FOLD.value,
+                ),
+                InlineKeyboardButton(
+                    text=PlayerAction.ALL_IN.value,
+                    callback_data=PlayerAction.ALL_IN.value,
+                ),
+                InlineKeyboardButton(
+                    text=call_text,
+                    callback_data=call_action.value,
+                ),
+            ],
+            [
+                InlineKeyboardButton(
+                    text=str(PlayerAction.SMALL.value),
+                    callback_data=str(PlayerAction.SMALL.value),
+                ),
+                InlineKeyboardButton(
+                    text=str(PlayerAction.NORMAL.value),
+                    callback_data=str(PlayerAction.NORMAL.value),
+                ),
+                InlineKeyboardButton(
+                    text=str(PlayerAction.BIG.value),
+                    callback_data=str(PlayerAction.BIG.value),
+                ),
+            ],
+        ]
+        return InlineKeyboardMarkup(inline_keyboard=keyboard)
 
-        async with self._turn_cache_lock:
-            cached_entry = self._turn_payload_cache.get(cache_key)
-        if cached_entry and cached_entry.payload_hash == payload_hash:
-            if message_id is None or cached_entry.message_id == message_id:
-                logger.debug(
-                    "Turn payload cache hit; skipping Telegram call",
-                    extra={
-                        "chat_id": chat_id,
-                        "player_id": player.user_id,
-                        "message_id": cached_entry.message_id,
-                    },
-                )
-                return cached_entry.message_id
 
-        if message_id:
-            edited_id = await self.edit_turn_actions(
-                chat_id,
-                message_id,
-                normalized_text,
-                markup,
-            )
-            if edited_id:
-                await self._remember_turn_cache(cache_key, edited_id, payload_hash)
-                return edited_id
-
-        try:
-            message = await self._messenger.send_message(
-                chat_id=chat_id,
-                text=normalized_text,
-                reply_markup=markup,
-                parse_mode=ParseMode.MARKDOWN,
-                disable_notification=False,
-            )
-        except Exception as e:
-            logger.error(
-                "Error sending turn actions",
-                extra={
-                    "error_type": type(e).__name__,
-                    "chat_id": chat_id,
-                    "request_params": {"player": player.user_id},
-                },
-            )
-            return message_id
-
-        if isinstance(message, Message):
-            new_message_id = message.message_id
-            await self._remember_turn_cache(cache_key, new_message_id, payload_hash)
-            if message_id and message_id != new_message_id:
-                try:
-                    await self.delete_message(chat_id, message_id)
-                except Exception:
-                    logger.debug(
-                        "Failed to delete stale turn message",
-                        extra={
-                            "chat_id": chat_id,
-                            "message_id": message_id,
-                        },
-                    )
-            return new_message_id
-
-        return message_id
-
-    async def edit_turn_actions(
-        self,
-        chat_id: ChatId,
-        message_id: MessageId,
-        text: str,
-        reply_markup: InlineKeyboardMarkup,
-    ) -> Optional[MessageId]:
-        """ویرایش پیام موجود با متن و کیبورد جدید."""
-
-        context = self._build_context(
-            "edit_turn_actions", chat_id=chat_id, message_id=message_id
-        )
-        normalized_text = self._validator.normalize_text(
-            text,
-            parse_mode=ParseMode.MARKDOWN,
-            context=context,
-        )
-        if normalized_text is None:
-            logger.warning(
-                "Skipping edit_turn_actions due to invalid text",
-                extra={"context": context},
-            )
-            return None
-
-        try:
-            return await self._messenger.edit_message_text(
-                chat_id=chat_id,
-                message_id=message_id,
-                text=normalized_text,
-                reply_markup=reply_markup,
-                parse_mode=ParseMode.MARKDOWN,
-                disable_web_page_preview=True,
-            )
-        except Exception as exc:
-            logger.error(
-                "Failed to edit turn actions",
-                extra={
-                    "error_type": type(exc).__name__,
-                    "chat_id": chat_id,
-                    "message_id": message_id,
-                },
-            )
-            return None
     async def edit_message_reply_markup(
         self,
         chat_id: ChatId,
@@ -1071,60 +1189,6 @@ class PokerBotViewer:
                 },
             )
         return False
-
-    async def _get_turns_markup(
-        self, check_call_text: str, check_call_action: PlayerAction
-    ) -> InlineKeyboardMarkup:
-        key = (check_call_text, check_call_action.value)
-        async with self._inline_markup_lock:
-            cached = self._inline_markup_cache.get(key)
-            if cached:
-                return cached.markup
-
-            keyboard = [
-                [
-                    InlineKeyboardButton(
-                        text=PlayerAction.FOLD.value,
-                        callback_data=PlayerAction.FOLD.value,
-                    ),
-                    InlineKeyboardButton(
-                        text=PlayerAction.ALL_IN.value,
-                        callback_data=PlayerAction.ALL_IN.value,
-                    ),
-                    InlineKeyboardButton(
-                        text=check_call_text,
-                        callback_data=check_call_action.value,
-                    ),
-                ],
-                [
-                    InlineKeyboardButton(
-                        text=str(PlayerAction.SMALL.value),
-                        callback_data=str(PlayerAction.SMALL.value),
-                    ),
-                    InlineKeyboardButton(
-                        text=str(PlayerAction.NORMAL.value),
-                        callback_data=str(PlayerAction.NORMAL.value),
-                    ),
-                    InlineKeyboardButton(
-                        text=str(PlayerAction.BIG.value),
-                        callback_data=str(PlayerAction.BIG.value),
-                    ),
-                ],
-            ]
-            markup = InlineKeyboardMarkup(inline_keyboard=keyboard)
-            markup_hash = self._serialize_markup(markup) or ""
-            self._inline_markup_cache[key] = _InlineMarkupEntry(
-                markup=markup,
-                markup_hash=markup_hash,
-                updated_at=datetime.datetime.now(datetime.timezone.utc),
-            )
-            logger.debug(
-                "Inline keyboard cache size %s",
-                self._inline_markup_cache.currsize,
-                extra={"cache_max": self._inline_markup_cache.maxsize},
-            )
-            return markup
-
 
     async def remove_markup(self, chat_id: ChatId, message_id: MessageId) -> None:
         """حذف دکمه‌های اینلاین از یک پیام و فیلتر کردن ارورهای رایج."""
@@ -1229,12 +1293,15 @@ class PokerBotViewer:
                         f"  - {player.mention_markdown} با دست {hand_display_name} "
                         f"برنده *{win_amount_per_player}$* شد.\n"
                     )
-                    final_message += f"    کارت‌ها: {' '.join(map(str, hand_cards))}\n"
+                    final_message += (
+                        f"    کارت‌ها: {self._render_cards(hand_cards)}\n"
+                    )
                 
                 final_message += "\n" # یک خط فاصله برای جداسازی پات‌ها
 
         final_message += "⎯" * 20 + "\n"
-        final_message += f"🃏 *کارت‌های روی میز:* {' '.join(map(str, game.cards_table)) if game.cards_table else '🚫'}\n\n"
+        board_cards = self._render_cards(game.cards_table)
+        final_message += f"🃏 *کارت‌های روی میز:* {board_cards}\n\n"
 
         final_message += "🤚 *کارت‌های سایر بازیکنان:*\n"
         all_players_in_hand = game.players_by(states=(PlayerState.ACTIVE, PlayerState.ALL_IN, PlayerState.FOLD))
@@ -1248,7 +1315,11 @@ class PokerBotViewer:
 
         for p in all_players_in_hand:
             if p.user_id not in winner_user_ids:
-                card_display = ' '.join(map(str, p.cards)) if p.cards else 'کارت‌ها نمایش داده نشد'
+                card_display = (
+                    self._render_cards(p.cards)
+                    if p.cards
+                    else 'کارت‌ها نمایش داده نشد'
+                )
                 state_info = " (فولد)" if p.state == PlayerState.FOLD else ""
                 final_message += f"  - {p.mention_markdown}{state_info}: {card_display}\n"
 
