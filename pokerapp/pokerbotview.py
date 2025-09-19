@@ -32,6 +32,7 @@ from pokerapp.entities import (
     Money,
     PlayerState,
 )
+from pokerapp.update_scheduler import MessageUpdate, UpdateScheduler
 
 
 logger = logging.getLogger(__name__)
@@ -230,6 +231,27 @@ class PokerBotViewer:
             notify_admin=self.notify_admin,
             max_per_minute=rate_limit_per_minute,
             max_per_second=rate_limit_per_second,
+        )
+        # Coalesce consecutive updates for the same chat/table.  A 0.55s flush
+        # interval allows ~1.8 updates per second which is under Telegram's
+        # per-chat flood limits but still instant for players.  Urgent updates
+        # (turn changes, cards dealt) bypass the delay entirely.
+        self._update_scheduler = UpdateScheduler(flush_interval=0.55)
+
+    @staticmethod
+    def _inline_keyboard_signature(markup: Optional[InlineKeyboardMarkup]) -> Optional[tuple]:
+        if not markup:
+            return None
+        return tuple(
+            tuple(
+                (
+                    button.text,
+                    getattr(button, "callback_data", None),
+                    getattr(button, "url", None),
+                )
+                for button in row
+            )
+            for row in markup.inline_keyboard
         )
 
     async def notify_admin(self, log_data: Dict[str, Any]) -> None:
@@ -912,58 +934,39 @@ class PokerBotViewer:
         # کیبورد اینلاین
         markup = self._get_turns_markup(call_check_text, call_check_action)
 
-        if message_id:
-            edited_id = await self.edit_turn_actions(
-                chat_id, message_id, text, markup
+        signature = (text, self._inline_keyboard_signature(markup))
+
+        async def _execute_update() -> Optional[MessageId]:
+            return await self._send_turn_message_update(
+                chat_id=chat_id,
+                message_id=message_id,
+                text=text,
+                markup=markup,
             )
-            if edited_id:
-                return edited_id
-            # پیام اصلی دیگر قابل ویرایش نیست، پیام جدید ارسال می‌کنیم
+
+        update = MessageUpdate(
+            chat_id=chat_id,
+            key=f"turn:{getattr(game, 'id', chat_id)}",
+            state_signature=signature,
+            coroutine_factory=_execute_update,
+            description=f"turn message for player {player.user_id}",
+            urgent=True,
+            fallback_result=message_id,
+        )
 
         try:
-            message = await self._rate_limiter.send(
-                lambda: self._bot.send_message(
-                    chat_id=chat_id,
-                    text=text,
-                    reply_markup=markup,
-                    parse_mode=ParseMode.MARKDOWN,
-                    disable_notification=False,  # player gets notification
-                ),
-                chat_id=chat_id,
-            )
-            if isinstance(message, Message):
-                new_message_id = message.message_id
-                if message_id:
-                    try:
-                        await self._rate_limiter.send(
-                            lambda: self._bot.delete_message(
-                                chat_id=chat_id,
-                                message_id=message_id,
-                            ),
-                            chat_id=chat_id,
-                        )
-                    except BadRequest:
-                        pass
-                    except Exception as e:
-                        logger.debug(
-                            "Failed to delete stale turn message",
-                            extra={
-                                "error_type": type(e).__name__,
-                                "chat_id": chat_id,
-                                "message_id": message_id,
-                            },
-                        )
-                return new_message_id
-        except Exception as e:
+            result = await self._update_scheduler.enqueue(update)
+        except Exception as e:  # pylint: disable=broad-except
             logger.error(
-                "Error sending turn actions",
+                "Error scheduling turn actions",
                 extra={
                     "error_type": type(e).__name__,
                     "chat_id": chat_id,
                     "request_params": {"player": player.user_id},
                 },
             )
-        return None
+            return None
+        return result
 
     async def edit_turn_actions(
         self,
@@ -999,6 +1002,140 @@ class PokerBotViewer:
                 },
             )
         return None
+
+    async def _send_turn_message_update(
+        self,
+        *,
+        chat_id: ChatId,
+        message_id: Optional[MessageId],
+        text: str,
+        markup: InlineKeyboardMarkup,
+    ) -> Optional[MessageId]:
+        """Send or edit the player's turn message with graceful fallbacks.
+
+        The method performs diff-aware edits first.  If the edit fails because
+        the message is gone or too old we fall back to sending a new message and
+        delete the stale one asynchronously.  All Telegram requests are routed
+        through :class:`RateLimitedSender` so they benefit from retry and
+        per-chat rate control.
+        """
+
+        if message_id:
+            try:
+                message = await self._rate_limiter.send(
+                    lambda: self._bot.edit_message_text(
+                        chat_id=chat_id,
+                        message_id=message_id,
+                        text=text,
+                        reply_markup=markup,
+                        parse_mode=ParseMode.MARKDOWN,
+                        disable_web_page_preview=True,
+                    ),
+                    chat_id=chat_id,
+                )
+                if isinstance(message, Message):
+                    return message.message_id
+                if message is True:
+                    return message_id
+            except BadRequest as e:
+                err = str(e).lower()
+                if "message is not modified" in err:
+                    return message_id
+                if "message to edit not found" not in err:
+                    logger.warning(
+                        "BadRequest editing turn message",
+                        extra={
+                            "error_type": type(e).__name__,
+                            "chat_id": chat_id,
+                            "message_id": message_id,
+                        },
+                    )
+                # Fall back to sending a new message.
+            except Forbidden as e:
+                logger.error(
+                    "Forbidden editing turn message",
+                    extra={
+                        "error_type": type(e).__name__,
+                        "chat_id": chat_id,
+                        "message_id": message_id,
+                    },
+                )
+                return None
+            except RetryAfter:
+                raise
+            except TelegramError as e:
+                logger.warning(
+                    "TelegramError editing turn message",
+                    extra={
+                        "error_type": type(e).__name__,
+                        "chat_id": chat_id,
+                        "message_id": message_id,
+                    },
+                )
+            except Exception as e:  # pylint: disable=broad-except
+                logger.error(
+                    "Unexpected error editing turn message",
+                    extra={
+                        "error_type": type(e).__name__,
+                        "chat_id": chat_id,
+                        "message_id": message_id,
+                    },
+                )
+
+        try:
+            message = await self._rate_limiter.send(
+                lambda: self._bot.send_message(
+                    chat_id=chat_id,
+                    text=text,
+                    reply_markup=markup,
+                    parse_mode=ParseMode.MARKDOWN,
+                    disable_notification=False,
+                ),
+                chat_id=chat_id,
+            )
+        except TelegramError as e:
+            logger.error(
+                "TelegramError sending turn message",
+                extra={
+                    "error_type": type(e).__name__,
+                    "chat_id": chat_id,
+                    "message_id": message_id,
+                },
+            )
+            return message_id
+
+        if isinstance(message, Message):
+            new_message_id = message.message_id
+            if message_id and message_id != new_message_id:
+                await self._schedule_turn_message_cleanup(chat_id, message_id)
+            return new_message_id
+
+        return message_id
+
+    async def _schedule_turn_message_cleanup(
+        self, chat_id: ChatId, message_id: MessageId
+    ) -> None:
+        """Delete a stale turn message without blocking the scheduler."""
+
+        async def _delete() -> None:
+            try:
+                await self._rate_limiter.send(
+                    lambda: self._bot.delete_message(chat_id=chat_id, message_id=message_id),
+                    chat_id=chat_id,
+                )
+            except BadRequest:
+                pass
+            except Exception as exc:  # pylint: disable=broad-except
+                logger.debug(
+                    "Failed to delete stale turn message",
+                    extra={
+                        "error_type": type(exc).__name__,
+                        "chat_id": chat_id,
+                        "message_id": message_id,
+                    },
+                )
+
+        asyncio.create_task(_delete())
 
     async def edit_message_reply_markup(
         self,
