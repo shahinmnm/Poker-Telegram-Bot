@@ -735,7 +735,7 @@ class PokerBotViewer:
                 return None
 
             if message_id:
-                edited_id = await self._messenger.edit_message_text(
+                edited_id = await self.edit_message_text(
                     chat_id=chat_id,
                     message_id=message_id,
                     text=normalized_hidden_text,
@@ -748,7 +748,7 @@ class PokerBotViewer:
 
             try:
                 reply_kwargs = {}
-                if reply_to_ready_message and ready_message_id:
+                if reply_to_ready_message and ready_message_id and not message_id:
                     reply_kwargs["reply_to_message_id"] = ready_message_id
                 message = await self._messenger.send_message(
                     chat_id=chat_id,
@@ -759,9 +759,24 @@ class PokerBotViewer:
                     **reply_kwargs,
                 )
 
-                message_id = getattr(message, "message_id", None) if message else None
-                if message_id:
-                    return message_id
+                new_message_id: Optional[MessageId] = (
+                    getattr(message, "message_id", None) if message else None
+                )
+
+                if message_id and new_message_id and new_message_id != message_id:
+                    try:
+                        await self.delete_message(chat_id, message_id)
+                    except Exception:
+                        logger.debug(
+                            "Failed to delete previous hidden cards message",
+                            extra={
+                                "chat_id": chat_id,
+                                "request_params": {"message_id": message_id},
+                            },
+                        )
+
+                if new_message_id:
+                    return new_message_id
             except Exception as e:
                 logger.error(
                     "Error sending hidden cards keyboard",
