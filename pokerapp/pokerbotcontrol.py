@@ -129,6 +129,15 @@ class PokerBotCotroller:
                 "🃏 برای راه‌اندازی میز جدید، در گروه مورد نظر دستور /newgame را ارسال کنید یا از مدیر گروه بخواهید بازی را آغاز کند.",
             )
             return
+        if text == "🤝 بازی با ناشناس":
+            if chat.type != chat.PRIVATE:
+                await self._view.send_message(
+                    chat.id,
+                    "ℹ️ برای جستجوی حریف ناشناس، از چت خصوصی ربات استفاده کنید.",
+                )
+            else:
+                await self._model.handle_private_matchmaking_request(update, context)
+            return
         normalized = text.replace("✅ ", "").replace("🔁 ", "")
         if normalized == "فلاپ":
             game, chat_id = await self._model._get_game(update, context)

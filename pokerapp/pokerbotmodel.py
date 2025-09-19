@@ -3,7 +3,9 @@
 import asyncio
 import datetime
 import random
+import uuid
 from collections import defaultdict
+from dataclasses import dataclass
 from typing import Dict, Iterable, List, Optional, Tuple
 
 import redis.asyncio as aioredis
@@ -84,7 +86,21 @@ STOP_RESUME_CALLBACK = "stop:resume"
 MAX_TIME_FOR_TURN = datetime.timedelta(minutes=2)
 DESCRIPTION_FILE = "assets/description_bot.md"
 
+PRIVATE_MATCH_QUEUE_KEY = "pokerbot:private_matchmaking:queue"
+PRIVATE_MATCH_USER_KEY_PREFIX = "pokerbot:private_matchmaking:user:"
+PRIVATE_MATCH_RECORD_KEY_PREFIX = "pokerbot:private_matchmaking:match:"
+PRIVATE_MATCH_QUEUE_TTL = 180  # seconds
+PRIVATE_MATCH_STATE_TTL = 3600  # seconds
+
 logger = logging.getLogger(__name__)
+
+
+@dataclass(slots=True)
+class PrivateMatchPlayerInfo:
+    user_id: int
+    chat_id: Optional[int]
+    display_name: str
+    username: Optional[str] = None
 
 
 class PokerBotModel:
@@ -165,8 +181,51 @@ class PokerBotModel:
             [
                 ["🎁 بونوس روزانه", "📊 آمار بازی"],
                 ["⚙️ تنظیمات", "🃏 شروع بازی"],
+                ["🤝 بازی با ناشناس"],
             ],
             resize_keyboard=True,
+        )
+
+    def _private_user_key(self, user_id: UserId) -> str:
+        return f"{PRIVATE_MATCH_USER_KEY_PREFIX}{self._safe_int(user_id)}"
+
+    @staticmethod
+    def _private_match_key(match_id: str) -> str:
+        return f"{PRIVATE_MATCH_RECORD_KEY_PREFIX}{match_id}"
+
+    @staticmethod
+    def _coerce_optional_int(value: Optional[str]) -> Optional[int]:
+        if value in (None, "", b""):
+            return None
+        if isinstance(value, bytes):
+            value = value.decode()
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return None
+
+    @staticmethod
+    def _decode_hash(data: Dict[bytes, bytes]) -> Dict[str, str]:
+        decoded: Dict[str, str] = {}
+        for key, value in data.items():
+            if isinstance(key, bytes):
+                key = key.decode()
+            if isinstance(value, bytes):
+                value = value.decode()
+            decoded[str(key)] = str(value)
+        return decoded
+
+    def _build_player_info_from_state(
+        self, user_id: str, state: Dict[str, str]
+    ) -> PrivateMatchPlayerInfo:
+        display_name = state.get("display_name") or str(user_id)
+        username = state.get("username") or None
+        chat_id = self._coerce_optional_int(state.get("chat_id"))
+        return PrivateMatchPlayerInfo(
+            user_id=self._safe_int(user_id),
+            chat_id=chat_id,
+            display_name=display_name,
+            username=username,
         )
 
     def _build_identity_from_player(self, player: Player) -> PlayerIdentity:
@@ -221,6 +280,366 @@ class PokerBotModel:
             formatted,
             reply_markup=self._build_private_menu(),
         )
+
+    async def _get_private_match_state(self, user_id: UserId) -> Dict[str, str]:
+        key = self._private_user_key(user_id)
+        data = await self._kv.hgetall(key)
+        if not data:
+            return {}
+        return self._decode_hash(data)
+
+    async def _cleanup_private_queue(self) -> None:
+        now = datetime.datetime.now(datetime.timezone.utc)
+        cutoff_ts = int(now.timestamp()) - PRIVATE_MATCH_QUEUE_TTL
+        expired = await self._kv.zrangebyscore(
+            PRIVATE_MATCH_QUEUE_KEY, "-inf", cutoff_ts
+        )
+        if not expired:
+            return
+        for raw_user_id in expired:
+            if isinstance(raw_user_id, bytes):
+                user_id_str = raw_user_id.decode()
+            else:
+                user_id_str = str(raw_user_id)
+            await self._kv.zrem(PRIVATE_MATCH_QUEUE_KEY, raw_user_id)
+            state = await self._get_private_match_state(user_id_str)
+            key = self._private_user_key(user_id_str)
+            await self._kv.delete(key)
+            chat_id = self._coerce_optional_int(state.get("chat_id")) if state else None
+            if chat_id:
+                await self._view.send_message(
+                    chat_id,
+                    "⏳ زمان انتظار شما به پایان رسید و از صف بازی خصوصی خارج شدید.",
+                    reply_markup=self._build_private_menu(),
+                )
+
+    async def _try_pop_match(self) -> Optional[List[PrivateMatchPlayerInfo]]:
+        popped = await self._kv.zpopmin(PRIVATE_MATCH_QUEUE_KEY, 2)
+        if not popped:
+            return None
+        if len(popped) < 2:
+            member, score = popped[0]
+            await self._kv.zadd(PRIVATE_MATCH_QUEUE_KEY, {member: score})
+            return None
+        states: List[Tuple[str, Dict[str, str], float]] = []
+        for member, score in popped:
+            user_id_str = member.decode() if isinstance(member, bytes) else str(member)
+            state = await self._get_private_match_state(user_id_str)
+            states.append((user_id_str, state, score))
+        valid = [item for item in states if item[1].get("status") == "queued"]
+        if len(valid) < 2:
+            for user_id_str, state, score in states:
+                timestamp = state.get("timestamp") if state else None
+                score_value = int(timestamp) if timestamp else score
+                await self._kv.zadd(PRIVATE_MATCH_QUEUE_KEY, {user_id_str: score_value})
+            return None
+        players = [
+            self._build_player_info_from_state(user_id_str, state)
+            for user_id_str, state, _ in valid[:2]
+        ]
+        now_ts = int(datetime.datetime.now(datetime.timezone.utc).timestamp())
+        for idx, (user_id_str, state, _) in enumerate(valid[:2]):
+            opponent = players[1 - idx]
+            await self._kv.hset(
+                self._private_user_key(user_id_str),
+                mapping={
+                    "status": "matched",
+                    "opponent": str(opponent.user_id),
+                    "matched_at": str(now_ts),
+                    "chat_id": state.get("chat_id", ""),
+                    "display_name": state.get("display_name", ""),
+                    "username": state.get("username", ""),
+                },
+            )
+            await self._kv.expire(
+                self._private_user_key(user_id_str), PRIVATE_MATCH_STATE_TTL
+            )
+        return players
+
+    async def _enqueue_private_player(
+        self, user: User, chat_id: int
+    ) -> Dict[str, object]:
+        existing_state = await self._get_private_match_state(user.id)
+        status = existing_state.get("status") if existing_state else None
+        if status == "queued":
+            return {"status": "queued"}
+        if status in {"matched", "playing"}:
+            return {
+                "status": "busy",
+                "match_id": existing_state.get("match_id") if existing_state else None,
+                "opponent": existing_state.get("opponent") if existing_state else None,
+            }
+
+        timestamp = int(datetime.datetime.now(datetime.timezone.utc).timestamp())
+        display_name = (
+            user.full_name
+            or user.first_name
+            or user.username
+            or str(user.id)
+        )
+        username = user.username or ""
+        state_key = self._private_user_key(user.id)
+        await self._kv.hset(
+            state_key,
+            mapping={
+                "status": "queued",
+                "timestamp": str(timestamp),
+                "chat_id": str(chat_id),
+                "display_name": display_name,
+                "username": username,
+            },
+        )
+        await self._kv.expire(state_key, PRIVATE_MATCH_STATE_TTL)
+        await self._kv.zadd(
+            PRIVATE_MATCH_QUEUE_KEY,
+            {str(self._safe_int(user.id)): timestamp},
+        )
+
+        players = await self._try_pop_match()
+        if players:
+            return {"status": "matched", "players": players}
+        return {"status": "queued"}
+
+    async def _cancel_private_matchmaking(self, user_id: UserId) -> bool:
+        state = await self._get_private_match_state(user_id)
+        if state.get("status") != "queued":
+            return False
+        user_key = self._private_user_key(user_id)
+        removed = await self._kv.zrem(
+            PRIVATE_MATCH_QUEUE_KEY, str(self._safe_int(user_id))
+        )
+        await self._kv.delete(user_key)
+        return bool(removed)
+
+    async def _start_private_headsup_game(
+        self, players: List[PrivateMatchPlayerInfo]
+    ) -> str:
+        if len(players) != 2:
+            raise ValueError("Private heads-up games require exactly two players")
+        match_id = f"pm_{uuid.uuid4().hex}"
+        chat_id: ChatId = f"private:{match_id}"
+        game = await self._table_manager.create_game(chat_id)
+        game.reset()
+        for index, info in enumerate(players):
+            safe_user_id = self._safe_int(info.user_id)
+            wallet = WalletManagerModel(safe_user_id, self._kv)
+            mention_name = info.display_name or str(safe_user_id)
+            mention = format_mention_markdown(safe_user_id, mention_name, version=1)
+            player = Player(
+                user_id=safe_user_id,
+                mention_markdown=mention,
+                wallet=wallet,
+                ready_message_id="private_match",
+                seat_index=index,
+            )
+            player.display_name = info.display_name or mention_name
+            player.username = info.username
+            player.full_name = info.display_name
+            player.private_chat_id = info.chat_id
+            game.add_player(player, seat_index=index)
+            game.ready_users.add(safe_user_id)
+            if info.chat_id:
+                self._private_chat_ids[safe_user_id] = info.chat_id
+        await self._table_manager.save_game(chat_id, game)
+
+        started_at = datetime.datetime.now(datetime.timezone.utc)
+        match_key = self._private_match_key(match_id)
+        await self._kv.hset(
+            match_key,
+            mapping={
+                "status": "active",
+                "chat_id": chat_id,
+                "player_one": str(self._safe_int(players[0].user_id)),
+                "player_two": str(self._safe_int(players[1].user_id)),
+                "player_one_name": players[0].display_name,
+                "player_two_name": players[1].display_name,
+                "player_one_chat": str(players[0].chat_id or ""),
+                "player_two_chat": str(players[1].chat_id or ""),
+                "started_at": str(started_at.timestamp()),
+            },
+        )
+        await self._kv.expire(match_key, PRIVATE_MATCH_STATE_TTL)
+
+        if self._stats_enabled():
+            identities = [self._build_identity_from_player(p) for p in game.players]
+            await self._stats.start_hand(
+                match_id, chat_id, identities, start_time=started_at
+            )
+
+        for idx, info in enumerate(players):
+            opponent = players[1 - idx]
+            state_key = self._private_user_key(info.user_id)
+            await self._kv.hset(
+                state_key,
+                mapping={
+                    "status": "playing",
+                    "match_id": match_id,
+                    "opponent": str(self._safe_int(opponent.user_id)),
+                    "opponent_name": opponent.display_name,
+                    "chat_id": str(info.chat_id or ""),
+                    "display_name": info.display_name,
+                    "username": info.username or "",
+                },
+            )
+            await self._kv.expire(state_key, PRIVATE_MATCH_STATE_TTL)
+            if info.chat_id:
+                opponent_name = opponent.display_name
+                message = (
+                    "🤝 حریف شما پیدا شد!\n"
+                    f"🎮 بازی خصوصی با {opponent_name} تا لحظاتی دیگر آغاز می‌شود.\n"
+                    f"🆔 شناسه بازی: {match_id}"
+                )
+                await self._view.send_message(
+                    info.chat_id,
+                    message,
+                    reply_markup=self._build_private_menu(),
+                )
+
+        return match_id
+
+    async def handle_private_matchmaking_request(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        chat = update.effective_chat
+        user = update.effective_user
+        if chat.type != chat.PRIVATE:
+            await self._view.send_message(
+                chat.id,
+                "ℹ️ برای بازی ناشناس، ابتدا در گفت‌وگوی خصوصی ربات این گزینه را انتخاب کنید.",
+            )
+            return
+
+        await self._register_player_identity(user, private_chat_id=chat.id)
+        await self._cleanup_private_queue()
+
+        state = await self._get_private_match_state(user.id)
+        status = state.get("status") if state else None
+
+        if status == "queued":
+            await self._cancel_private_matchmaking(user.id)
+            await self._view.send_message(
+                chat.id,
+                "❌ شما از صف بازی خصوصی خارج شدید.",
+                reply_markup=self._build_private_menu(),
+            )
+            return
+
+        if status in {"matched", "playing"}:
+            opponent_name = state.get("opponent_name") or state.get("opponent")
+            match_id = state.get("match_id") or "نامشخص"
+            await self._view.send_message(
+                chat.id,
+                f"🎮 شما در حال حاضر در بازی با {opponent_name or 'حریف'} هستید. (شناسه: {match_id})",
+                reply_markup=self._build_private_menu(),
+            )
+            return
+
+        result = await self._enqueue_private_player(user, chat.id)
+        result_status = result.get("status")
+        if result_status == "queued":
+            await self._view.send_message(
+                chat.id,
+                "⌛ شما به صف بازی خصوصی اضافه شدید. برای لغو، دوباره همین دکمه را بزنید.",
+                reply_markup=self._build_private_menu(),
+            )
+            return
+
+        if result_status == "busy":
+            match_id = result.get("match_id") or "نامشخص"
+            await self._view.send_message(
+                chat.id,
+                f"⏳ بازی قبلی شما هنوز به پایان نرسیده است. (شناسه: {match_id})",
+                reply_markup=self._build_private_menu(),
+            )
+            return
+
+        if result_status == "matched":
+            players = result.get("players")
+            if isinstance(players, list) and len(players) == 2:
+                await self._start_private_headsup_game(players)  # type: ignore[arg-type]
+            return
+
+        await self._view.send_message(
+            chat.id,
+            "⚠️ در حال حاضر امکان ثبت در صف وجود ندارد. لطفاً دوباره تلاش کنید.",
+            reply_markup=self._build_private_menu(),
+        )
+
+    async def report_private_match_result(
+        self, match_id: str, winner_user_id: UserId
+    ) -> None:
+        match_key = self._private_match_key(match_id)
+        match_data_raw = await self._kv.hgetall(match_key)
+        if not match_data_raw:
+            raise UserException("بازی خصوصی مورد نظر یافت نشد.")
+        match_data = self._decode_hash(match_data_raw)
+        chat_id = match_data.get("chat_id")
+        if not chat_id:
+            raise UserException("اطلاعات مربوط به بازی خصوصی ناقص است.")
+        game = await self._table_manager.get_game(chat_id)
+        winner_id = self._safe_int(winner_user_id)
+        results: List[PlayerHandResult] = []
+        for player in game.players:
+            is_winner = self._safe_int(player.user_id) == winner_id
+            display_name = getattr(player, "display_name", None) or player.mention_markdown
+            results.append(
+                PlayerHandResult(
+                    user_id=self._safe_int(player.user_id),
+                    display_name=display_name,
+                    total_bet=0,
+                    payout=1 if is_winner else 0,
+                    net_profit=1 if is_winner else -1,
+                    hand_type=None,
+                    was_all_in=False,
+                    result="win" if is_winner else "loss",
+                )
+            )
+
+        if self._stats_enabled():
+            await self._stats.finish_hand(match_id, chat_id, results)
+
+        game.state = GameState.FINISHED
+        await self._table_manager.save_game(chat_id, game)
+
+        player_one_id = self._safe_int(match_data.get("player_one"))
+        player_two_id = self._safe_int(match_data.get("player_two"))
+        player_one_name = match_data.get("player_one_name") or str(player_one_id)
+        player_two_name = match_data.get("player_two_name") or str(player_two_id)
+        player_one_chat = self._coerce_optional_int(match_data.get("player_one_chat"))
+        player_two_chat = self._coerce_optional_int(match_data.get("player_two_chat"))
+
+        winner_name = (
+            player_one_name if winner_id == player_one_id else player_two_name
+        )
+        loser_name = (
+            player_two_name if winner_id == player_one_id else player_one_name
+        )
+
+        message_winner = (
+            "🏆 تبریک! شما برنده بازی خصوصی شدید.\n"
+            f"🎯 حریف: {loser_name}"
+        )
+        message_loser = (
+            "🤝 بازی خصوصی به پایان رسید.\n"
+            f"🏆 برنده: {winner_name}"
+        )
+
+        if player_one_chat:
+            await self._view.send_message(
+                player_one_chat,
+                message_winner if winner_id == player_one_id else message_loser,
+                reply_markup=self._build_private_menu(),
+            )
+        if player_two_chat:
+            await self._view.send_message(
+                player_two_chat,
+                message_winner if winner_id == player_two_id else message_loser,
+                reply_markup=self._build_private_menu(),
+            )
+
+        await self._kv.delete(match_key)
+        await self._kv.delete(self._private_user_key(player_one_id))
+        await self._kv.delete(self._private_user_key(player_two_id))
 
     async def _get_game(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
