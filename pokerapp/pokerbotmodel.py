@@ -595,8 +595,10 @@ class PokerBotModel:
                 )
             )
 
+        pot_total = sum(result.payout for result in results)
+
         if self._stats_enabled():
-            await self._stats.finish_hand(match_id, chat_id, results)
+            await self._stats.finish_hand(match_id, chat_id, results, pot_total)
 
         game.state = GameState.FINISHED
         await self._table_manager.save_game(chat_id, game)
