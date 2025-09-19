@@ -38,6 +38,7 @@ logger = logging.getLogger(__name__)
 
 
 CacheKey = Tuple[int, int]
+CacheEntryKey = Tuple[int, int, str]
 
 
 class MessagingService:
@@ -67,7 +68,7 @@ class MessagingService:
     ) -> None:
         self._bot = bot
         self._logger = logger_ or logger.getChild("service")
-        self._content_cache: TTLCache[CacheKey, str] = TTLCache(
+        self._content_cache: TTLCache[CacheEntryKey, bool] = TTLCache(
             maxsize=cache_maxsize,
             ttl=cache_ttl,
         )
@@ -137,7 +138,6 @@ class MessagingService:
 
         content_hash = self._content_hash(text, reply_markup)
         if not force and await self._should_skip(chat_id, message_id, content_hash):
-            await self._remember_content(chat_id, message_id, content_hash)
             self._logger.info(
                 "SKIP EDIT: identical content for chat %s, msg %s",
                 chat_id,
@@ -148,7 +148,6 @@ class MessagingService:
         lock = await self._acquire_lock(chat_id, message_id)
         async with lock:
             if not force and await self._should_skip(chat_id, message_id, content_hash):
-                await self._remember_content(chat_id, message_id, content_hash)
                 self._logger.info(
                     "SKIP EDIT: identical content for chat %s, msg %s",
                     chat_id,
@@ -202,7 +201,6 @@ class MessagingService:
 
         content_hash = self._content_hash(None, reply_markup)
         if not force and await self._should_skip(chat_id, message_id, content_hash):
-            await self._remember_content(chat_id, message_id, content_hash)
             self._logger.info(
                 "SKIP EDIT: identical content for chat %s, msg %s",
                 chat_id,
@@ -213,7 +211,6 @@ class MessagingService:
         lock = await self._acquire_lock(chat_id, message_id)
         async with lock:
             if not force and await self._should_skip(chat_id, message_id, content_hash):
-                await self._remember_content(chat_id, message_id, content_hash)
                 self._logger.info(
                     "SKIP EDIT: identical content for chat %s, msg %s",
                     chat_id,
@@ -307,8 +304,8 @@ class MessagingService:
         message_id: int,
         content_hash: str,
     ) -> bool:
-        cached = await self._get_cached_hash(chat_id, message_id)
-        return cached == content_hash
+        cached = await self._get_cached_hash(chat_id, message_id, content_hash)
+        return cached
 
     async def _handle_bad_request(
         self,
@@ -372,17 +369,21 @@ class MessagingService:
     async def _remember_content(self, chat_id: int, message_id: int, content_hash: str) -> None:
         if message_id is None:
             return
-        key = (int(chat_id), int(message_id))
+        key = (int(chat_id), int(message_id), content_hash)
         async with self._cache_lock:
-            self._content_cache[key] = content_hash
+            self._content_cache[key] = True
 
     async def _forget_content(self, chat_id: int, message_id: int) -> None:
-        key = (int(chat_id), int(message_id))
+        prefix = (int(chat_id), int(message_id))
         async with self._cache_lock:
-            self._content_cache.pop(key, None)
+            keys_to_remove = [key for key in self._content_cache if key[:2] == prefix]
+            for key in keys_to_remove:
+                self._content_cache.pop(key, None)
 
-    async def _get_cached_hash(self, chat_id: int, message_id: int) -> Optional[str]:
-        key = (int(chat_id), int(message_id))
+    async def _get_cached_hash(
+        self, chat_id: int, message_id: int, content_hash: str
+    ) -> Optional[bool]:
+        key = (int(chat_id), int(message_id), content_hash)
         async with self._cache_lock:
             return self._content_cache.get(key)
 

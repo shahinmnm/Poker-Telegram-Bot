@@ -2,6 +2,7 @@
 
 import asyncio
 import datetime
+import asyncio
 import logging
 import unittest
 from types import SimpleNamespace
@@ -14,7 +15,7 @@ import pytest
 
 from pokerapp.cards import Cards, Card
 from pokerapp.config import Config
-from pokerapp.entities import Money, Player, Game, PlayerState, GameState
+from pokerapp.entities import Money, Player, Game, PlayerState, GameState, PlayerAction
 from pokerapp.pokerbotmodel import (
     PokerBotModel,
     RoundRateModel,
@@ -26,6 +27,7 @@ from pokerapp.pokerbotmodel import (
     STOP_CONFIRM_CALLBACK,
     STOP_RESUME_CALLBACK,
 )
+from pokerapp.pokerbotview import TurnMessageUpdate
 from telegram.error import BadRequest
 from telegram import InlineKeyboardMarkup
 
@@ -53,7 +55,15 @@ def _prepare_view_mock(view: MagicMock) -> MagicMock:
     view.send_message_return_id = AsyncMock(return_value=None)
     view.send_message = AsyncMock()
     view.announce_player_seats = AsyncMock(return_value=None)
-    view.update_turn_message = AsyncMock(return_value=None)
+    view.update_turn_message = AsyncMock(
+        return_value=TurnMessageUpdate(
+            message_id=None,
+            call_label="CHECK",
+            call_action=PlayerAction.CHECK,
+            board_line="",
+        )
+    )
+    view.update_player_anchor = AsyncMock(return_value=None)
     return view
 
 
@@ -206,7 +216,7 @@ if __name__ == '__main__':
 
 def _build_model_with_game():
     view = _prepare_view_mock(MagicMock())
-    view.send_cards = AsyncMock(return_value=None)
+    view.update_player_anchor = AsyncMock(return_value="anchor")
     view.send_message = AsyncMock()
     bot = MagicMock()
     cfg = MagicMock(DEBUG=False)
@@ -396,91 +406,65 @@ async def test_cancel_hand_refunds_wallets_and_announces():
     assert game.state == GameState.INITIAL
 
 
-def test_add_cards_to_table_sends_plain_message_without_keyboard():
-    model, game, player, view = _build_model_with_game()
-    chat_id = -300
-    view.send_cards = AsyncMock(return_value=None)
-    asyncio.run(model._divide_cards(game, chat_id))
 
-    view.send_message_return_id = AsyncMock(return_value=101)
-    view.delete_message = AsyncMock()
+
+def test_send_turn_message_updates_anchor_messages():
+    model, game, player, view = _build_model_with_game()
+    chat_id = -501
+
+    other_player = Player(
+        user_id=2,
+        mention_markdown="@other",
+        wallet=make_wallet_mock(1000),
+        ready_message_id="ready-2",
+    )
+    game.add_player(other_player, seat_index=1)
+    player.seat_index = 0
+    other_player.seat_index = 1
+    game.cards_table = [Card("A♠"), Card("K♦"), Card("5♣")]
+
+    turn_update = SimpleNamespace(
+        message_id=321,
+        call_label="CALL",
+        call_action=PlayerAction.CALL,
+        board_line="🃏 Board: A♠     K♦     5♣",
+    )
+    view.update_turn_message = AsyncMock(return_value=turn_update)
+    view.update_player_anchor = AsyncMock(side_effect=["anchor-1", "anchor-2"])
+
+    asyncio.run(model._send_turn_message(game, player, chat_id))
+
+    assert game.turn_message_id == 321
+    assert view.update_player_anchor.await_count == 2
+    calls = view.update_player_anchor.await_args_list
+    active_calls = [call for call in calls if call.kwargs["active"]]
+    assert len(active_calls) == 1
+    assert active_calls[0].kwargs["player"].user_id == player.user_id
+
+
+def test_add_cards_to_table_updates_board_message_only():
+    model, game, player, view = _build_model_with_game()
+    chat_id = -601
+
+    view.send_message_return_id = AsyncMock(return_value=111)
+    view.update_player_anchor = AsyncMock()
 
     game.remain_cards = [Card("2♣"), Card("3♦"), Card("4♥")]
 
-    view.send_cards.reset_mock()
     asyncio.run(model.add_cards_to_table(3, game, chat_id, "🃏 فلاپ"))
 
-    assert view.send_message_return_id.await_count == 1
-    assert view.send_cards.await_count == 1
-
-    send_args = view.send_message_return_id.await_args
-    assert send_args.args[0] == chat_id
-    assert send_args.args[1] == "🃏 فلاپ"
-    assert send_args.kwargs.get("reply_markup") is None
-
-    call_kwargs = view.send_cards.await_args.kwargs
-    assert call_kwargs["hide_hand_text"] is True
-    assert call_kwargs["table_cards"] == game.cards_table
-    assert call_kwargs["ready_message_id"] == player.ready_message_id
-    assert "message_id" not in call_kwargs
-
-    assert game.board_message_id == 101
-    assert 101 in game.message_ids_to_delete
-    assert view.delete_message.await_count == 0
-
-
-def test_add_cards_to_table_replaces_player_keyboard_message():
-    model, game, player, view = _build_model_with_game()
-    chat_id = -301
-    view.send_cards = AsyncMock(side_effect=["msg-1", "msg-1"])
-    view.delete_message = AsyncMock()
-    view.send_message_return_id = AsyncMock(return_value=222)
-
-    asyncio.run(model._divide_cards(game, chat_id))
-
-    assert player.cards_keyboard_message_id == "msg-1"
-    assert "msg-1" in game.message_ids_to_delete
-
-    asyncio.run(
-        model.add_cards_to_table(
-            0,
-            game,
-            chat_id,
-            "🃏 میز",
-        )
-    )
-
-    assert view.send_cards.await_count == 2
-    second_call_kwargs = view.send_cards.await_args_list[1].kwargs
-    assert second_call_kwargs["message_id"] == "msg-1"
-    assert player.cards_keyboard_message_id == "msg-1"
-    assert view.delete_message.await_count == 0
-    assert game.message_ids_to_delete.count("msg-1") == 1
-
-
-def test_divide_cards_sends_keyboard_without_tracking_message_id():
-    model, game, player, view = _build_model_with_game()
-    chat_id = -400
-    view.send_cards = AsyncMock(return_value=None)
-
-    asyncio.run(model._divide_cards(game, chat_id))
-
-    assert view.send_cards.await_count == 1
-    call_kwargs = view.send_cards.await_args.kwargs
-    assert "message_id" not in call_kwargs
-    assert call_kwargs["ready_message_id"] == player.ready_message_id
-    assert game.message_ids == {}
-
-
+    view.send_message_return_id.assert_awaited_once()
+    assert game.board_message_id == 111
+    assert 111 in game.message_ids_to_delete
+    view.update_player_anchor.assert_not_awaited()
 def test_clear_game_messages_deletes_player_card_messages():
     model, game, player, view = _build_model_with_game()
     chat_id = -500
     view.delete_message = AsyncMock()
-    view.send_cards = AsyncMock(return_value="keyboard-7")
 
-    asyncio.run(model._divide_cards(game, chat_id))
-
-    game.message_ids_to_delete.extend([888, 999])
+    player.cards_keyboard_message_id = "keyboard-7"
+    player.anchor_message = (chat_id, "keyboard-7")
+    game.message_ids_to_delete.extend(["keyboard-7", 888, 999])
     game.board_message_id = 321
     game.turn_message_id = 654
 
@@ -871,7 +855,7 @@ async def test_showdown_sends_new_hand_message_before_join_prompt():
 @pytest.mark.asyncio
 async def test_start_game_assigns_blinds_to_occupied_seats():
     view = _prepare_view_mock(MagicMock())
-    view.send_cards = AsyncMock()
+    view.update_player_anchor = AsyncMock()
     view.send_message = AsyncMock()
     view.delete_message = AsyncMock()
     bot = MagicMock()
@@ -932,7 +916,7 @@ async def test_start_game_assigns_blinds_to_occupied_seats():
 @pytest.mark.asyncio
 async def test_start_game_keeps_ready_message_id_when_deletion_fails():
     view = _prepare_view_mock(MagicMock())
-    view.send_cards = AsyncMock()
+    view.update_player_anchor = AsyncMock()
     view.send_message = AsyncMock()
     view.delete_message = AsyncMock(side_effect=BadRequest("not found"))
     bot = MagicMock()
@@ -978,7 +962,14 @@ def test_send_turn_message_updates_existing_message():
     game.turn_message_id = 111
     game.last_actions = ["action"]
 
-    view.update_turn_message = AsyncMock(return_value=222)
+    view.update_turn_message = AsyncMock(
+        return_value=TurnMessageUpdate(
+            message_id=222,
+            call_label="CALL",
+            call_action=PlayerAction.CALL,
+            board_line="line",
+        )
+    )
 
     asyncio.run(model._send_turn_message(game, player, chat_id))
 
@@ -1001,7 +992,14 @@ def test_send_turn_message_keeps_previous_when_new_message_missing():
     game.turn_message_id = 333
     game.last_actions = ["action"]
 
-    view.update_turn_message = AsyncMock(return_value=None)
+    view.update_turn_message = AsyncMock(
+        return_value=TurnMessageUpdate(
+            message_id=None,
+            call_label="CALL",
+            call_action=PlayerAction.CALL,
+            board_line="line",
+        )
+    )
 
     asyncio.run(model._send_turn_message(game, player, chat_id))
 

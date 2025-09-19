@@ -50,6 +50,14 @@ _CARD_SPACER = "     "
 
 
 @dataclass(slots=True)
+class TurnMessageUpdate:
+    message_id: Optional[MessageId]
+    call_label: str
+    call_action: PlayerAction
+    board_line: str
+
+
+@dataclass(slots=True)
 class _CacheRecord:
     value: bool
     timestamp: float
@@ -96,6 +104,37 @@ class _TimedLRUCache(LRUCache):
 
 class PokerBotViewer:
     _ZERO_WIDTH_SPACE = "\u2063"
+    _INVISIBLE_CHARS = {
+        "\u200b",  # zero width space
+        "\u200c",  # zero width non-joiner
+        "\u200d",  # zero width joiner
+        "\u200e",  # left-to-right mark
+        "\u200f",  # right-to-left mark
+        "\u2060",  # word joiner
+        "\u2061",
+        "\u2062",
+        "\u2063",
+    }
+
+    @classmethod
+    def _has_visible_text(cls, text: str) -> bool:
+        if not text:
+            return False
+        for char in text:
+            if char.isspace():
+                continue
+            if char in cls._INVISIBLE_CHARS:
+                continue
+            return True
+        return False
+
+    @staticmethod
+    def _log_skip_empty(chat_id: ChatId, message_id: Optional[MessageId]) -> None:
+        logger.info(
+            "SKIP SEND: empty or invisible content for %s, msg %s",
+            chat_id,
+            message_id,
+        )
 
     @staticmethod
     def _build_hidden_mention(mention_markdown: Optional[Mention]) -> str:
@@ -233,6 +272,10 @@ class PokerBotViewer:
             )
             return message_id
 
+        if not self._has_visible_text(normalized_text):
+            self._log_skip_empty(chat_id, message_id)
+            return message_id
+
         payload_hash = self._payload_hash(normalized_text, reply_markup)
         normalized_chat = self._safe_int(chat_id)
         normalized_message = (
@@ -311,6 +354,58 @@ class PokerBotViewer:
     @classmethod
     def _format_card_line(cls, label: str, cards: Sequence[Card]) -> str:
         return f"{label}: {cls._render_cards(cards)}"
+
+    @classmethod
+    def _build_anchor_text(
+        cls,
+        *,
+        mention_markdown: Mention,
+        seat_number: int,
+        role_label: str,
+        board_cards: Sequence[Card],
+    ) -> str:
+        lines = [
+            f"🎮 {mention_markdown}",
+            f"🪑 صندلی: `{seat_number}`",
+            f"🎖️ نقش: {role_label}",
+        ]
+        board_line = cls._format_card_line("🃏 Board", board_cards)
+        lines.extend(["", board_line])
+        return "\n".join(lines)
+
+    async def update_player_anchor(
+        self,
+        *,
+        chat_id: ChatId,
+        player: Player,
+        seat_number: int,
+        role_label: str,
+        board_cards: Sequence[Card],
+        active: bool,
+        call_label: str,
+        call_action: PlayerAction,
+        message_id: Optional[MessageId] = None,
+    ) -> Optional[MessageId]:
+        text = self._build_anchor_text(
+            mention_markdown=player.mention_markdown,
+            seat_number=seat_number,
+            role_label=role_label,
+            board_cards=board_cards,
+        )
+        reply_markup = (
+            self._build_turn_keyboard(call_label, call_action)
+            if active
+            else None
+        )
+        return await self._update_message(
+            chat_id=chat_id,
+            message_id=message_id,
+            text=text,
+            reply_markup=reply_markup,
+            parse_mode=ParseMode.MARKDOWN,
+            disable_web_page_preview=True,
+            disable_notification=message_id is not None,
+        )
 
     async def announce_player_seats(
         self,
@@ -396,6 +491,9 @@ class PokerBotViewer:
                 extra={"context": context},
             )
             return None
+        if not self._has_visible_text(normalized_text):
+            self._log_skip_empty(chat_id, None)
+            return None
         try:
             message = await self._messenger.send_message(
                 chat_id=chat_id,
@@ -437,6 +535,9 @@ class PokerBotViewer:
                 "Skipping send_message due to invalid text",
                 extra={"context": context},
             )
+            return None
+        if not self._has_visible_text(normalized_text):
+            self._log_skip_empty(chat_id, None)
             return None
         try:
             message = await self._messenger.send_message(
@@ -520,6 +621,9 @@ class PokerBotViewer:
                 extra={"context": context},
             )
             return
+        if not self._has_visible_text(normalized_text):
+            self._log_skip_empty(chat_id, message_id)
+            return
         try:
             await self._messenger.send_message(
                 chat_id=chat_id,
@@ -563,6 +667,9 @@ class PokerBotViewer:
                 "Skipping edit_message_text due to invalid text",
                 extra={"context": context},
             )
+            return None
+        if not self._has_visible_text(normalized_text):
+            self._log_skip_empty(chat_id, message_id)
             return None
         try:
             result = await self._messenger.edit_message_text(
@@ -782,264 +889,6 @@ class PokerBotViewer:
         return None
 
     @staticmethod
-    def _derive_stage_from_table(table_cards: Cards, stage: Optional[str] = None) -> str:
-        """Infer the current poker street from the number of table cards.
-
-        When an explicit ``stage`` value is provided it takes precedence. This
-        helper guarantees a consistent stage string (``preflop``, ``flop``,
-        ``turn`` or ``river``) so that all keyboards use the same labelling.
-        """
-
-        if stage:
-            return stage
-
-        cards_count = len(table_cards)
-        if cards_count >= 5:
-            return "river"
-        if cards_count == 4:
-            return "turn"
-        if cards_count >= 3:
-            return "flop"
-        return "preflop"
-
-    @staticmethod
-    def _get_table_markup(
-        table_cards: Cards, stage: Optional[str] = None
-    ) -> ReplyKeyboardMarkup:
-        """Creates a keyboard displaying table cards and stage buttons."""
-
-        resolved_stage = PokerBotViewer._derive_stage_from_table(table_cards, stage)
-        cards_row = [str(card) for card in table_cards] if table_cards else ["❔"]
-
-        stage_map = {
-            "preflop": "پری فلاپ",
-            "flop": "فلاپ",
-            "turn": "ترن",
-            "river": "ریور",
-        }
-
-        stages = [
-            stage_map["preflop"],
-            stage_map["flop"],
-            stage_map["turn"],
-            stage_map["river"],
-        ]
-
-        stages = [
-            (f"✅ {label}" if label == stage_map.get(resolved_stage, label) else label)
-            for label in stages
-        ]
-
-        return ReplyKeyboardMarkup(
-            keyboard=[cards_row, stages],
-            selective=False,
-            resize_keyboard=True,
-            one_time_keyboard=False,
-        )
-
-    @staticmethod
-    def _get_hand_and_board_markup(
-        hand: Cards, table_cards: Cards, stage: Optional[str] = None
-    ) -> ReplyKeyboardMarkup:
-        """Combine player's hand, table cards and stage buttons in one keyboard.
-
-        این کیبورد در پیام نامرئی گروه برای هر بازیکن استفاده می‌شود تا او هم‌زمان
-        دست و کارت‌های میز را در منوی کیبوردی ببیند بدون آن‌که پیام قابل مشاهده‌ای
-        در گروه باقی بماند. ردیف سوم مراحل بازی را برای ناوبری سریع نگه می‌دارد.
-        """
-
-        resolved_stage = PokerBotViewer._derive_stage_from_table(table_cards, stage)
-        hand_row = [str(c) for c in hand]
-        table_row = [str(c) for c in table_cards] if table_cards else ["❔"]
-
-        stage_map = {
-            "preflop": "پری فلاپ",
-            "flop": "فلاپ",
-            "turn": "ترن",
-            "river": "ریور",
-        }
-        stages = [
-            stage_map["preflop"],
-            stage_map["flop"],
-            stage_map["turn"],
-            stage_map["river"],
-        ]
-        stage_row = []
-        for s in stages:
-            label = f"🔁 {s}"
-            if stage_map.get(resolved_stage) == s:
-                label = f"✅ {s}"
-            stage_row.append(label)
-
-        return ReplyKeyboardMarkup(
-            keyboard=[hand_row, table_row, stage_row],
-            selective=True,
-            resize_keyboard=True,
-            one_time_keyboard=False,
-        )
-
-    async def send_cards(
-            self,
-            chat_id: ChatId,
-            cards: Cards,
-            mention_markdown: Mention,
-            ready_message_id: str | None = None,
-            table_cards: Cards | None = None,
-            hide_hand_text: bool = False,
-            stage: str = "",
-            message_id: MessageId | None = None,
-            reply_to_ready_message: bool = True,
-    ) -> Optional[MessageId]:
-        resolved_stage = PokerBotViewer._derive_stage_from_table(table_cards or [], stage)
-        markup = self._get_hand_and_board_markup(
-            cards, table_cards or [], resolved_stage
-        )
-        if hide_hand_text:
-            hidden_mention = PokerBotViewer._build_hidden_mention(mention_markdown)
-            if hidden_mention:
-                hidden_text = hidden_mention + PokerBotViewer._ZERO_WIDTH_SPACE
-            else:
-                hidden_text = PokerBotViewer._ZERO_WIDTH_SPACE
-
-            context_hidden = self._build_context(
-                "send_cards_hidden", chat_id=chat_id, message_id=message_id
-            )
-            normalized_hidden_text = self._validator.normalize_text(
-                hidden_text,
-                parse_mode=ParseMode.MARKDOWN,
-                context=context_hidden,
-            )
-            if normalized_hidden_text is None:
-                logger.warning(
-                    "Skipping hidden cards update due to invalid text",
-                    extra={"context": context_hidden},
-                )
-                return None
-
-            if message_id:
-                edited_id = await self.edit_message_text(
-                    chat_id=chat_id,
-                    message_id=message_id,
-                    text=normalized_hidden_text,
-                    reply_markup=markup,
-                    parse_mode=ParseMode.MARKDOWN,
-                    disable_web_page_preview=True,
-                )
-                if edited_id:
-                    return edited_id
-
-            try:
-                reply_kwargs = {}
-                if reply_to_ready_message and ready_message_id and not message_id:
-                    reply_kwargs["reply_to_message_id"] = ready_message_id
-                message = await self._messenger.send_message(
-                    chat_id=chat_id,
-                    text=normalized_hidden_text,
-                    reply_markup=markup,
-                    parse_mode=ParseMode.MARKDOWN,
-                    disable_notification=True,
-                    **reply_kwargs,
-                )
-
-                new_message_id: Optional[MessageId] = (
-                    getattr(message, "message_id", None) if message else None
-                )
-
-                if message_id and new_message_id and new_message_id != message_id:
-                    try:
-                        await self.delete_message(chat_id, message_id)
-                    except Exception:
-                        logger.debug(
-                            "Failed to delete previous hidden cards message",
-                            extra={
-                                "chat_id": chat_id,
-                                "request_params": {"message_id": message_id},
-                            },
-                        )
-
-                if new_message_id:
-                    return new_message_id
-            except Exception as e:
-                logger.error(
-                    "Error sending hidden cards keyboard",
-                    extra={
-                        "error_type": type(e).__name__,
-                        "chat_id": chat_id,
-                    },
-                )
-            return None
-
-        message_body = (
-            f"{self._format_card_line('🃏 دست', cards)}\n"
-            f"{self._format_card_line('🃎 میز', table_cards or [])}"
-        )
-        message_text = f"{mention_markdown}\n{message_body}"
-
-        context_visible = self._build_context(
-            "send_cards", chat_id=chat_id, message_id=message_id
-        )
-        normalized_message_text = self._validator.normalize_text(
-            message_text,
-            parse_mode=ParseMode.MARKDOWN,
-            context=context_visible,
-        )
-        if normalized_message_text is None:
-            logger.warning(
-                "Skipping visible cards message due to invalid text",
-                extra={"context": context_visible},
-            )
-            return None
-
-        if message_id:
-            updated_id = await self.edit_message_text(
-                chat_id=chat_id,
-                message_id=message_id,
-                text=normalized_message_text,
-                reply_markup=markup,
-                parse_mode=ParseMode.MARKDOWN,
-            )
-            if updated_id:
-                return updated_id
-
-        try:
-            reply_kwargs = {}
-            if reply_to_ready_message and ready_message_id and not message_id:
-                reply_kwargs["reply_to_message_id"] = ready_message_id
-            message = await self._messenger.send_message(
-                chat_id=chat_id,
-                text=normalized_message_text,
-                reply_markup=markup,
-                parse_mode=ParseMode.MARKDOWN,
-                disable_notification=True,
-                **reply_kwargs,
-            )
-            new_message_id: Optional[MessageId] = getattr(message, "message_id", None)
-
-            if message_id and new_message_id and new_message_id != message_id:
-                try:
-                    await self.delete_message(chat_id, message_id)
-                except Exception:
-                    logger.debug(
-                        "Failed to delete previous cards message",
-                        extra={
-                            "chat_id": chat_id,
-                            "request_params": {"message_id": message_id},
-                        },
-                    )
-
-            if new_message_id:
-                return new_message_id
-        except Exception as e:
-            logger.error(
-                "Error sending cards",
-                extra={
-                    "error_type": type(e).__name__,
-                    "chat_id": chat_id,
-                },
-            )
-        return None
-
-    @staticmethod
     def define_check_call_action(game: Game, player: Player) -> PlayerAction:
         if player.round_rate >= game.max_round_rate:
             return PlayerAction.CHECK
@@ -1054,7 +903,7 @@ class PokerBotViewer:
         money: Money,
         message_id: Optional[MessageId] = None,
         recent_actions: Optional[List[str]] = None,
-    ) -> Optional[MessageId]:
+    ) -> TurnMessageUpdate:
         """Send or edit the persistent turn message for the active player."""
 
         call_amount = max(game.max_round_rate - player.round_rate, 0)
@@ -1064,7 +913,6 @@ class PokerBotViewer:
             if call_action == PlayerAction.CALL and call_amount > 0
             else call_action.value
         )
-        keyboard = self._build_turn_keyboard(call_text, call_action)
 
         seat_number = (player.seat_index or 0) + 1
         board_line = self._format_card_line("🃏 Board", game.cards_table)
@@ -1078,7 +926,7 @@ class PokerBotViewer:
             f"🎲 **بِت فعلی شما:** `{player.round_rate}$`",
             f"📈 **حداکثر شرط این دور:** `{game.max_round_rate}$`",
             "",
-            "⬇️ حرکت خود را انتخاب کنید:",
+            "⬇️ دکمه‌های نوبت شما در پیام اختصاصی فعال شده‌اند.",
         ]
 
         history = list(
@@ -1091,14 +939,21 @@ class PokerBotViewer:
 
         text = "\n".join(info_lines)
 
-        return await self._update_message(
+        new_message_id = await self._update_message(
             chat_id=chat_id,
             message_id=message_id,
             text=text,
-            reply_markup=keyboard,
+            reply_markup=None,
             parse_mode=ParseMode.MARKDOWN,
             disable_web_page_preview=True,
             disable_notification=message_id is not None,
+        )
+
+        return TurnMessageUpdate(
+            message_id=new_message_id,
+            call_label=call_text,
+            call_action=call_action,
+            board_line=board_line,
         )
 
     @staticmethod
@@ -1300,8 +1155,8 @@ class PokerBotViewer:
                 final_message += "\n" # یک خط فاصله برای جداسازی پات‌ها
 
         final_message += "⎯" * 20 + "\n"
-        board_cards = self._render_cards(game.cards_table)
-        final_message += f"🃏 *کارت‌های روی میز:* {board_cards}\n\n"
+        board_line = self._format_card_line("🃏 Board", game.cards_table)
+        final_message += f"{board_line}\n\n"
 
         final_message += "🤚 *کارت‌های سایر بازیکنان:*\n"
         all_players_in_hand = game.players_by(states=(PlayerState.ACTIVE, PlayerState.ALL_IN, PlayerState.FOLD))
