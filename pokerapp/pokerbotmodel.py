@@ -931,6 +931,8 @@ class PokerBotModel:
                     text,
                     reply_markup=keyboard,
                     log_context="countdown",
+                    request_category="countdown",
+                    request_reserved=True,
                 )
                 if new_message_id is None:
                     if message_id and message_id in game.message_ids_to_delete:
@@ -1081,6 +1083,8 @@ class PokerBotModel:
         reply_markup: Optional[InlineKeyboardMarkup | ReplyKeyboardMarkup] = None,
         parse_mode: str = ParseMode.MARKDOWN,
         log_context: Optional[str] = None,
+        request_category: Optional[str] = None,
+        request_reserved: bool = False,
     ) -> Optional[MessageId]:
         """
         Safely edit a message's text, retrying on rate limits and
@@ -1112,6 +1116,8 @@ class PokerBotModel:
                 text=text,
                 reply_markup=reply_markup,
                 parse_mode=parse_mode,
+                request_category=request_category,
+                request_reserved=request_reserved,
             )
         except RetryAfter as exc:
             await asyncio.sleep(exc.retry_after)
@@ -1121,6 +1127,8 @@ class PokerBotModel:
                 text=text,
                 reply_markup=reply_markup,
                 parse_mode=parse_mode,
+                request_category=request_category,
+                request_reserved=request_reserved,
             )
         except BadRequest as exc:
             error_message = getattr(exc, "message", None) or str(exc)
@@ -2300,6 +2308,8 @@ class PokerBotModel:
                         street_name,
                         reply_markup=None,
                         parse_mode=ParseMode.MARKDOWN,
+                        request_category="stage",
+                        request_reserved=True,
                     )
                 else:
                     new_msg_id = game.board_message_id
