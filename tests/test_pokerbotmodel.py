@@ -25,7 +25,6 @@ from pokerapp.pokerbotmodel import (
     STOP_CONFIRM_CALLBACK,
     STOP_RESUME_CALLBACK,
 )
-from pokerapp.pokerbotview import RateLimitedSender
 from telegram.error import BadRequest
 from telegram import InlineKeyboardMarkup
 
@@ -540,19 +539,7 @@ async def test_auto_start_tick_finishes_without_rate_limit_tail_sleep(monkeypatc
 
     model = PokerBotModel(view=view, bot=bot, cfg=cfg, kv=kv, table_manager=table_manager)
 
-    rate_limiter = RateLimitedSender(delay=0.5, max_per_minute=60)
-
-    async def limited_edit_message_text(chat_id_arg, message_id_arg, text, **kwargs):
-        assert chat_id_arg == chat_id
-        assert message_id_arg == 111
-
-        async def perform_edit():
-            return 111
-
-        await rate_limiter.send(perform_edit, chat_id=chat_id)
-        return 111
-
-    model._safe_edit_message_text = limited_edit_message_text
+    model._safe_edit_message_text = AsyncMock(return_value=111)
 
     sleep_calls: List[float] = []
 
@@ -568,6 +555,7 @@ async def test_auto_start_tick_finishes_without_rate_limit_tail_sleep(monkeypatc
     await model._auto_start_tick(context)
 
     assert sleep_calls == []
+    model._safe_edit_message_text.assert_awaited_once()
     assert context.chat_data["start_countdown"] == 2
     assert game.ready_message_main_text != "prompt"
     table_manager.save_game.assert_not_awaited()

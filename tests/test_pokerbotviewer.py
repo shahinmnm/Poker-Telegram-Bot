@@ -1,5 +1,4 @@
 import asyncio
-import json
 import logging
 from unittest.mock import AsyncMock, MagicMock
 
@@ -30,28 +29,37 @@ def _row_texts(row):
     return [getattr(button, "text", button) for button in row]
 
 
-def test_pokerbotviewer_uses_configured_rate_limit():
+def test_pokerbotviewer_tracks_legacy_rate_limit_settings():
     default_viewer = PokerBotViewer(bot=MagicMock())
-    assert default_viewer._rate_limiter._max_tokens == DEFAULT_RATE_LIMIT_PER_MINUTE
-    assert default_viewer._rate_limiter._delay == pytest.approx(
-        1 / DEFAULT_RATE_LIMIT_PER_SECOND
+    assert (
+        default_viewer._legacy_rate_limit_per_minute
+        == DEFAULT_RATE_LIMIT_PER_MINUTE
+    )
+    assert (
+        default_viewer._legacy_rate_limit_per_second
+        == DEFAULT_RATE_LIMIT_PER_SECOND
     )
 
     viewer = PokerBotViewer(bot=MagicMock(), rate_limit_per_minute=123)
 
-    assert viewer._rate_limiter._max_tokens == 123
-    assert viewer._rate_limiter._refill_rate == 123 / 60.0
+    assert viewer._legacy_rate_limit_per_minute == 123
+    assert viewer._legacy_rate_limit_per_second == DEFAULT_RATE_LIMIT_PER_SECOND
 
     fast_viewer = PokerBotViewer(
-        bot=MagicMock(), rate_limit_per_minute=120, rate_limit_per_second=3
+        bot=MagicMock(),
+        rate_limit_per_minute=120,
+        rate_limit_per_second=3,
+        rate_limiter_delay=0.25,
     )
 
-    assert fast_viewer._rate_limiter._delay == pytest.approx(1 / 3)
+    assert fast_viewer._legacy_rate_limit_per_minute == 120
+    assert fast_viewer._legacy_rate_limit_per_second == 3
+    assert fast_viewer._legacy_rate_limiter_delay == 0.25
 
 
 def test_delete_message_ignores_missing_message(caplog):
     viewer = PokerBotViewer(bot=MagicMock())
-    viewer._rate_limiter.send = AsyncMock(
+    viewer._bot.delete_message = AsyncMock(
         side_effect=BadRequest("Message to delete not found")
     )
 
@@ -67,7 +75,9 @@ def test_delete_message_ignores_missing_message(caplog):
 
 def test_delete_message_logs_warning_for_unexpected_bad_request(caplog):
     viewer = PokerBotViewer(bot=MagicMock())
-    viewer._rate_limiter.send = AsyncMock(side_effect=BadRequest("Some other error"))
+    viewer._bot.delete_message = AsyncMock(
+        side_effect=BadRequest("Some other error")
+    )
 
     with caplog.at_level(logging.WARNING):
         run(viewer.delete_message(chat_id=123, message_id=456))
@@ -80,7 +90,7 @@ def test_delete_message_logs_warning_for_unexpected_bad_request(caplog):
 
 def test_delete_message_ignores_forbidden_when_message_cannot_be_deleted(caplog):
     viewer = PokerBotViewer(bot=MagicMock())
-    viewer._rate_limiter.send = AsyncMock(
+    viewer._bot.delete_message = AsyncMock(
         side_effect=Forbidden("message can't be deleted")
     )
 
@@ -96,7 +106,7 @@ def test_delete_message_ignores_forbidden_when_message_cannot_be_deleted(caplog)
 
 def test_delete_message_logs_error_for_unexpected_exception(caplog):
     viewer = PokerBotViewer(bot=MagicMock())
-    viewer._rate_limiter.send = AsyncMock(side_effect=RuntimeError("boom"))
+    viewer._bot.delete_message = AsyncMock(side_effect=RuntimeError("boom"))
 
     with caplog.at_level(logging.ERROR):
         run(viewer.delete_message(chat_id=123, message_id=456))
@@ -107,37 +117,24 @@ def test_delete_message_logs_error_for_unexpected_exception(caplog):
     )
 
 
-def test_notify_admin_failure_does_not_deadlock():
+def test_notify_admin_failure_logs_error(caplog):
     viewer = PokerBotViewer(bot=MagicMock(), admin_chat_id=999)
-    viewer._rate_limiter._delay = 0
-    viewer._rate_limiter._error_delay = 0
+    viewer._bot.send_message = AsyncMock(side_effect=RuntimeError("boom"))
 
-    failing_call = AsyncMock(side_effect=RuntimeError("boom"))
-    viewer._bot.send_message = AsyncMock(return_value=MagicMock(message_id=1))
+    with caplog.at_level(logging.ERROR):
+        run(viewer.notify_admin({"event": "oops"}))
 
-    async def invoke_send():
-        return await viewer._rate_limiter.send(failing_call, chat_id=555)
-
-    result = run(asyncio.wait_for(invoke_send(), timeout=0.5))
-
-    assert result is None
-    assert viewer._bot.send_message.await_count == 2
-    chat_ids = {call.kwargs["chat_id"] for call in viewer._bot.send_message.await_args_list}
-    assert chat_ids == {999}
-    events = [json.loads(call.kwargs["text"])["event"] for call in viewer._bot.send_message.await_args_list]
-    assert events.count("rate_limiter_error") == 1
-    assert events.count("rate_limiter_failed") == 1
-
-
-async def _passthrough_rate_limit(func, *args, **kwargs):
-    return await func()
+    assert viewer._bot.send_message.await_count == 1
+    assert any(
+        record.levelno == logging.ERROR and "Failed to notify admin" in record.message
+        for record in caplog.records
+    )
 
 
 def test_send_cards_hides_group_hand_text_keeps_keyboard_message():
     viewer = PokerBotViewer(bot=MagicMock())
-    viewer._rate_limiter.send = _passthrough_rate_limit  # type: ignore[assignment]
     viewer._bot.send_message = AsyncMock(return_value=MagicMock(message_id=42))
-    viewer.delete_message = AsyncMock()
+    viewer._bot.delete_message = AsyncMock()
 
     cards = [Card("A♠"), Card("K♦")]
     table_cards = [Card("2♣"), Card("3♣"), Card("4♣")]
@@ -165,14 +162,13 @@ def test_send_cards_hides_group_hand_text_keeps_keyboard_message():
     assert _row_texts(markup.keyboard[0]) == ["A♠", "K♦"]
     assert _row_texts(markup.keyboard[1]) == ["2♣", "3♣", "4♣"]
     assert _row_texts(markup.keyboard[2]) == ["🔁 پری فلاپ", "✅ فلاپ", "🔁 ترن", "🔁 ریور"]
-    assert viewer.delete_message.await_count == 0
+    assert viewer._bot.delete_message.await_count == 0
 
 
 def test_send_cards_hidden_text_replies_to_ready_message():
     viewer = PokerBotViewer(bot=MagicMock())
-    viewer._rate_limiter.send = _passthrough_rate_limit  # type: ignore[assignment]
     viewer._bot.send_message = AsyncMock(return_value=MagicMock(message_id=99))
-    viewer.delete_message = AsyncMock()
+    viewer._bot.delete_message = AsyncMock()
 
     cards = [Card("A♠"), Card("K♦")]
 
@@ -190,12 +186,11 @@ def test_send_cards_hidden_text_replies_to_ready_message():
     call = viewer._bot.send_message.await_args
     assert call.kwargs["reply_to_message_id"] == "777"
     assert call.kwargs["text"] == HIDDEN_MENTION_TEXT
-    assert viewer.delete_message.await_count == 0
+    assert viewer._bot.delete_message.await_count == 0
 
 
 def test_send_cards_includes_hand_details_by_default():
     viewer = PokerBotViewer(bot=MagicMock())
-    viewer._rate_limiter.send = _passthrough_rate_limit  # type: ignore[assignment]
     viewer._bot.send_message = AsyncMock(return_value=MagicMock(message_id=24))
 
     cards = [Card("Q♥"), Card("J♥")]
@@ -234,7 +229,6 @@ def test_table_markup_excludes_show_table_button():
 
 def test_new_hand_ready_message_uses_reply_keyboard():
     viewer = PokerBotViewer(bot=MagicMock())
-    viewer._rate_limiter.send = _passthrough_rate_limit  # type: ignore[assignment]
     viewer._bot.send_message = AsyncMock()
 
     run(viewer.send_new_hand_ready_message(chat_id=987))
@@ -252,7 +246,6 @@ def test_new_hand_ready_message_uses_reply_keyboard():
 
 def test_send_message_uses_validated_payload():
     viewer = PokerBotViewer(bot=MagicMock())
-    viewer._rate_limiter.send = _passthrough_rate_limit  # type: ignore[assignment]
     viewer._bot.send_message = AsyncMock(return_value=MagicMock(message_id=7))
     viewer._validator.normalize_text = MagicMock(return_value="cleaned")
 
@@ -265,10 +258,10 @@ def test_send_message_uses_validated_payload():
 
 def test_send_message_skips_when_validation_fails():
     viewer = PokerBotViewer(bot=MagicMock())
-    viewer._rate_limiter.send = AsyncMock()
+    viewer._bot.send_message = AsyncMock()
     viewer._validator.normalize_text = MagicMock(return_value=None)
 
     result = run(viewer.send_message(chat_id=55, text="bad", parse_mode=ParseMode.MARKDOWN))
 
     assert result is None
-    assert viewer._rate_limiter.send.await_count == 0
+    assert viewer._bot.send_message.await_count == 0

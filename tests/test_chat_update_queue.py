@@ -13,21 +13,15 @@ class DummyBot:
         self.edit_message_text = AsyncMock()
 
 
-async def _immediate_send(func, *args, **kwargs):
-    return await func()
-
-
 def _build_viewer(debounce: float = 0.05) -> PokerBotViewer:
     bot = DummyBot()
-    viewer = PokerBotViewer(
+    return PokerBotViewer(
         bot,
         rate_limit_per_minute=600,
         rate_limit_per_second=600,
         rate_limiter_delay=0,
         update_debounce=debounce,
     )
-    viewer._rate_limiter.send = AsyncMock(side_effect=_immediate_send)
-    return viewer
 
 
 @pytest.mark.asyncio

@@ -2208,7 +2208,7 @@ class PokerBotModel:
                 player,
                 keyboard_message_id,
             )
-            await asyncio.sleep(0.1)
+            # Legacy pacing delay removed; cache-driven queuing now smooths bursts.
 
         # پس از ارسال/ویرایش تصویر میز، پیام نوبت باید آخرین پیام باشد
         if count == 0 and game.turn_message_id:
@@ -2359,7 +2359,7 @@ class PokerBotModel:
                     )
                     if attempt + 1 >= retries:
                         return
-                    await asyncio.sleep(0.1)
+                    # Background tasks now handle retries without manual pacing.
 
         contenders = game.players_by(states=(PlayerState.ACTIVE, PlayerState.ALL_IN))
 
@@ -2463,7 +2463,6 @@ class PokerBotModel:
         game.reset()
         await self._table_manager.save_game(chat_id, game)
 
-        await asyncio.sleep(0.1)
         await _send_with_retry(self._view.send_new_hand_ready_message, chat_id)
         await self._send_join_prompt(game, chat_id)
 

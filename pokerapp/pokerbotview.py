@@ -11,13 +11,12 @@ from telegram import (
 from telegram.constants import ParseMode
 from telegram.error import BadRequest, Forbidden, RetryAfter, TelegramError
 from io import BytesIO
-from typing import Optional, Callable, Awaitable, Dict, Any, List, Deque, Tuple
+from typing import Optional, Dict, Any, Deque, Tuple, List
 from dataclasses import dataclass, field
-from collections import defaultdict, deque
+from collections import deque
 import asyncio
 import logging
 import json
-import time
 from pokerapp.config import DEFAULT_RATE_LIMIT_PER_MINUTE, DEFAULT_RATE_LIMIT_PER_SECOND
 from pokerapp.winnerdetermination import HAND_NAMES_TRANSLATIONS
 from pokerapp.desk import DeskImageGenerator
@@ -38,161 +37,6 @@ from pokerapp.utils.cache import MessagePayload, MessageStateCache
 
 
 logger = logging.getLogger(__name__)
-
-
-class RateLimitedSender:
-    """Serializes Telegram requests with per-chat rate limiting.
-
-    A simple token-bucket is maintained for each chat to ensure that no more
-    than ``max_per_minute`` messages are sent within a rolling minute. When the
-    bucket is close to exhaustion, an additional delay is injected between
-    messages to reduce the likelihood of hitting Telegram's ``HTTP 429``. The
-    queue of pending messages is preserved even when a ``RetryAfter`` error is
-    received.
-    """
-
-    def __init__(
-        self,
-        delay: Optional[float] = None,
-        *,
-        max_retries: int = 3,
-        error_delay: float = 0.1,
-        notify_admin: Optional[Callable[[Dict[str, Any]], Awaitable[None]]] = None,
-        max_per_minute: int = 20,
-        max_per_second: Optional[float] = None,
-    ):
-        self._global_lock = asyncio.Lock()
-        self._max_retries = max_retries
-        self._error_delay = error_delay
-        self._notify_admin = notify_admin
-        self._max_tokens = max_per_minute
-        self._refill_rate = max_per_minute / 60.0  # tokens per second
-        per_second_limit = max_per_second if max_per_second is not None else self._refill_rate
-        if per_second_limit <= 0:
-            computed_delay = 0.0
-        else:
-            computed_delay = 1.0 / per_second_limit
-        self._delay = delay if delay is not None else computed_delay
-        self._buckets: Dict[ChatId, Dict[str, float]] = {}
-        self._locks: Dict[ChatId, asyncio.Lock] = defaultdict(asyncio.Lock)
-        self._next_available_ts: Dict[ChatId, float] = defaultdict(float)
-
-    @dataclass
-    class _TokenPermit:
-        remaining: float
-        wait_before: float
-
-    def _get_lock(self, chat_id: Optional[ChatId]) -> asyncio.Lock:
-        if chat_id is None:
-            return self._global_lock
-        return self._locks[chat_id]
-
-    async def _wait_for_token(self, chat_id: ChatId) -> "RateLimitedSender._TokenPermit":
-        lock = self._get_lock(chat_id)
-        while True:
-            async with lock:
-                bucket = self._buckets.setdefault(
-                    chat_id, {"tokens": self._max_tokens, "ts": time.monotonic()}
-                )
-                now = time.monotonic()
-                elapsed = now - bucket["ts"]
-                bucket["tokens"] = min(
-                    self._max_tokens, bucket["tokens"] + elapsed * self._refill_rate
-                )
-                bucket["ts"] = now
-                if bucket["tokens"] >= 1:
-                    bucket["tokens"] -= 1
-                    remaining = bucket["tokens"]
-                    delay = self._delay
-                    if remaining < 5:
-                        shortage = max(0.0, 5 - remaining)
-                        delay += min(shortage * 0.2, 0.9)
-                    next_available = self._next_available_ts[chat_id]
-                    scheduled_time = max(now, next_available)
-                    wait_before = max(0.0, scheduled_time - now)
-                    cooldown = delay
-                    self._next_available_ts[chat_id] = scheduled_time + cooldown
-                    return RateLimitedSender._TokenPermit(
-                        remaining=remaining, wait_before=wait_before
-                    )
-                wait_time = (1 - bucket["tokens"]) / self._refill_rate
-            await asyncio.sleep(wait_time)
-
-    async def send(
-        self, func: Callable[..., Awaitable[Any]], *args, chat_id: Optional[ChatId] = None, **kwargs
-    ):
-        """Execute ``func`` with args, respecting per-chat limits and retrying."""
-        notifications: List[Dict[str, Any]] = []
-        error_to_raise: Optional[TelegramError] = None
-        should_notify_failure = False
-        should_return_none = False
-
-        attempts = 0
-        last_error: Optional[TelegramError] = None
-        while True:
-            permit: Optional[RateLimitedSender._TokenPermit] = None
-            if chat_id is not None:
-                permit = await self._wait_for_token(chat_id)
-                if permit.wait_before > 0:
-                    await asyncio.sleep(permit.wait_before)
-            try:
-                result = await func(*args, **kwargs)
-                return result
-            except RetryAfter as e:
-                await asyncio.sleep(e.retry_after)
-            except TelegramError as e:
-                if attempts >= self._max_retries:
-                    last_error = e
-                    should_notify_failure = True
-                    break
-                attempts += 1
-                await asyncio.sleep(self._error_delay)
-            except Exception as e:
-                logger.error(
-                    "Unexpected error in RateLimitedSender.send",
-                    extra={
-                        "error_type": type(e).__name__,
-                        "request_params": {"args": args, "kwargs": kwargs},
-                    },
-                )
-                if self._notify_admin:
-                    notifications.append(
-                        {
-                            "event": "rate_limiter_error",
-                            "error": str(e),
-                            "error_type": type(e).__name__,
-                        }
-                    )
-                last_error = e if isinstance(e, TelegramError) else None
-                should_notify_failure = True
-                if last_error is None:
-                    should_return_none = True
-                break
-        if should_notify_failure:
-            notifications.append(
-                {
-                    "event": "rate_limiter_failed",
-                    "request_params": {"args": str(args), "kwargs": str(kwargs)},
-                }
-            )
-            logger.warning(
-                "RateLimitedSender.send failed after retries",
-                extra={"request_params": {"args": args, "kwargs": kwargs}},
-            )
-            if last_error is not None:
-                error_to_raise = last_error
-            else:
-                should_return_none = True
-
-        if self._notify_admin:
-            for payload in notifications:
-                await self._notify_admin(payload)
-
-        if error_to_raise is not None:
-            raise error_to_raise
-
-        if should_return_none:
-            return None
 
 
 class ChatUpdateQueue:
@@ -234,13 +78,11 @@ class ChatUpdateQueue:
     def __init__(
         self,
         bot: Bot,
-        rate_limiter: RateLimitedSender,
         *,
         debounce_window: float = 0.3,
         message_cache: Optional[MessageStateCache] = None,
     ) -> None:
         self._bot = bot
-        self._rate_limiter = rate_limiter
         self._debounce = debounce_window
         self._chat_states: Dict[ChatId, ChatUpdateQueue._ChatState] = {}
         self._message_cache = message_cache or MessageStateCache()
@@ -319,16 +161,15 @@ class ChatUpdateQueue:
 
         async def _send(event_: MessageEditEvent) -> Optional[MessageId]:
             try:
-                response = await self._rate_limiter.send(
-                    lambda: self._bot.edit_message_text(
-                        chat_id=event_.chat_id,
-                        message_id=event_.message_id,
-                        text=event_.text,
-                        reply_markup=event_.reply_markup,
-                        parse_mode=event_.parse_mode,
-                        disable_web_page_preview=event_.disable_web_page_preview,
-                    ),
+                # The per-chat update queue now serializes edits, so we can
+                # invoke Telegram directly without the legacy rate limiter.
+                response = await self._bot.edit_message_text(
                     chat_id=event_.chat_id,
+                    message_id=event_.message_id,
+                    text=event_.text,
+                    reply_markup=event_.reply_markup,
+                    parse_mode=event_.parse_mode,
+                    disable_web_page_preview=event_.disable_web_page_preview,
                 )
                 if isinstance(response, Message):
                     return response.message_id
@@ -507,19 +348,16 @@ class PokerBotViewer:
         self._validator = TelegramPayloadValidator(
             logger_=logger.getChild("validation")
         )
-        self._rate_limiter = RateLimitedSender(
-            delay=rate_limiter_delay,
-            error_delay=0.1,
-            notify_admin=self.notify_admin,
-            max_per_minute=rate_limit_per_minute,
-            max_per_second=rate_limit_per_second,
-        )
+        # Legacy rate-limit parameters are accepted for compatibility but the
+        # message cache + async queue now handle duplicate suppression.
+        self._legacy_rate_limit_per_minute = rate_limit_per_minute
+        self._legacy_rate_limit_per_second = rate_limit_per_second
+        self._legacy_rate_limiter_delay = rate_limiter_delay
         self._message_cache = MessageStateCache(
             logger_=logger.getChild("message_cache")
         )
         self._update_queue = ChatUpdateQueue(
             bot,
-            self._rate_limiter,
             debounce_window=update_debounce,
             message_cache=self._message_cache,
         )
@@ -540,12 +378,10 @@ class PokerBotViewer:
             )
             return
         try:
-            await self._rate_limiter.send(
-                lambda: self._bot.send_message(
-                    chat_id=self._admin_chat_id,
-                    text=text,
-                ),
+            # Direct Telegram call; cache-based diffing keeps retries unnecessary.
+            await self._bot.send_message(
                 chat_id=self._admin_chat_id,
+                text=text,
             )
         except Exception as e:
             logger.error(
@@ -576,16 +412,13 @@ class PokerBotViewer:
             )
             return None
         try:
-            message = await self._rate_limiter.send(
-                lambda: self._bot.send_message(
-                    chat_id=chat_id,
-                    parse_mode=ParseMode.MARKDOWN,
-                    text=normalized_text,
-                    reply_markup=reply_markup,
-                    disable_notification=True,
-                    disable_web_page_preview=True,
-                ),
+            message = await self._bot.send_message(
                 chat_id=chat_id,
+                parse_mode=ParseMode.MARKDOWN,
+                text=normalized_text,
+                reply_markup=reply_markup,
+                disable_notification=True,
+                disable_web_page_preview=True,
             )
             if isinstance(message, Message):
                 await self.remember_text_payload(
@@ -628,16 +461,13 @@ class PokerBotViewer:
             )
             return None
         try:
-            message = await self._rate_limiter.send(
-                lambda: self._bot.send_message(
-                    chat_id=chat_id,
-                    parse_mode=parse_mode,
-                    text=normalized_text,
-                    reply_markup=reply_markup,
-                    disable_notification=True,
-                    disable_web_page_preview=True,
-                ),
+            message = await self._bot.send_message(
                 chat_id=chat_id,
+                parse_mode=parse_mode,
+                text=normalized_text,
+                reply_markup=reply_markup,
+                disable_notification=True,
+                disable_web_page_preview=True,
             )
             if isinstance(message, Message):
                 await self.remember_text_payload(
@@ -711,7 +541,8 @@ class PokerBotViewer:
                     disable_notification=True,
                 )
         try:
-            await self._rate_limiter.send(_send, chat_id=chat_id)
+            # Execute immediately; aiogram/PTB async stack manages throughput.
+            await _send()
         except Exception as e:
             logger.error(
                 "Error sending photo",
@@ -725,14 +556,11 @@ class PokerBotViewer:
             "send_dice_reply", chat_id=chat_id, message_id=message_id
         )
         try:
-            return await self._rate_limiter.send(
-                lambda: self._bot.send_dice(
-                    reply_to_message_id=message_id,
-                    chat_id=chat_id,
-                    disable_notification=True,
-                    emoji=emoji,
-                ),
+            return await self._bot.send_dice(
+                reply_to_message_id=message_id,
                 chat_id=chat_id,
+                disable_notification=True,
+                emoji=emoji,
             )
         except Exception as e:
             logger.error(
@@ -764,15 +592,12 @@ class PokerBotViewer:
             )
             return
         try:
-            await self._rate_limiter.send(
-                lambda: self._bot.send_message(
-                    reply_to_message_id=message_id,
-                    chat_id=chat_id,
-                    parse_mode=ParseMode.MARKDOWN,
-                    text=normalized_text,
-                    disable_notification=True,
-                ),
+            await self._bot.send_message(
+                reply_to_message_id=message_id,
                 chat_id=chat_id,
+                parse_mode=ParseMode.MARKDOWN,
+                text=normalized_text,
+                disable_notification=True,
             )
         except Exception as e:
             logger.error(
@@ -793,7 +618,7 @@ class PokerBotViewer:
         reply_markup: ReplyKeyboardMarkup = None,
         parse_mode: str = ParseMode.MARKDOWN,
     ) -> Optional[MessageId]:
-        """Edit a message's text using the rate limiter."""
+        """Edit a message's text using the async update queue."""
         context = self._build_context(
             "edit_message_text", chat_id=chat_id, message_id=message_id
         )
@@ -820,14 +645,9 @@ class PokerBotViewer:
     async def delete_message(
         self, chat_id: ChatId, message_id: MessageId
     ) -> None:
-        """Delete a message with rate limiting and basic error handling."""
+        """Delete a message while keeping the cache in sync."""
         try:
-            await self._rate_limiter.send(
-                lambda: self._bot.delete_message(
-                    chat_id=chat_id, message_id=message_id
-                ),
-                chat_id=chat_id,
-            )
+            await self._bot.delete_message(chat_id=chat_id, message_id=message_id)
             await self._message_cache.forget(chat_id, message_id)
         except (BadRequest, Forbidden) as e:
             error_message = getattr(e, "message", None) or str(e) or ""
@@ -881,13 +701,10 @@ class PokerBotViewer:
             bio.name = "card.png"
             im_card.save(bio, "PNG")
             bio.seek(0)
-            await self._rate_limiter.send(
-                lambda: self._bot.send_photo(
-                    chat_id=chat_id,
-                    photo=bio,
-                    disable_notification=disable_notification,
-                ),
+            await self._bot.send_photo(
                 chat_id=chat_id,
+                photo=bio,
+                disable_notification=disable_notification,
             )
         except Exception as e:
             logger.error(
@@ -926,16 +743,13 @@ class PokerBotViewer:
             bio = BytesIO(desk_bytes)
             bio.name = "desk.png"
             bio.seek(0)
-            message = await self._rate_limiter.send(
-                lambda: self._bot.send_photo(
-                    chat_id=chat_id,
-                    photo=bio,
-                    caption=normalized_caption,
-                    parse_mode=parse_mode,
-                    disable_notification=disable_notification,
-                    reply_markup=reply_markup,
-                ),
+            message = await self._bot.send_photo(
                 chat_id=chat_id,
+                photo=bio,
+                caption=normalized_caption,
+                parse_mode=parse_mode,
+                disable_notification=disable_notification,
+                reply_markup=reply_markup,
             )
             if isinstance(message, Message):
                 return message
@@ -985,14 +799,11 @@ class PokerBotViewer:
             media = InputMediaPhoto(
                 media=bio, caption=normalized_caption, parse_mode=parse_mode
             )
-            await self._rate_limiter.send(
-                lambda: self._bot.edit_message_media(
-                    chat_id=chat_id,
-                    message_id=message_id,
-                    media=media,
-                    reply_markup=reply_markup,
-                ),
+            await self._bot.edit_message_media(
                 chat_id=chat_id,
+                message_id=message_id,
+                media=media,
+                reply_markup=reply_markup,
             )
             return None
         except BadRequest:
@@ -1193,9 +1004,7 @@ class PokerBotViewer:
                         **reply_kwargs,
                     )
 
-                message = await self._rate_limiter.send(
-                    _send_keyboard, chat_id=chat_id
-                )
+                message = await _send_keyboard()
 
                 message_id = getattr(message, "message_id", None) if message else None
                 if message_id:
@@ -1263,17 +1072,14 @@ class PokerBotViewer:
                     **reply_kwargs,
                 )
 
-            message = await self._rate_limiter.send(_send, chat_id=chat_id)
+            message = await _send()
             new_message_id: Optional[MessageId] = getattr(message, "message_id", None)
 
             if message_id and new_message_id and new_message_id != message_id:
                 try:
-                    await self._rate_limiter.send(
-                        lambda: self._bot.delete_message(
-                            chat_id=chat_id,
-                            message_id=message_id,
-                        ),
+                    await self._bot.delete_message(
                         chat_id=chat_id,
+                        message_id=message_id,
                     )
                 except BadRequest:
                     # پیام ممکن است قبلاً حذف شده باشد؛ صرفاً ادامه می‌دهیم.
@@ -1379,15 +1185,12 @@ class PokerBotViewer:
             # پیام اصلی دیگر قابل ویرایش نیست، پیام جدید ارسال می‌کنیم
 
         try:
-            message = await self._rate_limiter.send(
-                lambda: self._bot.send_message(
-                    chat_id=chat_id,
-                    text=normalized_text,
-                    reply_markup=markup,
-                    parse_mode=ParseMode.MARKDOWN,
-                    disable_notification=False,  # player gets notification
-                ),
+            message = await self._bot.send_message(
                 chat_id=chat_id,
+                text=normalized_text,
+                reply_markup=markup,
+                parse_mode=ParseMode.MARKDOWN,
+                disable_notification=False,  # player gets notification
             )
             if isinstance(message, Message):
                 new_message_id = message.message_id
@@ -1400,12 +1203,9 @@ class PokerBotViewer:
                 )
                 if message_id:
                     try:
-                        await self._rate_limiter.send(
-                            lambda: self._bot.delete_message(
-                                chat_id=chat_id,
-                                message_id=message_id,
-                            ),
+                        await self._bot.delete_message(
                             chat_id=chat_id,
+                            message_id=message_id,
                         )
                     except BadRequest:
                         pass
@@ -1473,13 +1273,10 @@ class PokerBotViewer:
         if not message_id:
             return False
         try:
-            result = await self._rate_limiter.send(
-                lambda: self._bot.edit_message_reply_markup(
-                    chat_id=chat_id,
-                    message_id=message_id,
-                    reply_markup=reply_markup,
-                ),
+            result = await self._bot.edit_message_reply_markup(
                 chat_id=chat_id,
+                message_id=message_id,
+                reply_markup=reply_markup,
             )
             if isinstance(result, Message):
                 return True
@@ -1542,12 +1339,9 @@ class PokerBotViewer:
         if not message_id:
             return
         try:
-            await self._rate_limiter.send(
-                lambda: self._bot.edit_message_reply_markup(
-                    chat_id=chat_id,
-                    message_id=message_id,
-                ),
+            await self._bot.edit_message_reply_markup(
                 chat_id=chat_id,
+                message_id=message_id,
             )
         except BadRequest as e:
             err = str(e).lower()
@@ -1710,16 +1504,13 @@ class PokerBotViewer:
             selective=False,
         )
         try:
-            await self._rate_limiter.send(
-                lambda: self._bot.send_message(
-                    chat_id=chat_id,
-                    text=normalized_message,
-                    parse_mode=ParseMode.MARKDOWN,
-                    disable_notification=True,
-                    disable_web_page_preview=True,
-                    reply_markup=reply_keyboard,
-                ),
+            await self._bot.send_message(
                 chat_id=chat_id,
+                text=normalized_message,
+                parse_mode=ParseMode.MARKDOWN,
+                disable_notification=True,
+                disable_web_page_preview=True,
+                reply_markup=reply_keyboard,
             )
         except Exception as e:
             logger.error(
