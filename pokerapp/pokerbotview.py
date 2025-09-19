@@ -136,6 +136,10 @@ class ChatUpdateQueue:
         self._recent_edit_cache_lock = asyncio.Lock()
         self._category_locks: Dict[Tuple[int, str], asyncio.Lock] = {}
         self._category_locks_lock = asyncio.Lock()
+        self._last_sent_payloads: TTLCache[Tuple[int, int], str] = TTLCache(
+            maxsize=500, ttl=3
+        )
+        self._last_sent_lock = asyncio.Lock()
 
     def _serialize_markup(
         self, markup: Optional[InlineKeyboardMarkup | ReplyKeyboardMarkup]
@@ -170,6 +174,47 @@ class ChatUpdateQueue:
                 lock = asyncio.Lock()
                 self._category_locks[key] = lock
             return lock
+
+    @staticmethod
+    def _payload_cache_key(chat_id: ChatId, message_id: MessageId) -> Tuple[int, int]:
+        return int(chat_id), int(message_id)
+
+    async def _get_last_payload_hash(
+        self, chat_id: ChatId, message_id: MessageId
+    ) -> Optional[str]:
+        if not message_id:
+            return None
+        key = self._payload_cache_key(chat_id, message_id)
+        async with self._last_sent_lock:
+            return self._last_sent_payloads.get(key)
+
+    async def _remember_last_payload_hash(
+        self, chat_id: ChatId, message_id: MessageId, payload_hash: str
+    ) -> None:
+        if not message_id:
+            return
+        key = self._payload_cache_key(chat_id, message_id)
+        async with self._last_sent_lock:
+            self._last_sent_payloads[key] = payload_hash
+
+    async def forget_payload_hash(
+        self, chat_id: ChatId, message_id: MessageId
+    ) -> None:
+        if not message_id:
+            return
+        key = self._payload_cache_key(chat_id, message_id)
+        async with self._last_sent_lock:
+            self._last_sent_payloads.pop(key, None)
+
+    @staticmethod
+    def _calculate_payload_hash(
+        text: Optional[str], markup_hash: Optional[str], parse_mode: Optional[str]
+    ) -> str:
+        text_material = text or ""
+        markup_component = markup_hash or ""
+        parse_component = parse_mode or ""
+        text_hash_input = f"{text_material}|{markup_component}|{parse_component}"
+        return hashlib.sha256(text_hash_input.encode("utf-8")).hexdigest()
 
     async def _recent_edit_seen(
         self, chat_id: ChatId, message_id: MessageId, text_hash: str
@@ -227,11 +272,13 @@ class ChatUpdateQueue:
         budget_denied = False
         release_reserved = False
         category_lock: Optional[asyncio.Lock] = None
-        text_material = pending.text or ""
-        markup_component = pending.markup_hash or ""
-        parse_component = pending.parse_mode or ""
-        text_hash_input = f"{text_material}|{markup_component}|{parse_component}"
-        text_hash = hashlib.sha256(text_hash_input.encode("utf-8")).hexdigest()
+        markup_hash = pending.markup_hash
+        if markup_hash is None:
+            markup_hash = self._serialize_markup(pending.reply_markup)
+            pending.markup_hash = markup_hash
+        text_hash = self._calculate_payload_hash(
+            pending.text, markup_hash, pending.parse_mode
+        )
 
         event = MessageEditEvent(
             chat_id=pending.chat_id,
@@ -248,6 +295,23 @@ class ChatUpdateQueue:
             if category:
                 category_lock = await self._get_category_lock(pending.chat_id, category)
                 await category_lock.acquire()
+
+            last_payload_hash = await self._get_last_payload_hash(
+                pending.chat_id, pending.message_id
+            )
+            if last_payload_hash == text_hash:
+                logger.info(
+                    "Skipping edit: content unchanged",
+                    extra={
+                        "chat_id": pending.chat_id,
+                        "message_id": pending.message_id,
+                        "context": pending.context,
+                        "category": category,
+                    },
+                )
+                if category and request_reserved:
+                    release_reserved = True
+                return pending.message_id
 
             if await self._recent_edit_seen(
                 pending.chat_id, pending.message_id, text_hash
@@ -337,6 +401,11 @@ class ChatUpdateQueue:
             ):
                 release_reserved = True
 
+            if request_performed and result is not None:
+                await self._remember_last_payload_hash(
+                    pending.chat_id, result, text_hash
+                )
+
             return result
         finally:
             if category_lock:
@@ -358,6 +427,8 @@ class ChatUpdateQueue:
             text=text, markup_hash=markup_hash, parse_mode=parse_mode
         )
         await self._message_cache.update(chat_id, message_id, payload)
+        payload_hash = self._calculate_payload_hash(text, markup_hash, parse_mode)
+        await self._remember_last_payload_hash(chat_id, message_id, payload_hash)
 
     async def enqueue_text_edit(
         self,
@@ -894,6 +965,7 @@ class PokerBotViewer:
             self.cancel_pending_edit(chat_id, message_id)
             await self._bot.delete_message(chat_id=chat_id, message_id=message_id)
             await self._message_cache.forget(chat_id, message_id)
+            await self._update_queue.forget_payload_hash(chat_id, message_id)
         except (BadRequest, Forbidden) as e:
             error_message = getattr(e, "message", None) or str(e) or ""
             normalized_message = error_message.lower()
@@ -913,6 +985,7 @@ class PokerBotViewer:
                     },
                 )
                 await self._message_cache.forget(chat_id, message_id)
+                await self._update_queue.forget_payload_hash(chat_id, message_id)
                 return
             logger.warning(
                 "Failed to delete message",
