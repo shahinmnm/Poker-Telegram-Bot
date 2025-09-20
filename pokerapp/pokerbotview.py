@@ -22,6 +22,7 @@ from typing import (
 from dataclasses import dataclass
 import asyncio
 import hashlib
+import inspect
 import logging
 import json
 import time
@@ -217,6 +218,7 @@ class PokerBotViewer:
         self._message_update_locks: Dict[Tuple[int, int], asyncio.Lock] = {}
         self._message_update_guard = asyncio.Lock()
         self._message_payload_hashes: Dict[Tuple[int, int], str] = {}
+        self._callback_update_tokens: Dict[Tuple[int, int], Tuple[str, str]] = {}
 
     def _payload_hash(
         self,
@@ -248,6 +250,65 @@ class PokerBotViewer:
                 lock = asyncio.Lock()
                 self._message_update_locks[key] = lock
         return lock
+
+    @staticmethod
+    def _normalize_stage_name(stage: Optional[str]) -> str:
+        return stage if stage else "<unknown>"
+
+    def _detect_callback_context(self) -> Tuple[Optional[str], Optional[str]]:
+        try:
+            stack = inspect.stack(context=0)
+        except Exception:
+            return None, None
+
+        callback_id: Optional[str] = None
+        stage_name: Optional[str] = None
+        try:
+            for frame_info in stack:
+                locals_ = frame_info.frame.f_locals
+
+                if callback_id is None:
+                    callback = locals_.get("callback_query")
+                    if callback is None:
+                        update = locals_.get("update")
+                        if update is not None:
+                            callback = getattr(update, "callback_query", None)
+                    if callback is not None:
+                        raw_id = getattr(callback, "id", None) or getattr(
+                            callback, "query_id", None
+                        )
+                        if raw_id is None:
+                            data = getattr(callback, "data", None)
+                            if data is not None:
+                                raw_id = f"data:{data}"
+                        if raw_id is None:
+                            from_user = getattr(callback, "from_user", None)
+                            if from_user is not None:
+                                user_id = getattr(from_user, "id", None)
+                                if user_id is not None:
+                                    raw_id = f"user:{user_id}"
+                        if raw_id is not None:
+                            callback_id = str(raw_id)
+
+                if stage_name is None:
+                    game = locals_.get("game")
+                    if game is not None:
+                        state = getattr(game, "state", None)
+                        if state is not None:
+                            name = getattr(state, "name", None)
+                            if isinstance(name, str):
+                                stage_name = name
+                            else:
+                                stage_name = str(state)
+
+                if callback_id is not None and stage_name is not None:
+                    break
+
+            return callback_id, stage_name
+        except Exception:
+            return None, None
+        finally:
+            del stack
 
     async def _update_message(
         self,
@@ -292,6 +353,18 @@ class PokerBotViewer:
             if normalized_existing_message is not None
             else None
         )
+        callback_guard_key: Optional[Tuple[str, str]] = None
+        callback_stage_name = "<unknown>"
+        if message_id is not None:
+            callback_id, detected_stage = self._detect_callback_context()
+            if callback_id is not None:
+                callback_stage_name = self._normalize_stage_name(detected_stage)
+                callback_guard_key = (callback_id, callback_stage_name)
+                if (
+                    message_key is not None
+                    and self._callback_update_tokens.get(message_key) == callback_guard_key
+                ):
+                    return message_id
         cache_key: Tuple[int, int, str] = (
             normalized_chat,
             normalized_message,
@@ -309,6 +382,11 @@ class PokerBotViewer:
             if message_key is not None:
                 previous_hash = self._message_payload_hashes.get(message_key)
                 if previous_hash == payload_hash:
+                    return message_id
+                if (
+                    callback_guard_key is not None
+                    and self._callback_update_tokens.get(message_key) == callback_guard_key
+                ):
                     return message_id
             if message_id is not None and self._message_update_cache.get(cache_key):
                 return message_id
@@ -364,11 +442,14 @@ class PokerBotViewer:
             self._message_update_cache[cache_key] = True
             new_message_key = (normalized_chat, normalized_new_message)
             self._message_payload_hashes[new_message_key] = payload_hash
+            if callback_guard_key is not None:
+                self._callback_update_tokens[new_message_key] = callback_guard_key
             if (
                 message_key is not None
                 and new_message_key != message_key
             ):
                 self._message_payload_hashes.pop(message_key, None)
+                self._callback_update_tokens.pop(message_key, None)
             return new_message_id
 
     @staticmethod
