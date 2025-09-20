@@ -1688,7 +1688,7 @@ class PokerBotModel:
 
             action_str = "بازی شروع شد"
             game.last_actions.append(action_str)
-            if len(game.last_actions) > 4:
+            if len(game.last_actions) > 5:
                 game.last_actions.pop(0)
             if current_player:
                 await self._update_player_anchor_messages(
@@ -1926,7 +1926,7 @@ class PokerBotModel:
         current_player.state = PlayerState.FOLD
         action_str = f"{current_player.mention_markdown}: فولد"
         game.last_actions.append(action_str)
-        if len(game.last_actions) > 4:
+        if len(game.last_actions) > 5:
             game.last_actions.pop(0)
 
         next_player = await self._process_playing(chat_id, game, context)
@@ -1964,7 +1964,7 @@ class PokerBotModel:
         if amount > 0:
             action_str += f" {amount}$"
         game.last_actions.append(action_str)
-        if len(game.last_actions) > 4:
+        if len(game.last_actions) > 5:
             game.last_actions.pop(0)
 
         next_player = await self._process_playing(chat_id, game, context)
@@ -2007,7 +2007,7 @@ class PokerBotModel:
 
         action_str = f"{current_player.mention_markdown}: {action_text} {total_amount_to_bet}$"
         game.last_actions.append(action_str)
-        if len(game.last_actions) > 4:
+        if len(game.last_actions) > 5:
             game.last_actions.pop(0)
 
         next_player = await self._process_playing(chat_id, game, context)
@@ -2044,7 +2044,7 @@ class PokerBotModel:
 
         action_str = f"{current_player.mention_markdown}: آل-این {all_in_amount}$"
         game.last_actions.append(action_str)
-        if len(game.last_actions) > 4:
+        if len(game.last_actions) > 5:
             game.last_actions.pop(0)
 
         if current_player.round_rate > game.max_round_rate:
@@ -2230,47 +2230,11 @@ class PokerBotModel:
 
             if not send_message:
                 return
-
-            if not game.board_message_id:
-                msg_id = await self._view.send_message_return_id(
-                    chat_id, street_name, reply_markup=None
-                )
-                if msg_id:
-                    game.board_message_id = msg_id
-                    if msg_id not in game.message_ids_to_delete:
-                        game.message_ids_to_delete.append(msg_id)
-            else:
-                new_msg_id = await self._safe_edit_message_text(
-                    chat_id,
-                    game.board_message_id,
-                    street_name,
-                    reply_markup=None,
-                    parse_mode=ParseMode.MARKDOWN,
-                )
-                if new_msg_id is None:
-                    old_id = game.board_message_id
-                    if old_id and old_id in game.message_ids_to_delete:
-                        game.message_ids_to_delete.remove(old_id)
-                    game.board_message_id = None
-                    replacement_id = await self._view.send_message_return_id(
-                        chat_id, street_name, reply_markup=None
-                    )
-                    if replacement_id:
-                        game.board_message_id = replacement_id
-                        if replacement_id not in game.message_ids_to_delete:
-                            game.message_ids_to_delete.append(replacement_id)
-                elif new_msg_id != game.board_message_id:
-                    if game.board_message_id in game.message_ids_to_delete:
-                        game.message_ids_to_delete.remove(game.board_message_id)
-                    game.board_message_id = new_msg_id
-                    if new_msg_id not in game.message_ids_to_delete:
-                        game.message_ids_to_delete.append(new_msg_id)
-
-            # پس از ارسال/ویرایش تصویر میز، پیام نوبت باید آخرین پیام باشد
-            if count == 0 and game.turn_message_id:
-                current_player = self._current_turn_player(game)
-                if current_player:
-                    await self._send_turn_message(game, current_player, chat_id)
+            if game.board_message_id:
+                await self._view.delete_message(chat_id, game.board_message_id)
+                if game.board_message_id in game.message_ids_to_delete:
+                    game.message_ids_to_delete.remove(game.board_message_id)
+                game.board_message_id = None
 
     def _hand_name_from_score(self, score: int) -> str:
         """تبدیل عدد امتیاز به نام دست پوکر"""
@@ -2658,7 +2622,7 @@ class RoundRateModel:
                 f"💸 {player.mention_markdown} بلایند {blind_type} به مبلغ {amount}$ را پرداخت کرد."
             )
             game.last_actions.append(action_str)
-            if len(game.last_actions) > 4:
+            if len(game.last_actions) > 5:
                 game.last_actions.pop(0)
         except UserException as e:
             available_money = await player.wallet.value()

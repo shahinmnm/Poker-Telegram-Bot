@@ -16,6 +16,7 @@ documented coroutine methods.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import hashlib
 import json
 import logging
@@ -27,7 +28,7 @@ from typing import Any, Deque, Dict, List, Mapping, Optional, Sequence
 from aiogram import Bot
 from aiogram.exceptions import TelegramBadRequest
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, Message
-from cachetools import TTLCache
+from cachetools import LRUCache, TTLCache
 
 
 logger = logging.getLogger(__name__)
@@ -94,7 +95,17 @@ class TurnState:
     stack: int = 0
     current_bet: int = 0
     max_bet: int = 0
+    stage: Optional[str] = None
+    turn_indicator: Optional[str] = None
     notice: Optional[str] = None
+
+
+@dataclass(slots=True)
+class _PendingTurnEdit:
+    text: str
+    reply_markup: Any
+    payload_hash: str
+    countdown_tick: bool = False
 
 
 def _has_visible_text(text: Optional[str]) -> bool:
@@ -463,7 +474,14 @@ class PokerMessagingOrchestrator:
         self._anchors: Dict[int, AnchorMessage] = {}
         self._turn_message_id: Optional[int] = None
         self._turn_state = TurnState(notice=_DEFAULT_TURN_NOTICE)
-        self._actions: Deque[str] = deque(maxlen=3)
+        self._actions: Deque[str] = deque(maxlen=5)
+        self._turn_update_cache: LRUCache[tuple[int, int, str], bool] = LRUCache(
+            maxsize=256
+        )
+        self._turn_update_lock = asyncio.Lock()
+        self._turn_update_task: Optional[asyncio.Task] = None
+        self._turn_update_pending: Optional[_PendingTurnEdit] = None
+        self._turn_update_delay = 0.06
         self._voting_message_id: Optional[int] = None
         self._voting_players: List[str] = []
         self._voting_status: Dict[str, str] = {}
@@ -553,6 +571,7 @@ class PokerMessagingOrchestrator:
         self._anchors.clear()
         await self._request_manager.start()
         self._actions.clear()
+        await self._reset_turn_updates()
 
         for player in players:
             base_text = self._format_anchor_text(player)
@@ -606,11 +625,11 @@ class PokerMessagingOrchestrator:
             reply_markup=markup,
         )
 
-    async def update_turn_state(self, **updates: Any) -> None:
+    async def update_turn_state(self, *, countdown_tick: bool = False, **updates: Any) -> None:
         for key, value in updates.items():
             if hasattr(self._turn_state, key):
                 setattr(self._turn_state, key, value)
-        await self._refresh_turn_message()
+        await self._refresh_turn_message(countdown_tick=countdown_tick)
 
     async def record_action(self, description: str) -> None:
         description = description.strip()
@@ -633,11 +652,7 @@ class PokerMessagingOrchestrator:
         if summary:
             text = f"{text}\n\n" + "\n".join(summary)
         if self._turn_message_id is not None:
-            await self._request_manager.edit_message_text(
-                chat_id=self.chat_id,
-                message_id=self._turn_message_id,
-                text=text,
-            )
+            await self._schedule_turn_message_edit(text)
         await self._clear_hand_messages()
 
     async def cancel(self) -> None:
@@ -651,15 +666,81 @@ class PokerMessagingOrchestrator:
         await self._request_manager.close()
         self.state = GameState.WAITING
 
-    async def _refresh_turn_message(self) -> None:
+    async def _refresh_turn_message(self, *, countdown_tick: bool = False) -> None:
         if self._turn_message_id is None:
             return
         text = self._render_turn_text()
-        await self._request_manager.edit_message_text(
-            chat_id=self.chat_id,
-            message_id=self._turn_message_id,
+        await self._schedule_turn_message_edit(text, countdown_tick=countdown_tick)
+
+    async def _schedule_turn_message_edit(
+        self,
+        text: str,
+        reply_markup: Any = None,
+        *,
+        countdown_tick: bool = False,
+    ) -> None:
+        if self._turn_message_id is None:
+            return
+        payload_hash = _content_hash(text, reply_markup)
+        key = (self.chat_id, self._turn_message_id, payload_hash)
+        if not countdown_tick and key in self._turn_update_cache:
+            return
+        self._turn_update_pending = _PendingTurnEdit(
             text=text,
+            reply_markup=reply_markup,
+            payload_hash=payload_hash,
+            countdown_tick=countdown_tick,
         )
+        delay = 0.0 if countdown_tick else self._turn_update_delay
+        if self._turn_update_task is None or self._turn_update_task.done():
+            self._turn_update_task = asyncio.create_task(
+                self._flush_turn_updates(delay)
+            )
+        task = self._turn_update_task
+        if task is not None:
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
+
+    async def _flush_turn_updates(self, delay: float) -> None:
+        try:
+            if delay:
+                await asyncio.sleep(delay)
+            while True:
+                pending = self._turn_update_pending
+                if pending is None:
+                    break
+                self._turn_update_pending = None
+                message_id = self._turn_message_id
+                if message_id is None:
+                    break
+                key = (self.chat_id, message_id, pending.payload_hash)
+                if not pending.countdown_tick and key in self._turn_update_cache:
+                    continue
+                async with self._turn_update_lock:
+                    message_id = self._turn_message_id
+                    if message_id is None:
+                        break
+                    key = (self.chat_id, message_id, pending.payload_hash)
+                    if not pending.countdown_tick and key in self._turn_update_cache:
+                        continue
+                    await self._request_manager.edit_message_text(
+                        chat_id=self.chat_id,
+                        message_id=message_id,
+                        text=pending.text,
+                        reply_markup=pending.reply_markup,
+                    )
+                    self._turn_update_cache[key] = True
+        finally:
+            self._turn_update_task = None
+
+    async def _reset_turn_updates(self) -> None:
+        self._turn_update_pending = None
+        self._turn_update_cache.clear()
+        if self._turn_update_task and not self._turn_update_task.done():
+            with contextlib.suppress(asyncio.CancelledError):
+                self._turn_update_task.cancel()
+                await self._turn_update_task
+        self._turn_update_task = None
 
     def _render_turn_text(self) -> str:
         board = (
@@ -667,19 +748,28 @@ class PokerMessagingOrchestrator:
             if self._turn_state.board_cards
             else "—"
         )
-        lines = [
-            f"🃏 Board: {board}",
-            f"💰 Pot: {self._turn_state.pot}",
-            f"💵 Stack: {self._turn_state.stack}",
-            f"🎲 Bet: {self._turn_state.current_bet}",
-            f"📈 Max bet this round: {self._turn_state.max_bet}",
-        ]
+        lines: List[str] = []
+        indicator = self._turn_state.turn_indicator
+        if indicator:
+            lines.append(f"🎯 {indicator}")
+        stage = self._turn_state.stage or "Pre-Flop"
+        lines.append(f"🎰 مرحله بازی: {stage}")
+        lines.extend(
+            [
+                f"🃏 Board: {board}",
+                f"💰 Pot: {self._turn_state.pot}",
+                f"💵 Stack: {self._turn_state.stack}",
+                f"🎲 Bet: {self._turn_state.current_bet}",
+                f"📈 Max bet this round: {self._turn_state.max_bet}",
+            ]
+        )
         if self._turn_state.notice:
+            lines.append("")
             lines.append(f"⬇️ {self._turn_state.notice}")
         if self._actions:
             lines.append("")
             lines.append("🎬 اکشن‌های اخیر:")
-            for action in list(self._actions)[-3:]:
+            for action in list(self._actions)[-5:]:
                 lines.append(f"• {action}")
         return "\n".join(lines)
 
@@ -711,6 +801,7 @@ class PokerMessagingOrchestrator:
         return InlineKeyboardMarkup(inline_keyboard=rows)
 
     async def _clear_hand_messages(self) -> None:
+        await self._reset_turn_updates()
         for anchor in list(self._anchors.values()):
             if anchor.message_id is not None:
                 await self._request_manager.delete_message(
