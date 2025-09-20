@@ -973,8 +973,13 @@ class PokerBotViewer:
         reply_markup: ReplyKeyboardMarkup = None,
         parse_mode: str = ParseMode.MARKDOWN,
         disable_web_page_preview: bool = False,
+        request_category: RequestCategory = RequestCategory.GENERAL,
     ) -> Optional[MessageId]:
-        """Edit a message using the central ``MessagingService``."""
+        """Edit a message using the central ``MessagingService``.
+
+        Args:
+            request_category: Request category used for metrics and rate limiting.
+        """
         context = self._build_context(
             "edit_message_text", chat_id=chat_id, message_id=message_id
         )
@@ -998,7 +1003,7 @@ class PokerBotViewer:
                 message_id=message_id,
                 text=normalized_text,
                 reply_markup=reply_markup,
-                request_category=RequestCategory.GENERAL,
+                request_category=request_category,
                 parse_mode=parse_mode,
                 disable_web_page_preview=disable_web_page_preview,
             )
