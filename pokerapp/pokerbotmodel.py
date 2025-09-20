@@ -355,27 +355,6 @@ class PokerBotModel:
             reply_markup=self._build_private_menu(),
         )
 
-    async def _send_wallet_balance(
-        self, update: Update, context: ContextTypes.DEFAULT_TYPE
-    ) -> None:
-        chat = update.effective_chat
-        user = update.effective_user
-
-        if chat.type == chat.PRIVATE:
-            await self._register_player_identity(user, private_chat_id=chat.id)
-        else:
-            await self._register_player_identity(user)
-
-        wallet = WalletManagerModel(user.id, self._kv)
-        balance = await wallet.value()
-
-        reply_markup = self._build_private_menu() if chat.type == chat.PRIVATE else None
-        await self._view.send_message(
-            chat.id,
-            f"💰 موجودی فعلی شما: {balance}$",
-            reply_markup=reply_markup,
-        )
-
     async def _get_private_match_state(self, user_id: UserId) -> Dict[str, str]:
         key = self._private_user_key(user_id)
         data = await self._kv.hgetall(key)
@@ -1200,8 +1179,6 @@ class PokerBotModel:
                 board_cards=board_cards,
                 active=player.user_id == active_player.user_id,
                 message_id=existing_id,
-                player_cards=list(player.cards),
-                game_state=game.state,
             )
 
             if collect_active and request.active:
@@ -1215,8 +1192,6 @@ class PokerBotModel:
                     seat_number=request.seat_number,
                     role_label=request.role_label,
                     board_cards=request.board_cards,
-                    player_cards=request.player_cards,
-                    game_state=request.game_state,
                     active=request.active,
                     message_id=request.message_id,
                 )
@@ -2136,8 +2111,6 @@ class PokerBotModel:
                             seat_number=anchor_plan.seat_number,
                             role_label=anchor_plan.role_label,
                             board_cards=anchor_plan.board_cards,
-                            player_cards=anchor_plan.player_cards,
-                            game_state=anchor_plan.game_state,
                             active=True,
                             message_id=anchor_plan.message_id,
                         )
@@ -2606,43 +2579,13 @@ class PokerBotModel:
                 ids_to_delete.add(game.turn_message_id)
                 game.turn_message_id = None
 
-        for player in game.seated_players():
-            keyboard_message_id: Optional[MessageId] = None
-            if player.anchor_message and player.anchor_message[0] == chat_id:
-                keyboard_message_id = player.anchor_message[1]
-            elif getattr(player, "cards_keyboard_message_id", None):
-                keyboard_message_id = player.cards_keyboard_message_id
-
-            if keyboard_message_id:
-                ids_to_delete.discard(keyboard_message_id)
-                try:
-                    await self._view.update_player_anchor(
-                        chat_id=chat_id,
-                        player=player,
-                        seat_number=(player.seat_index or 0) + 1,
-                        role_label=getattr(player, "anchor_role", "بازیکن"),
-                        board_cards=list(game.cards_table),
-                        player_cards=list(player.cards),
-                        game_state=GameState.FINISHED,
-                        active=False,
-                        message_id=keyboard_message_id,
-                    )
-                except Exception as exc:
-                    logger.debug(
-                        "Failed to update inactive anchor",
-                        extra={
-                            "chat_id": chat_id,
-                            "message_id": keyboard_message_id,
-                            "error_type": type(exc).__name__,
-                        },
-                    )
-            if keyboard_message_id:
-                player.anchor_message = (chat_id, keyboard_message_id)
-                player.cards_keyboard_message_id = keyboard_message_id
-            else:
+            for player in game.seated_players():
+                keyboard_message_id = getattr(player, "cards_keyboard_message_id", None)
+                if keyboard_message_id:
+                    ids_to_delete.add(keyboard_message_id)
+                    player.cards_keyboard_message_id = None
                 player.anchor_message = None
-                player.cards_keyboard_message_id = None
-            player.anchor_role = "بازیکن"
+                player.anchor_role = "بازیکن"
 
             for message_id in ids_to_delete:
                 try:
