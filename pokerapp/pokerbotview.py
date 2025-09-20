@@ -46,6 +46,7 @@ from pokerapp.utils.messaging_service import MessagingService
 
 
 logger = logging.getLogger(__name__)
+debug_trace_logger = logging.getLogger("pokerbot.debug_trace")
 
 _CARD_SPACER = "     "
 
@@ -168,6 +169,8 @@ class PokerBotViewer:
         self._message_update_guard = asyncio.Lock()
         self._message_payload_hashes: Dict[Tuple[int, int], str] = {}
         self._last_callback_updates: Dict[Tuple[int, int, str, int], str] = {}
+        self._last_callback_edit: Dict[Tuple[int, str], str] = {}
+        self._last_message_hash: Dict[int, str] = {}
 
     def _payload_hash(
         self,
@@ -231,6 +234,16 @@ class PokerBotViewer:
         ]
         for key in to_remove:
             self._last_callback_updates.pop(key, None)
+
+        callback_throttle_keys = [
+            key
+            for key in self._last_callback_edit
+            if key[0] == normalized_message
+        ]
+        for key in callback_throttle_keys:
+            self._last_callback_edit.pop(key, None)
+
+        self._last_message_hash.pop(normalized_message, None)
 
     def _detect_callback_context(
         self,
@@ -332,6 +345,7 @@ class PokerBotViewer:
             return message_id
 
         payload_hash = self._payload_hash(normalized_text, reply_markup)
+        message_text_hash = hashlib.md5(normalized_text.encode("utf-8")).hexdigest()
         normalized_chat = self._safe_int(chat_id)
         normalized_existing_message = (
             self._safe_int(message_id) if message_id is not None else None
@@ -345,6 +359,7 @@ class PokerBotViewer:
         callback_stage_name = "<unknown>"
         callback_user_id: Optional[int] = None
         callback_token_key: Optional[Tuple[int, int, str, int]] = None
+        callback_throttle_key: Optional[Tuple[int, str]] = None
         if normalized_existing_message is not None:
             callback_id, detected_stage, detected_user_id = (
                 self._detect_callback_context()
@@ -358,6 +373,19 @@ class PokerBotViewer:
                     callback_stage_name,
                     callback_user_id,
                 )
+                callback_throttle_key = (
+                    normalized_existing_message,
+                    callback_stage_name,
+                )
+                last_callback_token = self._last_callback_edit.get(
+                    callback_throttle_key
+                )
+                if last_callback_token == callback_id:
+                    debug_trace_logger.info(
+                        f"Skipping editMessageText for message_id={message_id} "
+                        "(callback throttling)"
+                    )
+                    return message_id
                 if self._should_skip_callback_update(
                     callback_token_key, callback_id
                 ):
@@ -374,6 +402,15 @@ class PokerBotViewer:
                         },
                     )
                     return message_id
+        if normalized_existing_message is not None:
+            previous_text_hash = self._last_message_hash.get(
+                normalized_existing_message
+            )
+            if previous_text_hash == message_text_hash:
+                debug_trace_logger.info(
+                    f"Skipping editMessageText for message_id={message_id} (hash match)"
+                )
+                return message_id
         if message_key is not None:
             previous_hash = self._message_payload_hashes.get(message_key)
             if previous_hash == payload_hash:
@@ -395,6 +432,15 @@ class PokerBotViewer:
 
         lock = await self._acquire_message_lock(chat_id, message_id)
         async with lock:
+            if normalized_existing_message is not None:
+                previous_text_hash = self._last_message_hash.get(
+                    normalized_existing_message
+                )
+                if previous_text_hash == message_text_hash:
+                    debug_trace_logger.info(
+                        f"Skipping editMessageText for message_id={message_id} (hash match)"
+                    )
+                    return message_id
             if message_key is not None:
                 previous_hash = self._message_payload_hashes.get(message_key)
                 if previous_hash == payload_hash:
@@ -411,6 +457,20 @@ class PokerBotViewer:
                             if callback_id is not None
                             else "automatic",
                         },
+                    )
+                    return message_id
+            if (
+                callback_token_key is not None
+                and callback_id is not None
+                and callback_throttle_key is not None
+            ):
+                last_callback_token = self._last_callback_edit.get(
+                    callback_throttle_key
+                )
+                if last_callback_token == callback_id:
+                    debug_trace_logger.info(
+                        f"Skipping editMessageText for message_id={message_id} "
+                        "(callback throttling)"
                     )
                     return message_id
             if (
@@ -477,6 +537,7 @@ class PokerBotViewer:
             normalized_new_message = self._safe_int(new_message_id)
             new_message_key = (normalized_chat, normalized_new_message)
             self._message_payload_hashes[new_message_key] = payload_hash
+            self._last_message_hash[normalized_new_message] = message_text_hash
             if callback_id is not None:
                 new_callback_token_key = (
                     normalized_chat,
@@ -488,6 +549,9 @@ class PokerBotViewer:
                     new_callback_token_key,
                     callback_id,
                 )
+                self._last_callback_edit[
+                    (normalized_new_message, callback_stage_name)
+                ] = callback_id
             if (
                 message_key is not None
                 and new_message_key != message_key
