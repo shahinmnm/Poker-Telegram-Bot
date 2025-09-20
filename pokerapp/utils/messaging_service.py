@@ -23,6 +23,8 @@ from typing import Any, Dict, Optional, Tuple
 
 from cachetools import TTLCache
 
+from pokerapp.utils.debug_trace import trace_telegram_api_call
+
 try:  # pragma: no cover - aiogram is optional at runtime
     from aiogram.exceptions import TelegramBadRequest
 except Exception:  # pragma: no cover - fallback for PTB-only deployments
@@ -94,6 +96,13 @@ class MessagingService:
 
         lock = await self._acquire_lock(chat_id, 0)
         async with lock:
+            trace_telegram_api_call(
+                "sendMessage",
+                chat_id=chat_id,
+                message_id=None,
+                text=text,
+                reply_markup=reply_markup,
+            )
             result = await self._bot.send_message(
                 chat_id=chat_id,
                 text=text,
@@ -156,6 +165,13 @@ class MessagingService:
                 return message_id
 
             try:
+                trace_telegram_api_call(
+                    "editMessageText",
+                    chat_id=chat_id,
+                    message_id=message_id,
+                    text=text,
+                    reply_markup=reply_markup,
+                )
                 result = await self._bot.edit_message_text(
                     chat_id=chat_id,
                     message_id=message_id,
@@ -258,6 +274,11 @@ class MessagingService:
         async with lock:
             result: Any = False
             try:
+                trace_telegram_api_call(
+                    "deleteMessage",
+                    chat_id=chat_id,
+                    message_id=message_id,
+                )
                 result = await self._bot.delete_message(
                     chat_id=chat_id,
                     message_id=message_id,

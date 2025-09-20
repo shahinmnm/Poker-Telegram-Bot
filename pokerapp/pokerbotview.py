@@ -42,6 +42,7 @@ from pokerapp.entities import (
     PlayerState,
 )
 from pokerapp.telegram_validation import TelegramPayloadValidator
+from pokerapp.utils.debug_trace import trace_telegram_api_call
 from pokerapp.utils.messaging_service import MessagingService
 
 
@@ -560,6 +561,12 @@ class PokerBotViewer:
     async def send_photo(self, chat_id: ChatId) -> None:
         async def _send():
             with open("./assets/poker_hand.jpg", "rb") as f:
+                trace_telegram_api_call(
+                    "sendPhoto",
+                    chat_id=chat_id,
+                    message_id=None,
+                    text=None,
+                )
                 return await self._bot.send_photo(
                     chat_id=chat_id,
                     photo=f,
@@ -746,6 +753,12 @@ class PokerBotViewer:
             bio.name = "card.png"
             im_card.save(bio, "PNG")
             bio.seek(0)
+            trace_telegram_api_call(
+                "sendPhoto",
+                chat_id=chat_id,
+                message_id=None,
+                text=None,
+            )
             await self._bot.send_photo(
                 chat_id=chat_id,
                 photo=bio,
@@ -788,6 +801,13 @@ class PokerBotViewer:
             bio = BytesIO(desk_bytes)
             bio.name = "desk.png"
             bio.seek(0)
+            trace_telegram_api_call(
+                "sendPhoto",
+                chat_id=chat_id,
+                message_id=None,
+                text=normalized_caption,
+                reply_markup=reply_markup,
+            )
             message = await self._bot.send_photo(
                 chat_id=chat_id,
                 photo=bio,
