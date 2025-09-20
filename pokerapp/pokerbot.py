@@ -180,7 +180,49 @@ class PokerBot:
             self.run_polling()
             return True
 
+        if self._should_force_polling_due_to_webhook_failure(exc):
+            logger.error(
+                "Webhook startup failed due to a network resolution error; automatically "
+                "falling back to polling mode. Error: %s",
+                exc,
+            )
+            logger.warning(
+                "Automatic polling fallback triggered because the webhook host could not "
+                "be resolved. Verify the webhook configuration or provide a reachable "
+                "public URL to resume webhook delivery."
+            )
+            self.run_polling()
+            return True
+
         return False
+
+    def _should_force_polling_due_to_webhook_failure(self, exc: Exception) -> bool:
+        for error in self._iter_exception_chain(exc):
+            message = str(error).lower()
+            if any(
+                keyword in message
+                for keyword in (
+                    "failed to resolve host",
+                    "name or service not known",
+                    "temporary failure in name resolution",
+                    "getaddrinfo failed",
+                )
+            ):
+                return True
+        return False
+
+    @staticmethod
+    def _iter_exception_chain(exc: Exception):
+        seen = set()
+        stack = [exc]
+        while stack:
+            current = stack.pop()
+            if current is None or id(current) in seen:
+                continue
+            seen.add(id(current))
+            yield current
+            stack.append(getattr(current, "__cause__", None))
+            stack.append(getattr(current, "__context__", None))
 
     def _schedule_webhook_verification(self) -> None:
         try:
