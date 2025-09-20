@@ -439,21 +439,38 @@ def test_send_turn_message_updates_turn_message_only():
     view.update_player_anchor.assert_not_awaited()
 
 
-def test_add_cards_to_table_updates_board_message_only():
+def test_add_cards_to_table_does_not_send_stage_message():
     model, game, player, view = _build_model_with_game()
     chat_id = -601
 
     view.send_message_return_id = AsyncMock(return_value=111)
+    view.delete_message = AsyncMock()
     view.update_player_anchor = AsyncMock()
 
     game.remain_cards = [Card("2♣"), Card("3♦"), Card("4♥")]
 
     asyncio.run(model.add_cards_to_table(3, game, chat_id, "🃏 فلاپ"))
 
-    view.send_message_return_id.assert_awaited_once()
-    assert game.board_message_id == 111
-    assert 111 in game.message_ids_to_delete
+    view.send_message_return_id.assert_not_awaited()
+    view.delete_message.assert_not_awaited()
+    assert game.board_message_id is None
     view.update_player_anchor.assert_not_awaited()
+
+
+def test_add_cards_to_table_removes_existing_stage_message():
+    model, game, player, view = _build_model_with_game()
+    chat_id = -602
+
+    view.delete_message = AsyncMock()
+
+    game.board_message_id = 222
+    game.message_ids_to_delete.append(222)
+
+    asyncio.run(model.add_cards_to_table(0, game, chat_id, "🃏 فلاپ"))
+
+    view.delete_message.assert_awaited_once_with(chat_id, 222)
+    assert game.board_message_id is None
+    assert 222 not in game.message_ids_to_delete
 def test_clear_game_messages_deletes_player_card_messages():
     model, game, player, view = _build_model_with_game()
     chat_id = -500

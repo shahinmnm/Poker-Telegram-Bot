@@ -90,7 +90,9 @@ async def test_orchestrator_creates_anchor_and_turn_messages():
         ]
     )
     turn_call = bot.send_message.await_args_list[-1]
-    assert "🃏 Board: 4♥     A♠" in turn_call.kwargs["text"]
+    text = turn_call.kwargs["text"]
+    assert "🎰 مرحله بازی: Pre-Flop" in text
+    assert "🃏 Board: 4♥     A♠" in text
     await orchestrator.request_manager.close()
 
 
@@ -121,7 +123,9 @@ async def test_record_action_updates_turn_message():
     await orchestrator.record_action("Sara bet 50")
 
     assert bot.edit_message_text.await_count == 1
-    assert "Sara bet 50" in bot.edit_message_text.await_args.kwargs["text"]
+    edited_text = bot.edit_message_text.await_args.kwargs["text"]
+    assert "🎬 اکشن‌های اخیر:" in edited_text
+    assert "• Sara bet 50" in edited_text
     await orchestrator.request_manager.close()
 
 

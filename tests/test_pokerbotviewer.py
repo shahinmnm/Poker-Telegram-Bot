@@ -218,9 +218,11 @@ def test_update_turn_message_includes_stage_and_keyboard():
     assert result.message_id == 321
     call = viewer._update_message.await_args
     text = call.kwargs['text']
-    assert '🃏 **مرحله بازی:** Turn' in text
+    assert '🎯 **نوبت:**' in text
+    assert '🎰 **مرحله بازی:** Turn' in text
     assert '🃏 Board:' in text
     assert '🎬 **اکشن‌های اخیر:**' in text
+    assert '⬇️ **از دکمه‌های زیر برای اقدام استفاده کنید.**' in text
 
     markup = call.kwargs['reply_markup']
     assert isinstance(markup, InlineKeyboardMarkup)

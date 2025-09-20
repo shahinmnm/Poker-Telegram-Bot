@@ -922,18 +922,20 @@ class PokerBotViewer:
         stage_name = stage_labels.get(game.state, "Pre-Flop")
 
         info_lines = [
-            f"🎯 **نوبت بازی {player.mention_markdown} (صندلی {seat_number})**",
-            f"🃏 **مرحله بازی:** {stage_name}",
+            f"🎯 **نوبت:** {player.mention_markdown} (صندلی {seat_number})",
+            f"🎰 **مرحله بازی:** {stage_name}",
             "",
             board_line,
             f"💰 **پات فعلی:** `{game.pot}$`",
             f"💵 **موجودی شما:** `{money}$`",
             f"🎲 **بِت فعلی شما:** `{player.round_rate}$`",
             f"📈 **حداکثر شرط این دور:** `{game.max_round_rate}$`",
+            "",
+            "⬇️ **از دکمه‌های زیر برای اقدام استفاده کنید.**",
         ]
 
         history = list(
-            (recent_actions if recent_actions is not None else game.last_actions)[-3:]
+            (recent_actions if recent_actions is not None else game.last_actions)[-5:]
         )
         if history:
             info_lines.append("")
