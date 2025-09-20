@@ -25,8 +25,6 @@ import hashlib
 import inspect
 import logging
 import json
-import time
-from cachetools import LRUCache
 from pokerapp.config import DEFAULT_RATE_LIMIT_PER_MINUTE, DEFAULT_RATE_LIMIT_PER_SECOND
 from pokerapp.winnerdetermination import HAND_NAMES_TRANSLATIONS
 from pokerapp.desk import DeskImageGenerator
@@ -58,57 +56,6 @@ class TurnMessageUpdate:
     call_label: str
     call_action: PlayerAction
     board_line: str
-
-
-@dataclass(slots=True)
-class _CacheRecord:
-    value: bool
-    timestamp: float
-
-
-@dataclass(slots=True)
-class _CallbackUpdateRecord:
-    token: str
-    timestamp: float
-
-
-class _TimedLRUCache(LRUCache):
-    """LRU cache with a simple time-to-live eviction policy."""
-
-    def __init__(self, *, maxsize: int, ttl: float) -> None:
-        super().__init__(maxsize=maxsize)
-        self._ttl = ttl
-
-    def __contains__(self, key: object) -> bool:  # type: ignore[override]
-        try:
-            record = LRUCache.__getitem__(self, key)
-        except KeyError:
-            return False
-        if time.monotonic() - record.timestamp <= self._ttl:
-            return True
-        LRUCache.__delitem__(self, key)
-        return False
-
-    def __getitem__(self, key: object) -> bool:  # type: ignore[override]
-        record = LRUCache.__getitem__(self, key)
-        if time.monotonic() - record.timestamp > self._ttl:
-            LRUCache.__delitem__(self, key)
-            raise KeyError(key)
-        return record.value
-
-    def get(self, key: object, default: Optional[bool] = None) -> Optional[bool]:
-        try:
-            return self.__getitem__(key)
-        except KeyError:
-            return default
-
-    def __setitem__(self, key: object, value: bool) -> None:  # type: ignore[override]
-        record = _CacheRecord(value=value, timestamp=time.monotonic())
-        LRUCache.__setitem__(self, key, record)
-
-    def popitem(self, last: bool = True) -> Tuple[object, bool]:  # type: ignore[override]
-        key, record = LRUCache.popitem(self, last=last)
-        return key, record.value
 
 
 class PokerBotViewer:
@@ -217,17 +164,10 @@ class PokerBotViewer:
         self._legacy_rate_limit_per_second = rate_limit_per_second
         self._legacy_rate_limiter_delay = rate_limiter_delay
 
-        self._message_update_cache: _TimedLRUCache = _TimedLRUCache(
-            maxsize=500,
-            ttl=3.0,
-        )
         self._message_update_locks: Dict[Tuple[int, int], asyncio.Lock] = {}
         self._message_update_guard = asyncio.Lock()
         self._message_payload_hashes: Dict[Tuple[int, int], str] = {}
-        self._callback_update_tokens: Dict[
-            Tuple[int, int, str], _CallbackUpdateRecord
-        ] = {}
-        self._callback_token_ttl = 30.0
+        self._last_callback_updates: Dict[Tuple[int, int, str], str] = {}
 
     def _payload_hash(
         self,
@@ -269,23 +209,15 @@ class PokerBotViewer:
         key: Tuple[int, int, str],
         callback_id: str,
     ) -> bool:
-        record = self._callback_update_tokens.get(key)
-        if record is None:
-            return False
-        if time.monotonic() - record.timestamp > self._callback_token_ttl:
-            self._callback_update_tokens.pop(key, None)
-            return False
-        return record.token == callback_id
+        stored_token = self._last_callback_updates.get(key)
+        return stored_token == callback_id
 
     def _store_callback_update_token(
         self,
         key: Tuple[int, int, str],
         callback_id: str,
     ) -> None:
-        self._callback_update_tokens[key] = _CallbackUpdateRecord(
-            token=callback_id,
-            timestamp=time.monotonic(),
-        )
+        self._last_callback_updates[key] = callback_id
 
     def _clear_callback_tokens_for_message(
         self,
@@ -294,11 +226,11 @@ class PokerBotViewer:
     ) -> None:
         to_remove = [
             key
-            for key in self._callback_update_tokens
+            for key in self._last_callback_updates
             if key[0] == normalized_chat and key[1] == normalized_message
         ]
         for key in to_remove:
-            self._callback_update_tokens.pop(key, None)
+            self._last_callback_updates.pop(key, None)
 
     def _detect_callback_context(self) -> Tuple[Optional[str], Optional[str]]:
         try:
@@ -390,9 +322,6 @@ class PokerBotViewer:
         normalized_existing_message = (
             self._safe_int(message_id) if message_id is not None else None
         )
-        normalized_message = (
-            normalized_existing_message if normalized_existing_message is not None else 0
-        )
         message_key: Optional[Tuple[int, int]] = (
             (normalized_chat, normalized_existing_message)
             if normalized_existing_message is not None
@@ -413,32 +342,71 @@ class PokerBotViewer:
                 if self._should_skip_callback_update(
                     callback_token_key, callback_id
                 ):
+                    logger.debug(
+                        "Skipping update_message due to callback throttling",
+                        extra={
+                            "chat_id": chat_id,
+                            "message_id": message_id,
+                            "payload_hash": payload_hash,
+                            "callback_id": callback_id,
+                            "game_stage": callback_stage_name,
+                            "trigger": "callback_query",
+                        },
+                    )
                     return message_id
-        cache_key: Tuple[int, int, str] = (
-            normalized_chat,
-            normalized_message,
-            payload_hash,
-        )
         if message_key is not None:
             previous_hash = self._message_payload_hashes.get(message_key)
             if previous_hash == payload_hash:
+                logger.debug(
+                    "Skipping update_message due to identical payload",
+                    extra={
+                        "chat_id": chat_id,
+                        "message_id": message_id,
+                        "payload_hash": payload_hash,
+                        "callback_id": callback_id,
+                        "game_stage": callback_stage_name,
+                        "trigger": "callback_query"
+                        if callback_id is not None
+                        else "automatic",
+                    },
+                )
                 return message_id
-        if message_id is not None and self._message_update_cache.get(cache_key):
-            return message_id
 
         lock = await self._acquire_message_lock(chat_id, message_id)
         async with lock:
             if message_key is not None:
                 previous_hash = self._message_payload_hashes.get(message_key)
                 if previous_hash == payload_hash:
+                    logger.debug(
+                        "Skipping update_message inside lock due to identical payload",
+                        extra={
+                            "chat_id": chat_id,
+                            "message_id": message_id,
+                            "payload_hash": payload_hash,
+                            "callback_id": callback_id,
+                            "game_stage": callback_stage_name,
+                            "trigger": "callback_query"
+                            if callback_id is not None
+                            else "automatic",
+                        },
+                    )
                     return message_id
             if (
                 callback_token_key is not None
                 and callback_id is not None
                 and self._should_skip_callback_update(callback_token_key, callback_id)
             ):
-                return message_id
-            if message_id is not None and self._message_update_cache.get(cache_key):
+                logger.debug(
+                    "Skipping update_message inside lock due to callback throttling",
+                    extra={
+                        "chat_id": chat_id,
+                        "message_id": message_id,
+                        "payload_hash": payload_hash,
+                        "callback_id": callback_id,
+                        "game_stage": callback_stage_name,
+                        "trigger": "callback_query",
+                    },
+                )
                 return message_id
 
             try:
@@ -484,12 +452,6 @@ class PokerBotViewer:
                 return message_id
 
             normalized_new_message = self._safe_int(new_message_id)
-            cache_key = (
-                normalized_chat,
-                normalized_new_message,
-                payload_hash,
-            )
-            self._message_update_cache[cache_key] = True
             new_message_key = (normalized_chat, normalized_new_message)
             self._message_payload_hashes[new_message_key] = payload_hash
             if callback_id is not None:
