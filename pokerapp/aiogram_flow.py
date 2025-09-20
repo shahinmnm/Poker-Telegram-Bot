@@ -30,6 +30,8 @@ from aiogram.exceptions import TelegramBadRequest
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, Message
 from cachetools import LRUCache, TTLCache
 
+from pokerapp.utils.debug_trace import trace_telegram_api_call
+
 
 logger = logging.getLogger(__name__)
 
@@ -222,6 +224,13 @@ class RequestManager:
             lock = await self._acquire_lock(chat_id, 0)
             async with lock:
                 try:
+                    trace_telegram_api_call(
+                        "sendMessage",
+                        chat_id=chat_id,
+                        message_id=None,
+                        text=text,
+                        reply_markup=reply_markup,
+                    )
                     message: Message = await self._bot.send_message(
                         chat_id=chat_id,
                         text=text,
@@ -287,6 +296,13 @@ class RequestManager:
                         )
                         return message_id
                 try:
+                    trace_telegram_api_call(
+                        "editMessageText",
+                        chat_id=chat_id,
+                        message_id=message_id,
+                        text=text,
+                        reply_markup=reply_markup,
+                    )
                     result = await self._bot.edit_message_text(
                         chat_id=chat_id,
                         message_id=message_id,
@@ -379,6 +395,11 @@ class RequestManager:
             lock = await self._acquire_lock(chat_id, message_id)
             async with lock:
                 try:
+                    trace_telegram_api_call(
+                        "deleteMessage",
+                        chat_id=chat_id,
+                        message_id=message_id,
+                    )
                     await self._bot.delete_message(
                         chat_id=chat_id,
                         message_id=message_id,
