@@ -24,6 +24,7 @@ from typing import Any, Dict, Optional, Tuple
 from cachetools import TTLCache
 
 from pokerapp.utils.debug_trace import trace_telegram_api_call
+from pokerapp.utils.request_metrics import RequestCategory, RequestMetrics
 
 try:  # pragma: no cover - aiogram is optional at runtime
     from aiogram.exceptions import TelegramBadRequest
@@ -67,6 +68,7 @@ class MessagingService:
         cache_ttl: int = 3,
         cache_maxsize: int = 500,
         logger_: Optional[logging.Logger] = None,
+        request_metrics: Optional[RequestMetrics] = None,
     ) -> None:
         self._bot = bot
         self._logger = logger_ or logger.getChild("service")
@@ -77,6 +79,7 @@ class MessagingService:
         self._cache_lock = asyncio.Lock()
         self._locks: Dict[CacheKey, asyncio.Lock] = {}
         self._locks_guard = asyncio.Lock()
+        self._metrics = request_metrics or RequestMetrics(logger_=self._logger)
 
     async def send_message(
         self,
@@ -84,6 +87,7 @@ class MessagingService:
         chat_id: int,
         text: Optional[str],
         reply_markup: Any = None,
+        request_category: RequestCategory = RequestCategory.GENERAL,
         **params: Any,
     ) -> Any:
         """Send a Telegram message and register its content hash.
@@ -93,6 +97,14 @@ class MessagingService:
         ``message_id`` and its content hash are recorded, allowing future edits
         to be deduplicated.
         """
+
+        if not await self._consume_budget(
+            method="sendMessage",
+            chat_id=chat_id,
+            message_id=None,
+            category=request_category,
+        ):
+            return None
 
         lock = await self._acquire_lock(chat_id, 0)
         async with lock:
@@ -130,6 +142,49 @@ class MessagingService:
 
             return result
 
+    async def send_photo(
+        self,
+        *,
+        chat_id: int,
+        photo: Any,
+        request_category: RequestCategory = RequestCategory.PHOTO,
+        caption: Optional[str] = None,
+        **params: Any,
+    ) -> Any:
+        """Send a photo message while recording the request budget usage."""
+
+        if not await self._consume_budget(
+            method="sendPhoto",
+            chat_id=chat_id,
+            message_id=None,
+            category=request_category,
+        ):
+            return None
+
+        lock = await self._acquire_lock(chat_id, 0)
+        async with lock:
+            trace_telegram_api_call(
+                "sendPhoto",
+                chat_id=chat_id,
+                message_id=None,
+                text=caption,
+            )
+            result = await self._bot.send_photo(
+                chat_id=chat_id,
+                photo=photo,
+                caption=caption,
+                **params,
+            )
+
+            message_id = getattr(result, "message_id", None)
+            self._log_api_call(
+                "send_photo",
+                chat_id=chat_id,
+                message_id=message_id,
+                content_hash="-",
+            )
+            return result
+
     async def edit_message_text(
         self,
         *,
@@ -138,6 +193,7 @@ class MessagingService:
         text: Optional[str],
         reply_markup: Any = None,
         force: bool = False,
+        request_category: RequestCategory = RequestCategory.GENERAL,
         **params: Any,
     ) -> Optional[int]:
         """Edit an existing Telegram message while avoiding duplicate edits."""
@@ -152,6 +208,14 @@ class MessagingService:
                 chat_id,
                 message_id,
             )
+            return message_id
+
+        if not await self._consume_budget(
+            method="editMessageText",
+            chat_id=chat_id,
+            message_id=message_id,
+            category=request_category,
+        ):
             return message_id
 
         lock = await self._acquire_lock(chat_id, message_id)
@@ -208,6 +272,7 @@ class MessagingService:
         message_id: int,
         reply_markup: Any = None,
         force: bool = False,
+        request_category: RequestCategory = RequestCategory.INLINE,
         **params: Any,
     ) -> bool:
         """Edit only the reply markup for a message if it changed."""
@@ -222,6 +287,14 @@ class MessagingService:
                 chat_id,
                 message_id,
             )
+            return True
+
+        if not await self._consume_budget(
+            method="editMessageReplyMarkup",
+            chat_id=chat_id,
+            message_id=message_id,
+            category=request_category,
+        ):
             return True
 
         lock = await self._acquire_lock(chat_id, message_id)
@@ -263,11 +336,20 @@ class MessagingService:
         *,
         chat_id: int,
         message_id: int,
+        request_category: RequestCategory = RequestCategory.DELETE,
         **params: Any,
     ) -> bool:
         """Delete a message and clear its cached hash."""
 
         if message_id is None:
+            return False
+
+        if not await self._consume_budget(
+            method="deleteMessage",
+            chat_id=chat_id,
+            message_id=message_id,
+            category=request_category,
+        ):
             return False
 
         lock = await self._acquire_lock(chat_id, message_id)
@@ -457,6 +539,34 @@ class MessagingService:
                 "content_hash": content_hash,
             },
         )
+
+    async def _consume_budget(
+        self,
+        *,
+        method: str,
+        chat_id: int,
+        message_id: Optional[int],
+        category: RequestCategory,
+    ) -> bool:
+        if self._metrics is None:
+            return True
+        allowed = await self._metrics.consume(
+            chat_id=chat_id,
+            method=method,
+            category=category,
+            message_id=message_id,
+        )
+        if not allowed:
+            self._logger.debug(
+                "Skipping %s due to exhausted request budget",
+                method,
+                extra={
+                    "chat_id": chat_id,
+                    "message_id": message_id,
+                    "category": category.value,
+                },
+            )
+        return allowed
 
 
 __all__ = ["MessagingService"]

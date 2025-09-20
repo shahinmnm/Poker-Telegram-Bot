@@ -25,6 +25,7 @@ import hashlib
 import inspect
 import logging
 import json
+from cachetools import FIFOCache, LFUCache, LRUCache
 from pokerapp.config import DEFAULT_RATE_LIMIT_PER_MINUTE, DEFAULT_RATE_LIMIT_PER_SECOND
 from pokerapp.winnerdetermination import HAND_NAMES_TRANSLATIONS
 from pokerapp.desk import DeskImageGenerator
@@ -43,6 +44,7 @@ from pokerapp.entities import (
 from pokerapp.telegram_validation import TelegramPayloadValidator
 from pokerapp.utils.debug_trace import trace_telegram_api_call
 from pokerapp.utils.messaging_service import MessagingService
+from pokerapp.utils.request_metrics import RequestCategory, RequestMetrics
 
 
 logger = logging.getLogger(__name__)
@@ -145,6 +147,7 @@ class PokerBotViewer:
         rate_limit_per_second: Optional[int] = DEFAULT_RATE_LIMIT_PER_SECOND,
         rate_limiter_delay: Optional[float] = None,
         update_debounce: float = 0.3,
+        request_metrics: Optional[RequestMetrics] = None,
     ):
         # ``update_debounce`` is kept for compatibility with previous
         # initialisers but no longer used after the messaging rewrite.
@@ -156,8 +159,13 @@ class PokerBotViewer:
         self._validator = TelegramPayloadValidator(
             logger_=logger.getChild("validation")
         )
+        self._request_metrics = request_metrics or RequestMetrics(
+            logger_=logger.getChild("request_metrics")
+        )
         self._messenger = MessagingService(
-            bot, logger_=logger.getChild("messaging_service")
+            bot,
+            logger_=logger.getChild("messaging_service"),
+            request_metrics=self._request_metrics,
         )
         # Legacy rate-limit attributes are retained for backwards compatibility
         # with configuration code but do not influence runtime behaviour.
@@ -167,10 +175,22 @@ class PokerBotViewer:
 
         self._message_update_locks: Dict[Tuple[int, int], asyncio.Lock] = {}
         self._message_update_guard = asyncio.Lock()
-        self._message_payload_hashes: Dict[Tuple[int, int], str] = {}
+        self._message_payload_hashes: LRUCache[Tuple[int, int], str] = LRUCache(
+            maxsize=1024
+        )
+        self._message_payload_cache_lock = asyncio.Lock()
         self._last_callback_updates: Dict[Tuple[int, int, str, int], str] = {}
         self._last_callback_edit: Dict[Tuple[int, str], str] = {}
-        self._last_message_hash: Dict[int, str] = {}
+        self._last_message_hash: LRUCache[int, str] = LRUCache(maxsize=2048)
+        self._last_message_hash_lock = asyncio.Lock()
+        self._turn_message_cache: LFUCache[Tuple[int, int], str] = LFUCache(
+            maxsize=256
+        )
+        self._turn_message_cache_lock = asyncio.Lock()
+        self._inline_keyboard_cache: FIFOCache[str, InlineKeyboardMarkup] = FIFOCache(
+            maxsize=32
+        )
+        self._inline_keyboard_cache_lock = asyncio.Lock()
 
     def _payload_hash(
         self,
@@ -222,7 +242,7 @@ class PokerBotViewer:
     ) -> None:
         self._last_callback_updates[key] = callback_id
 
-    def _clear_callback_tokens_for_message(
+    async def _clear_callback_tokens_for_message(
         self,
         normalized_chat: int,
         normalized_message: int,
@@ -243,7 +263,62 @@ class PokerBotViewer:
         for key in callback_throttle_keys:
             self._last_callback_edit.pop(key, None)
 
-        self._last_message_hash.pop(normalized_message, None)
+        await self._pop_last_text_hash(normalized_message)
+
+    async def _get_payload_hash(
+        self, key: Tuple[int, int]
+    ) -> Optional[str]:
+        async with self._message_payload_cache_lock:
+            return self._message_payload_hashes.get(key)
+
+    async def _set_payload_hash(self, key: Tuple[int, int], value: str) -> None:
+        async with self._message_payload_cache_lock:
+            self._message_payload_hashes[key] = value
+            logger.debug(
+                "Payload cache size %s/%s",
+                self._message_payload_hashes.currsize,
+                self._message_payload_hashes.maxsize,
+            )
+
+    async def _pop_payload_hash(self, key: Tuple[int, int]) -> None:
+        async with self._message_payload_cache_lock:
+            self._message_payload_hashes.pop(key, None)
+
+    async def _get_last_text_hash(self, message_id: int) -> Optional[str]:
+        async with self._last_message_hash_lock:
+            return self._last_message_hash.get(message_id)
+
+    async def _set_last_text_hash(self, message_id: int, value: str) -> None:
+        async with self._last_message_hash_lock:
+            self._last_message_hash[message_id] = value
+            logger.debug(
+                "Text hash cache size %s/%s",
+                self._last_message_hash.currsize,
+                self._last_message_hash.maxsize,
+            )
+
+    async def _pop_last_text_hash(self, message_id: int) -> None:
+        async with self._last_message_hash_lock:
+            self._last_message_hash.pop(message_id, None)
+
+    async def _get_turn_cache_hash(
+        self, key: Tuple[int, int]
+    ) -> Optional[str]:
+        async with self._turn_message_cache_lock:
+            return self._turn_message_cache.get(key)
+
+    async def _set_turn_cache_hash(self, key: Tuple[int, int], value: str) -> None:
+        async with self._turn_message_cache_lock:
+            self._turn_message_cache[key] = value
+            logger.debug(
+                "Turn cache size %s/%s",
+                self._turn_message_cache.currsize,
+                self._turn_message_cache.maxsize,
+            )
+
+    async def _pop_turn_cache_hash(self, key: Tuple[int, int]) -> None:
+        async with self._turn_message_cache_lock:
+            self._turn_message_cache.pop(key, None)
 
     def _detect_callback_context(
         self,
@@ -324,6 +399,7 @@ class PokerBotViewer:
         parse_mode: str = ParseMode.MARKDOWN,
         disable_web_page_preview: bool = True,
         disable_notification: bool = False,
+        request_category: RequestCategory = RequestCategory.GENERAL,
     ) -> Optional[MessageId]:
         context = self._build_context(
             "update_message", chat_id=chat_id, message_id=message_id
@@ -403,7 +479,7 @@ class PokerBotViewer:
                     )
                     return message_id
         if normalized_existing_message is not None:
-            previous_text_hash = self._last_message_hash.get(
+            previous_text_hash = await self._get_last_text_hash(
                 normalized_existing_message
             )
             if previous_text_hash == message_text_hash:
@@ -411,8 +487,10 @@ class PokerBotViewer:
                     f"Skipping editMessageText for message_id={message_id} (hash match)"
                 )
                 return message_id
+        turn_cache_key = message_key if request_category == RequestCategory.TURN else None
+
         if message_key is not None:
-            previous_hash = self._message_payload_hashes.get(message_key)
+            previous_hash = await self._get_payload_hash(message_key)
             if previous_hash == payload_hash:
                 logger.debug(
                     "Skipping update_message due to identical payload",
@@ -430,10 +508,23 @@ class PokerBotViewer:
                 )
                 return message_id
 
+        if turn_cache_key is not None:
+            cached_turn_hash = await self._get_turn_cache_hash(turn_cache_key)
+            if cached_turn_hash == payload_hash:
+                logger.debug(
+                    "Skipping turn update due to LFU cache hit",
+                    extra={
+                        "chat_id": chat_id,
+                        "message_id": message_id,
+                        "payload_hash": payload_hash,
+                    },
+                )
+                return message_id
+
         lock = await self._acquire_message_lock(chat_id, message_id)
         async with lock:
             if normalized_existing_message is not None:
-                previous_text_hash = self._last_message_hash.get(
+                previous_text_hash = await self._get_last_text_hash(
                     normalized_existing_message
                 )
                 if previous_text_hash == message_text_hash:
@@ -442,7 +533,7 @@ class PokerBotViewer:
                     )
                     return message_id
             if message_key is not None:
-                previous_hash = self._message_payload_hashes.get(message_key)
+                previous_hash = await self._get_payload_hash(message_key)
                 if previous_hash == payload_hash:
                     logger.debug(
                         "Skipping update_message inside lock due to identical payload",
@@ -498,6 +589,7 @@ class PokerBotViewer:
                         chat_id=chat_id,
                         text=normalized_text,
                         reply_markup=reply_markup,
+                        request_category=request_category,
                         parse_mode=parse_mode,
                         disable_web_page_preview=disable_web_page_preview,
                         disable_notification=disable_notification,
@@ -511,6 +603,7 @@ class PokerBotViewer:
                         message_id=message_id,
                         text=normalized_text,
                         reply_markup=reply_markup,
+                        request_category=request_category,
                         parse_mode=parse_mode,
                         disable_web_page_preview=disable_web_page_preview,
                     )
@@ -536,8 +629,10 @@ class PokerBotViewer:
 
             normalized_new_message = self._safe_int(new_message_id)
             new_message_key = (normalized_chat, normalized_new_message)
-            self._message_payload_hashes[new_message_key] = payload_hash
-            self._last_message_hash[normalized_new_message] = message_text_hash
+            await self._set_payload_hash(new_message_key, payload_hash)
+            await self._set_last_text_hash(normalized_new_message, message_text_hash)
+            if turn_cache_key is not None:
+                await self._set_turn_cache_hash(new_message_key, payload_hash)
             if callback_id is not None:
                 new_callback_token_key = (
                     normalized_chat,
@@ -556,8 +651,10 @@ class PokerBotViewer:
                 message_key is not None
                 and new_message_key != message_key
             ):
-                self._message_payload_hashes.pop(message_key, None)
-                self._clear_callback_tokens_for_message(
+                await self._pop_payload_hash(message_key)
+                if turn_cache_key is not None:
+                    await self._pop_turn_cache_hash(message_key)
+                await self._clear_callback_tokens_for_message(
                     message_key[0],
                     message_key[1],
                 )
@@ -654,6 +751,7 @@ class PokerBotViewer:
             reply_markup=None,
             parse_mode=ParseMode.MARKDOWN,
             disable_notification=True,
+            request_category=RequestCategory.STAGE,
         )
 
     async def notify_admin(self, log_data: Dict[str, Any]) -> None:
@@ -675,6 +773,7 @@ class PokerBotViewer:
             await self._messenger.send_message(
                 chat_id=self._admin_chat_id,
                 text=text,
+                request_category=RequestCategory.GENERAL,
             )
         except Exception as e:
             logger.error(
@@ -690,6 +789,7 @@ class PokerBotViewer:
         chat_id: ChatId,
         text: str,
         reply_markup: ReplyKeyboardMarkup = None,
+        request_category: RequestCategory = RequestCategory.GENERAL,
     ) -> Optional[MessageId]:
         """Sends a message and returns its ID, or None if not applicable."""
         context = self._build_context("send_message_return_id", chat_id=chat_id)
@@ -712,6 +812,7 @@ class PokerBotViewer:
                 chat_id=chat_id,
                 text=normalized_text,
                 reply_markup=reply_markup,
+                request_category=request_category,
                 parse_mode=ParseMode.MARKDOWN,
                 disable_notification=True,
                 disable_web_page_preview=True,
@@ -736,6 +837,7 @@ class PokerBotViewer:
         text: str,
         reply_markup: ReplyKeyboardMarkup = None,
         parse_mode: str = ParseMode.MARKDOWN,  # <--- پارامتر جدید اضافه شد
+        request_category: RequestCategory = RequestCategory.GENERAL,
     ) -> Optional[MessageId]:
         context = self._build_context("send_message", chat_id=chat_id)
         normalized_text = self._validator.normalize_text(
@@ -757,6 +859,7 @@ class PokerBotViewer:
                 chat_id=chat_id,
                 text=normalized_text,
                 reply_markup=reply_markup,
+                request_category=request_category,
                 parse_mode=parse_mode,
                 disable_notification=True,
                 disable_web_page_preview=True,
@@ -775,23 +878,15 @@ class PokerBotViewer:
         return None
 
     async def send_photo(self, chat_id: ChatId) -> None:
-        async def _send():
+        try:
             with open("./assets/poker_hand.jpg", "rb") as f:
-                trace_telegram_api_call(
-                    "sendPhoto",
-                    chat_id=chat_id,
-                    message_id=None,
-                    text=None,
-                )
-                return await self._bot.send_photo(
+                await self._messenger.send_photo(
                     chat_id=chat_id,
                     photo=f,
+                    request_category=RequestCategory.PHOTO,
                     parse_mode=ParseMode.MARKDOWN,
                     disable_notification=True,
                 )
-        try:
-            # Execute immediately; aiogram/PTB async stack manages throughput.
-            await _send()
         except Exception as e:
             logger.error(
                 "Error sending photo",
@@ -823,6 +918,12 @@ class PokerBotViewer:
             )
             return None
 
+    @property
+    def request_metrics(self) -> RequestMetrics:
+        """Expose the shared request metrics helper for orchestration code."""
+
+        return self._request_metrics
+
     async def send_message_reply(
         self, chat_id: ChatId, message_id: MessageId, text: str
     ) -> None:
@@ -848,6 +949,7 @@ class PokerBotViewer:
                 chat_id=chat_id,
                 text=normalized_text,
                 reply_markup=None,
+                request_category=RequestCategory.GENERAL,
                 parse_mode=ParseMode.MARKDOWN,
                 disable_notification=True,
                 reply_to_message_id=message_id,
@@ -896,6 +998,7 @@ class PokerBotViewer:
                 message_id=message_id,
                 text=normalized_text,
                 reply_markup=reply_markup,
+                request_category=RequestCategory.GENERAL,
                 parse_mode=parse_mode,
                 disable_web_page_preview=disable_web_page_preview,
             )
@@ -917,7 +1020,11 @@ class PokerBotViewer:
     ) -> None:
         """Delete a message while keeping the cache in sync."""
         try:
-            await self._messenger.delete_message(chat_id=chat_id, message_id=message_id)
+            await self._messenger.delete_message(
+                chat_id=chat_id,
+                message_id=message_id,
+                request_category=RequestCategory.DELETE,
+            )
         except (BadRequest, Forbidden) as e:
             error_message = getattr(e, "message", None) or str(e) or ""
             normalized_message = error_message.lower()
@@ -969,15 +1076,10 @@ class PokerBotViewer:
             bio.name = "card.png"
             im_card.save(bio, "PNG")
             bio.seek(0)
-            trace_telegram_api_call(
-                "sendPhoto",
-                chat_id=chat_id,
-                message_id=None,
-                text=None,
-            )
-            await self._bot.send_photo(
+            await self._messenger.send_photo(
                 chat_id=chat_id,
                 photo=bio,
+                request_category=RequestCategory.PHOTO,
                 disable_notification=disable_notification,
             )
         except Exception as e:
@@ -1017,17 +1119,11 @@ class PokerBotViewer:
             bio = BytesIO(desk_bytes)
             bio.name = "desk.png"
             bio.seek(0)
-            trace_telegram_api_call(
-                "sendPhoto",
-                chat_id=chat_id,
-                message_id=None,
-                text=normalized_caption,
-                reply_markup=reply_markup,
-            )
-            message = await self._bot.send_photo(
+            message = await self._messenger.send_photo(
                 chat_id=chat_id,
                 photo=bio,
                 caption=normalized_caption,
+                request_category=RequestCategory.PHOTO,
                 parse_mode=parse_mode,
                 disable_notification=disable_notification,
                 reply_markup=reply_markup,
@@ -1180,7 +1276,7 @@ class PokerBotViewer:
 
         text = "\n".join(info_lines)
 
-        reply_markup = self._build_turn_keyboard(call_text, call_action)
+        reply_markup = await self._build_turn_keyboard(call_text, call_action)
 
         new_message_id = await self._update_message(
             chat_id=chat_id,
@@ -1190,6 +1286,7 @@ class PokerBotViewer:
             parse_mode=ParseMode.MARKDOWN,
             disable_web_page_preview=True,
             disable_notification=message_id is not None,
+            request_category=RequestCategory.TURN,
         )
 
         return TurnMessageUpdate(
@@ -1199,41 +1296,55 @@ class PokerBotViewer:
             board_line=board_line,
         )
 
-    @staticmethod
-    def _build_turn_keyboard(
-        call_text: str, call_action: PlayerAction
+    async def _build_turn_keyboard(
+        self, call_text: str, call_action: PlayerAction
     ) -> InlineKeyboardMarkup:
-        keyboard = [
-            [
-                InlineKeyboardButton(
-                    text=PlayerAction.FOLD.value,
-                    callback_data=PlayerAction.FOLD.value,
-                ),
-                InlineKeyboardButton(
-                    text=PlayerAction.ALL_IN.value,
-                    callback_data=PlayerAction.ALL_IN.value,
-                ),
-                InlineKeyboardButton(
-                    text=call_text,
-                    callback_data=call_action.value,
-                ),
-            ],
-            [
-                InlineKeyboardButton(
-                    text=str(PlayerAction.SMALL.value),
-                    callback_data=str(PlayerAction.SMALL.value),
-                ),
-                InlineKeyboardButton(
-                    text=str(PlayerAction.NORMAL.value),
-                    callback_data=str(PlayerAction.NORMAL.value),
-                ),
-                InlineKeyboardButton(
-                    text=str(PlayerAction.BIG.value),
-                    callback_data=str(PlayerAction.BIG.value),
-                ),
-            ],
-        ]
-        return InlineKeyboardMarkup(inline_keyboard=keyboard)
+        """Return a cached inline keyboard for the active player's actions."""
+
+        cache_key = f"{call_action.value}|{call_text}"
+        async with self._inline_keyboard_cache_lock:
+            cached = self._inline_keyboard_cache.get(cache_key)
+            if cached is not None:
+                return cached
+
+            keyboard = [
+                [
+                    InlineKeyboardButton(
+                        text=PlayerAction.FOLD.value,
+                        callback_data=PlayerAction.FOLD.value,
+                    ),
+                    InlineKeyboardButton(
+                        text=PlayerAction.ALL_IN.value,
+                        callback_data=PlayerAction.ALL_IN.value,
+                    ),
+                    InlineKeyboardButton(
+                        text=call_text,
+                        callback_data=call_action.value,
+                    ),
+                ],
+                [
+                    InlineKeyboardButton(
+                        text=str(PlayerAction.SMALL.value),
+                        callback_data=str(PlayerAction.SMALL.value),
+                    ),
+                    InlineKeyboardButton(
+                        text=str(PlayerAction.NORMAL.value),
+                        callback_data=str(PlayerAction.NORMAL.value),
+                    ),
+                    InlineKeyboardButton(
+                        text=str(PlayerAction.BIG.value),
+                        callback_data=str(PlayerAction.BIG.value),
+                    ),
+                ],
+            ]
+            markup = InlineKeyboardMarkup(inline_keyboard=keyboard)
+            self._inline_keyboard_cache[cache_key] = markup
+            logger.debug(
+                "Turn keyboard cache size %s/%s",
+                self._inline_keyboard_cache.currsize,
+                self._inline_keyboard_cache.maxsize,
+            )
+            return markup
 
 
     async def edit_message_reply_markup(
@@ -1250,6 +1361,7 @@ class PokerBotViewer:
                 chat_id=chat_id,
                 message_id=message_id,
                 reply_markup=reply_markup,
+                request_category=RequestCategory.INLINE,
             )
         except BadRequest as e:
             err = str(e).lower()

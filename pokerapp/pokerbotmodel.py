@@ -64,6 +64,7 @@ from pokerapp.stats import (
     PlayerIdentity,
 )
 from pokerapp.utils.cache import PlayerReportCache
+from pokerapp.utils.request_metrics import RequestCategory, RequestMetrics
 from pokerapp.utils.locks import ReentrantAsyncLock
 
 DICE_MULT = 10
@@ -171,6 +172,13 @@ class PokerBotModel:
             maxsize=64, getsizeof=lambda entry: 1
         )
         self._countdown_cache_lock = asyncio.Lock()
+        metrics_candidate = getattr(self._view, "request_metrics", None)
+        if not isinstance(metrics_candidate, RequestMetrics):
+            metrics_candidate = RequestMetrics(
+                logger_=logger.getChild("request_metrics")
+            )
+            setattr(self._view, "request_metrics", metrics_candidate)
+        self._request_metrics = metrics_candidate
 
     @property
     def _min_players(self):
@@ -463,6 +471,9 @@ class PokerBotModel:
         match_id = f"pm_{uuid.uuid4().hex}"
         chat_id: ChatId = f"private:{match_id}"
         game = await self._table_manager.create_game(chat_id)
+        await self._request_metrics.end_cycle(
+            self._safe_int(chat_id), cycle_token=game.id
+        )
         game.reset()
         for index, info in enumerate(players):
             safe_user_id = self._safe_int(info.user_id)
@@ -902,6 +913,7 @@ class PokerBotModel:
                     text,
                     reply_markup=keyboard,
                     log_context="countdown",
+                    request_category=RequestCategory.COUNTDOWN,
                 )
                 if new_message_id is None:
                     if message_id and message_id in game.message_ids_to_delete:
@@ -1072,6 +1084,7 @@ class PokerBotModel:
         reply_markup: Optional[InlineKeyboardMarkup | ReplyKeyboardMarkup] = None,
         parse_mode: str = ParseMode.MARKDOWN,
         log_context: Optional[str] = None,
+        request_category: RequestCategory = RequestCategory.GENERAL,
     ) -> Optional[MessageId]:
         """
         Safely edit a message's text, retrying on rate limits and
@@ -1093,6 +1106,7 @@ class PokerBotModel:
                 message_id=message_id,
                 text=text,
                 reply_markup=reply_markup,
+                request_category=request_category,
                 parse_mode=parse_mode,
             )
         except RetryAfter as exc:
@@ -1102,6 +1116,7 @@ class PokerBotModel:
                 message_id=message_id,
                 text=text,
                 reply_markup=reply_markup,
+                request_category=request_category,
                 parse_mode=parse_mode,
             )
         except BadRequest as exc:
@@ -1137,7 +1152,10 @@ class PokerBotModel:
                 return result
 
         new_id = await self._view.send_message_return_id(
-            chat_id, text, reply_markup=reply_markup
+            chat_id,
+            text,
+            reply_markup=reply_markup,
+            request_category=request_category,
         )
         if new_id and message_id and new_id != message_id:
             try:
@@ -1251,6 +1269,7 @@ class PokerBotModel:
                     game.ready_message_main_id,
                     text,
                     reply_markup=keyboard,
+                    request_category=RequestCategory.COUNTDOWN,
                 )
                 if new_id is None:
                     old_id = game.ready_message_main_id
@@ -1258,7 +1277,10 @@ class PokerBotModel:
                         game.message_ids_to_delete.remove(old_id)
                     game.ready_message_main_id = None
                     msg = await self._view.send_message_return_id(
-                        chat_id, text, reply_markup=keyboard
+                        chat_id,
+                        text,
+                        reply_markup=keyboard,
+                        request_category=RequestCategory.COUNTDOWN,
                     )
                     if msg:
                         game.ready_message_main_id = msg
@@ -1270,7 +1292,10 @@ class PokerBotModel:
                 game.ready_message_main_text = current_text
         else:
             msg = await self._view.send_message_return_id(
-                chat_id, text, reply_markup=keyboard
+                chat_id,
+                text,
+                reply_markup=keyboard,
+                request_category=RequestCategory.COUNTDOWN,
             )
             if msg:
                 game.ready_message_main_id = msg
@@ -1312,6 +1337,9 @@ class PokerBotModel:
             return
 
         if game.state == GameState.FINISHED:
+            await self._request_metrics.end_cycle(
+                self._safe_int(chat_id), cycle_token=game.id
+            )
             game.reset()
             # بازیکنان قبلی را برای دور جدید نگه دار
             old_players_ids = context.chat_data.get(KEY_OLD_PLAYERS, [])
@@ -1397,6 +1425,7 @@ class PokerBotModel:
             stop_request.get("message_id"),
             message_text,
             reply_markup=self._build_stop_request_markup(),
+            request_category=RequestCategory.GENERAL,
         )
         stop_request["message_id"] = message_id
         context.chat_data[KEY_STOP_REQUEST] = stop_request
@@ -1540,6 +1569,7 @@ class PokerBotModel:
             stop_request.get("message_id"),
             message_text,
             reply_markup=self._build_stop_request_markup(),
+            request_category=RequestCategory.GENERAL,
         )
         stop_request["message_id"] = message_id
         context.chat_data[KEY_STOP_REQUEST] = stop_request
@@ -1569,7 +1599,11 @@ class PokerBotModel:
 
         resume_text = "✅ رأی به ادامه‌ی بازی داده شد. بازی ادامه می‌یابد."
         await self._safe_edit_message_text(
-            chat_id, message_id, resume_text, reply_markup=None
+            chat_id,
+            message_id,
+            resume_text,
+            reply_markup=None,
+            request_category=RequestCategory.GENERAL,
         )
 
     async def _cancel_hand(
@@ -1613,10 +1647,14 @@ class PokerBotModel:
             stop_request.get("message_id"),
             "\n".join([summary_line, details]),
             reply_markup=None,
+            request_category=RequestCategory.GENERAL,
         )
 
         context.chat_data.pop(KEY_STOP_REQUEST, None)
 
+        await self._request_metrics.end_cycle(
+            self._safe_int(chat_id), cycle_token=game.id
+        )
         game.reset()
         await self._table_manager.save_game(chat_id, game)
         await self._view.send_message(chat_id, "🛑 بازی متوقف شد.")
@@ -1670,6 +1708,9 @@ class PokerBotModel:
                 )
 
             game.state = GameState.ROUND_PRE_FLOP
+            await self._request_metrics.start_cycle(
+                self._safe_int(chat_id), game.id
+            )
 
             seat_message_id = await self._view.announce_player_seats(
                 chat_id=chat_id,
@@ -1710,6 +1751,9 @@ class PokerBotModel:
             if len(game.remain_cards) < 2:
                 await self._view.send_message(
                     chat_id, "کارت‌های کافی در دسته وجود ندارد! بازی ریست می‌شود."
+                )
+                await self._request_metrics.end_cycle(
+                    self._safe_int(chat_id), cycle_token=game.id
                 )
                 game.reset()
                 return
@@ -2491,6 +2535,9 @@ class PokerBotModel:
                 remaining_players.append(p)
         context.chat_data[KEY_OLD_PLAYERS] = [p.user_id for p in remaining_players]
 
+        await self._request_metrics.end_cycle(
+            self._safe_int(chat_id), cycle_token=game.id
+        )
         game.reset()
         await self._table_manager.save_game(chat_id, game)
 
