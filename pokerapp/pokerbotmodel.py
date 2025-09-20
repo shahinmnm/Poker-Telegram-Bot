@@ -1023,8 +1023,6 @@ class PokerBotModel:
         chat_id: ChatId,
         *,
         active_player: Player,
-        call_label: str,
-        call_action: PlayerAction,
     ) -> None:
         board_cards = list(game.cards_table)
         for player in game.seated_players():
@@ -1046,8 +1044,6 @@ class PokerBotModel:
                     role_label=role_label,
                     board_cards=board_cards,
                     active=player.user_id == active_player.user_id,
-                    call_label=call_label,
-                    call_action=call_action,
                     message_id=existing_id,
                 )
             except Exception as exc:
@@ -1688,16 +1684,19 @@ class PokerBotModel:
 
             # این متد به تنهایی تمام کارهای لازم برای شروع راند را انجام می‌دهد.
             # از جمله تعیین بلایندها، تعیین نوبت اول و ارسال پیام نوبت.
-            await self._round_rate.set_blinds(game, chat_id)
+            current_player = await self._round_rate.set_blinds(game, chat_id)
 
             action_str = "بازی شروع شد"
             game.last_actions.append(action_str)
             if len(game.last_actions) > 4:
                 game.last_actions.pop(0)
-            if game.turn_message_id:
-                current_player = game.get_player_by_seat(game.current_player_index)
-                if current_player:
-                    await self._send_turn_message(game, current_player, chat_id)
+            if current_player:
+                await self._update_player_anchor_messages(
+                    game,
+                    chat_id,
+                    active_player=current_player,
+                )
+                await self._send_turn_message(game, current_player, chat_id)
 
             # نیازی به هیچ کد دیگری در اینجا نیست.
             # کدهای اضافی حذف شدند.
@@ -1910,14 +1909,6 @@ class PokerBotModel:
 
             if turn_update.message_id:
                 game.turn_message_id = turn_update.message_id
-
-            await self._update_player_anchor_messages(
-                game,
-                chat_id,
-                active_player=player,
-                call_label=turn_update.call_label,
-                call_action=turn_update.call_action,
-            )
 
             game.last_turn_time = datetime.datetime.now()
 
@@ -2604,7 +2595,7 @@ class RoundRateModel:
         return self._find_next_active_player_index(game, game.dealer_index)
 
     # داخل کلاس RoundRateModel
-    async def set_blinds(self, game: Game, chat_id: ChatId) -> None:
+    async def set_blinds(self, game: Game, chat_id: ChatId) -> Optional[Player]:
         """
         Determine small/big blinds (using seat indices) and debit the players.
         Works for heads-up (2-player) and multiplayer by walking occupied seats.
@@ -2632,7 +2623,7 @@ class RoundRateModel:
         big_blind_player = game.get_player_by_seat(big_blind_index)
 
         if small_blind_player is None or big_blind_player is None:
-            return
+            return None
 
         # apply blinds
         await self._set_player_blind(
@@ -2647,21 +2638,7 @@ class RoundRateModel:
         game.trading_end_user_id = big_blind_player.user_id
 
         player_turn = game.get_player_by_seat(game.current_player_index)
-        if player_turn:
-            if self._model:
-                await self._model._send_turn_message(game, player_turn, chat_id)
-            else:
-                player_money = await player_turn.wallet.value()
-                turn_update = await self._view.update_turn_message(
-                    chat_id=chat_id,
-                    game=game,
-                    player=player_turn,
-                    money=player_money,
-                    message_id=game.turn_message_id,
-                    recent_actions=list(game.last_actions),
-                )
-                if turn_update.message_id:
-                    game.turn_message_id = turn_update.message_id
+        return player_turn
 
     async def _set_player_blind(
         self,
@@ -2683,23 +2660,6 @@ class RoundRateModel:
             game.last_actions.append(action_str)
             if len(game.last_actions) > 4:
                 game.last_actions.pop(0)
-            if game.turn_message_id:
-                current_player = game.get_player_by_seat(game.current_player_index)
-                if current_player:
-                    if self._model:
-                        await self._model._send_turn_message(
-                            game, current_player, chat_id
-                        )
-                    else:
-                        current_money = await current_player.wallet.value()
-                        await self._view.update_turn_message(
-                            chat_id=chat_id,
-                            game=game,
-                            player=current_player,
-                            money=current_money,
-                            message_id=game.turn_message_id,
-                            recent_actions=list(game.last_actions),
-                        )
         except UserException as e:
             available_money = await player.wallet.value()
             await player.wallet.authorize(game_id=str(chat_id), amount=available_money)

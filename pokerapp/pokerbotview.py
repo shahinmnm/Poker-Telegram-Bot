@@ -32,6 +32,7 @@ from pokerapp.desk import DeskImageGenerator
 from pokerapp.cards import Cards, Card
 from pokerapp.entities import (
     Game,
+    GameState,
     Player,
     PlayerAction,
     MessageId,
@@ -382,8 +383,6 @@ class PokerBotViewer:
         role_label: str,
         board_cards: Sequence[Card],
         active: bool,
-        call_label: str,
-        call_action: PlayerAction,
         message_id: Optional[MessageId] = None,
     ) -> Optional[MessageId]:
         text = self._build_anchor_text(
@@ -392,16 +391,13 @@ class PokerBotViewer:
             role_label=role_label,
             board_cards=board_cards,
         )
-        reply_markup = (
-            self._build_turn_keyboard(call_label, call_action)
-            if active
-            else None
-        )
+        if active:
+            text = f"{text}\n\n🎯 **نوبت بازی این بازیکن است.**"
         return await self._update_message(
             chat_id=chat_id,
             message_id=message_id,
             text=text,
-            reply_markup=reply_markup,
+            reply_markup=None,
             parse_mode=ParseMode.MARKDOWN,
             disable_web_page_preview=True,
             disable_notification=message_id is not None,
@@ -917,16 +913,23 @@ class PokerBotViewer:
         seat_number = (player.seat_index or 0) + 1
         board_line = self._format_card_line("🃏 Board", game.cards_table)
 
+        stage_labels = {
+            GameState.ROUND_PRE_FLOP: "Pre-Flop",
+            GameState.ROUND_FLOP: "Flop",
+            GameState.ROUND_TURN: "Turn",
+            GameState.ROUND_RIVER: "River",
+        }
+        stage_name = stage_labels.get(game.state, "Pre-Flop")
+
         info_lines = [
             f"🎯 **نوبت بازی {player.mention_markdown} (صندلی {seat_number})**",
+            f"🃏 **مرحله بازی:** {stage_name}",
             "",
             board_line,
             f"💰 **پات فعلی:** `{game.pot}$`",
             f"💵 **موجودی شما:** `{money}$`",
             f"🎲 **بِت فعلی شما:** `{player.round_rate}$`",
             f"📈 **حداکثر شرط این دور:** `{game.max_round_rate}$`",
-            "",
-            "⬇️ دکمه‌های نوبت شما در پیام اختصاصی فعال شده‌اند.",
         ]
 
         history = list(
@@ -939,11 +942,13 @@ class PokerBotViewer:
 
         text = "\n".join(info_lines)
 
+        reply_markup = self._build_turn_keyboard(call_text, call_action)
+
         new_message_id = await self._update_message(
             chat_id=chat_id,
             message_id=message_id,
             text=text,
-            reply_markup=None,
+            reply_markup=reply_markup,
             parse_mode=ParseMode.MARKDOWN,
             disable_web_page_preview=True,
             disable_notification=message_id is not None,

@@ -3,7 +3,7 @@ import logging
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
-from telegram import ReplyKeyboardMarkup
+from telegram import InlineKeyboardMarkup, ReplyKeyboardMarkup
 from telegram.constants import ParseMode
 from telegram.error import BadRequest, Forbidden
 
@@ -13,8 +13,8 @@ from pokerapp.config import (
     DEFAULT_RATE_LIMIT_PER_MINUTE,
     DEFAULT_RATE_LIMIT_PER_SECOND,
 )
+from pokerapp.entities import Game, GameState, Player, PlayerAction
 from pokerapp.pokerbotview import PokerBotViewer
-from pokerapp.entities import PlayerAction
 
 
 MENTION_LINK = "tg://user?id=123"
@@ -148,8 +148,6 @@ def test_update_player_anchor_creates_anchor_message():
             role_label='دیلر',
             board_cards=board_cards,
             active=True,
-            call_label='CALL',
-            call_action=PlayerAction.CALL,
         )
     )
 
@@ -158,12 +156,8 @@ def test_update_player_anchor_creates_anchor_message():
     assert '🪑 صندلی: `3`' in call.kwargs['text']
     assert '🎖️ نقش: دیلر' in call.kwargs['text']
     assert '🃏 Board:' in call.kwargs['text']
-    markup = call.kwargs['reply_markup']
-    assert markup is not None
-    first_row = [button.text for button in markup.inline_keyboard[0]]
-    assert PlayerAction.FOLD.value in first_row
-    assert PlayerAction.ALL_IN.value in first_row
-    assert any(label.startswith('CALL') for label in first_row)
+    assert '🎯 **نوبت بازی این بازیکن است.**' in call.kwargs['text']
+    assert call.kwargs['reply_markup'] is None
 
 
 def test_update_player_anchor_inactive_removes_keyboard():
@@ -181,8 +175,6 @@ def test_update_player_anchor_inactive_removes_keyboard():
             role_label='بازیکن',
             board_cards=board_cards,
             active=False,
-            call_label='CHECK',
-            call_action=PlayerAction.CHECK,
             message_id=77,
         )
     )
@@ -191,6 +183,51 @@ def test_update_player_anchor_inactive_removes_keyboard():
     call = viewer._messenger.edit_message_text.await_args
     assert call.kwargs['reply_markup'] is None
     assert '🃏 Board:' in call.kwargs['text']
+    assert '🎯 **نوبت بازی این بازیکن است.**' not in call.kwargs['text']
+
+
+def test_update_turn_message_includes_stage_and_keyboard():
+    viewer = PokerBotViewer(bot=MagicMock())
+    viewer._update_message = AsyncMock(return_value=321)
+
+    game = Game()
+    game.state = GameState.ROUND_TURN
+    game.max_round_rate = 30
+    game.pot = 120
+    game.cards_table = [Card('A♠'), Card('K♦'), Card('5♣'), Card('9♥')]
+    game.last_actions = ['action 1', 'action 2']
+
+    player = Player(
+        user_id=111,
+        mention_markdown=MENTION_MARKDOWN,
+        wallet=MagicMock(),
+        ready_message_id='ready',
+    )
+    player.seat_index = 0
+    player.round_rate = 10
+
+    result = run(
+        viewer.update_turn_message(
+            chat_id=555,
+            game=game,
+            player=player,
+            money=500,
+        )
+    )
+
+    assert result.message_id == 321
+    call = viewer._update_message.await_args
+    text = call.kwargs['text']
+    assert '🃏 **مرحله بازی:** Turn' in text
+    assert '🃏 Board:' in text
+    assert '🎬 **اکشن‌های اخیر:**' in text
+
+    markup = call.kwargs['reply_markup']
+    assert isinstance(markup, InlineKeyboardMarkup)
+    first_row = [button.text for button in markup.inline_keyboard[0]]
+    assert PlayerAction.FOLD.value in first_row
+    assert PlayerAction.ALL_IN.value in first_row
+    assert any('🎯 کال' in label for label in first_row)
 
 def test_new_hand_ready_message_uses_reply_keyboard():
     viewer = PokerBotViewer(bot=MagicMock())
