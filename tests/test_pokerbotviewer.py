@@ -138,7 +138,6 @@ def test_update_player_anchor_creates_anchor_message():
     viewer._messenger.send_message = AsyncMock(return_value=MagicMock(message_id=42))
 
     player = MagicMock(mention_markdown=MENTION_MARKDOWN, user_id=111)
-    player.cards = [Card('A♣'), Card('K♥')]
     board_cards = [Card('A♠'), Card('K♦'), Card('5♣')]
 
     result = run(
@@ -148,8 +147,6 @@ def test_update_player_anchor_creates_anchor_message():
             seat_number=3,
             role_label='دیلر',
             board_cards=board_cards,
-            player_cards=player.cards,
-            game_state=GameState.ROUND_PRE_FLOP,
             active=True,
         )
     )
@@ -160,21 +157,14 @@ def test_update_player_anchor_creates_anchor_message():
     assert '🎖️ نقش: دیلر' in call.kwargs['text']
     assert '🃏 Board:' in call.kwargs['text']
     assert '🎯 **نوبت بازی این بازیکن است.**' in call.kwargs['text']
-    markup = call.kwargs['reply_markup']
-    assert isinstance(markup, InlineKeyboardMarkup)
-    rows = markup.inline_keyboard
-    assert [button.text for button in rows[0]] == ['🎴 کارت‌های شما']
-    assert [button.text for button in rows[1]] == ['A♣️', 'K♥️']
-    assert [button.text for button in rows[2]] == ['🃏 کارت‌های روی میز']
-    assert [button.text for button in rows[3]] == ['A♠️', 'K♦️', '5♣️']
+    assert call.kwargs['reply_markup'] is None
 
 
-def test_update_player_anchor_inactive_player_keeps_card_keyboard():
+def test_update_player_anchor_inactive_removes_keyboard():
     viewer = PokerBotViewer(bot=MagicMock())
     viewer._messenger.edit_message_text = AsyncMock(return_value=77)
 
     player = MagicMock(mention_markdown=MENTION_MARKDOWN, user_id=222)
-    player.cards = [Card('Q♣'), Card('J♥')]
     board_cards = [Card('Q♠'), Card('J♦'), Card('9♣'), Card('2♥')]
 
     result = run(
@@ -184,8 +174,6 @@ def test_update_player_anchor_inactive_player_keeps_card_keyboard():
             seat_number=4,
             role_label='بازیکن',
             board_cards=board_cards,
-            player_cards=player.cards,
-            game_state=GameState.ROUND_TURN,
             active=False,
             message_id=77,
         )
@@ -193,49 +181,9 @@ def test_update_player_anchor_inactive_player_keeps_card_keyboard():
 
     assert result == 77
     call = viewer._messenger.edit_message_text.await_args
+    assert call.kwargs['reply_markup'] is None
     assert '🃏 Board:' in call.kwargs['text']
     assert '🎯 **نوبت بازی این بازیکن است.**' not in call.kwargs['text']
-    markup = call.kwargs['reply_markup']
-    assert isinstance(markup, InlineKeyboardMarkup)
-    rows = markup.inline_keyboard
-    assert [button.text for button in rows[0]] == ['🎴 کارت‌های شما']
-    assert [button.text for button in rows[1]] == ['Q♣️', 'J♥️']
-    assert [button.text for button in rows[2]] == ['🃏 کارت‌های روی میز']
-    assert [button.text for button in rows[3]] == ['Q♠️', 'J♦️', '9♣️']
-    assert [button.text for button in rows[4]] == ['2♥️']
-
-
-def test_update_player_anchor_when_game_inactive_shows_menu():
-    viewer = PokerBotViewer(bot=MagicMock())
-    viewer._messenger.edit_message_text = AsyncMock(return_value=99)
-
-    player = MagicMock(mention_markdown=MENTION_MARKDOWN, user_id=333)
-    player.cards = [Card('2♣'), Card('3♦')]
-
-    result = run(
-        viewer.update_player_anchor(
-            chat_id=-777,
-            player=player,
-            seat_number=2,
-            role_label='بازیکن',
-            board_cards=[],
-            player_cards=player.cards,
-            game_state=GameState.INITIAL,
-            active=False,
-            message_id=99,
-        )
-    )
-
-    assert result == 99
-    call = viewer._messenger.edit_message_text.await_args
-    markup = call.kwargs['reply_markup']
-    assert isinstance(markup, InlineKeyboardMarkup)
-    rows = [[button.text for button in row] for row in markup.inline_keyboard]
-    assert rows == [
-        ['🎮 شروع بازی جدید', '📊 آمار شما'],
-        ['🛠 راهنما / قوانین', '💰 موجودی کیف پول'],
-        ['💬 گفتگوی دوستانه'],
-    ]
 
 
 def test_update_turn_message_includes_stage_and_keyboard():
