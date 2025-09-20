@@ -1036,8 +1036,8 @@ class PokerBotViewer:
             f"🪑 صندلی: `{seat_number}`",
             f"🎖️ نقش: {role_label}",
         ]
-        # کارت‌های روی میز در کیبورد اینلاین نمایش داده می‌شوند تا متن ثابت بماند.
-        _ = board_cards
+        board_line = cls._format_card_line("🃏 Board", board_cards)
+        lines.extend(["", board_line])
         return "\n".join(lines)
 
     async def update_player_anchor(
