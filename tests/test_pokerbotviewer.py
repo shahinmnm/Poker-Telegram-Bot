@@ -164,7 +164,10 @@ def test_update_player_anchor_creates_anchor_message():
     assert isinstance(markup, InlineKeyboardMarkup)
     rows = markup.inline_keyboard
     assert [button.text for button in rows[0]] == ['🎴 کارت‌های شما']
-    assert [button.text for button in rows[1]] == ['A♣️', 'K♥️']
+    assert [button.text for button in rows[1]] == [
+        '🂠 کارت مخفی 1/2',
+        '🂠 کارت مخفی 2/2',
+    ]
     assert [button.text for button in rows[2]] == ['🃏 کارت‌های روی میز']
     assert [button.text for button in rows[3]] == ['A♠️', 'K♦️', '5♣️']
 
@@ -226,7 +229,10 @@ def test_update_player_anchor_inactive_player_keeps_card_keyboard():
     assert isinstance(markup, InlineKeyboardMarkup)
     rows = markup.inline_keyboard
     assert [button.text for button in rows[0]] == ['🎴 کارت‌های شما']
-    assert [button.text for button in rows[1]] == ['Q♣️', 'J♥️']
+    assert [button.text for button in rows[1]] == [
+        '🂠 کارت مخفی 1/2',
+        '🂠 کارت مخفی 2/2',
+    ]
     assert [button.text for button in rows[2]] == ['🃏 کارت‌های روی میز']
     assert [button.text for button in rows[3]] == ['Q♠️', 'J♦️', '9♣️']
     assert [button.text for button in rows[4]] == ['2♥️']

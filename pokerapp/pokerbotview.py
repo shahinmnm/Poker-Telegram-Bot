@@ -966,12 +966,13 @@ class PokerBotViewer:
         rows: List[List[InlineKeyboardButton]] = []
         if has_hand:
             rows.append([cls._build_label_button("🎴 کارت‌های شما")])
+            total_cards = len(player_cards)
             card_row = [
                 InlineKeyboardButton(
-                    text=cls._format_card_button(card),
+                    text=f"🂠 کارت مخفی {index + 1}/{total_cards}",
                     callback_data=cls._build_hand_card_callback(player, index),
                 )
-                for index, card in enumerate(player_cards)
+                for index, _ in enumerate(player_cards)
             ]
             rows.append(card_row)
 
