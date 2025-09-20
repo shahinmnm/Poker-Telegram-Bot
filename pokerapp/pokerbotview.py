@@ -167,7 +167,7 @@ class PokerBotViewer:
         self._message_update_locks: Dict[Tuple[int, int], asyncio.Lock] = {}
         self._message_update_guard = asyncio.Lock()
         self._message_payload_hashes: Dict[Tuple[int, int], str] = {}
-        self._last_callback_updates: Dict[Tuple[int, int, str], str] = {}
+        self._last_callback_updates: Dict[Tuple[int, int, str, int], str] = {}
 
     def _payload_hash(
         self,
@@ -206,7 +206,7 @@ class PokerBotViewer:
 
     def _should_skip_callback_update(
         self,
-        key: Tuple[int, int, str],
+        key: Tuple[int, int, str, int],
         callback_id: str,
     ) -> bool:
         stored_token = self._last_callback_updates.get(key)
@@ -214,7 +214,7 @@ class PokerBotViewer:
 
     def _store_callback_update_token(
         self,
-        key: Tuple[int, int, str],
+        key: Tuple[int, int, str, int],
         callback_id: str,
     ) -> None:
         self._last_callback_updates[key] = callback_id
@@ -232,25 +232,29 @@ class PokerBotViewer:
         for key in to_remove:
             self._last_callback_updates.pop(key, None)
 
-    def _detect_callback_context(self) -> Tuple[Optional[str], Optional[str]]:
+    def _detect_callback_context(
+        self,
+    ) -> Tuple[Optional[str], Optional[str], Optional[int]]:
         try:
             stack = inspect.stack(context=0)
         except Exception:
-            return None, None
+            return None, None, None
 
         callback_id: Optional[str] = None
         stage_name: Optional[str] = None
+        user_id: Optional[int] = None
         try:
             for frame_info in stack:
                 locals_ = frame_info.frame.f_locals
 
-                if callback_id is None:
-                    callback = locals_.get("callback_query")
-                    if callback is None:
-                        update = locals_.get("update")
-                        if update is not None:
-                            callback = getattr(update, "callback_query", None)
-                    if callback is not None:
+                callback = locals_.get("callback_query")
+                if callback is None:
+                    update = locals_.get("update")
+                    if update is not None:
+                        callback = getattr(update, "callback_query", None)
+
+                if callback is not None:
+                    if callback_id is None:
                         raw_id = getattr(callback, "id", None) or getattr(
                             callback, "query_id", None
                         )
@@ -261,11 +265,21 @@ class PokerBotViewer:
                         if raw_id is None:
                             from_user = getattr(callback, "from_user", None)
                             if from_user is not None:
-                                user_id = getattr(from_user, "id", None)
-                                if user_id is not None:
-                                    raw_id = f"user:{user_id}"
+                                user_identifier = getattr(from_user, "id", None)
+                                if user_identifier is not None:
+                                    raw_id = f"user:{user_identifier}"
                         if raw_id is not None:
                             callback_id = str(raw_id)
+
+                    if user_id is None:
+                        from_user = getattr(callback, "from_user", None)
+                        if from_user is not None:
+                            raw_user_id = getattr(from_user, "id", None)
+                            if raw_user_id is not None:
+                                try:
+                                    user_id = int(raw_user_id)
+                                except (TypeError, ValueError):
+                                    user_id = None
 
                 if stage_name is None:
                     game = locals_.get("game")
@@ -281,9 +295,9 @@ class PokerBotViewer:
                 if callback_id is not None and stage_name is not None:
                     break
 
-            return callback_id, stage_name
+            return callback_id, stage_name, user_id
         except Exception:
-            return None, None
+            return None, None, None
         finally:
             del stack
 
@@ -329,15 +343,20 @@ class PokerBotViewer:
         )
         callback_id: Optional[str] = None
         callback_stage_name = "<unknown>"
-        callback_token_key: Optional[Tuple[int, int, str]] = None
+        callback_user_id: Optional[int] = None
+        callback_token_key: Optional[Tuple[int, int, str, int]] = None
         if normalized_existing_message is not None:
-            callback_id, detected_stage = self._detect_callback_context()
+            callback_id, detected_stage, detected_user_id = (
+                self._detect_callback_context()
+            )
             if callback_id is not None:
                 callback_stage_name = self._normalize_stage_name(detected_stage)
+                callback_user_id = self._safe_int(detected_user_id)
                 callback_token_key = (
                     normalized_chat,
                     normalized_existing_message,
                     callback_stage_name,
+                    callback_user_id,
                 )
                 if self._should_skip_callback_update(
                     callback_token_key, callback_id
@@ -350,6 +369,7 @@ class PokerBotViewer:
                             "payload_hash": payload_hash,
                             "callback_id": callback_id,
                             "game_stage": callback_stage_name,
+                            "callback_user_id": callback_user_id,
                             "trigger": "callback_query",
                         },
                     )
@@ -365,6 +385,7 @@ class PokerBotViewer:
                         "payload_hash": payload_hash,
                         "callback_id": callback_id,
                         "game_stage": callback_stage_name,
+                        "callback_user_id": callback_user_id,
                         "trigger": "callback_query"
                         if callback_id is not None
                         else "automatic",
@@ -385,6 +406,7 @@ class PokerBotViewer:
                             "payload_hash": payload_hash,
                             "callback_id": callback_id,
                             "game_stage": callback_stage_name,
+                            "callback_user_id": callback_user_id,
                             "trigger": "callback_query"
                             if callback_id is not None
                             else "automatic",
@@ -404,6 +426,7 @@ class PokerBotViewer:
                         "payload_hash": payload_hash,
                         "callback_id": callback_id,
                         "game_stage": callback_stage_name,
+                        "callback_user_id": callback_user_id,
                         "trigger": "callback_query",
                     },
                 )
@@ -459,6 +482,7 @@ class PokerBotViewer:
                     normalized_chat,
                     normalized_new_message,
                     callback_stage_name,
+                    callback_user_id if callback_user_id is not None else 0,
                 )
                 self._store_callback_update_token(
                     new_callback_token_key,
