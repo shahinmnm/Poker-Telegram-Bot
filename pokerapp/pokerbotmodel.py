@@ -2,6 +2,7 @@
 
 import asyncio
 import datetime
+import inspect
 import random
 import uuid
 from collections import defaultdict
@@ -54,7 +55,7 @@ from pokerapp.entities import (
     MIN_PLAYERS,
     MAX_PLAYERS,
 )
-from pokerapp.pokerbotview import PokerBotViewer
+from pokerapp.pokerbotview import AnchorUpdateRequest, PokerBotViewer
 from pokerapp.utils.markdown import escape_markdown_v1
 from pokerapp.table_manager import TableManager
 from pokerapp.stats import (
@@ -898,6 +899,51 @@ class PokerBotModel:
                     should_broadcast = False
 
             if should_broadcast:
+                payload_hash: Optional[str] = None
+                hash_builder = getattr(self._view, "payload_signature", None)
+                if callable(hash_builder):
+                    try:
+                        candidate = hash_builder(text, keyboard)
+                    except Exception:
+                        payload_hash = None
+                    else:
+                        if isinstance(candidate, str):
+                            payload_hash = candidate
+
+                stage_skip = False
+                if payload_hash is not None:
+                    skip_checker = getattr(
+                        self._view, "should_skip_stage_update", None
+                    )
+                    if callable(skip_checker):
+                        try:
+                            maybe = skip_checker(
+                                chat_id=chat_id,
+                                message_id=message_id,
+                                stage="countdown",
+                                payload_hash=payload_hash,
+                            )
+                            if inspect.isawaitable(maybe):
+                                maybe = await maybe
+                            if isinstance(maybe, bool):
+                                stage_skip = maybe
+                        except Exception:
+                            stage_skip = False
+                if stage_skip:
+                    logger.debug(
+                        "Skipping countdown update due to recent identical payload",
+                        extra={
+                            "chat_id": chat_id,
+                            "message_id": message_id,
+                        },
+                    )
+                    await self._request_metrics.record_skip(
+                        chat_id=self._safe_int(chat_id),
+                        category=RequestCategory.COUNTDOWN,
+                    )
+                    should_broadcast = False
+
+            if should_broadcast:
                 skip_due_to_cache = await self._countdown_cache_should_skip(
                     chat_id, next_remaining, text, message_id
                 )
@@ -1035,8 +1081,10 @@ class PokerBotModel:
         chat_id: ChatId,
         *,
         active_player: Player,
-    ) -> None:
+        collect_active: bool = False,
+    ) -> Optional[AnchorUpdateRequest]:
         board_cards = list(game.cards_table)
+        active_plan: Optional[AnchorUpdateRequest] = None
         for player in game.seated_players():
             seat_number = (player.seat_index or 0) + 1
             role_label = self._describe_player_role(game, player)
@@ -1048,15 +1096,28 @@ class PokerBotModel:
             elif getattr(player, "cards_keyboard_message_id", None):
                 existing_id = player.cards_keyboard_message_id
 
+            request = AnchorUpdateRequest(
+                player=player,
+                seat_number=seat_number,
+                role_label=role_label,
+                board_cards=board_cards,
+                active=player.user_id == active_player.user_id,
+                message_id=existing_id,
+            )
+
+            if collect_active and request.active:
+                active_plan = request
+                continue
+
             try:
                 message_id = await self._view.update_player_anchor(
                     chat_id=chat_id,
-                    player=player,
-                    seat_number=seat_number,
-                    role_label=role_label,
-                    board_cards=board_cards,
-                    active=player.user_id == active_player.user_id,
-                    message_id=existing_id,
+                    player=request.player,
+                    seat_number=request.seat_number,
+                    role_label=request.role_label,
+                    board_cards=request.board_cards,
+                    active=request.active,
+                    message_id=request.message_id,
                 )
             except Exception as exc:
                 logger.error(
@@ -1075,6 +1136,8 @@ class PokerBotModel:
                 player,
                 message_id,
             )
+
+        return active_plan
 
     async def _safe_edit_message_text(
         self,
@@ -1732,12 +1795,18 @@ class PokerBotModel:
             if len(game.last_actions) > 5:
                 game.last_actions.pop(0)
             if current_player:
-                await self._update_player_anchor_messages(
+                anchor_plan = await self._update_player_anchor_messages(
                     game,
                     chat_id,
                     active_player=current_player,
+                    collect_active=True,
                 )
-                await self._send_turn_message(game, current_player, chat_id)
+                await self._send_turn_message(
+                    game,
+                    current_player,
+                    chat_id,
+                    anchor_plan=anchor_plan,
+                )
 
             # نیازی به هیچ کد دیگری در اینجا نیست.
             # کدهای اضافی حذف شدند.
@@ -1936,9 +2005,52 @@ class PokerBotModel:
         await self._go_to_next_street(game, chat_id, context)
         return None
 
-    async def _send_turn_message(self, game: Game, player: Player, chat_id: ChatId):
+    async def _send_turn_message(
+        self,
+        game: Game,
+        player: Player,
+        chat_id: ChatId,
+        *,
+        anchor_plan: Optional[AnchorUpdateRequest] = None,
+    ):
         """پیام نوبت را ارسال کرده و شناسه آن را برای حذف در آینده ذخیره می‌کند."""
         async with self._chat_guard(chat_id):
+            if anchor_plan is None:
+                anchor_plan = await self._update_player_anchor_messages(
+                    game,
+                    chat_id,
+                    active_player=player,
+                    collect_active=True,
+                )
+            anchor_message_id: Optional[MessageId] = None
+            if anchor_plan is not None:
+                try:
+                    anchor_message_id = await self._view.update_player_anchor(
+                        chat_id=chat_id,
+                        player=anchor_plan.player,
+                        seat_number=anchor_plan.seat_number,
+                        role_label=anchor_plan.role_label,
+                        board_cards=anchor_plan.board_cards,
+                        active=True,
+                        message_id=anchor_plan.message_id,
+                    )
+                    if anchor_message_id:
+                        await self._track_player_keyboard_message(
+                            game,
+                            chat_id,
+                            anchor_plan.player,
+                            anchor_message_id,
+                        )
+                except Exception as exc:
+                    logger.error(
+                        "Failed to update active anchor",
+                        extra={
+                            "chat_id": chat_id,
+                            "player_id": anchor_plan.player.user_id,
+                            "error_type": type(exc).__name__,
+                        },
+                    )
+
             money = await player.wallet.value()
             recent_actions = list(game.last_actions)
 
@@ -1955,6 +2067,15 @@ class PokerBotModel:
                 game.turn_message_id = turn_update.message_id
 
             game.last_turn_time = datetime.datetime.now()
+
+            logger.debug(
+                "Batched anchor+turn update",
+                extra={
+                    "chat_id": chat_id,
+                    "anchor_message_id": anchor_message_id,
+                    "turn_message_id": game.turn_message_id,
+                },
+            )
 
     # --- Player Action Handlers ---
     # این بخش تمام حرکات ممکن بازیکنان در نوبتشان را مدیریت می‌کند.
