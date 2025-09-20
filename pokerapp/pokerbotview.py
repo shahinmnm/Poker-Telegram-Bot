@@ -1029,16 +1029,14 @@ class PokerBotViewer:
         mention_markdown: Mention,
         seat_number: int,
         role_label: str,
-        board_cards: Sequence[Card],
     ) -> str:
-        lines = [
-            f"🎮 {mention_markdown}",
-            f"🪑 صندلی: `{seat_number}`",
-            f"🎖️ نقش: {role_label}",
-        ]
-        board_line = cls._format_card_line("🃏 Board", board_cards)
-        lines.extend(["", board_line])
-        return "\n".join(lines)
+        return "\n".join(
+            [
+                f"🎮 {mention_markdown}",
+                f"🪑 صندلی: `{seat_number}`",
+                f"🎖️ نقش: {role_label}",
+            ]
+        )
 
     async def update_player_anchor(
         self,
@@ -1057,7 +1055,6 @@ class PokerBotViewer:
             mention_markdown=player.mention_markdown,
             seat_number=seat_number,
             role_label=role_label,
-            board_cards=board_cards,
         )
         reply_markup: Optional[InlineKeyboardMarkup] = None
         if not self._is_private_chat(chat_id):
