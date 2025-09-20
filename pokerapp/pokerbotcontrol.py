@@ -43,6 +43,8 @@ class PokerBotCotroller:
         application.add_handler(CallbackQueryHandler(self._handle_start, pattern="^start_game$"))
         application.add_handler(CallbackQueryHandler(self._handle_join_game, pattern="^join_game$"))
         application.add_handler(CallbackQueryHandler(self._handle_board_card, pattern="^board_card_"))
+        application.add_handler(CallbackQueryHandler(self._handle_hand_card, pattern="^hand_card_"))
+        application.add_handler(CallbackQueryHandler(self._handle_anchor_menu, pattern="^anchor:"))
         application.add_handler(
             CallbackQueryHandler(
                 self._handle_stop_vote,
@@ -211,6 +213,85 @@ class PokerBotCotroller:
             card = game.cards_table[index]
             await query.answer(text=str(card), show_alert=True)
             return
+        await query.answer()
+
+    async def _handle_hand_card(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        query = update.callback_query
+        if not query or not query.data:
+            return
+
+        parts = query.data.split("_")
+        if len(parts) < 4:
+            await query.answer()
+            return
+
+        player_id = parts[2]
+        index_str = parts[3]
+        requester_id = str(update.effective_user.id)
+        if player_id != requester_id:
+            await query.answer(text="این کارت متعلق به شما نیست!", show_alert=True)
+            return
+
+        try:
+            index = int(index_str)
+        except ValueError:
+            await query.answer()
+            return
+
+        try:
+            game, _ = await self._model._get_game(update, context)
+        except Exception:
+            await query.answer()
+            return
+
+        player = next((p for p in game.players if str(p.user_id) == player_id), None)
+        if not player or index < 0 or index >= len(player.cards):
+            await query.answer()
+            return
+
+        await query.answer(text=str(player.cards[index]), show_alert=True)
+
+    async def _handle_anchor_menu(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        query = update.callback_query
+        if not query or not query.data:
+            return
+
+        action = query.data.split(":", 1)[1] if ":" in query.data else ""
+        chat = update.effective_chat
+
+        if action == "noop":
+            await query.answer()
+            return
+
+        if action == "stats":
+            await query.answer()
+            await self._model._send_statistics_report(update, context)
+            return
+
+        if action == "help":
+            await query.answer()
+            help_text = (
+                "🛠 راهنما:\n"
+                "• /newgame — ساخت میز جدید\n"
+                "• /ready — آماده شدن برای دست بعدی\n"
+                "• /money — دریافت بونوس روزانه"
+            )
+            await self._view.send_message(chat.id, help_text)
+            return
+
+        if action == "wallet":
+            await query.answer()
+            await self._model._send_wallet_balance(update, context)
+            return
+
+        if action == "chat":
+            await query.answer(text="💬 یک گفتگوی دوستانه تازه شروع کن!", show_alert=False)
+            return
+
         await query.answer()
 
     async def _handle_button_clicked(

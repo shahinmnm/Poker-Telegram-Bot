@@ -70,6 +70,8 @@ class AnchorUpdateRequest:
     board_cards: Sequence[Card]
     active: bool
     message_id: Optional[MessageId]
+    player_cards: Sequence[Card]
+    game_state: GameState
 
 
 class PokerBotViewer:
@@ -84,6 +86,18 @@ class PokerBotViewer:
         "\u2061",
         "\u2062",
         "\u2063",
+    }
+    _ACTIVE_ANCHOR_STATES = {
+        GameState.ROUND_PRE_FLOP,
+        GameState.ROUND_FLOP,
+        GameState.ROUND_TURN,
+        GameState.ROUND_RIVER,
+    }
+    _SUIT_EMOJI = {
+        "♠": "♠\ufe0f",
+        "♥": "♥\ufe0f",
+        "♦": "♦\ufe0f",
+        "♣": "♣\ufe0f",
     }
 
     @classmethod
@@ -105,6 +119,27 @@ class PokerBotViewer:
             chat_id,
             message_id,
         )
+
+    @staticmethod
+    def _is_private_chat(chat_id: ChatId) -> bool:
+        if isinstance(chat_id, str):
+            return chat_id.startswith("private:")
+        return False
+
+    @classmethod
+    def _format_card_button(cls, card: Card) -> str:
+        suit = cls._SUIT_EMOJI.get(card.suit, card.suit)
+        rank = card.rank
+        return f"{rank}{suit}"
+
+    @staticmethod
+    def _build_label_button(label: str) -> InlineKeyboardButton:
+        return InlineKeyboardButton(text=label, callback_data="anchor:noop")
+
+    @staticmethod
+    def _build_hand_card_callback(player: Player, index: int) -> str:
+        player_id = getattr(player, "user_id", "0")
+        return f"hand_card_{player_id}_{index}"
 
     @staticmethod
     def _build_hidden_mention(mention_markdown: Optional[Mention]) -> str:
@@ -820,6 +855,78 @@ class PokerBotViewer:
         return f"{label}: {cls._render_cards(cards)}"
 
     @classmethod
+    def _build_card_markup(
+        cls,
+        *,
+        player: Player,
+        player_cards: Sequence[Card],
+        board_cards: Sequence[Card],
+    ) -> Optional[InlineKeyboardMarkup]:
+        has_hand = bool(player_cards)
+        has_board = bool(board_cards)
+        if not has_hand and not has_board:
+            return None
+
+        rows: List[List[InlineKeyboardButton]] = []
+        if has_hand:
+            rows.append([cls._build_label_button("🎴 کارت‌های شما")])
+            card_row = [
+                InlineKeyboardButton(
+                    text=cls._format_card_button(card),
+                    callback_data=cls._build_hand_card_callback(player, index),
+                )
+                for index, card in enumerate(player_cards)
+            ]
+            rows.append(card_row)
+
+        if has_board:
+            rows.append([cls._build_label_button("🃏 کارت‌های روی میز")])
+            board_buttons = [
+                InlineKeyboardButton(
+                    text=cls._format_card_button(card),
+                    callback_data=f"board_card_{index}",
+                )
+                for index, card in enumerate(board_cards)
+            ]
+            for start in range(0, len(board_buttons), 3):
+                rows.append(board_buttons[start : start + 3])
+
+        return InlineKeyboardMarkup(inline_keyboard=rows)
+
+    @staticmethod
+    def _build_inactive_anchor_markup() -> InlineKeyboardMarkup:
+        return InlineKeyboardMarkup(
+            inline_keyboard=[
+                [
+                    InlineKeyboardButton(
+                        text="🎮 شروع بازی جدید",
+                        callback_data="start_game",
+                    ),
+                    InlineKeyboardButton(
+                        text="📊 آمار شما",
+                        callback_data="anchor:stats",
+                    ),
+                ],
+                [
+                    InlineKeyboardButton(
+                        text="🛠 راهنما / قوانین",
+                        callback_data="anchor:help",
+                    ),
+                    InlineKeyboardButton(
+                        text="💰 موجودی کیف پول",
+                        callback_data="anchor:wallet",
+                    ),
+                ],
+                [
+                    InlineKeyboardButton(
+                        text="💬 گفتگوی دوستانه",
+                        callback_data="anchor:chat",
+                    )
+                ],
+            ]
+        )
+
+    @classmethod
     def _build_anchor_text(
         cls,
         *,
@@ -845,6 +952,8 @@ class PokerBotViewer:
         seat_number: int,
         role_label: str,
         board_cards: Sequence[Card],
+        player_cards: Sequence[Card],
+        game_state: GameState,
         active: bool,
         message_id: Optional[MessageId] = None,
     ) -> Optional[MessageId]:
@@ -854,13 +963,23 @@ class PokerBotViewer:
             role_label=role_label,
             board_cards=board_cards,
         )
+        reply_markup: Optional[InlineKeyboardMarkup] = None
+        if not self._is_private_chat(chat_id):
+            if game_state in self._ACTIVE_ANCHOR_STATES:
+                reply_markup = self._build_card_markup(
+                    player=player,
+                    player_cards=player_cards,
+                    board_cards=board_cards,
+                )
+            else:
+                reply_markup = self._build_inactive_anchor_markup()
         if active:
             text = f"{text}\n\n🎯 **نوبت بازی این بازیکن است.**"
         return await self._update_message(
             chat_id=chat_id,
             message_id=message_id,
             text=text,
-            reply_markup=None,
+            reply_markup=reply_markup,
             parse_mode=ParseMode.MARKDOWN,
             disable_web_page_preview=True,
             disable_notification=message_id is not None,
