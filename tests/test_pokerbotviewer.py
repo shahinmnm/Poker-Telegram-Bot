@@ -1,6 +1,5 @@
 import asyncio
 import logging
-from typing import List
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -159,6 +158,7 @@ def test_update_player_anchor_creates_anchor_message():
     call = viewer._messenger.send_message.await_args
     assert '🪑 صندلی: `3`' in call.kwargs['text']
     assert '🎖️ نقش: دیلر' in call.kwargs['text']
+    assert '🃏 Board:' in call.kwargs['text']
     assert '🎯 **نوبت بازی این بازیکن است.**' in call.kwargs['text']
     markup = call.kwargs['reply_markup']
     assert isinstance(markup, InlineKeyboardMarkup)
@@ -171,34 +171,10 @@ def test_update_player_anchor_creates_anchor_message():
 
 def test_update_player_anchor_inactive_player_keeps_card_keyboard():
     viewer = PokerBotViewer(bot=MagicMock())
-    viewer._messenger.send_message = AsyncMock(
-        return_value=MagicMock(message_id=77)
-    )
-    viewer._messenger.edit_message_reply_markup = AsyncMock(return_value=True)
-    viewer._messenger.edit_message_text = AsyncMock()
+    viewer._messenger.edit_message_text = AsyncMock(return_value=77)
 
     player = MagicMock(mention_markdown=MENTION_MARKDOWN, user_id=222)
     player.cards = [Card('Q♣'), Card('J♥')]
-    initial_board: List[Card] = []
-
-    # Initial creation of the anchor message caches the message text
-    run(
-        viewer.update_player_anchor(
-            chat_id=888,
-            player=player,
-            seat_number=4,
-            role_label='بازیکن',
-            board_cards=initial_board,
-            player_cards=player.cards,
-            game_state=GameState.ROUND_PRE_FLOP,
-            active=False,
-        )
-    )
-
-    viewer._messenger.send_message.reset_mock()
-    viewer._messenger.edit_message_reply_markup.reset_mock()
-    viewer._messenger.edit_message_text.reset_mock()
-
     board_cards = [Card('Q♠'), Card('J♦'), Card('9♣'), Card('2♥')]
 
     result = run(
@@ -216,9 +192,9 @@ def test_update_player_anchor_inactive_player_keeps_card_keyboard():
     )
 
     assert result == 77
-    assert viewer._messenger.edit_message_text.await_count == 0
-    assert viewer._messenger.edit_message_reply_markup.await_count == 1
-    call = viewer._messenger.edit_message_reply_markup.await_args
+    call = viewer._messenger.edit_message_text.await_args
+    assert '🃏 Board:' in call.kwargs['text']
+    assert '🎯 **نوبت بازی این بازیکن است.**' not in call.kwargs['text']
     markup = call.kwargs['reply_markup']
     assert isinstance(markup, InlineKeyboardMarkup)
     rows = markup.inline_keyboard
