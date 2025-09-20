@@ -530,6 +530,21 @@ class PokerBotViewer:
             self._log_skip_empty(chat_id, message_id)
             return message_id
 
+        if (
+            request_category == RequestCategory.ANCHOR
+            and reply_markup is not None
+            and not isinstance(reply_markup, InlineKeyboardMarkup)
+        ):
+            logger.warning(
+                "Discarding non-inline reply markup for anchor update",
+                extra={
+                    "chat_id": chat_id,
+                    "message_id": message_id,
+                    "markup_type": type(reply_markup).__name__,
+                },
+            )
+            reply_markup = None
+
         payload_hash = self._payload_hash(normalized_text, reply_markup)
         message_text_hash = hashlib.md5(normalized_text.encode("utf-8")).hexdigest()
         normalized_chat = self._safe_int(chat_id)
@@ -593,19 +608,37 @@ class PokerBotViewer:
             if normalized_existing_message is not None
             else None
         )
+        previous_payload_hash: Optional[str] = None
         if normalized_existing_message is not None:
             previous_text_hash = await self._get_last_text_hash(
                 normalized_existing_message
             )
             if previous_text_hash == message_text_hash:
-                debug_trace_logger.info(
-                    f"Skipping editMessageText for message_id={message_id} (hash match)"
-                )
-                await self._request_metrics.record_skip(
-                    chat_id=normalized_chat,
-                    category=request_category,
-                )
-                return message_id
+                anchor_markup_only = False
+                if (
+                    request_category == RequestCategory.ANCHOR
+                    and message_key is not None
+                ):
+                    previous_payload_hash = await self._get_payload_hash(message_key)
+                    anchor_markup_only = previous_payload_hash != payload_hash
+                if anchor_markup_only:
+                    logger.debug(
+                        "Anchor text unchanged; will refresh inline markup",
+                        extra={
+                            "chat_id": chat_id,
+                            "message_id": message_id,
+                            "payload_hash": payload_hash,
+                        },
+                    )
+                else:
+                    debug_trace_logger.info(
+                        f"Skipping editMessageText for message_id={message_id} (hash match)"
+                    )
+                    await self._request_metrics.record_skip(
+                        chat_id=normalized_chat,
+                        category=request_category,
+                    )
+                    return message_id
         turn_cache_key = message_key if request_category == RequestCategory.TURN else None
 
         if stage_key is not None:
@@ -627,8 +660,9 @@ class PokerBotViewer:
                 return message_id
 
         if message_key is not None:
-            previous_hash = await self._get_payload_hash(message_key)
-            if previous_hash == payload_hash:
+            if previous_payload_hash is None:
+                previous_payload_hash = await self._get_payload_hash(message_key)
+            if previous_payload_hash == payload_hash:
                 logger.debug(
                     "Skipping update_message due to identical payload",
                     extra={
@@ -673,6 +707,65 @@ class PokerBotViewer:
                     normalized_existing_message
                 )
                 if previous_text_hash == message_text_hash:
+                    anchor_markup_only = False
+                    if (
+                        request_category == RequestCategory.ANCHOR
+                        and message_key is not None
+                    ):
+                        if previous_payload_hash is None:
+                            previous_payload_hash = await self._get_payload_hash(
+                                message_key
+                            )
+                        anchor_markup_only = previous_payload_hash != payload_hash
+                    if anchor_markup_only:
+                        if reply_markup is not None and not isinstance(
+                            reply_markup, InlineKeyboardMarkup
+                        ):
+                            logger.debug(
+                                "Ignoring non-inline reply markup during anchor refresh",
+                                extra={
+                                    "chat_id": chat_id,
+                                    "message_id": message_id,
+                                    "markup_type": type(reply_markup).__name__,
+                                },
+                            )
+                            reply_markup = None
+                        updated = await self.edit_message_reply_markup(
+                            chat_id=chat_id,
+                            message_id=message_id,
+                            reply_markup=reply_markup,
+                        )
+                        if updated:
+                            await self._set_last_text_hash(
+                                normalized_existing_message, message_text_hash
+                            )
+                            if message_key is not None:
+                                await self._set_payload_hash(
+                                    message_key, payload_hash
+                                )
+                            if stage_key is not None:
+                                await self._set_stage_payload_hash(
+                                    stage_key, payload_hash
+                                )
+                            if turn_cache_key is not None:
+                                await self._set_turn_cache_hash(
+                                    message_key, payload_hash
+                                )
+                            if (
+                                callback_id is not None
+                                and callback_token_key is not None
+                            ):
+                                self._store_callback_update_token(
+                                    callback_token_key, callback_id
+                                )
+                            if (
+                                callback_id is not None
+                                and callback_throttle_key is not None
+                            ):
+                                self._last_callback_edit[
+                                    callback_throttle_key
+                                ] = callback_id
+                            return message_id
                     debug_trace_logger.info(
                         f"Skipping editMessageText for message_id={message_id} (hash match)"
                     )
@@ -682,8 +775,11 @@ class PokerBotViewer:
                     )
                     return message_id
             if message_key is not None:
-                previous_hash = await self._get_payload_hash(message_key)
-                if previous_hash == payload_hash:
+                if previous_payload_hash is None:
+                    previous_payload_hash = await self._get_payload_hash(
+                        message_key
+                    )
+                if previous_payload_hash == payload_hash:
                     logger.debug(
                         "Skipping update_message inside lock due to identical payload",
                         extra={
