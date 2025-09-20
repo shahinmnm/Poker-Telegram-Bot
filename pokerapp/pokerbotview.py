@@ -21,6 +21,7 @@ from typing import (
 )
 from dataclasses import dataclass
 import asyncio
+import datetime
 import hashlib
 import inspect
 import logging
@@ -977,6 +978,24 @@ class PokerBotViewer:
                     "request_params": {"text": text},
                 },
             )
+        return None
+
+    async def last_message_edit_at(
+        self, chat_id: ChatId, message_id: MessageId
+    ) -> Optional[datetime.datetime]:
+        """Return the timestamp of the last successful edit for ``message_id``."""
+
+        accessor = getattr(self._messenger, "last_edit_timestamp", None)
+        if accessor is None:
+            return None
+        try:
+            result = accessor(chat_id, message_id)
+            if inspect.isawaitable(result):
+                result = await result
+        except Exception:
+            return None
+        if isinstance(result, datetime.datetime):
+            return result
         return None
 
 

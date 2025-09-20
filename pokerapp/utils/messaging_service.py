@@ -19,7 +19,10 @@ import asyncio
 import hashlib
 import json
 import logging
-from typing import Any, Dict, Optional, Tuple
+import time
+import datetime
+from dataclasses import dataclass, field
+from typing import Any, Dict, List, Optional, Tuple
 
 from cachetools import TTLCache
 
@@ -44,6 +47,43 @@ CacheKey = Tuple[int, int]
 CacheEntryKey = Tuple[int, int, str]
 
 
+@dataclass(slots=True)
+class _EditPayload:
+    """Payload information for a queued edit operation."""
+
+    text: Optional[str]
+    reply_markup: Any
+    params: Dict[str, Any]
+    force: bool
+    request_category: RequestCategory
+    content_hash: str
+
+
+@dataclass(slots=True)
+class _EditWaiter:
+    """Track awaiting callers for a queued edit."""
+
+    future: "asyncio.Future[Optional[int]]"
+    category: RequestCategory
+    content_hash: str
+    superseded: bool = False
+
+
+@dataclass(slots=True)
+class _PendingEditState:
+    """Mutable state for coalescing edits on a single message."""
+
+    guard: asyncio.Lock = field(default_factory=asyncio.Lock)
+    pending_payload: Optional[_EditPayload] = None
+    waiters: List[_EditWaiter] = field(default_factory=list)
+    update_event: asyncio.Event = field(default_factory=asyncio.Event)
+    flush_task: Optional[asyncio.Task] = None
+    first_update: float = 0.0
+    last_update: float = 0.0
+    last_flush: float = 0.0
+    delete_waiters: List["asyncio.Future[bool]"] = field(default_factory=list)
+
+
 class MessagingService:
     """Encapsulate all outgoing Telegram requests for the poker bot.
 
@@ -60,6 +100,11 @@ class MessagingService:
     logger_:
         Optional custom :class:`logging.Logger` instance used for diagnostics.
     """
+
+    #: Maximum time to keep coalescing edits for the same message.
+    _COALESCE_WINDOW = 1.5
+    #: Minimum quiet period before flushing a queued edit.
+    _COALESCE_IDLE = 0.35
 
     def __init__(
         self,
@@ -80,6 +125,8 @@ class MessagingService:
         self._locks: Dict[CacheKey, asyncio.Lock] = {}
         self._locks_guard = asyncio.Lock()
         self._metrics = request_metrics or RequestMetrics(logger_=self._logger)
+        self._pending_edits: Dict[CacheKey, _PendingEditState] = {}
+        self._last_edit_timestamp: Dict[CacheKey, datetime.datetime] = {}
 
     async def send_message(
         self,
@@ -201,16 +248,198 @@ class MessagingService:
         if message_id is None:
             return None
 
+        loop = asyncio.get_running_loop()
         content_hash = self._content_hash(text, reply_markup)
-        if not force and await self._should_skip(chat_id, message_id, content_hash):
-            self._logger.info(
-                "SKIP EDIT: identical content for chat %s, msg %s",
-                chat_id,
-                message_id,
-            )
-            await self._metrics.record_skip(
+        payload = _EditPayload(
+            text=text,
+            reply_markup=reply_markup,
+            params=dict(params),
+            force=force,
+            request_category=request_category,
+            content_hash=content_hash,
+        )
+        future: "asyncio.Future[Optional[int]]" = loop.create_future()
+        waiter = _EditWaiter(
+            future=future,
+            category=request_category,
+            content_hash=content_hash,
+        )
+
+        await self._enqueue_edit(
+            chat_id=chat_id,
+            message_id=message_id,
+            payload=payload,
+            waiter=waiter,
+        )
+
+        return await future
+
+    async def _enqueue_edit(
+        self,
+        *,
+        chat_id: int,
+        message_id: int,
+        payload: _EditPayload,
+        waiter: _EditWaiter,
+    ) -> None:
+        """Queue an edit request so multiple updates can be coalesced."""
+
+        key = (int(chat_id), int(message_id))
+        state = self._pending_edits.setdefault(key, _PendingEditState())
+
+        async with state.guard:
+            if state.pending_payload is None:
+                if (
+                    not payload.force
+                    and await self._should_skip(chat_id, message_id, payload.content_hash)
+                ):
+                    await self._log_skip(
+                        chat_id=chat_id,
+                        message_id=message_id,
+                        category=payload.request_category,
+                        reason="hash_match",
+                    )
+                    if not waiter.future.done():
+                        waiter.future.set_result(message_id)
+                    return
+                state.pending_payload = payload
+                state.waiters.append(waiter)
+                now = time.monotonic()
+                state.first_update = now
+                state.last_update = now
+            else:
+                pending_hash = state.pending_payload.content_hash
+                if (
+                    pending_hash == payload.content_hash
+                    and not payload.force
+                ):
+                    # Join the existing pending edit without logging a skip.
+                    state.waiters.append(waiter)
+                    state.last_update = time.monotonic()
+                else:
+                    for existing in state.waiters:
+                        if not existing.superseded:
+                            existing.superseded = True
+                            await self._log_skip(
+                                chat_id=chat_id,
+                                message_id=message_id,
+                                category=existing.category,
+                                reason="superseded",
+                            )
+                    state.pending_payload = payload
+                    state.waiters.append(waiter)
+                    state.last_update = time.monotonic()
+            state.update_event.set()
+            if state.flush_task is None or state.flush_task.done():
+                state.flush_task = asyncio.create_task(
+                    self._flush_pending_edits(chat_id, message_id, state)
+                )
+
+    async def _flush_pending_edits(
+        self,
+        chat_id: int,
+        message_id: int,
+        state: _PendingEditState,
+    ) -> None:
+        """Flush queued edits once the coalescing window expires."""
+
+        key = (int(chat_id), int(message_id))
+        while True:
+            payload: Optional[_EditPayload] = None
+            waiters: List[_EditWaiter] = []
+            wait_timeout: Optional[float] = None
+            notify_delete: List["asyncio.Future[bool]"] = []
+            should_exit = False
+
+            async with state.guard:
+                if state.pending_payload is None:
+                    should_exit = True
+                    if state.delete_waiters:
+                        notify_delete = list(state.delete_waiters)
+                        state.delete_waiters.clear()
+                    state.flush_task = None
+                    state.update_event.clear()
+                else:
+                    now = time.monotonic()
+                    idle = now - state.last_update
+                    total = now - state.first_update
+                    if idle < self._COALESCE_IDLE and total < self._COALESCE_WINDOW:
+                        wait_timeout = min(
+                            self._COALESCE_IDLE - idle,
+                            self._COALESCE_WINDOW - total,
+                        )
+                        state.update_event.clear()
+                    else:
+                        payload = state.pending_payload
+                        waiters = list(state.waiters)
+                        state.pending_payload = None
+                        state.waiters = []
+                        state.first_update = 0.0
+                        state.last_update = 0.0
+                        state.update_event.clear()
+
+            if should_exit:
+                for future in notify_delete:
+                    if not future.done():
+                        future.set_result(True)
+                return
+
+            if wait_timeout is not None:
+                try:
+                    await asyncio.wait_for(state.update_event.wait(), timeout=wait_timeout)
+                except asyncio.TimeoutError:
+                    continue
+                else:
+                    continue
+
+            if payload is None:
+                # Nothing ready yet; loop back to evaluate again.
+                await asyncio.sleep(self._COALESCE_IDLE)
+                continue
+
+            try:
+                result = await self._apply_edit(chat_id, message_id, payload)
+            except Exception as exc:
+                for waiter in waiters:
+                    if not waiter.future.done():
+                        waiter.future.set_exception(exc)
+                raise
+            else:
+                for waiter in waiters:
+                    if not waiter.future.done():
+                        waiter.future.set_result(result)
+            finally:
+                timestamp = datetime.datetime.now(datetime.timezone.utc)
+                self._last_edit_timestamp[key] = timestamp
+                async with state.guard:
+                    state.last_flush = time.monotonic()
+                    if state.pending_payload is None and not state.waiters:
+                        if state.delete_waiters:
+                            notify_delete = list(state.delete_waiters)
+                            state.delete_waiters.clear()
+                        else:
+                            notify_delete = []
+                    else:
+                        notify_delete = []
+            for future in notify_delete:
+                if not future.done():
+                    future.set_result(True)
+
+    async def _apply_edit(
+        self,
+        chat_id: int,
+        message_id: int,
+        payload: _EditPayload,
+    ) -> Optional[int]:
+        """Execute a single editMessageText call with deduplication."""
+
+        content_hash = payload.content_hash
+        if not payload.force and await self._should_skip(chat_id, message_id, content_hash):
+            await self._log_skip(
                 chat_id=chat_id,
-                category=request_category,
+                message_id=message_id,
+                category=payload.request_category,
+                reason="hash_match",
             )
             return message_id
 
@@ -218,21 +447,18 @@ class MessagingService:
             method="editMessageText",
             chat_id=chat_id,
             message_id=message_id,
-            category=request_category,
+            category=payload.request_category,
         ):
             return message_id
 
         lock = await self._acquire_lock(chat_id, message_id)
         async with lock:
-            if not force and await self._should_skip(chat_id, message_id, content_hash):
-                self._logger.info(
-                    "SKIP EDIT: identical content for chat %s, msg %s",
-                    chat_id,
-                    message_id,
-                )
-                await self._metrics.record_skip(
+            if not payload.force and await self._should_skip(chat_id, message_id, content_hash):
+                await self._log_skip(
                     chat_id=chat_id,
-                    category=request_category,
+                    message_id=message_id,
+                    category=payload.request_category,
+                    reason="hash_match",
                 )
                 return message_id
 
@@ -241,37 +467,41 @@ class MessagingService:
                     "editMessageText",
                     chat_id=chat_id,
                     message_id=message_id,
-                    text=text,
-                    reply_markup=reply_markup,
+                    text=payload.text,
+                    reply_markup=payload.reply_markup,
                 )
                 result = await self._bot.edit_message_text(
                     chat_id=chat_id,
                     message_id=message_id,
-                    text=text,
-                    reply_markup=reply_markup,
-                    **params,
+                    text=payload.text,
+                    reply_markup=payload.reply_markup,
+                    **payload.params,
                 )
             except Exception as exc:  # pragma: no cover - exception path
                 handled = await self._handle_bad_request(
-                    exc, chat_id=chat_id, message_id=message_id, content_hash=content_hash
+                    exc,
+                    chat_id=chat_id,
+                    message_id=message_id,
+                    content_hash=content_hash,
+                    category=payload.request_category,
                 )
                 if handled is not None:
                     return handled
                 raise
 
-            await self._remember_content(chat_id, message_id, content_hash)
-            self._log_api_call(
-                "edit_message_text",
-                chat_id=chat_id,
-                message_id=message_id,
-                content_hash=content_hash,
-            )
+        await self._remember_content(chat_id, message_id, content_hash)
+        self._log_api_call(
+            "edit_message_text",
+            chat_id=chat_id,
+            message_id=message_id,
+            content_hash=content_hash,
+        )
 
-            if hasattr(result, "message_id"):
-                return result.message_id  # type: ignore[return-value]
-            if isinstance(result, int):
-                return result
-            return message_id
+        if hasattr(result, "message_id"):
+            return result.message_id  # type: ignore[return-value]
+        if isinstance(result, int):
+            return result
+        return message_id
 
     async def edit_message_reply_markup(
         self,
@@ -290,14 +520,11 @@ class MessagingService:
 
         content_hash = self._content_hash(None, reply_markup)
         if not force and await self._should_skip(chat_id, message_id, content_hash):
-            self._logger.info(
-                "SKIP EDIT: identical content for chat %s, msg %s",
-                chat_id,
-                message_id,
-            )
-            await self._metrics.record_skip(
+            await self._log_skip(
                 chat_id=chat_id,
+                message_id=message_id,
                 category=request_category,
+                reason="hash_match",
             )
             return True
 
@@ -312,14 +539,11 @@ class MessagingService:
         lock = await self._acquire_lock(chat_id, message_id)
         async with lock:
             if not force and await self._should_skip(chat_id, message_id, content_hash):
-                self._logger.info(
-                    "SKIP EDIT: identical content for chat %s, msg %s",
-                    chat_id,
-                    message_id,
-                )
-                await self._metrics.record_skip(
+                await self._log_skip(
                     chat_id=chat_id,
+                    message_id=message_id,
                     category=request_category,
+                    reason="hash_match",
                 )
                 return True
 
@@ -332,7 +556,11 @@ class MessagingService:
                 )
             except Exception as exc:  # pragma: no cover - exception path
                 handled = await self._handle_bad_request(
-                    exc, chat_id=chat_id, message_id=message_id, content_hash=content_hash
+                    exc,
+                    chat_id=chat_id,
+                    message_id=message_id,
+                    content_hash=content_hash,
+                    category=request_category,
                 )
                 if handled is not None:
                     return bool(handled)
@@ -360,6 +588,20 @@ class MessagingService:
         if message_id is None:
             return False
 
+        key = (int(chat_id), int(message_id))
+        state = self._pending_edits.get(key)
+        if state is not None:
+            loop = asyncio.get_running_loop()
+            waiter: "asyncio.Future[bool]" = loop.create_future()
+            async with state.guard:
+                if state.pending_payload is None and not state.waiters:
+                    waiter.set_result(True)
+                else:
+                    state.delete_waiters.append(waiter)
+                    state.update_event.set()
+            if not waiter.done():
+                await waiter
+
         if not await self._consume_budget(
             method="deleteMessage",
             chat_id=chat_id,
@@ -385,6 +627,9 @@ class MessagingService:
             finally:
                 await self._forget_content(chat_id, message_id)
 
+        self._pending_edits.pop(key, None)
+        self._last_edit_timestamp.pop(key, None)
+
         self._log_api_call(
             "delete_message",
             chat_id=chat_id,
@@ -393,6 +638,14 @@ class MessagingService:
         )
 
         return bool(result)
+
+    async def last_edit_timestamp(
+        self, chat_id: int, message_id: int
+    ) -> Optional[datetime.datetime]:
+        """Return when the given message was last edited."""
+
+        key = (int(chat_id), int(message_id))
+        return self._last_edit_timestamp.get(key)
 
     async def remember_payload(
         self,
@@ -433,6 +686,7 @@ class MessagingService:
         chat_id: int,
         message_id: int,
         content_hash: str,
+        category: RequestCategory,
     ) -> Optional[int]:
         if not self._is_bad_request(exc):
             return None
@@ -440,10 +694,11 @@ class MessagingService:
         message = self._normalise_exception_message(exc)
         if "message is not modified" in message:
             await self._remember_content(chat_id, message_id, content_hash)
-            self._logger.info(
-                "SKIP EDIT: identical content for chat %s, msg %s",
-                chat_id,
-                message_id,
+            await self._log_skip(
+                chat_id=chat_id,
+                message_id=message_id,
+                category=category,
+                reason="hash_match",
             )
             return message_id
 
@@ -505,6 +760,30 @@ class MessagingService:
         key = (int(chat_id), int(message_id), content_hash)
         async with self._cache_lock:
             return self._content_cache.get(key)
+
+    async def _log_skip(
+        self,
+        *,
+        chat_id: int,
+        message_id: Optional[int],
+        category: RequestCategory,
+        reason: str,
+    ) -> None:
+        self._logger.info(
+            "SKIP %s",
+            reason,
+            extra={
+                "chat_id": chat_id,
+                "message_id": message_id,
+                "category": category.value,
+                "reason": reason,
+            },
+        )
+        if self._metrics is not None and message_id is not None:
+            await self._metrics.record_skip(
+                chat_id=chat_id,
+                category=category,
+            )
 
     @staticmethod
     def _content_hash(text: Optional[str], reply_markup: Any) -> str:
