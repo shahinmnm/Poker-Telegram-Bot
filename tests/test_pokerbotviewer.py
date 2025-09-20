@@ -158,7 +158,7 @@ def test_update_player_anchor_creates_anchor_message():
     call = viewer._messenger.send_message.await_args
     assert '🪑 صندلی: `3`' in call.kwargs['text']
     assert '🎖️ نقش: دیلر' in call.kwargs['text']
-    assert '🃏 Board:' in call.kwargs['text']
+    assert '🃏 Board:' not in call.kwargs['text']
     assert '🎯 **نوبت بازی این بازیکن است.**' in call.kwargs['text']
     markup = call.kwargs['reply_markup']
     assert isinstance(markup, InlineKeyboardMarkup)
@@ -171,11 +171,36 @@ def test_update_player_anchor_creates_anchor_message():
 
 def test_update_player_anchor_inactive_player_keeps_card_keyboard():
     viewer = PokerBotViewer(bot=MagicMock())
-    viewer._messenger.edit_message_text = AsyncMock(return_value=77)
 
     player = MagicMock(mention_markdown=MENTION_MARKDOWN, user_id=222)
     player.cards = [Card('Q♣'), Card('J♥')]
-    board_cards = [Card('Q♠'), Card('J♦'), Card('9♣'), Card('2♥')]
+    flop_cards = [Card('Q♠'), Card('J♦'), Card('9♣')]
+    turn_cards = flop_cards + [Card('2♥')]
+
+    viewer._messenger.send_message = AsyncMock(
+        return_value=MagicMock(message_id=77)
+    )
+
+    first_result = run(
+        viewer.update_player_anchor(
+            chat_id=888,
+            player=player,
+            seat_number=4,
+            role_label='بازیکن',
+            board_cards=flop_cards,
+            player_cards=player.cards,
+            game_state=GameState.ROUND_FLOP,
+            active=False,
+        )
+    )
+
+    assert first_result == 77
+    assert viewer._messenger.send_message.await_count == 1
+
+    viewer._messenger.edit_message_text = AsyncMock()
+    viewer._messenger.edit_message_reply_markup = AsyncMock(return_value=True)
+    original_edit_markup = viewer.edit_message_reply_markup
+    viewer.edit_message_reply_markup = AsyncMock(wraps=original_edit_markup)
 
     result = run(
         viewer.update_player_anchor(
@@ -183,7 +208,7 @@ def test_update_player_anchor_inactive_player_keeps_card_keyboard():
             player=player,
             seat_number=4,
             role_label='بازیکن',
-            board_cards=board_cards,
+            board_cards=turn_cards,
             player_cards=player.cards,
             game_state=GameState.ROUND_TURN,
             active=False,
@@ -192,10 +217,12 @@ def test_update_player_anchor_inactive_player_keeps_card_keyboard():
     )
 
     assert result == 77
-    call = viewer._messenger.edit_message_text.await_args
-    assert '🃏 Board:' in call.kwargs['text']
-    assert '🎯 **نوبت بازی این بازیکن است.**' not in call.kwargs['text']
-    markup = call.kwargs['reply_markup']
+    assert viewer._messenger.edit_message_text.await_count == 0
+    assert viewer.edit_message_reply_markup.await_count == 1
+    assert viewer._messenger.edit_message_reply_markup.await_count == 1
+
+    markup_call = viewer._messenger.edit_message_reply_markup.await_args
+    markup = markup_call.kwargs['reply_markup']
     assert isinstance(markup, InlineKeyboardMarkup)
     rows = markup.inline_keyboard
     assert [button.text for button in rows[0]] == ['🎴 کارت‌های شما']
