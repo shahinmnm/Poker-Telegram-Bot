@@ -35,3 +35,16 @@ def test_run_reraises_when_fallback_disabled():
         bot.run()
 
     bot.run_polling.assert_not_called()
+
+
+def test_run_dns_failure_triggers_automatic_polling(caplog):
+    bot = _create_bot(False)
+    error_message = "Bad webhook: failed to resolve host: temporary failure in name resolution"
+    bot.run_webhook = Mock(side_effect=TelegramError(error_message))
+    bot.run_polling = Mock()
+
+    with caplog.at_level(logging.ERROR):
+        bot.run()
+
+    bot.run_polling.assert_called_once()
+    assert "automatically falling back to polling mode" in caplog.text.lower()
