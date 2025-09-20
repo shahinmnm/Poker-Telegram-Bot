@@ -1,4 +1,5 @@
 import asyncio
+import hashlib
 import logging
 from unittest.mock import AsyncMock, MagicMock
 
@@ -156,10 +157,11 @@ def test_update_player_anchor_creates_anchor_message():
 
     assert result == 42
     call = viewer._messenger.send_message.await_args
-    assert '🪑 صندلی: `3`' in call.kwargs['text']
-    assert '🎖️ نقش: دیلر' in call.kwargs['text']
-    assert '🃏 Board:' in call.kwargs['text']
-    assert '🎯 **نوبت بازی این بازیکن است.**' in call.kwargs['text']
+    text = call.kwargs['text']
+    assert '🪑 صندلی: `3`' in text
+    assert '🎖️ نقش: دیلر' in text
+    assert '🃏 Board:' not in text
+    assert '🎯 **نوبت بازی این بازیکن است.**' in text
     markup = call.kwargs['reply_markup']
     assert isinstance(markup, InlineKeyboardMarkup)
     rows = markup.inline_keyboard
@@ -171,15 +173,40 @@ def test_update_player_anchor_creates_anchor_message():
 
 def test_update_player_anchor_inactive_player_keeps_card_keyboard():
     viewer = PokerBotViewer(bot=MagicMock())
-    viewer._messenger.edit_message_text = AsyncMock(return_value=77)
+    viewer._messenger.edit_message_text = AsyncMock()
+    viewer._messenger.edit_message_reply_markup = AsyncMock(return_value=True)
 
     player = MagicMock(mention_markdown=MENTION_MARKDOWN, user_id=222)
     player.cards = [Card('Q♣'), Card('J♥')]
     board_cards = [Card('Q♠'), Card('J♦'), Card('9♣'), Card('2♥')]
+    chat_id = 888
+    message_id = 77
+
+    anchor_text = viewer._build_anchor_text(
+        mention_markdown=player.mention_markdown,
+        seat_number=4,
+        role_label='بازیکن',
+        board_cards=board_cards,
+    )
+    context = viewer._build_context(
+        "update_message", chat_id=chat_id, message_id=message_id
+    )
+    normalized_text = viewer._validator.normalize_text(
+        anchor_text,
+        parse_mode=ParseMode.MARKDOWN,
+        context=context,
+    )
+    assert normalized_text is not None
+    run(
+        viewer._set_last_text_hash(
+            message_id, hashlib.md5(normalized_text.encode('utf-8')).hexdigest()
+        )
+    )
+    run(viewer._set_payload_hash((chat_id, message_id), "stale-anchor"))
 
     result = run(
         viewer.update_player_anchor(
-            chat_id=888,
+            chat_id=chat_id,
             player=player,
             seat_number=4,
             role_label='بازیکن',
@@ -187,14 +214,15 @@ def test_update_player_anchor_inactive_player_keeps_card_keyboard():
             player_cards=player.cards,
             game_state=GameState.ROUND_TURN,
             active=False,
-            message_id=77,
+            message_id=message_id,
         )
     )
 
-    assert result == 77
-    call = viewer._messenger.edit_message_text.await_args
-    assert '🃏 Board:' in call.kwargs['text']
-    assert '🎯 **نوبت بازی این بازیکن است.**' not in call.kwargs['text']
+    assert result == message_id
+    assert viewer._messenger.edit_message_text.await_count == 0
+    call = viewer._messenger.edit_message_reply_markup.await_args
+    assert call.kwargs['chat_id'] == chat_id
+    assert call.kwargs['message_id'] == message_id
     markup = call.kwargs['reply_markup']
     assert isinstance(markup, InlineKeyboardMarkup)
     rows = markup.inline_keyboard
