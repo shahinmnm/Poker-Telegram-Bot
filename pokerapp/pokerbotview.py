@@ -66,6 +66,12 @@ class _CacheRecord:
     timestamp: float
 
 
+@dataclass(slots=True)
+class _CallbackUpdateRecord:
+    token: str
+    timestamp: float
+
+
 class _TimedLRUCache(LRUCache):
     """LRU cache with a simple time-to-live eviction policy."""
 
@@ -218,7 +224,10 @@ class PokerBotViewer:
         self._message_update_locks: Dict[Tuple[int, int], asyncio.Lock] = {}
         self._message_update_guard = asyncio.Lock()
         self._message_payload_hashes: Dict[Tuple[int, int], str] = {}
-        self._callback_update_tokens: Dict[Tuple[int, int], Tuple[str, str]] = {}
+        self._callback_update_tokens: Dict[
+            Tuple[int, int, str], _CallbackUpdateRecord
+        ] = {}
+        self._callback_token_ttl = 30.0
 
     def _payload_hash(
         self,
@@ -254,6 +263,42 @@ class PokerBotViewer:
     @staticmethod
     def _normalize_stage_name(stage: Optional[str]) -> str:
         return stage if stage else "<unknown>"
+
+    def _should_skip_callback_update(
+        self,
+        key: Tuple[int, int, str],
+        callback_id: str,
+    ) -> bool:
+        record = self._callback_update_tokens.get(key)
+        if record is None:
+            return False
+        if time.monotonic() - record.timestamp > self._callback_token_ttl:
+            self._callback_update_tokens.pop(key, None)
+            return False
+        return record.token == callback_id
+
+    def _store_callback_update_token(
+        self,
+        key: Tuple[int, int, str],
+        callback_id: str,
+    ) -> None:
+        self._callback_update_tokens[key] = _CallbackUpdateRecord(
+            token=callback_id,
+            timestamp=time.monotonic(),
+        )
+
+    def _clear_callback_tokens_for_message(
+        self,
+        normalized_chat: int,
+        normalized_message: int,
+    ) -> None:
+        to_remove = [
+            key
+            for key in self._callback_update_tokens
+            if key[0] == normalized_chat and key[1] == normalized_message
+        ]
+        for key in to_remove:
+            self._callback_update_tokens.pop(key, None)
 
     def _detect_callback_context(self) -> Tuple[Optional[str], Optional[str]]:
         try:
@@ -353,16 +398,20 @@ class PokerBotViewer:
             if normalized_existing_message is not None
             else None
         )
-        callback_guard_key: Optional[Tuple[str, str]] = None
+        callback_id: Optional[str] = None
         callback_stage_name = "<unknown>"
-        if message_id is not None:
+        callback_token_key: Optional[Tuple[int, int, str]] = None
+        if normalized_existing_message is not None:
             callback_id, detected_stage = self._detect_callback_context()
             if callback_id is not None:
                 callback_stage_name = self._normalize_stage_name(detected_stage)
-                callback_guard_key = (callback_id, callback_stage_name)
-                if (
-                    message_key is not None
-                    and self._callback_update_tokens.get(message_key) == callback_guard_key
+                callback_token_key = (
+                    normalized_chat,
+                    normalized_existing_message,
+                    callback_stage_name,
+                )
+                if self._should_skip_callback_update(
+                    callback_token_key, callback_id
                 ):
                     return message_id
         cache_key: Tuple[int, int, str] = (
@@ -383,11 +432,12 @@ class PokerBotViewer:
                 previous_hash = self._message_payload_hashes.get(message_key)
                 if previous_hash == payload_hash:
                     return message_id
-                if (
-                    callback_guard_key is not None
-                    and self._callback_update_tokens.get(message_key) == callback_guard_key
-                ):
-                    return message_id
+            if (
+                callback_token_key is not None
+                and callback_id is not None
+                and self._should_skip_callback_update(callback_token_key, callback_id)
+            ):
+                return message_id
             if message_id is not None and self._message_update_cache.get(cache_key):
                 return message_id
 
@@ -442,14 +492,25 @@ class PokerBotViewer:
             self._message_update_cache[cache_key] = True
             new_message_key = (normalized_chat, normalized_new_message)
             self._message_payload_hashes[new_message_key] = payload_hash
-            if callback_guard_key is not None:
-                self._callback_update_tokens[new_message_key] = callback_guard_key
+            if callback_id is not None:
+                new_callback_token_key = (
+                    normalized_chat,
+                    normalized_new_message,
+                    callback_stage_name,
+                )
+                self._store_callback_update_token(
+                    new_callback_token_key,
+                    callback_id,
+                )
             if (
                 message_key is not None
                 and new_message_key != message_key
             ):
                 self._message_payload_hashes.pop(message_key, None)
-                self._callback_update_tokens.pop(message_key, None)
+                self._clear_callback_tokens_for_message(
+                    message_key[0],
+                    message_key[1],
+                )
             return new_message_id
 
     @staticmethod
