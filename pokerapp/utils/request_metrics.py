@@ -35,6 +35,8 @@ class RequestCategory(str, Enum):
     INLINE = "inline"
     PHOTO = "photo"
     DELETE = "delete"
+    ANCHOR = "anchor"
+    MEDIA = "media"
 
 
 @dataclass(slots=True)
@@ -46,6 +48,7 @@ class _CycleSnapshot:
     total: int = 0
     # Keep a rolling log of the most recent calls for debugging/analytics.
     recent_calls: Deque[str] = field(default_factory=lambda: deque(maxlen=50))
+    skipped: DefaultDict[str, int] = field(default_factory=lambda: defaultdict(int))
 
 
 class RequestMetrics:
@@ -87,6 +90,8 @@ class RequestMetrics:
                     "cycle_token": snapshot.cycle_token,
                     "counts": dict(snapshot.counts),
                     "total": snapshot.total,
+                    "skipped": dict(snapshot.skipped),
+                    "before_after_table": self._build_cycle_summary(snapshot),
                 },
             )
             self._cycles.pop(chat_id, None)
@@ -138,12 +143,34 @@ class RequestMetrics:
                     "method": method,
                     "category": category.value,
                     "message_id": message_id,
+                    "cycle_token": snapshot.cycle_token,
                     "counts": dict(snapshot.counts),
                     "total": snapshot.total,
                 },
             )
 
             return True
+
+    async def record_skip(
+        self,
+        *,
+        chat_id: int,
+        category: RequestCategory,
+    ) -> None:
+        """Record that a potential request was skipped due to optimisation."""
+
+        async with self._lock:
+            snapshot = self._cycles.setdefault(chat_id, _CycleSnapshot(cycle_token=None))
+            snapshot.skipped[category.value] += 1
+            self._logger.debug(
+                "Recorded skipped Telegram call",
+                extra={
+                    "chat_id": chat_id,
+                    "category": category.value,
+                    "cycle_token": snapshot.cycle_token,
+                    "skipped_counts": dict(snapshot.skipped),
+                },
+            )
 
     async def snapshot(self, chat_id: int) -> Dict[str, int]:
         """Return a copy of the counters for ``chat_id``."""
@@ -162,6 +189,30 @@ class RequestMetrics:
             if snapshot is None:
                 return []
             return list(snapshot.recent_calls)
+
+    def _build_cycle_summary(self, snapshot: _CycleSnapshot) -> Iterable[Dict[str, int]]:
+        """Return a table comparing raw vs optimised request counts."""
+
+        summary: Dict[str, Dict[str, int]] = {}
+        for category, after in snapshot.counts.items():
+            entry = summary.setdefault(category, {"after": 0, "skipped": 0})
+            entry["after"] = after
+        for category, skipped in snapshot.skipped.items():
+            entry = summary.setdefault(category, {"after": 0, "skipped": 0})
+            entry["skipped"] = skipped
+
+        rows = []
+        for category, data in sorted(summary.items()):
+            before = data.get("after", 0) + data.get("skipped", 0)
+            rows.append(
+                {
+                    "category": category,
+                    "before": before,
+                    "after": data.get("after", 0),
+                    "skipped": data.get("skipped", 0),
+                }
+            )
+        return rows
 
 
 __all__ = ["RequestMetrics", "RequestCategory"]

@@ -147,7 +147,7 @@ class MessagingService:
         *,
         chat_id: int,
         photo: Any,
-        request_category: RequestCategory = RequestCategory.PHOTO,
+        request_category: RequestCategory = RequestCategory.MEDIA,
         caption: Optional[str] = None,
         **params: Any,
     ) -> Any:
@@ -208,6 +208,10 @@ class MessagingService:
                 chat_id,
                 message_id,
             )
+            await self._metrics.record_skip(
+                chat_id=chat_id,
+                category=request_category,
+            )
             return message_id
 
         if not await self._consume_budget(
@@ -225,6 +229,10 @@ class MessagingService:
                     "SKIP EDIT: identical content for chat %s, msg %s",
                     chat_id,
                     message_id,
+                )
+                await self._metrics.record_skip(
+                    chat_id=chat_id,
+                    category=request_category,
                 )
                 return message_id
 
@@ -287,6 +295,10 @@ class MessagingService:
                 chat_id,
                 message_id,
             )
+            await self._metrics.record_skip(
+                chat_id=chat_id,
+                category=request_category,
+            )
             return True
 
         if not await self._consume_budget(
@@ -304,6 +316,10 @@ class MessagingService:
                     "SKIP EDIT: identical content for chat %s, msg %s",
                     chat_id,
                     message_id,
+                )
+                await self._metrics.record_skip(
+                    chat_id=chat_id,
+                    category=request_category,
                 )
                 return True
 

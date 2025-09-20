@@ -25,7 +25,7 @@ import hashlib
 import inspect
 import logging
 import json
-from cachetools import FIFOCache, LFUCache, LRUCache
+from cachetools import FIFOCache, LRUCache
 from pokerapp.config import DEFAULT_RATE_LIMIT_PER_MINUTE, DEFAULT_RATE_LIMIT_PER_SECOND
 from pokerapp.winnerdetermination import HAND_NAMES_TRANSLATIONS
 from pokerapp.desk import DeskImageGenerator
@@ -59,6 +59,16 @@ class TurnMessageUpdate:
     call_label: str
     call_action: PlayerAction
     board_line: str
+
+
+@dataclass(slots=True)
+class AnchorUpdateRequest:
+    player: Player
+    seat_number: int
+    role_label: str
+    board_cards: Sequence[Card]
+    active: bool
+    message_id: Optional[MessageId]
 
 
 class PokerBotViewer:
@@ -183,7 +193,7 @@ class PokerBotViewer:
         self._last_callback_edit: Dict[Tuple[int, str], str] = {}
         self._last_message_hash: LRUCache[int, str] = LRUCache(maxsize=2048)
         self._last_message_hash_lock = asyncio.Lock()
-        self._turn_message_cache: LFUCache[Tuple[int, int], str] = LFUCache(
+        self._turn_message_cache: LRUCache[Tuple[int, int], str] = LRUCache(
             maxsize=256
         )
         self._turn_message_cache_lock = asyncio.Lock()
@@ -191,6 +201,10 @@ class PokerBotViewer:
             maxsize=32
         )
         self._inline_keyboard_cache_lock = asyncio.Lock()
+        self._stage_payload_hashes: LRUCache[Tuple[int, int, str], str] = LRUCache(
+            maxsize=4096
+        )
+        self._stage_payload_hash_lock = asyncio.Lock()
 
     def _payload_hash(
         self,
@@ -200,6 +214,15 @@ class PokerBotViewer:
         markup_hash = self._serialize_markup(reply_markup) or ""
         payload = f"{text}|{markup_hash}"
         return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+    def payload_signature(
+        self,
+        text: str,
+        reply_markup: Optional[InlineKeyboardMarkup | ReplyKeyboardMarkup],
+    ) -> str:
+        """Public helper exposing the stable payload hash for callers."""
+
+        return self._payload_hash(text, reply_markup)
 
     @staticmethod
     def _safe_int(value: Optional[int | str]) -> int:
@@ -226,6 +249,25 @@ class PokerBotViewer:
     @staticmethod
     def _normalize_stage_name(stage: Optional[str]) -> str:
         return stage if stage else "<unknown>"
+
+    async def should_skip_stage_update(
+        self,
+        *,
+        chat_id: ChatId,
+        message_id: Optional[MessageId],
+        stage: str,
+        payload_hash: str,
+    ) -> bool:
+        """Return ``True`` if the same stage payload was already broadcast."""
+
+        if message_id is None:
+            return False
+
+        normalized_chat = self._safe_int(chat_id)
+        normalized_message = self._safe_int(message_id)
+        stage_key = (normalized_chat, normalized_message, stage)
+        cached = await self._get_stage_payload_hash(stage_key)
+        return cached == payload_hash
 
     def _should_skip_callback_update(
         self,
@@ -264,6 +306,9 @@ class PokerBotViewer:
             self._last_callback_edit.pop(key, None)
 
         await self._pop_last_text_hash(normalized_message)
+        await self._clear_stage_payloads_for_message(
+            normalized_chat, normalized_message
+        )
 
     async def _get_payload_hash(
         self, key: Tuple[int, int]
@@ -319,6 +364,35 @@ class PokerBotViewer:
     async def _pop_turn_cache_hash(self, key: Tuple[int, int]) -> None:
         async with self._turn_message_cache_lock:
             self._turn_message_cache.pop(key, None)
+
+    async def _get_stage_payload_hash(
+        self, key: Tuple[int, int, str]
+    ) -> Optional[str]:
+        async with self._stage_payload_hash_lock:
+            return self._stage_payload_hashes.get(key)
+
+    async def _set_stage_payload_hash(
+        self, key: Tuple[int, int, str], value: str
+    ) -> None:
+        async with self._stage_payload_hash_lock:
+            self._stage_payload_hashes[key] = value
+            logger.debug(
+                "Stage payload cache size %s/%s",
+                self._stage_payload_hashes.currsize,
+                self._stage_payload_hashes.maxsize,
+            )
+
+    async def _clear_stage_payloads_for_message(
+        self, normalized_chat: int, normalized_message: int
+    ) -> None:
+        async with self._stage_payload_hash_lock:
+            keys_to_remove = [
+                key
+                for key in self._stage_payload_hashes
+                if key[0] == normalized_chat and key[1] == normalized_message
+            ]
+            for key in keys_to_remove:
+                self._stage_payload_hashes.pop(key, None)
 
     def _detect_callback_context(
         self,
@@ -432,7 +506,7 @@ class PokerBotViewer:
             else None
         )
         callback_id: Optional[str] = None
-        callback_stage_name = "<unknown>"
+        callback_stage_name = self._normalize_stage_name(request_category.value)
         callback_user_id: Optional[int] = None
         callback_token_key: Optional[Tuple[int, int, str, int]] = None
         callback_throttle_key: Optional[Tuple[int, str]] = None
@@ -478,6 +552,11 @@ class PokerBotViewer:
                         },
                     )
                     return message_id
+        stage_key: Optional[Tuple[int, int, str]] = (
+            (normalized_chat, normalized_existing_message, callback_stage_name)
+            if normalized_existing_message is not None
+            else None
+        )
         if normalized_existing_message is not None:
             previous_text_hash = await self._get_last_text_hash(
                 normalized_existing_message
@@ -486,8 +565,30 @@ class PokerBotViewer:
                 debug_trace_logger.info(
                     f"Skipping editMessageText for message_id={message_id} (hash match)"
                 )
+                await self._request_metrics.record_skip(
+                    chat_id=normalized_chat,
+                    category=request_category,
+                )
                 return message_id
         turn_cache_key = message_key if request_category == RequestCategory.TURN else None
+
+        if stage_key is not None:
+            cached_stage_hash = await self._get_stage_payload_hash(stage_key)
+            if cached_stage_hash == payload_hash:
+                logger.debug(
+                    "Skipping update_message due to stage throttle",
+                    extra={
+                        "chat_id": chat_id,
+                        "message_id": message_id,
+                        "payload_hash": payload_hash,
+                        "game_stage": callback_stage_name,
+                    },
+                )
+                await self._request_metrics.record_skip(
+                    chat_id=normalized_chat,
+                    category=request_category,
+                )
+                return message_id
 
         if message_key is not None:
             previous_hash = await self._get_payload_hash(message_key)
@@ -506,18 +607,26 @@ class PokerBotViewer:
                         else "automatic",
                     },
                 )
+                await self._request_metrics.record_skip(
+                    chat_id=normalized_chat,
+                    category=request_category,
+                )
                 return message_id
 
         if turn_cache_key is not None:
             cached_turn_hash = await self._get_turn_cache_hash(turn_cache_key)
             if cached_turn_hash == payload_hash:
                 logger.debug(
-                    "Skipping turn update due to LFU cache hit",
+                    "Skipping turn update due to LRU cache hit",
                     extra={
                         "chat_id": chat_id,
                         "message_id": message_id,
                         "payload_hash": payload_hash,
                     },
+                )
+                await self._request_metrics.record_skip(
+                    chat_id=normalized_chat,
+                    category=request_category,
                 )
                 return message_id
 
@@ -530,6 +639,10 @@ class PokerBotViewer:
                 if previous_text_hash == message_text_hash:
                     debug_trace_logger.info(
                         f"Skipping editMessageText for message_id={message_id} (hash match)"
+                    )
+                    await self._request_metrics.record_skip(
+                        chat_id=normalized_chat,
+                        category=request_category,
                     )
                     return message_id
             if message_key is not None:
@@ -549,6 +662,27 @@ class PokerBotViewer:
                             else "automatic",
                         },
                     )
+                    await self._request_metrics.record_skip(
+                        chat_id=normalized_chat,
+                        category=request_category,
+                    )
+                    return message_id
+            if stage_key is not None:
+                cached_stage_hash = await self._get_stage_payload_hash(stage_key)
+                if cached_stage_hash == payload_hash:
+                    logger.debug(
+                        "Skipping update_message inside lock due to stage throttle",
+                        extra={
+                            "chat_id": chat_id,
+                            "message_id": message_id,
+                            "payload_hash": payload_hash,
+                            "game_stage": callback_stage_name,
+                        },
+                    )
+                    await self._request_metrics.record_skip(
+                        chat_id=normalized_chat,
+                        category=request_category,
+                    )
                     return message_id
             if (
                 callback_token_key is not None
@@ -562,6 +696,10 @@ class PokerBotViewer:
                     debug_trace_logger.info(
                         f"Skipping editMessageText for message_id={message_id} "
                         "(callback throttling)"
+                    )
+                    await self._request_metrics.record_skip(
+                        chat_id=normalized_chat,
+                        category=request_category,
                     )
                     return message_id
             if (
@@ -580,6 +718,10 @@ class PokerBotViewer:
                         "callback_user_id": callback_user_id,
                         "trigger": "callback_query",
                     },
+                )
+                await self._request_metrics.record_skip(
+                    chat_id=normalized_chat,
+                    category=request_category,
                 )
                 return message_id
 
@@ -633,6 +775,12 @@ class PokerBotViewer:
             await self._set_last_text_hash(normalized_new_message, message_text_hash)
             if turn_cache_key is not None:
                 await self._set_turn_cache_hash(new_message_key, payload_hash)
+            new_stage_key = (
+                normalized_chat,
+                normalized_new_message,
+                callback_stage_name,
+            )
+            await self._set_stage_payload_hash(new_stage_key, payload_hash)
             if callback_id is not None:
                 new_callback_token_key = (
                     normalized_chat,
@@ -715,6 +863,7 @@ class PokerBotViewer:
             parse_mode=ParseMode.MARKDOWN,
             disable_web_page_preview=True,
             disable_notification=message_id is not None,
+            request_category=RequestCategory.ANCHOR,
         )
 
     async def announce_player_seats(
@@ -883,7 +1032,7 @@ class PokerBotViewer:
                 await self._messenger.send_photo(
                     chat_id=chat_id,
                     photo=f,
-                    request_category=RequestCategory.PHOTO,
+                    request_category=RequestCategory.MEDIA,
                     parse_mode=ParseMode.MARKDOWN,
                     disable_notification=True,
                 )
@@ -1024,49 +1173,60 @@ class PokerBotViewer:
         self, chat_id: ChatId, message_id: MessageId
     ) -> None:
         """Delete a message while keeping the cache in sync."""
-        try:
-            await self._messenger.delete_message(
-                chat_id=chat_id,
-                message_id=message_id,
-                request_category=RequestCategory.DELETE,
-            )
-        except (BadRequest, Forbidden) as e:
-            error_message = getattr(e, "message", None) or str(e) or ""
-            normalized_message = error_message.lower()
-            ignorable_messages = (
-                "message to delete not found",
-                "message can't be deleted",
-                "message cant be deleted",
-            )
-            if any(msg in normalized_message for msg in ignorable_messages):
-                logger.debug(
-                    "Ignoring delete_message error",
+        normalized_chat = self._safe_int(chat_id)
+        normalized_message = self._safe_int(message_id)
+        lock = await self._acquire_message_lock(chat_id, message_id)
+        async with lock:
+            try:
+                await self._messenger.delete_message(
+                    chat_id=chat_id,
+                    message_id=message_id,
+                    request_category=RequestCategory.DELETE,
+                )
+            except (BadRequest, Forbidden) as e:
+                error_message = getattr(e, "message", None) or str(e) or ""
+                normalized_error = error_message.lower()
+                ignorable_messages = (
+                    "message to delete not found",
+                    "message can't be deleted",
+                    "message cant be deleted",
+                )
+                if any(msg in normalized_error for msg in ignorable_messages):
+                    logger.debug(
+                        "Ignoring delete_message error",
+                        extra={
+                            "chat_id": chat_id,
+                            "message_id": message_id,
+                            "error_type": type(e).__name__,
+                            "error_message": error_message,
+                        },
+                    )
+                    return
+                logger.warning(
+                    "Failed to delete message",
                     extra={
+                        "error_type": type(e).__name__,
                         "chat_id": chat_id,
                         "message_id": message_id,
-                        "error_type": type(e).__name__,
                         "error_message": error_message,
                     },
                 )
                 return
-            logger.warning(
-                "Failed to delete message",
-                extra={
-                    "error_type": type(e).__name__,
-                    "chat_id": chat_id,
-                    "message_id": message_id,
-                    "error_message": error_message,
-                },
-            )
-        except Exception as e:
-            logger.error(
-                "Error deleting message",
-                extra={
-                    "error_type": type(e).__name__,
-                    "chat_id": chat_id,
-                    "message_id": message_id,
-                },
-            )
+            except Exception as e:
+                logger.error(
+                    "Error deleting message (%s)",
+                    type(e).__name__,
+                    extra={
+                        "error_type": type(e).__name__,
+                        "chat_id": chat_id,
+                        "message_id": message_id,
+                    },
+                )
+                return
+            finally:
+                await self._clear_callback_tokens_for_message(
+                    normalized_chat, normalized_message
+                )
 
     async def send_single_card(
         self,
@@ -1084,7 +1244,7 @@ class PokerBotViewer:
             await self._messenger.send_photo(
                 chat_id=chat_id,
                 photo=bio,
-                request_category=RequestCategory.PHOTO,
+                request_category=RequestCategory.MEDIA,
                 disable_notification=disable_notification,
             )
         except Exception as e:
@@ -1128,7 +1288,7 @@ class PokerBotViewer:
                 chat_id=chat_id,
                 photo=bio,
                 caption=normalized_caption,
-                request_category=RequestCategory.PHOTO,
+                request_category=RequestCategory.MEDIA,
                 parse_mode=parse_mode,
                 disable_notification=disable_notification,
                 reply_markup=reply_markup,
@@ -1310,6 +1470,12 @@ class PokerBotViewer:
         async with self._inline_keyboard_cache_lock:
             cached = self._inline_keyboard_cache.get(cache_key)
             if cached is not None:
+                logger.debug(
+                    "Inline keyboard cache hit %s (size %s/%s)",
+                    cache_key,
+                    self._inline_keyboard_cache.currsize,
+                    self._inline_keyboard_cache.maxsize,
+                )
                 return cached
 
             keyboard = [

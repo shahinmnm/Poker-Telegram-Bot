@@ -436,7 +436,14 @@ def test_send_turn_message_updates_turn_message_only():
 
     assert game.turn_message_id == 321
     view.update_turn_message.assert_awaited_once()
-    view.update_player_anchor.assert_not_awaited()
+    assert view.update_player_anchor.await_count == 2
+    active_calls = [
+        call
+        for call in view.update_player_anchor.await_args_list
+        if call.kwargs.get("active")
+    ]
+    assert len(active_calls) == 1
+    assert active_calls[0].kwargs["player"].user_id == player.user_id
 
 
 def test_add_cards_to_table_does_not_send_stage_message():
@@ -931,10 +938,10 @@ async def test_start_game_assigns_blinds_to_occupied_seats():
     assert send_call.args[1].user_id == player_b.user_id
     assert send_call.args[2] == chat_id
 
-    assert view.update_player_anchor.await_count == 2
-    active_calls = [call for call in view.update_player_anchor.await_args_list if call.kwargs["active"]]
-    assert len(active_calls) == 1
-    assert active_calls[0].kwargs["player"].user_id == player_b.user_id
+    assert view.update_player_anchor.await_count == 1
+    call_kwargs = view.update_player_anchor.await_args.kwargs
+    assert call_kwargs["player"].user_id == player_a.user_id
+    assert call_kwargs["active"] is False
 
 
 @pytest.mark.asyncio
