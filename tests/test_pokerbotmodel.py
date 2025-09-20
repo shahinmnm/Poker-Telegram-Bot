@@ -408,7 +408,7 @@ async def test_cancel_hand_refunds_wallets_and_announces():
 
 
 
-def test_send_turn_message_updates_anchor_messages():
+def test_send_turn_message_updates_turn_message_only():
     model, game, player, view = _build_model_with_game()
     chat_id = -501
 
@@ -430,16 +430,13 @@ def test_send_turn_message_updates_anchor_messages():
         board_line="🃏 Board: A♠     K♦     5♣",
     )
     view.update_turn_message = AsyncMock(return_value=turn_update)
-    view.update_player_anchor = AsyncMock(side_effect=["anchor-1", "anchor-2"])
+    view.update_player_anchor = AsyncMock()
 
     asyncio.run(model._send_turn_message(game, player, chat_id))
 
     assert game.turn_message_id == 321
-    assert view.update_player_anchor.await_count == 2
-    calls = view.update_player_anchor.await_args_list
-    active_calls = [call for call in calls if call.kwargs["active"]]
-    assert len(active_calls) == 1
-    assert active_calls[0].kwargs["player"].user_id == player.user_id
+    view.update_turn_message.assert_awaited_once()
+    view.update_player_anchor.assert_not_awaited()
 
 
 def test_add_cards_to_table_updates_board_message_only():
@@ -912,6 +909,16 @@ async def test_start_game_assigns_blinds_to_occupied_seats():
     }
     assert blind_players == {1, 2}
 
+    model._send_turn_message.assert_awaited_once()
+    send_call = model._send_turn_message.await_args
+    assert send_call.args[1].user_id == player_b.user_id
+    assert send_call.args[2] == chat_id
+
+    assert view.update_player_anchor.await_count == 2
+    active_calls = [call for call in view.update_player_anchor.await_args_list if call.kwargs["active"]]
+    assert len(active_calls) == 1
+    assert active_calls[0].kwargs["player"].user_id == player_b.user_id
+
 
 @pytest.mark.asyncio
 async def test_start_game_keeps_ready_message_id_when_deletion_fails():
@@ -926,7 +933,7 @@ async def test_start_game_keeps_ready_message_id_when_deletion_fails():
 
     model = PokerBotModel(view=view, bot=bot, cfg=cfg, kv=kv, table_manager=table_manager)
     model._divide_cards = AsyncMock()
-    model._round_rate.set_blinds = AsyncMock()
+    model._round_rate.set_blinds = AsyncMock(return_value=None)
 
     game = Game()
     ready_message_id = 321
