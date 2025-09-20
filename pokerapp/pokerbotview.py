@@ -216,6 +216,7 @@ class PokerBotViewer:
         )
         self._message_update_locks: Dict[Tuple[int, int], asyncio.Lock] = {}
         self._message_update_guard = asyncio.Lock()
+        self._message_payload_hashes: Dict[Tuple[int, int], str] = {}
 
     def _payload_hash(
         self,
@@ -280,19 +281,35 @@ class PokerBotViewer:
 
         payload_hash = self._payload_hash(normalized_text, reply_markup)
         normalized_chat = self._safe_int(chat_id)
+        normalized_existing_message = (
+            self._safe_int(message_id) if message_id is not None else None
+        )
         normalized_message = (
-            self._safe_int(message_id) if message_id is not None else 0
+            normalized_existing_message if normalized_existing_message is not None else 0
+        )
+        message_key: Optional[Tuple[int, int]] = (
+            (normalized_chat, normalized_existing_message)
+            if normalized_existing_message is not None
+            else None
         )
         cache_key: Tuple[int, int, str] = (
             normalized_chat,
             normalized_message,
             payload_hash,
         )
+        if message_key is not None:
+            previous_hash = self._message_payload_hashes.get(message_key)
+            if previous_hash == payload_hash:
+                return message_id
         if message_id is not None and self._message_update_cache.get(cache_key):
             return message_id
 
         lock = await self._acquire_message_lock(chat_id, message_id)
         async with lock:
+            if message_key is not None:
+                previous_hash = self._message_payload_hashes.get(message_key)
+                if previous_hash == payload_hash:
+                    return message_id
             if message_id is not None and self._message_update_cache.get(cache_key):
                 return message_id
 
@@ -345,6 +362,13 @@ class PokerBotViewer:
                 payload_hash,
             )
             self._message_update_cache[cache_key] = True
+            new_message_key = (normalized_chat, normalized_new_message)
+            self._message_payload_hashes[new_message_key] = payload_hash
+            if (
+                message_key is not None
+                and new_message_key != message_key
+            ):
+                self._message_payload_hashes.pop(message_key, None)
             return new_message_id
 
     @staticmethod
