@@ -22,7 +22,7 @@ import logging
 from collections import deque
 from dataclasses import dataclass, field
 from enum import Enum, auto
-from typing import Any, Deque, Dict, Iterable, List, Mapping, Optional, Sequence
+from typing import Any, Deque, Dict, List, Mapping, Optional, Sequence
 
 from aiogram import Bot
 from aiogram.exceptions import TelegramBadRequest
@@ -34,6 +34,7 @@ logger = logging.getLogger(__name__)
 
 
 _CARD_SPACER = "     "  # five spaces to visually separate board cards
+_DEFAULT_TURN_NOTICE = "دکمه‌های نوبت شما در پیام اختصاصی فعال شده‌اند."
 _INVISIBLE_CHARS = {
     "\u200b",
     "\u200c",
@@ -183,6 +184,7 @@ class RequestManager:
     async def close(self) -> None:
         if self._worker is None:
             return
+        await self._queue.join()
         await self._queue.put(None)
         await self._worker
         self._worker = None
@@ -387,6 +389,7 @@ class RequestManager:
         while True:
             item = await self._queue.get()
             if item is None:
+                self._queue.task_done()
                 break
             future, action = item
             try:
@@ -459,7 +462,7 @@ class PokerMessagingOrchestrator:
         )
         self._anchors: Dict[int, AnchorMessage] = {}
         self._turn_message_id: Optional[int] = None
-        self._turn_state = TurnState()
+        self._turn_state = TurnState(notice=_DEFAULT_TURN_NOTICE)
         self._actions: Deque[str] = deque(maxlen=3)
         self._voting_message_id: Optional[int] = None
         self._voting_players: List[str] = []
@@ -549,6 +552,7 @@ class PokerMessagingOrchestrator:
         self.state = GameState.IN_HAND
         self._anchors.clear()
         await self._request_manager.start()
+        self._actions.clear()
 
         for player in players:
             base_text = self._format_anchor_text(player)
@@ -567,8 +571,12 @@ class PokerMessagingOrchestrator:
 
         if turn_state is not None:
             self._turn_state = turn_state
+            if not getattr(self._turn_state, "notice", None):
+                self._turn_state.notice = _DEFAULT_TURN_NOTICE
         if notice:
             self._turn_state.notice = notice
+        elif not getattr(self._turn_state, "notice", None):
+            self._turn_state.notice = _DEFAULT_TURN_NOTICE
         text = self._render_turn_text()
         message = await self._request_manager.send_message(
             chat_id=self.chat_id,
@@ -605,6 +613,7 @@ class PokerMessagingOrchestrator:
         await self._refresh_turn_message()
 
     async def record_action(self, description: str) -> None:
+        description = description.strip()
         if not description:
             return
         self._actions.append(description)
@@ -618,26 +627,16 @@ class PokerMessagingOrchestrator:
     ) -> None:
         self.state = GameState.SHOWDOWN
         text = self._render_turn_text()
-        if summary_lines:
-            text = f"{text}\n\n" + "\n".join(summary_lines)
+        summary: List[str] = list(summary_lines)
+        if chip_counts:
+            summary.extend(chip_counts.values())
+        if summary:
+            text = f"{text}\n\n" + "\n".join(summary)
         if self._turn_message_id is not None:
             await self._request_manager.edit_message_text(
                 chat_id=self.chat_id,
                 message_id=self._turn_message_id,
                 text=text,
-            )
-        for player_id, anchor in list(self._anchors.items()):
-            message_id = anchor.message_id
-            if message_id is None:
-                continue
-            extra = chip_counts.get(player_id)
-            new_text = anchor.base_text
-            if extra:
-                new_text = f"{new_text}\n\n{extra}"
-            await self._request_manager.edit_message_text(
-                chat_id=self.chat_id,
-                message_id=message_id,
-                text=new_text,
             )
         await self._clear_hand_messages()
 
@@ -679,7 +678,7 @@ class PokerMessagingOrchestrator:
             lines.append(f"⬇️ {self._turn_state.notice}")
         if self._actions:
             lines.append("")
-            lines.append("🎬 آخرین حرکات:")
+            lines.append("🎬 اکشن‌های اخیر:")
             for action in list(self._actions)[-3:]:
                 lines.append(f"• {action}")
         return "\n".join(lines)
@@ -726,6 +725,7 @@ class PokerMessagingOrchestrator:
             )
         self._turn_message_id = None
         self._actions.clear()
+        self._turn_state = TurnState(notice=_DEFAULT_TURN_NOTICE)
 
     def _render_voting_text(self) -> str:
         lines = [

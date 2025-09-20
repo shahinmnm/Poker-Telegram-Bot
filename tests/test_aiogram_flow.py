@@ -169,7 +169,7 @@ async def test_showdown_updates_and_clears_messages():
             MagicMock(message_id=32),
         ]
     )
-    bot.edit_message_text = AsyncMock(side_effect=[MagicMock(message_id=32), MagicMock(message_id=31)])
+    bot.edit_message_text = AsyncMock(return_value=MagicMock(message_id=32))
     bot.delete_message = AsyncMock(return_value=True)
 
     orchestrator = PokerMessagingOrchestrator(
@@ -191,6 +191,10 @@ async def test_showdown_updates_and_clears_messages():
     )
 
     assert orchestrator.state == GameState.SHOWDOWN
+    assert bot.edit_message_text.await_count == 1
+    edited_text = bot.edit_message_text.await_args.kwargs["text"]
+    assert "Nima wins the pot" in edited_text
+    assert "Stack: 2000" in edited_text
     assert bot.delete_message.await_count == 2
     await orchestrator.request_manager.close()
 
