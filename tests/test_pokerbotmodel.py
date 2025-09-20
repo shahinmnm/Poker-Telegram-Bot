@@ -436,20 +436,14 @@ def test_send_turn_message_updates_turn_message_only():
 
     assert game.turn_message_id == 321
     view.update_turn_message.assert_awaited_once()
-    assert view.update_player_anchor.await_count >= 1
+    assert view.update_player_anchor.await_count == 2
     active_calls = [
         call
         for call in view.update_player_anchor.await_args_list
         if call.kwargs.get("active")
     ]
-    if active_calls:
-        assert len(active_calls) == 1
-        assert active_calls[0].kwargs["player"].user_id == player.user_id
-    else:
-        turn_kwargs = view.update_turn_message.await_args.kwargs
-        overlay = turn_kwargs.get("anchor_overlay")
-        assert overlay is not None
-        assert overlay.player.user_id == player.user_id
+    assert len(active_calls) == 1
+    assert active_calls[0].kwargs["player"].user_id == player.user_id
 
 
 def test_add_cards_to_table_does_not_send_stage_message():

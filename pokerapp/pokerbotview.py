@@ -19,14 +19,13 @@ from typing import (
     List,
     Sequence,
 )
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 import asyncio
 import datetime
 import hashlib
 import inspect
 import logging
 import json
-import time
 from cachetools import FIFOCache, LRUCache
 from pokerapp.config import DEFAULT_RATE_LIMIT_PER_MINUTE, DEFAULT_RATE_LIMIT_PER_SECOND
 from pokerapp.winnerdetermination import HAND_NAMES_TRANSLATIONS
@@ -73,46 +72,6 @@ class AnchorUpdateRequest:
     message_id: Optional[MessageId]
 
 
-@dataclass(slots=True)
-class _StageUpdatePayload:
-    chat_id: ChatId
-    message_id: Optional[MessageId]
-    text: str
-    reply_markup: Optional[InlineKeyboardMarkup | ReplyKeyboardMarkup]
-    parse_mode: str
-    disable_web_page_preview: bool
-    disable_notification: bool
-    request_category: RequestCategory
-    payload_hash: str
-    message_text_hash: str
-    stage_name: str
-    callback_id: Optional[str]
-    callback_user_id: Optional[int]
-    callback_token_key: Optional[Tuple[int, int, str, int]]
-    callback_throttle_key: Optional[Tuple[int, str]]
-    enqueue_time: float
-
-
-@dataclass(slots=True)
-class _StageUpdateWaiter:
-    future: "asyncio.Future[Optional[MessageId]]"
-    category: RequestCategory
-    enqueued_at: float
-    superseded: bool = False
-
-
-@dataclass(slots=True)
-class _StageUpdateState:
-    guard: asyncio.Lock = field(default_factory=asyncio.Lock)
-    pending: Optional[_StageUpdatePayload] = None
-    waiters: List[_StageUpdateWaiter] = field(default_factory=list)
-    update_event: asyncio.Event = field(default_factory=asyncio.Event)
-    flush_task: Optional[asyncio.Task] = None
-    first_enqueued: float = 0.0
-    last_enqueued: float = 0.0
-    last_flush: float = 0.0
-
-
 class PokerBotViewer:
     _ZERO_WIDTH_SPACE = "\u2063"
     _INVISIBLE_CHARS = {
@@ -126,7 +85,6 @@ class PokerBotViewer:
         "\u2062",
         "\u2063",
     }
-    _STAGE_COALESCE_DELAY = 1.5
 
     @classmethod
     def _has_visible_text(cls, text: str) -> bool:
@@ -248,9 +206,6 @@ class PokerBotViewer:
             maxsize=4096
         )
         self._stage_payload_hash_lock = asyncio.Lock()
-        self._stage_update_states: Dict[Tuple[int, int, str], _StageUpdateState] = {}
-        self._stage_update_states_guard = asyncio.Lock()
-        self._stage_last_dispatch: Dict[Tuple[int, int, str], float] = {}
 
     def _payload_hash(
         self,
@@ -509,452 +464,6 @@ class PokerBotViewer:
         finally:
             del stack
 
-    def _stage_queue_key(
-        self,
-        chat_id: ChatId,
-        message_id: Optional[MessageId],
-        stage: str,
-    ) -> Tuple[int, int, str]:
-        normalized_chat = self._safe_int(chat_id)
-        normalized_message = (
-            self._safe_int(message_id) if message_id is not None else -1
-        )
-        return (normalized_chat, normalized_message, stage)
-
-    def _time_since_last_stage_update(
-        self, key: Tuple[int, int, str], now: float
-    ) -> Optional[float]:
-        last = self._stage_last_dispatch.get(key)
-        if last is None:
-            return None
-        delta = now - last
-        return max(delta, 0.0)
-
-    def _log_stage_skip(
-        self,
-        *,
-        payload: _StageUpdatePayload,
-        reason: str,
-        queue_key: Tuple[int, int, str],
-        now: Optional[float] = None,
-    ) -> None:
-        if now is None:
-            now = time.monotonic()
-        delta = self._time_since_last_stage_update(queue_key, now)
-        delta_text = f"{delta:.3f}s" if delta is not None else "n/a"
-        logger.info(
-            "SKIPPED %s for stage %s (chat=%s msg=%s Δ=%s)",
-            reason,
-            payload.stage_name,
-            payload.chat_id,
-            payload.message_id,
-            delta_text,
-            extra={
-                "chat_id": payload.chat_id,
-                "message_id": payload.message_id,
-                "stage": payload.stage_name,
-                "reason": reason,
-                "delta": delta,
-            },
-        )
-
-    async def _enqueue_stage_update(
-        self,
-        payload: _StageUpdatePayload,
-    ) -> Optional[MessageId]:
-        queue_key = self._stage_queue_key(
-            payload.chat_id, payload.message_id, payload.stage_name
-        )
-        async with self._stage_update_states_guard:
-            state = self._stage_update_states.get(queue_key)
-            if state is None:
-                state = _StageUpdateState()
-                self._stage_update_states[queue_key] = state
-
-        loop = asyncio.get_running_loop()
-        future: "asyncio.Future[Optional[MessageId]]" = loop.create_future()
-        waiter = _StageUpdateWaiter(
-            future=future,
-            category=payload.request_category,
-            enqueued_at=payload.enqueue_time,
-        )
-
-        superseded: List[_StageUpdateWaiter] = []
-        async with state.guard:
-            if state.pending is None:
-                state.pending = payload
-                state.waiters.append(waiter)
-                state.first_enqueued = payload.enqueue_time
-            else:
-                for existing in state.waiters:
-                    if not existing.superseded:
-                        existing.superseded = True
-                        superseded.append(existing)
-                state.pending = payload
-                state.waiters.append(waiter)
-            state.last_enqueued = payload.enqueue_time
-            state.update_event.set()
-            if state.flush_task is None or state.flush_task.done():
-                state.flush_task = asyncio.create_task(
-                    self._flush_stage_updates(queue_key, state)
-                )
-
-        if superseded:
-            now = payload.enqueue_time
-            for existing in superseded:
-                self._log_stage_skip(
-                    payload=payload,
-                    reason="superseded by newer edit",
-                    queue_key=queue_key,
-                    now=now,
-                )
-                if self._request_metrics is not None:
-                    await self._request_metrics.record_skip(
-                        chat_id=self._safe_int(payload.chat_id),
-                        category=existing.category,
-                    )
-
-        return await future
-
-    async def _flush_stage_updates(
-        self,
-        queue_key: Tuple[int, int, str],
-        state: _StageUpdateState,
-    ) -> None:
-        while True:
-            payload: Optional[_StageUpdatePayload] = None
-            waiters: List[_StageUpdateWaiter] = []
-            wait_timeout: Optional[float] = None
-
-            async with state.guard:
-                if state.pending is None:
-                    state.flush_task = None
-                    state.update_event.clear()
-                    break
-                now = time.monotonic()
-                idle = now - state.last_enqueued
-                if idle < self._STAGE_COALESCE_DELAY:
-                    wait_timeout = self._STAGE_COALESCE_DELAY - idle
-                    state.update_event.clear()
-                else:
-                    payload = state.pending
-                    waiters = list(state.waiters)
-                    state.pending = None
-                    state.waiters = []
-                    state.first_enqueued = 0.0
-                    state.last_enqueued = 0.0
-                    state.update_event.clear()
-
-            if payload is None:
-                try:
-                    await asyncio.wait_for(state.update_event.wait(), timeout=wait_timeout)
-                except asyncio.TimeoutError:
-                    continue
-                else:
-                    continue
-
-            try:
-                result = await self._process_stage_update(
-                    payload, queue_key=queue_key
-                )
-            except Exception as exc:
-                for waiter in waiters:
-                    if not waiter.future.done():
-                        waiter.future.set_exception(exc)
-                raise
-            else:
-                for waiter in waiters:
-                    if not waiter.future.done():
-                        waiter.future.set_result(result)
-            finally:
-                empty = False
-                async with state.guard:
-                    state.last_flush = time.monotonic()
-                    empty = state.pending is None and not state.waiters
-                    if empty:
-                        state.flush_task = None
-                        state.update_event.clear()
-                if empty:
-                    break
-
-        async with self._stage_update_states_guard:
-            current = self._stage_update_states.get(queue_key)
-            if current is state:
-                self._stage_update_states.pop(queue_key, None)
-
-    async def _process_stage_update(
-        self,
-        payload: _StageUpdatePayload,
-        *,
-        queue_key: Tuple[int, int, str],
-    ) -> Optional[MessageId]:
-        chat_id = payload.chat_id
-        message_id = payload.message_id
-        normalized_chat = self._safe_int(chat_id)
-        normalized_existing_message = (
-            self._safe_int(message_id) if message_id is not None else None
-        )
-        message_key: Optional[Tuple[int, int]] = (
-            (normalized_chat, normalized_existing_message)
-            if normalized_existing_message is not None
-            else None
-        )
-        stage_key: Optional[Tuple[int, int, str]] = (
-            (normalized_chat, normalized_existing_message, payload.stage_name)
-            if normalized_existing_message is not None
-            else None
-        )
-        turn_cache_key = (
-            message_key if payload.request_category == RequestCategory.TURN else None
-        )
-        callback_token_key = payload.callback_token_key
-        callback_throttle_key = payload.callback_throttle_key
-        callback_id = payload.callback_id
-        callback_stage_name = payload.stage_name
-        callback_user_id = payload.callback_user_id
-
-        lock = await self._acquire_message_lock(chat_id, message_id)
-        async with lock:
-            if normalized_existing_message is not None:
-                previous_text_hash = await self._get_last_text_hash(
-                    normalized_existing_message
-                )
-                if previous_text_hash == payload.message_text_hash:
-                    debug_trace_logger.info(
-                        f"Skipping editMessageText for message_id={message_id} (hash match)"
-                    )
-                    if self._request_metrics is not None:
-                        await self._request_metrics.record_skip(
-                            chat_id=normalized_chat,
-                            category=payload.request_category,
-                        )
-                    self._log_stage_skip(
-                        payload=payload,
-                        reason="hash match",
-                        queue_key=queue_key,
-                    )
-                    return message_id
-
-            if message_key is not None:
-                previous_hash = await self._get_payload_hash(message_key)
-                if previous_hash == payload.payload_hash:
-                    logger.debug(
-                        "Skipping update_message inside lock due to identical payload",
-                        extra={
-                            "chat_id": chat_id,
-                            "message_id": message_id,
-                            "payload_hash": payload.payload_hash,
-                            "callback_id": callback_id,
-                            "game_stage": callback_stage_name,
-                            "callback_user_id": callback_user_id,
-                            "trigger": "callback_query"
-                            if callback_id is not None
-                            else "automatic",
-                        },
-                    )
-                    if self._request_metrics is not None:
-                        await self._request_metrics.record_skip(
-                            chat_id=normalized_chat,
-                            category=payload.request_category,
-                        )
-                    self._log_stage_skip(
-                        payload=payload,
-                        reason="hash match",
-                        queue_key=queue_key,
-                    )
-                    return message_id
-
-            if stage_key is not None:
-                cached_stage_hash = await self._get_stage_payload_hash(stage_key)
-                if cached_stage_hash == payload.payload_hash:
-                    logger.debug(
-                        "Skipping update_message inside lock due to stage throttle",
-                        extra={
-                            "chat_id": chat_id,
-                            "message_id": message_id,
-                            "payload_hash": payload.payload_hash,
-                            "game_stage": callback_stage_name,
-                        },
-                    )
-                    if self._request_metrics is not None:
-                        await self._request_metrics.record_skip(
-                            chat_id=normalized_chat,
-                            category=payload.request_category,
-                        )
-                    self._log_stage_skip(
-                        payload=payload,
-                        reason="throttled due to rapid updates",
-                        queue_key=queue_key,
-                    )
-                    return message_id
-
-            if turn_cache_key is not None:
-                cached_turn_hash = await self._get_turn_cache_hash(turn_cache_key)
-                if cached_turn_hash == payload.payload_hash:
-                    logger.debug(
-                        "Skipping turn update due to LRU cache hit",
-                        extra={
-                            "chat_id": chat_id,
-                            "message_id": message_id,
-                            "payload_hash": payload.payload_hash,
-                        },
-                    )
-                    if self._request_metrics is not None:
-                        await self._request_metrics.record_skip(
-                            chat_id=normalized_chat,
-                            category=payload.request_category,
-                        )
-                    self._log_stage_skip(
-                        payload=payload,
-                        reason="hash match",
-                        queue_key=queue_key,
-                    )
-                    return message_id
-
-            if (
-                callback_token_key is not None
-                and callback_id is not None
-                and callback_throttle_key is not None
-            ):
-                last_callback_token = self._last_callback_edit.get(
-                    callback_throttle_key
-                )
-                if last_callback_token == callback_id:
-                    debug_trace_logger.info(
-                        f"Skipping editMessageText for message_id={message_id} (callback throttling)"
-                    )
-                    if self._request_metrics is not None:
-                        await self._request_metrics.record_skip(
-                            chat_id=normalized_chat,
-                            category=payload.request_category,
-                        )
-                    self._log_stage_skip(
-                        payload=payload,
-                        reason="throttled due to rapid updates",
-                        queue_key=queue_key,
-                    )
-                    return message_id
-
-            if (
-                callback_token_key is not None
-                and callback_id is not None
-                and self._should_skip_callback_update(callback_token_key, callback_id)
-            ):
-                logger.debug(
-                    "Skipping update_message inside lock due to callback throttling",
-                    extra={
-                        "chat_id": chat_id,
-                        "message_id": message_id,
-                        "payload_hash": payload.payload_hash,
-                        "callback_id": callback_id,
-                        "game_stage": callback_stage_name,
-                        "callback_user_id": callback_user_id,
-                        "trigger": "callback_query",
-                    },
-                )
-                if self._request_metrics is not None:
-                    await self._request_metrics.record_skip(
-                        chat_id=normalized_chat,
-                        category=payload.request_category,
-                    )
-                self._log_stage_skip(
-                    payload=payload,
-                    reason="throttled due to rapid updates",
-                    queue_key=queue_key,
-                )
-                return message_id
-
-            try:
-                if message_id is None:
-                    result = await self._messenger.send_message(
-                        chat_id=chat_id,
-                        text=payload.text,
-                        reply_markup=payload.reply_markup,
-                        request_category=payload.request_category,
-                        parse_mode=payload.parse_mode,
-                        disable_web_page_preview=payload.disable_web_page_preview,
-                        disable_notification=payload.disable_notification,
-                    )
-                    new_message_id: Optional[MessageId] = getattr(
-                        result, "message_id", None
-                    )
-                else:
-                    result = await self._messenger.edit_message_text(
-                        chat_id=chat_id,
-                        message_id=message_id,
-                        text=payload.text,
-                        reply_markup=payload.reply_markup,
-                        request_category=payload.request_category,
-                        parse_mode=payload.parse_mode,
-                        disable_web_page_preview=payload.disable_web_page_preview,
-                    )
-                    if hasattr(result, "message_id"):
-                        new_message_id = result.message_id  # type: ignore[assignment]
-                    elif isinstance(result, int):
-                        new_message_id = result
-                    else:
-                        new_message_id = message_id
-            except (BadRequest, Forbidden, RetryAfter, TelegramError) as exc:
-                logger.error(
-                    "Failed to update message",
-                    extra={
-                        "chat_id": chat_id,
-                        "message_id": message_id,
-                        "error_type": type(exc).__name__,
-                    },
-                )
-                return message_id
-
-        if new_message_id is None:
-            return message_id
-
-        normalized_new_message = self._safe_int(new_message_id)
-        new_message_key = (normalized_chat, normalized_new_message)
-        await self._set_payload_hash(new_message_key, payload.payload_hash)
-        await self._set_last_text_hash(
-            normalized_new_message, payload.message_text_hash
-        )
-        if turn_cache_key is not None:
-            await self._set_turn_cache_hash(new_message_key, payload.payload_hash)
-        new_stage_key = (
-            normalized_chat,
-            normalized_new_message,
-            payload.stage_name,
-        )
-        await self._set_stage_payload_hash(new_stage_key, payload.payload_hash)
-        if callback_id is not None:
-            new_callback_token_key = (
-                normalized_chat,
-                normalized_new_message,
-                payload.stage_name,
-                callback_user_id if callback_user_id is not None else 0,
-            )
-            self._store_callback_update_token(
-                new_callback_token_key,
-                callback_id,
-            )
-            self._last_callback_edit[(normalized_new_message, payload.stage_name)] = (
-                callback_id
-            )
-        if message_key is not None and new_message_key != message_key:
-            await self._pop_payload_hash(message_key)
-            if turn_cache_key is not None:
-                await self._pop_turn_cache_hash(message_key)
-            await self._clear_callback_tokens_for_message(
-                message_key[0],
-                message_key[1],
-            )
-
-        now = time.monotonic()
-        new_queue_key = self._stage_queue_key(
-            chat_id, new_message_id, payload.stage_name
-        )
-        self._stage_last_dispatch[new_queue_key] = now
-        if queue_key != new_queue_key:
-            self._stage_last_dispatch.pop(queue_key, None)
-
-        return new_message_id
-
     async def _update_message(
         self,
         *,
@@ -992,51 +501,313 @@ class PokerBotViewer:
         normalized_existing_message = (
             self._safe_int(message_id) if message_id is not None else None
         )
-
+        message_key: Optional[Tuple[int, int]] = (
+            (normalized_chat, normalized_existing_message)
+            if normalized_existing_message is not None
+            else None
+        )
         callback_id: Optional[str] = None
         callback_stage_name = self._normalize_stage_name(request_category.value)
         callback_user_id: Optional[int] = None
         callback_token_key: Optional[Tuple[int, int, str, int]] = None
         callback_throttle_key: Optional[Tuple[int, str]] = None
         if normalized_existing_message is not None:
-            detected_id, detected_stage, detected_user_id = (
+            callback_id, detected_stage, detected_user_id = (
                 self._detect_callback_context()
             )
-            if detected_id is not None:
-                callback_id = detected_id
+            if callback_id is not None:
                 callback_stage_name = self._normalize_stage_name(detected_stage)
                 callback_user_id = self._safe_int(detected_user_id)
                 callback_token_key = (
                     normalized_chat,
                     normalized_existing_message,
                     callback_stage_name,
-                    callback_user_id if callback_user_id is not None else 0,
+                    callback_user_id,
                 )
                 callback_throttle_key = (
                     normalized_existing_message,
                     callback_stage_name,
                 )
-
-        payload = _StageUpdatePayload(
-            chat_id=chat_id,
-            message_id=message_id,
-            text=normalized_text,
-            reply_markup=reply_markup,
-            parse_mode=parse_mode,
-            disable_web_page_preview=disable_web_page_preview,
-            disable_notification=disable_notification,
-            request_category=request_category,
-            payload_hash=payload_hash,
-            message_text_hash=message_text_hash,
-            stage_name=callback_stage_name,
-            callback_id=callback_id,
-            callback_user_id=callback_user_id,
-            callback_token_key=callback_token_key,
-            callback_throttle_key=callback_throttle_key,
-            enqueue_time=time.monotonic(),
+                last_callback_token = self._last_callback_edit.get(
+                    callback_throttle_key
+                )
+                if last_callback_token == callback_id:
+                    debug_trace_logger.info(
+                        f"Skipping editMessageText for message_id={message_id} "
+                        "(callback throttling)"
+                    )
+                    return message_id
+                if self._should_skip_callback_update(
+                    callback_token_key, callback_id
+                ):
+                    logger.debug(
+                        "Skipping update_message due to callback throttling",
+                        extra={
+                            "chat_id": chat_id,
+                            "message_id": message_id,
+                            "payload_hash": payload_hash,
+                            "callback_id": callback_id,
+                            "game_stage": callback_stage_name,
+                            "callback_user_id": callback_user_id,
+                            "trigger": "callback_query",
+                        },
+                    )
+                    return message_id
+        stage_key: Optional[Tuple[int, int, str]] = (
+            (normalized_chat, normalized_existing_message, callback_stage_name)
+            if normalized_existing_message is not None
+            else None
         )
+        if normalized_existing_message is not None:
+            previous_text_hash = await self._get_last_text_hash(
+                normalized_existing_message
+            )
+            if previous_text_hash == message_text_hash:
+                debug_trace_logger.info(
+                    f"Skipping editMessageText for message_id={message_id} (hash match)"
+                )
+                await self._request_metrics.record_skip(
+                    chat_id=normalized_chat,
+                    category=request_category,
+                )
+                return message_id
+        turn_cache_key = message_key if request_category == RequestCategory.TURN else None
 
-        return await self._enqueue_stage_update(payload)
+        if stage_key is not None:
+            cached_stage_hash = await self._get_stage_payload_hash(stage_key)
+            if cached_stage_hash == payload_hash:
+                logger.debug(
+                    "Skipping update_message due to stage throttle",
+                    extra={
+                        "chat_id": chat_id,
+                        "message_id": message_id,
+                        "payload_hash": payload_hash,
+                        "game_stage": callback_stage_name,
+                    },
+                )
+                await self._request_metrics.record_skip(
+                    chat_id=normalized_chat,
+                    category=request_category,
+                )
+                return message_id
+
+        if message_key is not None:
+            previous_hash = await self._get_payload_hash(message_key)
+            if previous_hash == payload_hash:
+                logger.debug(
+                    "Skipping update_message due to identical payload",
+                    extra={
+                        "chat_id": chat_id,
+                        "message_id": message_id,
+                        "payload_hash": payload_hash,
+                        "callback_id": callback_id,
+                        "game_stage": callback_stage_name,
+                        "callback_user_id": callback_user_id,
+                        "trigger": "callback_query"
+                        if callback_id is not None
+                        else "automatic",
+                    },
+                )
+                await self._request_metrics.record_skip(
+                    chat_id=normalized_chat,
+                    category=request_category,
+                )
+                return message_id
+
+        if turn_cache_key is not None:
+            cached_turn_hash = await self._get_turn_cache_hash(turn_cache_key)
+            if cached_turn_hash == payload_hash:
+                logger.debug(
+                    "Skipping turn update due to LRU cache hit",
+                    extra={
+                        "chat_id": chat_id,
+                        "message_id": message_id,
+                        "payload_hash": payload_hash,
+                    },
+                )
+                await self._request_metrics.record_skip(
+                    chat_id=normalized_chat,
+                    category=request_category,
+                )
+                return message_id
+
+        lock = await self._acquire_message_lock(chat_id, message_id)
+        async with lock:
+            if normalized_existing_message is not None:
+                previous_text_hash = await self._get_last_text_hash(
+                    normalized_existing_message
+                )
+                if previous_text_hash == message_text_hash:
+                    debug_trace_logger.info(
+                        f"Skipping editMessageText for message_id={message_id} (hash match)"
+                    )
+                    await self._request_metrics.record_skip(
+                        chat_id=normalized_chat,
+                        category=request_category,
+                    )
+                    return message_id
+            if message_key is not None:
+                previous_hash = await self._get_payload_hash(message_key)
+                if previous_hash == payload_hash:
+                    logger.debug(
+                        "Skipping update_message inside lock due to identical payload",
+                        extra={
+                            "chat_id": chat_id,
+                            "message_id": message_id,
+                            "payload_hash": payload_hash,
+                            "callback_id": callback_id,
+                            "game_stage": callback_stage_name,
+                            "callback_user_id": callback_user_id,
+                            "trigger": "callback_query"
+                            if callback_id is not None
+                            else "automatic",
+                        },
+                    )
+                    await self._request_metrics.record_skip(
+                        chat_id=normalized_chat,
+                        category=request_category,
+                    )
+                    return message_id
+            if stage_key is not None:
+                cached_stage_hash = await self._get_stage_payload_hash(stage_key)
+                if cached_stage_hash == payload_hash:
+                    logger.debug(
+                        "Skipping update_message inside lock due to stage throttle",
+                        extra={
+                            "chat_id": chat_id,
+                            "message_id": message_id,
+                            "payload_hash": payload_hash,
+                            "game_stage": callback_stage_name,
+                        },
+                    )
+                    await self._request_metrics.record_skip(
+                        chat_id=normalized_chat,
+                        category=request_category,
+                    )
+                    return message_id
+            if (
+                callback_token_key is not None
+                and callback_id is not None
+                and callback_throttle_key is not None
+            ):
+                last_callback_token = self._last_callback_edit.get(
+                    callback_throttle_key
+                )
+                if last_callback_token == callback_id:
+                    debug_trace_logger.info(
+                        f"Skipping editMessageText for message_id={message_id} "
+                        "(callback throttling)"
+                    )
+                    await self._request_metrics.record_skip(
+                        chat_id=normalized_chat,
+                        category=request_category,
+                    )
+                    return message_id
+            if (
+                callback_token_key is not None
+                and callback_id is not None
+                and self._should_skip_callback_update(callback_token_key, callback_id)
+            ):
+                logger.debug(
+                    "Skipping update_message inside lock due to callback throttling",
+                    extra={
+                        "chat_id": chat_id,
+                        "message_id": message_id,
+                        "payload_hash": payload_hash,
+                        "callback_id": callback_id,
+                        "game_stage": callback_stage_name,
+                        "callback_user_id": callback_user_id,
+                        "trigger": "callback_query",
+                    },
+                )
+                await self._request_metrics.record_skip(
+                    chat_id=normalized_chat,
+                    category=request_category,
+                )
+                return message_id
+
+            try:
+                if message_id is None:
+                    result = await self._messenger.send_message(
+                        chat_id=chat_id,
+                        text=normalized_text,
+                        reply_markup=reply_markup,
+                        request_category=request_category,
+                        parse_mode=parse_mode,
+                        disable_web_page_preview=disable_web_page_preview,
+                        disable_notification=disable_notification,
+                    )
+                    new_message_id: Optional[MessageId] = getattr(
+                        result, "message_id", None
+                    )
+                else:
+                    result = await self._messenger.edit_message_text(
+                        chat_id=chat_id,
+                        message_id=message_id,
+                        text=normalized_text,
+                        reply_markup=reply_markup,
+                        request_category=request_category,
+                        parse_mode=parse_mode,
+                        disable_web_page_preview=disable_web_page_preview,
+                    )
+                    if hasattr(result, "message_id"):
+                        new_message_id = result.message_id  # type: ignore[assignment]
+                    elif isinstance(result, int):
+                        new_message_id = result
+                    else:
+                        new_message_id = message_id
+            except (BadRequest, Forbidden, RetryAfter, TelegramError) as exc:
+                logger.error(
+                    "Failed to update message",
+                    extra={
+                        "chat_id": chat_id,
+                        "message_id": message_id,
+                        "error_type": type(exc).__name__,
+                    },
+                )
+                return message_id
+
+            if new_message_id is None:
+                return message_id
+
+            normalized_new_message = self._safe_int(new_message_id)
+            new_message_key = (normalized_chat, normalized_new_message)
+            await self._set_payload_hash(new_message_key, payload_hash)
+            await self._set_last_text_hash(normalized_new_message, message_text_hash)
+            if turn_cache_key is not None:
+                await self._set_turn_cache_hash(new_message_key, payload_hash)
+            new_stage_key = (
+                normalized_chat,
+                normalized_new_message,
+                callback_stage_name,
+            )
+            await self._set_stage_payload_hash(new_stage_key, payload_hash)
+            if callback_id is not None:
+                new_callback_token_key = (
+                    normalized_chat,
+                    normalized_new_message,
+                    callback_stage_name,
+                    callback_user_id if callback_user_id is not None else 0,
+                )
+                self._store_callback_update_token(
+                    new_callback_token_key,
+                    callback_id,
+                )
+                self._last_callback_edit[
+                    (normalized_new_message, callback_stage_name)
+                ] = callback_id
+            if (
+                message_key is not None
+                and new_message_key != message_key
+            ):
+                await self._pop_payload_hash(message_key)
+                if turn_cache_key is not None:
+                    await self._pop_turn_cache_hash(message_key)
+                await self._clear_callback_tokens_for_message(
+                    message_key[0],
+                    message_key[1],
+                )
+            return new_message_id
 
     @staticmethod
     def _render_cards(cards: Sequence[Card]) -> str:
@@ -1644,7 +1415,6 @@ class PokerBotViewer:
         money: Money,
         message_id: Optional[MessageId] = None,
         recent_actions: Optional[List[str]] = None,
-        anchor_overlay: Optional[AnchorUpdateRequest] = None,
     ) -> TurnMessageUpdate:
         """Send or edit the persistent turn message for the active player."""
 
@@ -1691,18 +1461,6 @@ class PokerBotViewer:
         text = "\n".join(info_lines)
 
         reply_markup = await self._build_turn_keyboard(call_text, call_action)
-
-        if anchor_overlay is not None:
-            anchor_text = self._build_anchor_text(
-                mention_markdown=anchor_overlay.player.mention_markdown,
-                seat_number=anchor_overlay.seat_number,
-                role_label=anchor_overlay.role_label,
-                board_cards=anchor_overlay.board_cards,
-            )
-            if anchor_overlay.active:
-                anchor_text = f"{anchor_text}\n\n🎯 **نوبت بازی این بازیکن است.**"
-            combined_parts = [anchor_text, "—" * 5, text]
-            text = "\n\n".join(part for part in combined_parts if part)
 
         new_message_id = await self._update_message(
             chat_id=chat_id,

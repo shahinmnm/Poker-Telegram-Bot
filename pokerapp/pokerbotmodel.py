@@ -887,13 +887,12 @@ class PokerBotModel:
             if scheduled_state is not None and scheduled_state != current_state_token:
                 if isinstance(job_data, dict):
                     job_data["game_state"] = current_state_token
-                logger.info(
-                    "SKIPPED job edit due to recent callback or stage change",
+                logger.debug(
+                    "Skipping auto-start tick due to game state change",
                     extra={
                         "chat_id": chat_id,
                         "scheduled_state": scheduled_state,
                         "current_state": current_state_token,
-                        "reason": "stage_change",
                     },
                 )
                 return
@@ -1000,13 +999,12 @@ class PokerBotModel:
                     and last_edit_wallclock is not None
                     and now - last_edit_wallclock <= datetime.timedelta(seconds=1.5)
                 ):
-                    logger.info(
-                        "SKIPPED job edit due to recent callback or stage change",
+                    logger.debug(
+                        "Skipping countdown update due to recent edit",
                         extra={
                             "chat_id": chat_id,
                             "message_id": message_id,
                             "delta_seconds": (now - last_edit_wallclock).total_seconds(),
-                            "reason": "recent_edit",
                         },
                     )
                     await self._request_metrics.record_skip(
@@ -2105,12 +2103,7 @@ class PokerBotModel:
                         collect_active=True,
                     )
                 anchor_message_id: Optional[MessageId] = None
-                combine_with_turn = (
-                    anchor_plan is not None
-                    and anchor_plan.message_id is None
-                    and game.turn_message_id is None
-                )
-                if anchor_plan is not None and not combine_with_turn:
+                if anchor_plan is not None:
                     try:
                         anchor_message_id = await self._view.update_player_anchor(
                             chat_id=chat_id,
@@ -2148,18 +2141,7 @@ class PokerBotModel:
                     money=money,
                     message_id=game.turn_message_id,
                     recent_actions=recent_actions,
-                    anchor_overlay=anchor_plan if combine_with_turn else None,
                 )
-
-                if combine_with_turn and anchor_plan is not None:
-                    anchor_message_id = turn_update.message_id
-                    if anchor_message_id:
-                        await self._track_player_keyboard_message(
-                            game,
-                            chat_id,
-                            anchor_plan.player,
-                            anchor_message_id,
-                        )
 
                 if turn_update.message_id:
                     game.turn_message_id = turn_update.message_id
@@ -2172,7 +2154,6 @@ class PokerBotModel:
                         "chat_id": chat_id,
                         "anchor_message_id": anchor_message_id,
                         "turn_message_id": game.turn_message_id,
-                        "combined": combine_with_turn,
                     },
                 )
 
