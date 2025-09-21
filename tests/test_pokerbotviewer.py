@@ -14,7 +14,7 @@ from pokerapp.config import (
     DEFAULT_RATE_LIMIT_PER_SECOND,
 )
 from pokerapp.entities import Game, GameState, Player, PlayerAction
-from pokerapp.pokerbotview import PokerBotViewer
+from pokerapp.pokerbotview import PokerBotViewer, build_player_cards_keyboard
 
 
 MENTION_LINK = "tg://user?id=123"
@@ -160,19 +160,10 @@ def test_update_player_anchor_creates_anchor_message():
     assert '🎖️ نقش: دیلر' in call.kwargs['text']
     assert '🃏 Board:' not in call.kwargs['text']
     assert '🎯 **نوبت بازی این بازیکن است.**' in call.kwargs['text']
-    markup = call.kwargs['reply_markup']
-    assert isinstance(markup, InlineKeyboardMarkup)
-    rows = markup.inline_keyboard
-    assert [button.text for button in rows[0]] == ['🎴 کارت‌های شما']
-    assert [button.text for button in rows[1]] == [
-        '🂠 کارت مخفی 1/2',
-        '🂠 کارت مخفی 2/2',
-    ]
-    assert [button.text for button in rows[2]] == ['🃏 کارت‌های روی میز']
-    assert [button.text for button in rows[3]] == ['A♠️', 'K♦️', '5♣️']
+    assert call.kwargs['reply_markup'] is None
 
 
-def test_update_player_anchor_inactive_player_keeps_card_keyboard():
+def test_update_player_anchor_inactive_player_skips_redundant_updates():
     viewer = PokerBotViewer(bot=MagicMock())
 
     player = MagicMock(mention_markdown=MENTION_MARKDOWN, user_id=222)
@@ -221,21 +212,8 @@ def test_update_player_anchor_inactive_player_keeps_card_keyboard():
 
     assert result == 77
     assert viewer._messenger.edit_message_text.await_count == 0
-    assert viewer.edit_message_reply_markup.await_count == 1
-    assert viewer._messenger.edit_message_reply_markup.await_count == 1
-
-    markup_call = viewer._messenger.edit_message_reply_markup.await_args
-    markup = markup_call.kwargs['reply_markup']
-    assert isinstance(markup, InlineKeyboardMarkup)
-    rows = markup.inline_keyboard
-    assert [button.text for button in rows[0]] == ['🎴 کارت‌های شما']
-    assert [button.text for button in rows[1]] == [
-        '🂠 کارت مخفی 1/2',
-        '🂠 کارت مخفی 2/2',
-    ]
-    assert [button.text for button in rows[2]] == ['🃏 کارت‌های روی میز']
-    assert [button.text for button in rows[3]] == ['Q♠️', 'J♦️', '9♣️']
-    assert [button.text for button in rows[4]] == ['2♥️']
+    assert viewer.edit_message_reply_markup.await_count == 0
+    assert viewer._messenger.edit_message_reply_markup.await_count == 0
 
 
 def test_update_player_anchor_when_game_inactive_shows_menu():
@@ -261,15 +239,82 @@ def test_update_player_anchor_when_game_inactive_shows_menu():
 
     assert result == 99
     call = viewer._messenger.edit_message_text.await_args
-    markup = call.kwargs['reply_markup']
-    assert isinstance(markup, InlineKeyboardMarkup)
-    rows = [[button.text for button in row] for row in markup.inline_keyboard]
-    assert rows == [
-        ['🎮 شروع بازی جدید', '📊 آمار شما'],
-        ['🛠 راهنما / قوانین', '💰 موجودی کیف پول'],
-        ['💬 گفتگوی دوستانه'],
-    ]
+    assert call.kwargs['reply_markup'] is None
 
+
+def test_build_player_cards_keyboard_layout():
+    markup = build_player_cards_keyboard(
+        hole_cards=['A♠', 'K♥'],
+        community_cards=['❔', '5♦', '❔', '❔', '❔'],
+        current_stage='FLOP',
+    )
+
+    assert isinstance(markup, ReplyKeyboardMarkup)
+    assert markup.resize_keyboard is True
+    assert markup.one_time_keyboard is False
+    assert markup.selective is True
+    assert _row_texts(markup.keyboard[0]) == ['A♠', 'K♥']
+    assert _row_texts(markup.keyboard[1]) == ['❔', '5♦', '❔', '❔', '❔']
+    stage_row = _row_texts(markup.keyboard[2])
+    assert stage_row[0] == 'پری فلاپ'
+    assert stage_row[1].startswith('✅')
+    assert stage_row[2] == 'ترن'
+    assert stage_row[3] == 'ریور'
+
+
+def test_send_player_cards_keyboard_prefers_edit_and_falls_back():
+    viewer = PokerBotViewer(bot=MagicMock())
+    viewer.edit_message_text = AsyncMock(return_value=123)
+    viewer.send_message = AsyncMock(return_value=456)
+
+    result = run(
+        viewer.send_player_cards_keyboard(
+            chat_id=789,
+            hole_cards=['A♠', 'K♥'],
+            community_cards=['❔'] * 5,
+            current_stage='PRE-FLOP',
+            message_id=321,
+        )
+    )
+
+    assert result == 123
+    viewer.edit_message_text.assert_awaited_once()
+    viewer.send_message.assert_not_awaited()
+
+    viewer.edit_message_text.reset_mock()
+    viewer.send_message.reset_mock()
+    viewer.edit_message_text.side_effect = BadRequest('message is not modified')
+
+    result = run(
+        viewer.send_player_cards_keyboard(
+            chat_id=789,
+            hole_cards=['A♠', 'K♥'],
+            community_cards=['❔'] * 5,
+            current_stage='PRE-FLOP',
+            message_id=321,
+        )
+    )
+
+    assert result == 321
+    viewer.send_message.assert_not_awaited()
+
+    viewer.edit_message_text.reset_mock()
+    viewer.send_message.reset_mock()
+    viewer.edit_message_text.side_effect = BadRequest('other error')
+    viewer.send_message.return_value = 654
+
+    result = run(
+        viewer.send_player_cards_keyboard(
+            chat_id=789,
+            hole_cards=['A♠', 'K♥'],
+            community_cards=['❔'] * 5,
+            current_stage='PRE-FLOP',
+            message_id=321,
+        )
+    )
+
+    assert result == 654
+    viewer.send_message.assert_awaited_once()
 
 def test_update_turn_message_includes_stage_and_keyboard():
     viewer = PokerBotViewer(bot=MagicMock())
