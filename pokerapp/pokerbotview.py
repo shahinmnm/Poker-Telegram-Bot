@@ -208,13 +208,15 @@ class PokerBotViewer:
         *,
         rate_limit_per_minute: int = DEFAULT_RATE_LIMIT_PER_MINUTE,
         rate_limit_per_second: Optional[int] = DEFAULT_RATE_LIMIT_PER_SECOND,
-        rate_limiter_delay: Optional[float] = None,
-        update_debounce: float = 0.3,
+        rate_limiter_delay: Optional[float] = 0.05,
+        update_debounce: float = 0.25,
         request_metrics: Optional[RequestMetrics] = None,
     ):
-        # ``update_debounce`` is kept for compatibility with previous
-        # initialisers but no longer used after the messaging rewrite.
-        _ = update_debounce
+        # ``update_debounce`` historically controlled how quickly message edits
+        # were flushed to Telegram.  The messaging rewrite in mid-2023 stopped
+        # consuming the parameter, but we now wire it back in so call sites can
+        # opt into even tighter coalescing windows when needed.
+        self._message_update_debounce_delay = max(0.0, float(update_debounce))
 
         self._bot = bot
         self._desk_generator = DeskImageGenerator()
@@ -264,7 +266,6 @@ class PokerBotViewer:
             Tuple[ChatId, Optional[MessageId]], asyncio.Task[Optional[MessageId]]
         ] = {}
         self._pending_updates_lock = asyncio.Lock()
-        self._message_update_debounce_delay = 0.35
 
         self._messenger = MessagingService(
             bot,
