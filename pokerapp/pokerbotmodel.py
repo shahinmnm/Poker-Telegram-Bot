@@ -2400,12 +2400,15 @@ class PokerBotModel:
             if game.state == GameState.ROUND_PRE_FLOP:
                 game.state = GameState.ROUND_FLOP
                 await self.add_cards_to_table(3, game, chat_id, "🃏 فلاپ")
+                await self._view.update_player_anchors_and_keyboards(game)
             elif game.state == GameState.ROUND_FLOP:
                 game.state = GameState.ROUND_TURN
                 await self.add_cards_to_table(1, game, chat_id, "🃏 ترن")
+                await self._view.update_player_anchors_and_keyboards(game)
             elif game.state == GameState.ROUND_TURN:
                 game.state = GameState.ROUND_RIVER
                 await self.add_cards_to_table(1, game, chat_id, "🃏 ریور")
+                await self._view.update_player_anchors_and_keyboards(game)
             elif game.state == GameState.ROUND_RIVER:
                 # بعد از ریور، دور شرط‌بندی تمام شده و باید showdown انجام شود
                 await self._showdown(game, chat_id, context)
