@@ -79,6 +79,9 @@ AUTO_START_MIN_UPDATE_INTERVAL = datetime.timedelta(
 )
 KEY_START_COUNTDOWN_LAST_TEXT = "start_countdown_last_text"
 KEY_START_COUNTDOWN_LAST_TIMESTAMP = "start_countdown_last_timestamp"
+KEY_PRESTART_COUNTDOWN_ANCHOR = "prestart_countdown_anchor"
+KEY_PRESTART_COUNTDOWN_SECONDS = "prestart_countdown_seconds"
+KEY_PRESTART_COUNTDOWN_ACTIVE = "prestart_countdown_active"
 
 # legacy keys kept for backward compatibility but unused
 KEY_OLD_PLAYERS = "old_players"
@@ -924,186 +927,107 @@ class PokerBotModel:
                     },
                 )
                 return
+
             remaining = context.chat_data.get("start_countdown")
             if remaining is None:
                 job.schedule_removal()
                 context.chat_data.pop("start_countdown_job", None)
                 context.chat_data.pop(KEY_START_COUNTDOWN_LAST_TEXT, None)
                 context.chat_data.pop(KEY_START_COUNTDOWN_LAST_TIMESTAMP, None)
+                context.chat_data.pop(KEY_PRESTART_COUNTDOWN_ANCHOR, None)
+                context.chat_data.pop(KEY_PRESTART_COUNTDOWN_SECONDS, None)
+                context.chat_data.pop(KEY_PRESTART_COUNTDOWN_ACTIVE, None)
+                await self._view._cancel_prestart_countdown(chat_id)
                 return
 
-            if remaining <= 0:
+            if remaining <= 0 or game.state != GameState.INITIAL:
                 job.schedule_removal()
                 context.chat_data.pop("start_countdown_job", None)
                 context.chat_data.pop("start_countdown", None)
                 context.chat_data.pop(KEY_START_COUNTDOWN_LAST_TEXT, None)
                 context.chat_data.pop(KEY_START_COUNTDOWN_LAST_TIMESTAMP, None)
-                await self._start_game(context, game, chat_id)
-                await self._table_manager.save_game(chat_id, game)
+                context.chat_data.pop(KEY_PRESTART_COUNTDOWN_ANCHOR, None)
+                context.chat_data.pop(KEY_PRESTART_COUNTDOWN_SECONDS, None)
+                context.chat_data.pop(KEY_PRESTART_COUNTDOWN_ACTIVE, None)
+                await self._view._cancel_prestart_countdown(chat_id)
+                if remaining <= 0 and game.state == GameState.INITIAL:
+                    await self._start_game(context, game, chat_id)
+                    await self._table_manager.save_game(chat_id, game)
                 return
-            next_remaining = max(remaining - 1, 0)
-            text, keyboard = self._build_ready_message(game, next_remaining)
+
+            countdown_value = max(int(remaining), 0)
+            now = datetime.datetime.now(datetime.timezone.utc)
+            text, keyboard = self._build_ready_message(game, countdown_value)
+            context.chat_data[KEY_START_COUNTDOWN_LAST_TEXT] = text
+            context.chat_data[KEY_START_COUNTDOWN_LAST_TIMESTAMP] = now
+            game.ready_message_main_text = text
 
             message_id = game.ready_message_main_id
-            last_text = context.chat_data.get(KEY_START_COUNTDOWN_LAST_TEXT)
-            last_timestamp = context.chat_data.get(KEY_START_COUNTDOWN_LAST_TIMESTAMP)
-            now = datetime.datetime.now(datetime.timezone.utc)
-
-            force_broadcast = message_id is None or next_remaining <= 0
-            should_broadcast = True
-
-            if message_id and text == game.ready_message_main_text:
-                should_broadcast = False
-            elif not force_broadcast:
-                if last_text == text:
-                    should_broadcast = False
-                elif (
-                    next_remaining > 0
-                    and last_timestamp
-                    and now - last_timestamp < AUTO_START_MIN_UPDATE_INTERVAL
-                ):
-                    should_broadcast = False
-
-            if should_broadcast:
-                payload_hash: Optional[str] = None
-                hash_builder = getattr(self._view, "payload_signature", None)
-                if callable(hash_builder):
-                    try:
-                        candidate = hash_builder(text, keyboard)
-                    except Exception:
-                        payload_hash = None
-                    else:
-                        if isinstance(candidate, str):
-                            payload_hash = candidate
-
-                stage_skip = False
-                if payload_hash is not None:
-                    skip_checker = getattr(
-                        self._view, "should_skip_stage_update", None
-                    )
-                    if callable(skip_checker):
-                        try:
-                            maybe = skip_checker(
-                                chat_id=chat_id,
-                                message_id=message_id,
-                                stage="countdown",
-                                payload_hash=payload_hash,
-                            )
-                            if inspect.isawaitable(maybe):
-                                maybe = await maybe
-                            if isinstance(maybe, bool):
-                                stage_skip = maybe
-                        except Exception:
-                            stage_skip = False
-                if stage_skip:
-                    logger.debug(
-                        "Skipping countdown update due to recent identical payload",
-                        extra={
-                            "chat_id": chat_id,
-                            "message_id": message_id,
-                        },
-                    )
-                    await self._request_metrics.record_skip(
-                        chat_id=self._safe_int(chat_id),
-                        category=RequestCategory.COUNTDOWN,
-                    )
-                    should_broadcast = False
-
-            if should_broadcast:
-                last_edit_wallclock: Optional[datetime.datetime] = None
-                if message_id:
-                    accessor = getattr(self._view, "last_message_edit_at", None)
-                    if callable(accessor):
-                        try:
-                            maybe_timestamp = accessor(chat_id, message_id)
-                            if inspect.isawaitable(maybe_timestamp):
-                                maybe_timestamp = await maybe_timestamp
-                            if isinstance(maybe_timestamp, datetime.datetime):
-                                last_edit_wallclock = maybe_timestamp
-                        except Exception:
-                            last_edit_wallclock = None
-                if (
-                    message_id
-                    and last_edit_wallclock is not None
-                    and now - last_edit_wallclock <= datetime.timedelta(seconds=1.5)
-                ):
-                    logger.debug(
-                        "Skipping countdown update due to recent edit",
-                        extra={
-                            "chat_id": chat_id,
-                            "message_id": message_id,
-                            "delta_seconds": (now - last_edit_wallclock).total_seconds(),
-                        },
-                    )
-                    await self._request_metrics.record_skip(
-                        chat_id=self._safe_int(chat_id),
-                        category=RequestCategory.COUNTDOWN,
-                    )
-                    should_broadcast = False
-
-            if should_broadcast:
-                skip_due_to_cache = await self._countdown_cache_should_skip(
-                    chat_id, next_remaining, text, message_id
-                )
-                if skip_due_to_cache:
-                    should_broadcast = False
-
-            broadcast_performed = False
-
-            if should_broadcast:
-                new_message_id = await self._safe_edit_message_text(
+            if message_id is None:
+                new_message_id = await self._view.send_message_return_id(
                     chat_id,
-                    message_id,
                     text,
                     reply_markup=keyboard,
-                    log_context="countdown",
                     request_category=RequestCategory.COUNTDOWN,
                 )
-                if new_message_id is None:
-                    if message_id and message_id in game.message_ids_to_delete:
-                        game.message_ids_to_delete.remove(message_id)
-                    game.ready_message_main_id = None
-                    replacement_id = await self._view.send_message_return_id(
-                        chat_id, text, reply_markup=keyboard
-                    )
-                    if replacement_id:
-                        game.ready_message_main_id = replacement_id
-                        game.ready_message_main_text = text
-                        await self._table_manager.save_game(chat_id, game)
-                        await self._update_countdown_cache(
-                            chat_id, next_remaining, text, replacement_id
-                        )
-                        broadcast_performed = True
-                elif new_message_id:
-                    if (
-                        message_id
-                        and new_message_id != message_id
-                        and message_id in game.message_ids_to_delete
-                    ):
-                        game.message_ids_to_delete.remove(message_id)
-                    if new_message_id != game.ready_message_main_id:
-                        game.ready_message_main_id = new_message_id
-                        await self._table_manager.save_game(chat_id, game)
-                    game.ready_message_main_text = text
-                    await self._update_countdown_cache(
-                        chat_id, next_remaining, text, new_message_id
-                    )
-                    broadcast_performed = True
+                if new_message_id:
+                    game.ready_message_main_id = new_message_id
+                    await self._table_manager.save_game(chat_id, game)
+                    message_id = new_message_id
+                else:
+                    await self._view._cancel_prestart_countdown(chat_id)
+                    context.chat_data["start_countdown"] = countdown_value
+                    context.chat_data[KEY_PRESTART_COUNTDOWN_ACTIVE] = False
+                    return
 
-            if broadcast_performed:
-                context.chat_data[KEY_START_COUNTDOWN_LAST_TEXT] = text
-                context.chat_data[KEY_START_COUNTDOWN_LAST_TIMESTAMP] = now
+            previous_anchor = context.chat_data.get(KEY_PRESTART_COUNTDOWN_ANCHOR)
+            previous_seconds = context.chat_data.get(KEY_PRESTART_COUNTDOWN_SECONDS)
+            countdown_active = context.chat_data.get(KEY_PRESTART_COUNTDOWN_ACTIVE)
+
+            def payload_fn(seconds_left: int) -> Tuple[str, InlineKeyboardMarkup]:
+                payload_text, payload_keyboard = self._build_ready_message(
+                    game, max(seconds_left, 0)
+                )
+                game.ready_message_main_text = payload_text
+                context.chat_data[KEY_START_COUNTDOWN_LAST_TEXT] = payload_text
+                context.chat_data[KEY_START_COUNTDOWN_LAST_TIMESTAMP] = (
+                    datetime.datetime.now(datetime.timezone.utc)
+                )
+                return payload_text, payload_keyboard
+
+            should_start_countdown = False
+            if message_id is not None:
+                if not countdown_active:
+                    should_start_countdown = True
+                elif previous_anchor != message_id:
+                    should_start_countdown = True
+                elif previous_seconds is None:
+                    should_start_countdown = True
+                elif countdown_value > int(previous_seconds):
+                    should_start_countdown = True
+
+            if should_start_countdown:
+                await self._view.start_prestart_countdown(
+                    chat_id=chat_id,
+                    anchor_message_id=message_id,
+                    seconds=countdown_value,
+                    payload_fn=payload_fn,
+                )
+                countdown_active = True
+                previous_anchor = message_id
+
+            if countdown_active:
+                context.chat_data[KEY_PRESTART_COUNTDOWN_ACTIVE] = True
+                context.chat_data[KEY_PRESTART_COUNTDOWN_ANCHOR] = previous_anchor
             else:
-                context.chat_data.setdefault(
-                    KEY_START_COUNTDOWN_LAST_TEXT, game.ready_message_main_text
-                )
-                context.chat_data.setdefault(
-                    KEY_START_COUNTDOWN_LAST_TIMESTAMP, now
-                )
+                context.chat_data[KEY_PRESTART_COUNTDOWN_ACTIVE] = False
 
-            context.chat_data["start_countdown"] = next_remaining
+            context.chat_data[KEY_PRESTART_COUNTDOWN_SECONDS] = countdown_value
+            context.chat_data["start_countdown"] = max(countdown_value - 1, 0)
 
-    async def _schedule_auto_start(self, context: CallbackContext, game: Game, chat_id: ChatId) -> None:
+    async def _schedule_auto_start(
+        self, context: CallbackContext, game: Game, chat_id: ChatId
+    ) -> None:
         if context.chat_data.get("start_countdown_job"):
             return
 
@@ -1114,6 +1038,9 @@ class PokerBotModel:
         context.chat_data["start_countdown"] = 60
         context.chat_data[KEY_START_COUNTDOWN_LAST_TEXT] = game.ready_message_main_text
         context.chat_data.pop(KEY_START_COUNTDOWN_LAST_TIMESTAMP, None)
+        context.chat_data.pop(KEY_PRESTART_COUNTDOWN_ANCHOR, None)
+        context.chat_data.pop(KEY_PRESTART_COUNTDOWN_SECONDS, None)
+        context.chat_data[KEY_PRESTART_COUNTDOWN_ACTIVE] = False
         job = context.job_queue.run_repeating(
             self._auto_start_tick,
             interval=1,
@@ -1125,13 +1052,22 @@ class PokerBotModel:
         )
         context.chat_data["start_countdown_job"] = job
 
-    def _cancel_auto_start(self, context: CallbackContext) -> None:
+    async def _cancel_auto_start(
+        self, context: CallbackContext, chat_id: Optional[ChatId] = None
+    ) -> None:
         job = context.chat_data.pop("start_countdown_job", None)
         if job:
             job.schedule_removal()
+            if chat_id is None:
+                chat_id = getattr(job, "chat_id", None)
         context.chat_data.pop("start_countdown", None)
         context.chat_data.pop(KEY_START_COUNTDOWN_LAST_TEXT, None)
         context.chat_data.pop(KEY_START_COUNTDOWN_LAST_TIMESTAMP, None)
+        context.chat_data.pop(KEY_PRESTART_COUNTDOWN_ANCHOR, None)
+        context.chat_data.pop(KEY_PRESTART_COUNTDOWN_SECONDS, None)
+        context.chat_data.pop(KEY_PRESTART_COUNTDOWN_ACTIVE, None)
+        if chat_id is not None:
+            await self._view._cancel_prestart_countdown(chat_id)
 
     async def _track_player_keyboard_message(
         self,
@@ -1502,7 +1438,7 @@ class PokerBotModel:
         if game.seated_count() >= self._min_players:
             await self._schedule_auto_start(context, game, chat_id)
         else:
-            self._cancel_auto_start(context)
+            await self._cancel_auto_start(context, chat_id)
 
         countdown_value = context.chat_data.get("start_countdown")
         text, keyboard = self._build_ready_message(game, countdown_value)
@@ -1575,7 +1511,7 @@ class PokerBotModel:
         await self._register_player_identity(user)
 
         game, chat_id = await self._get_game(update, context)
-        self._cancel_auto_start(context)
+        await self._cancel_auto_start(context, chat_id)
         if game.state not in (GameState.INITIAL, GameState.FINISHED):
             await self._view.send_message(
                 chat_id, "🎮 یک بازی در حال حاضر در جریان است."
@@ -1910,7 +1846,7 @@ class PokerBotModel:
     ) -> None:
         """مراحل شروع یک دست جدید بازی را انجام می‌دهد."""
         async with self._chat_guard(chat_id):
-            self._cancel_auto_start(context)
+            await self._cancel_auto_start(context, chat_id)
             if game.ready_message_main_id:
                 deleted_ready_message = False
                 try:
