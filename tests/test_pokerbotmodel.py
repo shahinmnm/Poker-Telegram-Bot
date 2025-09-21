@@ -56,10 +56,10 @@ def _prepare_view_mock(view: MagicMock) -> MagicMock:
     view.send_message_return_id = AsyncMock(return_value=None)
     view.send_message = AsyncMock()
     view.announce_player_seats = AsyncMock(return_value=None)
-    view.send_player_cards_keyboard = AsyncMock(return_value=None)
     view.delete_message = AsyncMock()
     view.start_prestart_countdown = AsyncMock(return_value=None)
     view._cancel_prestart_countdown = AsyncMock(return_value=None)
+    view.update_player_anchors_and_keyboards = AsyncMock(return_value=None)
     view.update_turn_message = AsyncMock(
         return_value=TurnMessageUpdate(
             message_id=None,
@@ -435,20 +435,13 @@ def test_send_turn_message_updates_turn_message_only():
         board_line="🃏 Board: A♠     K♦     5♣",
     )
     view.update_turn_message = AsyncMock(return_value=turn_update)
-    view.update_player_anchor = AsyncMock()
+    view.update_player_anchors_and_keyboards = AsyncMock()
 
     asyncio.run(model._send_turn_message(game, player, chat_id))
 
     assert game.turn_message_id == 321
     view.update_turn_message.assert_awaited_once()
-    assert view.update_player_anchor.await_count == 2
-    active_calls = [
-        call
-        for call in view.update_player_anchor.await_args_list
-        if call.kwargs.get("active")
-    ]
-    assert len(active_calls) == 1
-    assert active_calls[0].kwargs["player"].user_id == player.user_id
+    view.update_player_anchors_and_keyboards.assert_awaited_once_with(game)
 
 
 def test_add_cards_to_table_does_not_send_stage_message():
@@ -457,8 +450,7 @@ def test_add_cards_to_table_does_not_send_stage_message():
 
     view.send_message_return_id = AsyncMock(return_value=111)
     view.delete_message = AsyncMock()
-    view.update_player_anchor = AsyncMock()
-    view.send_player_cards_keyboard = AsyncMock(return_value="cards-1")
+    view.update_player_anchors_and_keyboards = AsyncMock()
 
     game.remain_cards = [Card("2♣"), Card("3♦"), Card("4♥")]
     game.state = GameState.ROUND_FLOP
@@ -468,9 +460,7 @@ def test_add_cards_to_table_does_not_send_stage_message():
     view.send_message_return_id.assert_not_awaited()
     view.delete_message.assert_not_awaited()
     assert game.board_message_id is None
-    view.update_player_anchor.assert_not_awaited()
-    view.send_player_cards_keyboard.assert_awaited_once()
-    assert player.cards_keyboard_message_id == "cards-1"
+    view.update_player_anchors_and_keyboards.assert_not_awaited()
 
 
 def test_add_cards_to_table_removes_existing_stage_message():
@@ -478,7 +468,7 @@ def test_add_cards_to_table_removes_existing_stage_message():
     chat_id = -602
 
     view.delete_message = AsyncMock()
-    view.send_player_cards_keyboard = AsyncMock(return_value="cards-2")
+    view.update_player_anchors_and_keyboards = AsyncMock()
 
     game.board_message_id = 222
     game.message_ids_to_delete.append(222)
@@ -489,17 +479,14 @@ def test_add_cards_to_table_removes_existing_stage_message():
     view.delete_message.assert_awaited_once_with(chat_id, 222)
     assert game.board_message_id is None
     assert 222 not in game.message_ids_to_delete
-    view.send_player_cards_keyboard.assert_awaited_once()
-    assert player.cards_keyboard_message_id == "cards-2"
+    view.update_player_anchors_and_keyboards.assert_not_awaited()
 def test_clear_game_messages_updates_anchor_to_inactive_menu():
     model, game, player, view = _build_model_with_game()
     chat_id = -500
     view.delete_message = AsyncMock()
     view.update_player_anchor = AsyncMock(return_value="anchor-7")
 
-    player.cards_keyboard_message_id = "cards-7"
     player.anchor_message = (chat_id, "anchor-7")
-    player.private_chat_id = 555
     game.message_ids_to_delete.extend(["anchor-7", 888, 999])
     game.board_message_id = 321
     game.turn_message_id = 654
@@ -511,7 +498,6 @@ def test_clear_game_messages_updates_anchor_to_inactive_menu():
     assert (chat_id, 654) in deleted_pairs
     assert (chat_id, 888) in deleted_pairs
     assert (chat_id, 999) in deleted_pairs
-    assert (player.private_chat_id, "cards-7") in deleted_pairs
     assert (chat_id, "anchor-7") not in deleted_pairs
     view.update_player_anchor.assert_awaited()
     update_call = view.update_player_anchor.await_args_list[0]
@@ -519,7 +505,6 @@ def test_clear_game_messages_updates_anchor_to_inactive_menu():
     assert update_call.kwargs["game_state"] == GameState.FINISHED
     assert update_call.kwargs["active"] is False
     assert player.anchor_message == (chat_id, "anchor-7")
-    assert player.cards_keyboard_message_id is None
     assert game.message_ids == {}
     assert game.message_ids_to_delete == []
 
@@ -879,11 +864,6 @@ async def test_start_game_assigns_blinds_to_occupied_seats():
     send_call = model._send_turn_message.await_args
     assert send_call.args[1].user_id == player_b.user_id
     assert send_call.args[2] == chat_id
-
-    assert view.update_player_anchor.await_count == 1
-    call_kwargs = view.update_player_anchor.await_args.kwargs
-    assert call_kwargs["player"].user_id == player_a.user_id
-    assert call_kwargs["active"] is False
 
 
 @pytest.mark.asyncio
