@@ -56,6 +56,7 @@ def _prepare_view_mock(view: MagicMock) -> MagicMock:
     view.send_message_return_id = AsyncMock(return_value=None)
     view.send_message = AsyncMock()
     view.announce_player_seats = AsyncMock(return_value=None)
+    view.send_player_role_anchors = AsyncMock(return_value=None)
     view.delete_message = AsyncMock()
     view.start_prestart_countdown = AsyncMock(return_value=None)
     view._cancel_prestart_countdown = AsyncMock(return_value=None)
@@ -858,6 +859,8 @@ async def test_start_game_assigns_blinds_to_occupied_seats():
     }
     assert blind_players == {1, 2}
 
+    view.send_player_role_anchors.assert_awaited_once_with(game=game, chat_id=chat_id)
+
     model._send_turn_message.assert_awaited_once()
     send_call = model._send_turn_message.await_args
     assert send_call.args[1].user_id == player_b.user_id
@@ -903,6 +906,7 @@ async def test_start_game_keeps_ready_message_id_when_deletion_fails():
     assert game.ready_message_main_text == ""
     model._divide_cards.assert_awaited_once_with(game, chat_id)
     model._round_rate.set_blinds.assert_awaited_once_with(game, chat_id)
+    view.send_player_role_anchors.assert_awaited_once_with(game=game, chat_id=chat_id)
 
 
 def test_send_turn_message_updates_existing_message():

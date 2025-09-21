@@ -879,14 +879,22 @@ class PokerBotViewer:
                 normalized_existing_message
             )
             if previous_text_hash == message_text_hash:
-                anchor_markup_only = False
-                if (
-                    request_category == RequestCategory.ANCHOR
-                    and message_key is not None
-                    and isinstance(reply_markup, InlineKeyboardMarkup)
-                ):
+                payload_changed = False
+                if message_key is not None:
                     previous_payload_hash = await self._get_payload_hash(message_key)
-                    anchor_markup_only = previous_payload_hash != payload_hash
+                    payload_changed = previous_payload_hash != payload_hash
+
+                anchor_markup_only = (
+                    request_category == RequestCategory.ANCHOR
+                    and payload_changed
+                    and isinstance(reply_markup, InlineKeyboardMarkup)
+                )
+                force_full_anchor_update = (
+                    request_category == RequestCategory.ANCHOR
+                    and payload_changed
+                    and not isinstance(reply_markup, InlineKeyboardMarkup)
+                )
+
                 if anchor_markup_only:
                     logger.debug(
                         "Anchor text unchanged; will refresh inline markup",
@@ -896,7 +904,7 @@ class PokerBotViewer:
                             "payload_hash": payload_hash,
                         },
                     )
-                else:
+                elif not force_full_anchor_update:
                     debug_trace_logger.info(
                         f"Skipping editMessageText for message_id={message_id} due to no content change"
                     )
@@ -982,17 +990,25 @@ class PokerBotViewer:
                     normalized_existing_message
                 )
                 if previous_text_hash == message_text_hash:
-                    anchor_markup_only = False
-                    if (
-                        request_category == RequestCategory.ANCHOR
-                        and message_key is not None
-                        and isinstance(reply_markup, InlineKeyboardMarkup)
-                    ):
+                    payload_changed = False
+                    if message_key is not None:
                         if previous_payload_hash is None:
                             previous_payload_hash = await self._get_payload_hash(
                                 message_key
                             )
-                        anchor_markup_only = previous_payload_hash != payload_hash
+                        payload_changed = previous_payload_hash != payload_hash
+
+                    anchor_markup_only = (
+                        request_category == RequestCategory.ANCHOR
+                        and payload_changed
+                        and isinstance(reply_markup, InlineKeyboardMarkup)
+                    )
+                    force_full_anchor_update = (
+                        request_category == RequestCategory.ANCHOR
+                        and payload_changed
+                        and not isinstance(reply_markup, InlineKeyboardMarkup)
+                    )
+
                     if anchor_markup_only:
                         if reply_markup is not None and not isinstance(
                             reply_markup, (InlineKeyboardMarkup, ReplyKeyboardMarkup)
@@ -1065,14 +1081,15 @@ class PokerBotViewer:
                                     callback_throttle_key
                                 ] = callback_id
                             return message_id
-                    debug_trace_logger.info(
-                        f"Skipping editMessageText for message_id={message_id} due to no content change"
-                    )
-                    await self._request_metrics.record_skip(
-                        chat_id=normalized_chat,
-                        category=request_category,
-                    )
-                    return message_id
+                    if not force_full_anchor_update:
+                        debug_trace_logger.info(
+                            f"Skipping editMessageText for message_id={message_id} due to no content change"
+                        )
+                        await self._request_metrics.record_skip(
+                            chat_id=normalized_chat,
+                            category=request_category,
+                        )
+                        return message_id
             if message_key is not None:
                 if previous_payload_hash is None:
                     previous_payload_hash = await self._get_payload_hash(
@@ -1264,17 +1281,120 @@ class PokerBotViewer:
     def _build_anchor_text(
         cls,
         *,
-        mention_markdown: Mention,
-        seat_number: int,
+        display_name: str,
+        mention_markdown: Optional[Mention],
+        seat_number: int | str,
         role_label: str,
     ) -> str:
+        hidden_mention = cls._build_hidden_mention(mention_markdown)
         lines = [
-            f"🎮 {mention_markdown}",
-            f"🪑 صندلی: `{seat_number}`",
+            f"🎮 {display_name}{hidden_mention}",
+            f"🪑 صندلی: {seat_number}",
             f"🎖️ نقش: {role_label}",
         ]
         # کارت‌های بازیکن در کیبورد پاسخ اختصاصی نمایش داده می‌شوند.
         return "\n".join(lines)
+
+    async def send_player_role_anchors(
+        self,
+        *,
+        game: Game,
+        chat_id: ChatId,
+    ) -> None:
+        """Send one anchor message per player with their current role."""
+
+        if chat_id is None or self._is_private_chat(chat_id):
+            return
+
+        stage = getattr(game, "state", GameState.INITIAL)
+        if not isinstance(stage, GameState):
+            try:
+                stage = GameState(stage)
+            except Exception:
+                stage = GameState.INITIAL
+        stage_name = stage.name
+
+        community_cards_source: Optional[Sequence[Card]] = getattr(
+            game, "community_cards", None
+        )
+        if community_cards_source is None:
+            community_cards_source = getattr(game, "cards_table", [])
+        try:
+            community_cards = [str(card) for card in community_cards_source or []]
+        except Exception:
+            community_cards = []
+
+        players: Sequence[Optional[Player]] = getattr(game, "players", [])
+        ordered_players = sorted(
+            (player for player in players if player is not None),
+            key=lambda p: p.seat_index if p.seat_index is not None else 999,
+        )
+
+        for player in ordered_players:
+            seat_index = player.seat_index if player.seat_index is not None else -1
+            seat_number: int | str = seat_index + 1 if seat_index >= 0 else "?"
+
+            role_label = getattr(player, "role_label", None) or self._describe_player_role(
+                game, player
+            )
+
+            hole_cards_source = getattr(player, "hole_cards", None)
+            if hole_cards_source is None:
+                hole_cards_source = getattr(player, "cards", [])
+            try:
+                hole_cards = [str(card) for card in hole_cards_source or []]
+            except Exception:
+                hole_cards = []
+
+            keyboard = build_player_cards_keyboard(
+                hole_cards=hole_cards,
+                community_cards=community_cards,
+                current_stage=stage_name,
+            )
+
+            display_name = str(
+                getattr(player, "display_name", None)
+                or getattr(player, "full_name", None)
+                or getattr(player, "username", None)
+                or getattr(player, "mention_markdown", "بازیکن")
+            )
+
+            text = self._build_anchor_text(
+                display_name=display_name,
+                mention_markdown=getattr(player, "mention_markdown", None),
+                seat_number=seat_number,
+                role_label=role_label,
+            )
+
+            try:
+                message_id = await self.send_message_return_id(
+                    chat_id=chat_id,
+                    text=text,
+                    reply_markup=keyboard,
+                    request_category=RequestCategory.ANCHOR,
+                )
+            except Exception as exc:
+                logger.error(
+                    "Failed to send player anchor",
+                    extra={
+                        "chat_id": chat_id,
+                        "player_id": getattr(player, "user_id", None),
+                        "error_type": type(exc).__name__,
+                    },
+                )
+                continue
+
+            if message_id is None:
+                continue
+
+            try:
+                normalized_anchor = int(message_id)
+            except (TypeError, ValueError):
+                continue
+
+            player.anchor_message = (chat_id, normalized_anchor)
+            player.anchor_role = role_label
+            player.role_label = role_label
 
     @staticmethod
     def _describe_player_role(game: Game, player: Player) -> str:
@@ -1383,26 +1503,28 @@ class PokerBotViewer:
                 current_stage=stage_name,
             )
 
+            seat_index = player.seat_index if player.seat_index is not None else -1
+            seat_number = seat_index + 1 if seat_index >= 0 else "?"
             role_label = getattr(player, "role_label", None) or getattr(
                 player, "anchor_role", "بازیکن"
             )
-
-            seat_index = player.seat_index if player.seat_index is not None else -1
-            seat_number = seat_index + 1 if seat_index >= 0 else "?"
             display_name = (
-                getattr(player, "display_name", None) or player.mention_markdown
+                getattr(player, "display_name", None)
+                or getattr(player, "full_name", None)
+                or getattr(player, "username", None)
+                or player.mention_markdown
             )
+            display_name = str(display_name)
 
-            lines = [
-                f"🎮 {display_name}",
-                f"🪑 Seat: {seat_number}",
-                f"🎖️ Role: {role_label}",
-            ]
+            text = self._build_anchor_text(
+                display_name=display_name,
+                mention_markdown=getattr(player, "mention_markdown", None),
+                seat_number=seat_number,
+                role_label=role_label,
+            )
             is_current_turn = current_player is player
             if is_current_turn:
-                lines.append("")
-                lines.append("🎯 It's this player's turn.")
-            text = "\n".join(lines)
+                text = "\n".join([text, "", "🎯 نوبت این بازیکن است."])
 
             logger.debug(
                 "Anchor update: player=%s | seat=%s | role=%s | hole_cards=%s | "
