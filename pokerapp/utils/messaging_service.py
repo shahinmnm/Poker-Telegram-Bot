@@ -106,15 +106,15 @@ class MessagingService:
     """
 
     #: Maximum time to keep coalescing edits for the same message.
-    _COALESCE_WINDOW = 1.5
+    _COALESCE_WINDOW = 1.0
     #: Minimum quiet period before flushing a queued edit.
-    _COALESCE_IDLE = 0.35
+    _COALESCE_IDLE = 0.2
     #: Minimum delay applied to quiet chats (seconds).
-    _MIN_DELAY = 0.05
+    _MIN_DELAY = 0.02
     #: Maximum delay applied to very busy chats (seconds).
-    _MAX_DELAY = 0.25
+    _MAX_DELAY = 0.15
     #: Minimum delay between any two messages globally (seconds).
-    _SAFE_GLOBAL_DELAY = 0.05
+    _SAFE_GLOBAL_DELAY = 0.02
     #: RetryAfter exception classes recognised by the service.
     _RETRY_AFTER_EXCEPTIONS: Tuple[type, ...] = tuple(
         exc for exc in (TelegramRetryAfter, PTBRetryAfter) if exc is not None
