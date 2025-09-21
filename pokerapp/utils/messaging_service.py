@@ -21,8 +21,9 @@ import json
 import logging
 import time
 import datetime
+from collections import defaultdict
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional, Set, Tuple
+from typing import Any, Awaitable, Callable, Dict, List, Optional, Set, Tuple
 
 from cachetools import TTLCache
 
@@ -30,14 +31,16 @@ from pokerapp.utils.debug_trace import trace_telegram_api_call
 from pokerapp.utils.request_metrics import RequestCategory, RequestMetrics
 
 try:  # pragma: no cover - aiogram is optional at runtime
-    from aiogram.exceptions import TelegramBadRequest
+    from aiogram.exceptions import TelegramBadRequest, TelegramRetryAfter
 except Exception:  # pragma: no cover - fallback for PTB-only deployments
     TelegramBadRequest = None  # type: ignore[assignment]
+    TelegramRetryAfter = None  # type: ignore[assignment]
 
 try:  # pragma: no cover - python-telegram-bot is optional during testing
-    from telegram.error import BadRequest as PTBBadRequest
+    from telegram.error import BadRequest as PTBBadRequest, RetryAfter as PTBRetryAfter
 except Exception:  # pragma: no cover
     PTBBadRequest = None  # type: ignore[assignment]
+    PTBRetryAfter = None  # type: ignore[assignment]
 
 
 logger = logging.getLogger(__name__)
@@ -106,6 +109,14 @@ class MessagingService:
     _COALESCE_WINDOW = 1.5
     #: Minimum quiet period before flushing a queued edit.
     _COALESCE_IDLE = 0.35
+    #: Minimum delay between messages for a single chat (seconds).
+    _SEND_INTERVAL_CHAT = 0.25
+    #: Minimum delay between any two messages globally (seconds).
+    _SEND_INTERVAL_GLOBAL = 0.05
+    #: RetryAfter exception classes recognised by the service.
+    _RETRY_AFTER_EXCEPTIONS: Tuple[type, ...] = tuple(
+        exc for exc in (TelegramRetryAfter, PTBRetryAfter) if exc is not None
+    )
 
     def __init__(
         self,
@@ -136,6 +147,72 @@ class MessagingService:
         self._deleted_messages_lock = deleted_messages_lock
         self._last_message_hash_ref = last_message_hash
         self._last_message_hash_lock = last_message_hash_lock
+        self._last_send_time_per_chat: defaultdict[int, float] = defaultdict(float)
+        self._global_last_send_time = 0.0
+
+    async def _throttle_send(self, chat_id: int) -> None:
+        """Apply per-chat and global throttling before contacting Telegram."""
+
+        chat_key = int(chat_id)
+        if self._SEND_INTERVAL_CHAT > 0:
+            now = time.monotonic()
+            delay = self._SEND_INTERVAL_CHAT - (now - self._last_send_time_per_chat[chat_key])
+            if delay > 0:
+                debug_trace_logger.info(
+                    "[MessagingService] THROTTLE per-chat chat_id=%s delay=%.3fs",
+                    chat_id,
+                    delay,
+                )
+                await asyncio.sleep(delay)
+
+        if self._SEND_INTERVAL_GLOBAL > 0:
+            now = time.monotonic()
+            delay = self._SEND_INTERVAL_GLOBAL - (now - self._global_last_send_time)
+            if delay > 0:
+                debug_trace_logger.info(
+                    "[MessagingService] THROTTLE global chat_id=%s delay=%.3fs",
+                    chat_id,
+                    delay,
+                )
+                await asyncio.sleep(delay)
+
+    def _register_send_time(self, chat_id: int) -> None:
+        """Record when the last Telegram API call was successfully made."""
+
+        timestamp = time.monotonic()
+        chat_key = int(chat_id)
+        self._last_send_time_per_chat[chat_key] = timestamp
+        self._global_last_send_time = timestamp
+
+    async def _call_with_retry(
+        self,
+        *,
+        chat_id: int,
+        message_id: Optional[int],
+        call: Callable[[], Awaitable[Any]],
+        throttle: Callable[[], Awaitable[None]],
+    ) -> Any:
+        """Execute a Telegram API call, retrying once if a RetryAfter occurs."""
+
+        retry_classes = self._RETRY_AFTER_EXCEPTIONS
+        if not retry_classes:
+            return await call()
+
+        try:
+            return await call()
+        except retry_classes as exc:  # type: ignore[misc]
+            delay = getattr(exc, "retry_after", None)
+            if delay is None:
+                raise
+            debug_trace_logger.info(
+                "[MessagingService] BACKOFF retry_after chat_id=%s message_id=%s delay=%.3fs",
+                chat_id,
+                message_id,
+                float(delay),
+            )
+            await asyncio.sleep(float(delay))
+            await throttle()
+            return await call()
 
     async def send_message(
         self,
@@ -164,6 +241,7 @@ class MessagingService:
 
         lock = await self._acquire_lock(chat_id, 0)
         async with lock:
+            await self._throttle_send(chat_id)
             trace_telegram_api_call(
                 "sendMessage",
                 chat_id=chat_id,
@@ -171,12 +249,18 @@ class MessagingService:
                 text=text,
                 reply_markup=reply_markup,
             )
-            result = await self._bot.send_message(
+            result = await self._call_with_retry(
                 chat_id=chat_id,
-                text=text,
-                reply_markup=reply_markup,
-                **params,
+                message_id=None,
+                call=lambda: self._bot.send_message(
+                    chat_id=chat_id,
+                    text=text,
+                    reply_markup=reply_markup,
+                    **params,
+                ),
+                throttle=lambda: self._throttle_send(chat_id),
             )
+            self._register_send_time(chat_id)
 
             message_id = getattr(result, "message_id", None)
             if message_id is not None:
@@ -222,18 +306,25 @@ class MessagingService:
 
         lock = await self._acquire_lock(chat_id, 0)
         async with lock:
+            await self._throttle_send(chat_id)
             trace_telegram_api_call(
                 "sendPhoto",
                 chat_id=chat_id,
                 message_id=None,
                 text=caption,
             )
-            result = await self._bot.send_photo(
+            result = await self._call_with_retry(
                 chat_id=chat_id,
-                photo=photo,
-                caption=caption,
-                **params,
+                message_id=None,
+                call=lambda: self._bot.send_photo(
+                    chat_id=chat_id,
+                    photo=photo,
+                    caption=caption,
+                    **params,
+                ),
+                throttle=lambda: self._throttle_send(chat_id),
             )
+            self._register_send_time(chat_id)
 
             message_id = getattr(result, "message_id", None)
             self._log_api_call(
@@ -372,6 +463,16 @@ class MessagingService:
                     state.flush_task = None
                     state.update_event.clear()
                 else:
+                    if state.waiters:
+                        retained_waiters: List[_EditWaiter] = []
+                        for existing in state.waiters:
+                            if existing.superseded:
+                                if not existing.future.done():
+                                    existing.future.set_result(message_id)
+                            else:
+                                retained_waiters.append(existing)
+                        state.waiters = retained_waiters
+
                     now = time.monotonic()
                     idle = now - state.last_update
                     total = now - state.first_update
@@ -507,6 +608,7 @@ class MessagingService:
                     return message_id
 
             try:
+                await self._throttle_send(chat_id)
                 trace_telegram_api_call(
                     "editMessageText",
                     chat_id=chat_id,
@@ -514,13 +616,19 @@ class MessagingService:
                     text=payload.text,
                     reply_markup=payload.reply_markup,
                 )
-                result = await self._bot.edit_message_text(
+                result = await self._call_with_retry(
                     chat_id=chat_id,
                     message_id=message_id,
-                    text=payload.text,
-                    reply_markup=payload.reply_markup,
-                    **payload.params,
+                    call=lambda: self._bot.edit_message_text(
+                        chat_id=chat_id,
+                        message_id=message_id,
+                        text=payload.text,
+                        reply_markup=payload.reply_markup,
+                        **payload.params,
+                    ),
+                    throttle=lambda: self._throttle_send(chat_id),
                 )
+                self._register_send_time(chat_id)
             except Exception as exc:  # pragma: no cover - exception path
                 handled = await self._handle_bad_request(
                     exc,
