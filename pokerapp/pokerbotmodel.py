@@ -2420,55 +2420,58 @@ class PokerBotModel:
                 ids_to_delete.add(game.turn_message_id)
                 game.turn_message_id = None
 
-        for player in game.seated_players():
-            anchor_message_id: Optional[MessageId] = None
-            if player.anchor_message and player.anchor_message[0] == chat_id:
-                anchor_message_id = player.anchor_message[1]
+            anchor_message_map: Dict[Player, Optional[MessageId]] = {}
+            for player in game.seated_players():
+                anchor_message_id: Optional[MessageId] = None
+                if player.anchor_message and player.anchor_message[0] == chat_id:
+                    anchor_message_id = player.anchor_message[1]
+                if anchor_message_id:
+                    ids_to_delete.discard(anchor_message_id)
+                anchor_message_map[player] = anchor_message_id
 
+            game.chat_id = chat_id
+
+        previous_state = game.state
+        previous_player_index = game.current_player_index
+        try:
+            game.state = GameState.FINISHED
+            game.current_player_index = -1
+            await self._view.update_player_anchors_and_keyboards(game)
+        except Exception as exc:
+            logger.debug(
+                "Failed to refresh anchors during cleanup",
+                extra={
+                    "chat_id": chat_id,
+                    "error_type": type(exc).__name__,
+                },
+            )
+        finally:
+            game.state = previous_state
+            game.current_player_index = previous_player_index
+
+        for player, anchor_message_id in anchor_message_map.items():
             if anchor_message_id:
-                ids_to_delete.discard(anchor_message_id)
-                try:
-                    await self._view.update_player_anchor(
-                        chat_id=chat_id,
-                        player=player,
-                        seat_number=(player.seat_index or 0) + 1,
-                        role_label=getattr(player, "anchor_role", "بازیکن"),
-                        board_cards=list(game.cards_table),
-                        player_cards=list(player.cards),
-                        game_state=GameState.FINISHED,
-                        active=False,
-                        message_id=anchor_message_id,
-                    )
-                except Exception as exc:
-                    logger.debug(
-                        "Failed to update inactive anchor",
-                        extra={
-                            "chat_id": chat_id,
-                            "message_id": anchor_message_id,
-                            "error_type": type(exc).__name__,
-                        },
-                    )
                 player.anchor_message = (chat_id, anchor_message_id)
+                ids_to_delete.discard(anchor_message_id)
             else:
                 player.anchor_message = None
-
             player.anchor_role = "بازیکن"
 
-            for message_id in ids_to_delete:
-                try:
-                    await self._view.delete_message(chat_id, message_id)
-                except Exception as e:
-                    logger.debug(
-                        "Failed to delete message",
-                        extra={
-                            "chat_id": chat_id,
-                            "message_id": message_id,
-                            "error_type": type(e).__name__,
-                        },
-                    )
+        for message_id in ids_to_delete:
+            try:
+                await self._view.delete_message(chat_id, message_id)
+            except Exception as e:
+                logger.debug(
+                    "Failed to delete message",
+                    extra={
+                        "chat_id": chat_id,
+                        "message_id": message_id,
+                        "error_type": type(e).__name__,
+                    },
+                )
 
-            game.message_ids_to_delete.clear()
-            game.message_ids.clear()
+        game.message_ids_to_delete.clear()
+        game.message_ids.clear()
 
     async def _showdown(
         self, game: Game, chat_id: ChatId, context: CallbackContext
