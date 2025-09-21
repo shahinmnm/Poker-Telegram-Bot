@@ -83,8 +83,6 @@ class Player:
         self.total_bet = 0  # کل مبلغ شرط‌بندی شده در یک دست
         self.has_acted = False # آیا در راند فعلی نوبت خود را بازی کرده؟
         self.seat_index = seat_index
-        # پیام کیبورد کارت‌ها در گروه برای پاک‌سازی مرحله‌ای
-        self.cards_keyboard_message_id: Optional[MessageId] = None
         self.anchor_message: Optional[Tuple[ChatId, MessageId]] = None
         self.anchor_role: str = "بازیکن"
         # -------------------------

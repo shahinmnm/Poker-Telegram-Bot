@@ -160,7 +160,7 @@ def test_update_player_anchor_creates_anchor_message():
     assert '🎖️ نقش: دیلر' in call.kwargs['text']
     assert '🃏 Board:' not in call.kwargs['text']
     assert '🎯 **نوبت بازی این بازیکن است.**' in call.kwargs['text']
-    assert call.kwargs['reply_markup'] is None
+    assert isinstance(call.kwargs['reply_markup'], ReplyKeyboardMarkup)
 
 
 def test_update_player_anchor_inactive_player_skips_redundant_updates():
@@ -239,7 +239,7 @@ def test_update_player_anchor_when_game_inactive_shows_menu():
 
     assert result == 99
     call = viewer._messenger.edit_message_text.await_args
-    assert call.kwargs['reply_markup'] is None
+    assert isinstance(call.kwargs['reply_markup'], ReplyKeyboardMarkup)
 
 
 def test_build_player_cards_keyboard_layout():
@@ -261,60 +261,51 @@ def test_build_player_cards_keyboard_layout():
     assert stage_row[2] == 'ترن'
     assert stage_row[3] == 'ریور'
 
-
-def test_send_player_cards_keyboard_prefers_edit_and_falls_back():
+def test_update_player_anchors_and_keyboards_updates_players():
     viewer = PokerBotViewer(bot=MagicMock())
-    viewer.edit_message_text = AsyncMock(return_value=123)
-    viewer.send_message = AsyncMock(return_value=456)
+    viewer.update_player_anchor = AsyncMock(side_effect=[101, 202])
 
-    result = run(
-        viewer.send_player_cards_keyboard(
-            chat_id=789,
-            hole_cards=['A♠', 'K♥'],
-            community_cards=['❔'] * 5,
-            current_stage='PRE-FLOP',
-            message_id=321,
-        )
+    game = Game()
+    game.chat_id = -777
+    game.state = GameState.ROUND_FLOP
+    game.cards_table = [Card('A♠'), Card('K♦'), Card('5♣')]
+
+    player_one = Player(
+        user_id=1,
+        mention_markdown='@one',
+        wallet=MagicMock(),
+        ready_message_id='ready-1',
+    )
+    player_two = Player(
+        user_id=2,
+        mention_markdown='@two',
+        wallet=MagicMock(),
+        ready_message_id='ready-2',
     )
 
-    assert result == 123
-    viewer.edit_message_text.assert_awaited_once()
-    viewer.send_message.assert_not_awaited()
+    game.add_player(player_one, seat_index=0)
+    game.add_player(player_two, seat_index=1)
+    player_one.cards = [Card('J♠'), Card('J♦')]
+    player_two.cards = [Card('9♣'), Card('9♦')]
+    game.current_player_index = 0
 
-    viewer.edit_message_text.reset_mock()
-    viewer.send_message.reset_mock()
-    viewer.edit_message_text.side_effect = BadRequest('message is not modified')
+    run(viewer.update_player_anchors_and_keyboards(game))
 
-    result = run(
-        viewer.send_player_cards_keyboard(
-            chat_id=789,
-            hole_cards=['A♠', 'K♥'],
-            community_cards=['❔'] * 5,
-            current_stage='PRE-FLOP',
-            message_id=321,
-        )
-    )
+    viewer.update_player_anchor.assert_awaited()
+    assert viewer.update_player_anchor.await_count == 2
 
-    assert result == 321
-    viewer.send_message.assert_not_awaited()
+    call_args = viewer.update_player_anchor.await_args_list
+    active_flags = {call.kwargs['player'].user_id: call.kwargs['active'] for call in call_args}
+    assert active_flags[1] is True
+    assert active_flags[2] is False
+    for call in call_args:
+        assert call.kwargs['chat_id'] == -777
+        assert call.kwargs['game_state'] == GameState.ROUND_FLOP
 
-    viewer.edit_message_text.reset_mock()
-    viewer.send_message.reset_mock()
-    viewer.edit_message_text.side_effect = BadRequest('other error')
-    viewer.send_message.return_value = 654
-
-    result = run(
-        viewer.send_player_cards_keyboard(
-            chat_id=789,
-            hole_cards=['A♠', 'K♥'],
-            community_cards=['❔'] * 5,
-            current_stage='PRE-FLOP',
-            message_id=321,
-        )
-    )
-
-    assert result == 654
-    viewer.send_message.assert_awaited_once()
+    assert player_one.anchor_message == (-777, 101)
+    assert player_two.anchor_message == (-777, 202)
+    assert 101 in game.message_ids_to_delete
+    assert 202 in game.message_ids_to_delete
 
 def test_update_turn_message_includes_stage_and_keyboard():
     viewer = PokerBotViewer(bot=MagicMock())

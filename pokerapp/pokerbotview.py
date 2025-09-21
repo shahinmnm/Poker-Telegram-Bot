@@ -73,9 +73,14 @@ def build_player_cards_keyboard(
     stages_persian = ["پری فلاپ", "فلاپ", "ترن", "ریور"]
     stage_map = {
         "ROUND_PRE_FLOP": "پری فلاپ",
+        "PRE_FLOP": "پری فلاپ",
+        "PRE-FLOP": "پری فلاپ",
         "ROUND_FLOP": "فلاپ",
+        "FLOP": "فلاپ",
         "ROUND_TURN": "ترن",
+        "TURN": "ترن",
         "ROUND_RIVER": "ریور",
+        "RIVER": "ریور",
     }
 
     current_stage_label = stage_map.get(current_stage.upper(), "")
@@ -100,19 +105,6 @@ class TurnMessageUpdate:
     call_label: str
     call_action: PlayerAction
     board_line: str
-
-
-@dataclass(slots=True)
-class AnchorUpdateRequest:
-    player: Player
-    seat_number: int
-    role_label: str
-    board_cards: Sequence[Card]
-    active: bool
-    message_id: Optional[MessageId]
-    player_cards: Sequence[Card]
-    game_state: GameState
-
 
 class PokerBotViewer:
     _ZERO_WIDTH_SPACE = "\u2063"
@@ -1284,6 +1276,21 @@ class PokerBotViewer:
         # کارت‌های بازیکن در کیبورد پاسخ اختصاصی نمایش داده می‌شوند.
         return "\n".join(lines)
 
+    @staticmethod
+    def _describe_player_role(game: Game, player: Player) -> str:
+        seat_index = player.seat_index if player.seat_index is not None else -1
+        roles: List[str] = []
+        if seat_index == getattr(game, "dealer_index", -1):
+            roles.append("دیلر")
+        if seat_index == getattr(game, "small_blind_index", -1):
+            roles.append("بلایند کوچک")
+        if seat_index == getattr(game, "big_blind_index", -1):
+            roles.append("بلایند بزرگ")
+        if not roles:
+            roles.append("بازیکن")
+        # Preserve insertion order while removing duplicates.
+        return "، ".join(dict.fromkeys(roles))
+
     async def update_player_anchor(
         self,
         *,
@@ -1322,68 +1329,102 @@ class PokerBotViewer:
             request_category=RequestCategory.ANCHOR,
         )
 
-    async def send_player_cards_keyboard(
-        self,
-        *,
-        chat_id: ChatId,
-        hole_cards: Sequence[str],
-        community_cards: Sequence[str],
-        current_stage: str,
-        message_id: Optional[MessageId] = None,
-        text: str = "کارت های شما 👇",
-    ) -> Optional[MessageId]:
-        """Send or update the per-player cards reply keyboard."""
+    async def update_player_anchors_and_keyboards(self, game: Game) -> None:
+        chat_id = getattr(game, "chat_id", None)
+        if chat_id is None:
+            logger.warning(
+                "Cannot update anchors without chat id",
+                extra={"game_id": getattr(game, "id", None)},
+            )
+            return
 
-        markup = build_player_cards_keyboard(
-            hole_cards=hole_cards,
-            community_cards=community_cards,
-            current_stage=current_stage,
-        )
+        try:
+            board_cards: Sequence[Card] = list(getattr(game, "cards_table", []))
+        except Exception:
+            board_cards = []
 
-        if message_id:
+        stage = getattr(game, "state", GameState.INITIAL)
+        if not isinstance(stage, GameState):
             try:
-                edited_id = await self.edit_message_text(
-                    chat_id=chat_id,
-                    message_id=message_id,
-                    text=text,
-                    reply_markup=markup,
-                    parse_mode=ParseMode.MARKDOWN,
-                    request_category=RequestCategory.GENERAL,
-                )
-            except BadRequest as exc:
-                message = str(exc).lower()
-                if "message is not modified" in message:
-                    return message_id
-                logger.debug(
-                    "Falling back to send_message for cards keyboard",
-                    extra={
-                        "chat_id": chat_id,
-                        "message_id": message_id,
-                        "error_type": type(exc).__name__,
-                        "error_message": str(exc),
-                    },
-                )
-            except TelegramError as exc:
-                logger.debug(
-                    "Failed to edit cards keyboard message",
-                    extra={
-                        "chat_id": chat_id,
-                        "message_id": message_id,
-                        "error_type": type(exc).__name__,
-                    },
-                )
-            else:
-                if edited_id:
-                    return edited_id
-                return message_id
+                stage = GameState(stage)
+            except Exception:
+                stage = GameState.INITIAL
 
-        return await self.send_message(
-            chat_id=chat_id,
-            text=text,
-            reply_markup=markup,
-            parse_mode=ParseMode.MARKDOWN,
-            request_category=RequestCategory.GENERAL,
-        )
+        current_player: Optional[Player] = None
+        current_index = getattr(game, "current_player_index", -1)
+        try:
+            if current_index is not None and current_index >= 0:
+                current_player = game.get_player_by_seat(current_index)
+        except Exception:
+            current_player = None
+
+        tracked_message_ids: Set[MessageId] = set()
+
+        for player in game.seated_players():
+            if player is None:
+                continue
+
+            role_label = self._describe_player_role(game, player)
+            player.anchor_role = role_label
+
+            seat_number = (player.seat_index or 0) + 1
+            anchor_meta = getattr(player, "anchor_message", None)
+            previous_message_id: Optional[MessageId] = None
+            if (
+                isinstance(anchor_meta, tuple)
+                and len(anchor_meta) >= 2
+                and anchor_meta[0] == chat_id
+            ):
+                previous_message_id = anchor_meta[1]
+
+            is_active = (
+                current_player is not None
+                and player.user_id == current_player.user_id
+                and player.state == PlayerState.ACTIVE
+            )
+
+            try:
+                new_message_id = await self.update_player_anchor(
+                    chat_id=chat_id,
+                    player=player,
+                    seat_number=seat_number,
+                    role_label=role_label,
+                    board_cards=board_cards,
+                    player_cards=list(getattr(player, "cards", [])),
+                    game_state=stage,
+                    active=is_active,
+                    message_id=previous_message_id,
+                )
+            except Exception as exc:
+                logger.error(
+                    "Failed to refresh anchor",
+                    extra={
+                        "chat_id": chat_id,
+                        "player_id": player.user_id,
+                        "error_type": type(exc).__name__,
+                    },
+                )
+                continue
+
+            resolved_message_id = new_message_id or previous_message_id
+            if resolved_message_id is None:
+                continue
+
+            player.anchor_message = (chat_id, resolved_message_id)
+            tracked_message_ids.add(resolved_message_id)
+            if resolved_message_id not in game.message_ids_to_delete:
+                game.message_ids_to_delete.append(resolved_message_id)
+
+        # Clear anchor metadata for players who no longer have an anchor in this chat.
+        for player in game.seated_players():
+            anchor_meta = getattr(player, "anchor_message", None)
+            if (
+                isinstance(anchor_meta, tuple)
+                and len(anchor_meta) >= 2
+                and anchor_meta[0] == chat_id
+                and anchor_meta[1] not in tracked_message_ids
+            ):
+                player.anchor_message = None
 
     async def announce_player_seats(
         self,
