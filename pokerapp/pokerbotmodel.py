@@ -2481,6 +2481,10 @@ class PokerBotModel:
                 ids_to_delete.add(game.turn_message_id)
                 game.turn_message_id = None
 
+            if game.seat_announcement_message_id:
+                ids_to_delete.add(game.seat_announcement_message_id)
+                game.seat_announcement_message_id = None
+
             game.chat_id = chat_id
 
             for player in game.seated_players():
