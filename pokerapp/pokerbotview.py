@@ -1393,22 +1393,16 @@ class PokerBotViewer:
                 getattr(player, "display_name", None) or player.mention_markdown
             )
 
-            visible_label = display_name
-            hidden_mention = self._build_hidden_mention(
-                getattr(player, "mention_markdown", None)
-            )
-            if hidden_mention and hidden_mention not in visible_label:
-                visible_label = f"{visible_label} {hidden_mention}"
-
-            text = self._build_anchor_text(
-                mention_markdown=visible_label,
-                seat_number=seat_number,
-                role_label=role_label,
-            )
-
+            lines = [
+                f"🎮 {display_name}",
+                f"🪑 Seat: {seat_number}",
+                f"🎖️ Role: {role_label}",
+            ]
             is_current_turn = current_player is player
             if is_current_turn:
-                text = f"{text}\n\n🎯 نوبت این بازیکن است."
+                lines.append("")
+                lines.append("🎯 It's this player's turn.")
+            text = "\n".join(lines)
 
             logger.debug(
                 "Anchor update: player=%s | seat=%s | role=%s | hole_cards=%s | "
@@ -1423,28 +1417,14 @@ class PokerBotViewer:
                 anchor_id,
             )
 
-            send_new_anchor = isinstance(keyboard, ReplyKeyboardMarkup)
-
             try:
-                if send_new_anchor:
-                    result = await self.schedule_message_update(
-                        chat_id=chat_id,
-                        message_id=None,
-                        text=text,
-                        reply_markup=keyboard,
-                        parse_mode=ParseMode.MARKDOWN,
-                        disable_web_page_preview=True,
-                        disable_notification=True,
-                        request_category=RequestCategory.ANCHOR,
-                    )
-                else:
-                    result = await self._update_message(
-                        chat_id=chat_id,
-                        message_id=anchor_id,
-                        text=text,
-                        reply_markup=keyboard,
-                        request_category=RequestCategory.ANCHOR,
-                    )
+                result = await self._update_message(
+                    chat_id=chat_id,
+                    message_id=anchor_id,
+                    text=text,
+                    reply_markup=keyboard,
+                    request_category=RequestCategory.ANCHOR,
+                )
             except Exception as exc:
                 logger.error(
                     "Failed to refresh anchor",
@@ -1467,32 +1447,12 @@ class PokerBotViewer:
                 except (TypeError, ValueError):
                     resolved_anchor_id = None
 
-            if (
-                send_new_anchor
-                and resolved_anchor_id is not None
-                and anchor_id is not None
-                and resolved_anchor_id != anchor_id
-            ):
-                try:
-                    await self.delete_message(chat_id=chat_id, message_id=anchor_id)
-                except Exception as delete_exc:
-                    logger.debug(
-                        "Failed to delete superseded anchor",
-                        extra={
-                            "chat_id": chat_id,
-                            "player_id": getattr(player, "user_id", None),
-                            "old_message_id": anchor_id,
-                            "error_type": type(delete_exc).__name__,
-                        },
-                    )
-
             final_anchor_id = resolved_anchor_id or anchor_id
             try:
                 normalized_anchor = int(final_anchor_id)
             except (TypeError, ValueError):
                 continue
             player.anchor_message = (chat_id, normalized_anchor)
-            player.anchor_role = role_label
 
     async def clear_all_player_anchors(self, game: Game) -> None:
         chat_id = getattr(game, "chat_id", None)

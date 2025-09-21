@@ -135,9 +135,7 @@ def test_notify_admin_failure_logs_error(caplog):
 
 def test_update_player_anchors_and_keyboards_highlights_active_player():
     viewer = PokerBotViewer(bot=MagicMock())
-    viewer.schedule_message_update = AsyncMock(side_effect=[303, 404])
-    viewer.delete_message = AsyncMock()
-    viewer._update_message = AsyncMock()
+    viewer._update_message = AsyncMock(side_effect=[101, 202])
 
     game = Game()
     game.chat_id = -777
@@ -172,36 +170,27 @@ def test_update_player_anchors_and_keyboards_highlights_active_player():
 
     run(viewer.update_player_anchors_and_keyboards(game))
 
-    assert viewer.schedule_message_update.await_count == 2
-    viewer._update_message.assert_not_awaited()
+    assert viewer._update_message.await_count == 2
 
-    first_call = viewer.schedule_message_update.await_args_list[0]
-    second_call = viewer.schedule_message_update.await_args_list[1]
+    first_call = viewer._update_message.await_args_list[0]
+    second_call = viewer._update_message.await_args_list[1]
 
-    assert first_call.kwargs['message_id'] is None
-    assert "🎯 نوبت این بازیکن است." in first_call.kwargs['text']
+    assert first_call.kwargs['message_id'] == 101
+    assert "🎯 It's this player's turn." in first_call.kwargs['text']
     assert 'Player One' in first_call.kwargs['text']
-    assert '@one' in first_call.kwargs['text']
-    assert '🪑 صندلی: `1`' in first_call.kwargs['text']
-    assert '🎖️ نقش: دیلر' in first_call.kwargs['text']
+    assert 'Seat: 1' in first_call.kwargs['text']
+    assert 'Role: دیلر' in first_call.kwargs['text']
     assert isinstance(first_call.kwargs['reply_markup'], ReplyKeyboardMarkup)
     board_row = _row_texts(first_call.kwargs['reply_markup'].keyboard[1])
     assert board_row == ['A♠', 'K♦', '5♣']
 
-    assert second_call.kwargs['message_id'] is None
-    assert "🎯 نوبت این بازیکن است." not in second_call.kwargs['text']
+    assert second_call.kwargs['message_id'] == 202
+    assert "🎯 It's this player's turn." not in second_call.kwargs['text']
     assert 'Player Two' in second_call.kwargs['text']
-    assert '@two' in second_call.kwargs['text']
-    assert '🎖️ نقش: بلایند بزرگ' in second_call.kwargs['text']
+    assert 'Role: بلایند بزرگ' in second_call.kwargs['text']
 
-    deleted_calls = [call.kwargs for call in viewer.delete_message.await_args_list]
-    assert deleted_calls == [
-        {'chat_id': game.chat_id, 'message_id': 101},
-        {'chat_id': game.chat_id, 'message_id': 202},
-    ]
-
-    assert player_one.anchor_message == (game.chat_id, 303)
-    assert player_two.anchor_message == (game.chat_id, 404)
+    assert player_one.anchor_message == (game.chat_id, 101)
+    assert player_two.anchor_message == (game.chat_id, 202)
 
 
 def test_update_player_anchors_and_keyboards_skips_players_without_anchor():
