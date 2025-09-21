@@ -61,28 +61,36 @@ def build_player_cards_keyboard(
     community_cards: Sequence[str],
     current_stage: str,
 ) -> ReplyKeyboardMarkup:
-    """Build a reply keyboard showing the player's cards and stage info."""
+    """Builds a personalized ReplyKeyboardMarkup for a player."""
 
+    # Row 1: The player's unique hole cards.
     row1 = list(hole_cards)
+
+    # Row 2: The shared community cards on the board.
     row2 = list(community_cards)
 
-    stages = ["پری فلاپ", "فلاپ", "ترن", "ریور"]
-    stage_flags = [
-        current_stage.upper() == "PRE-FLOP",
-        current_stage.upper() == "FLOP",
-        current_stage.upper() == "TURN",
-        current_stage.upper() == "RIVER",
-    ]
+    # Row 3: Game stages, with the current stage highlighted by a '✅' emoji.
+    stages_persian = ["پری فلاپ", "فلاپ", "ترن", "ریور"]
+    stage_map = {
+        "ROUND_PRE_FLOP": "پری فلاپ",
+        "ROUND_FLOP": "فلاپ",
+        "ROUND_TURN": "ترن",
+        "ROUND_RIVER": "ریور",
+    }
+
+    current_stage_label = stage_map.get(current_stage.upper(), "")
+
     row3 = [
-        f"✅ {label}" if is_current else label
-        for label, is_current in zip(stages, stage_flags)
+        f"✅ {label}" if label == current_stage_label else label
+        for label in stages_persian
     ]
 
+    # Construct and return the final keyboard object.
     return ReplyKeyboardMarkup(
-        [row1, row2, row3],
-        resize_keyboard=True,
-        one_time_keyboard=False,
-        selective=True,
+        keyboard=[row1, row2, row3],
+        resize_keyboard=True,      # Makes the keyboard fit the content.
+        one_time_keyboard=False,   # The keyboard persists until replaced.
+        selective=True,            # CRITICAL: Shows the keyboard ONLY to the @-mentioned user.
     )
 
 
@@ -790,10 +798,10 @@ class PokerBotViewer:
         if (
             request_category == RequestCategory.ANCHOR
             and reply_markup is not None
-            and not isinstance(reply_markup, InlineKeyboardMarkup)
+            and not isinstance(reply_markup, (InlineKeyboardMarkup, ReplyKeyboardMarkup))
         ):
             logger.warning(
-                "Discarding non-inline reply markup for anchor update",
+                "Discarding unsupported reply markup for anchor update",
                 extra={
                     "chat_id": chat_id,
                     "message_id": message_id,
@@ -883,6 +891,7 @@ class PokerBotViewer:
                 if (
                     request_category == RequestCategory.ANCHOR
                     and message_key is not None
+                    and isinstance(reply_markup, InlineKeyboardMarkup)
                 ):
                     previous_payload_hash = await self._get_payload_hash(message_key)
                     anchor_markup_only = previous_payload_hash != payload_hash
@@ -985,6 +994,7 @@ class PokerBotViewer:
                     if (
                         request_category == RequestCategory.ANCHOR
                         and message_key is not None
+                        and isinstance(reply_markup, InlineKeyboardMarkup)
                     ):
                         if previous_payload_hash is None:
                             previous_payload_hash = await self._get_payload_hash(
@@ -993,10 +1003,10 @@ class PokerBotViewer:
                         anchor_markup_only = previous_payload_hash != payload_hash
                     if anchor_markup_only:
                         if reply_markup is not None and not isinstance(
-                            reply_markup, InlineKeyboardMarkup
+                            reply_markup, (InlineKeyboardMarkup, ReplyKeyboardMarkup)
                         ):
                             logger.debug(
-                                "Ignoring non-inline reply markup during anchor refresh",
+                                "Ignoring unsupported reply markup during anchor refresh",
                                 extra={
                                     "chat_id": chat_id,
                                     "message_id": message_id,
@@ -1271,7 +1281,7 @@ class PokerBotViewer:
             f"🪑 صندلی: `{seat_number}`",
             f"🎖️ نقش: {role_label}",
         ]
-        # کارت‌های بازیکن در پیام جداگانه با کیبورد انتخابی ارسال می‌شوند.
+        # کارت‌های بازیکن در کیبورد پاسخ اختصاصی نمایش داده می‌شوند.
         return "\n".join(lines)
 
     async def update_player_anchor(
@@ -1292,7 +1302,13 @@ class PokerBotViewer:
             seat_number=seat_number,
             role_label=role_label,
         )
-        reply_markup: Optional[InlineKeyboardMarkup] = None
+        player_hole_cards = [str(card) for card in player_cards]
+        community_cards = [str(card) for card in board_cards]
+        reply_markup = build_player_cards_keyboard(
+            hole_cards=player_hole_cards,
+            community_cards=community_cards,
+            current_stage=game_state.name,
+        )
         if active:
             text = f"{text}\n\n🎯 **نوبت بازی این بازیکن است.**"
         return await self.schedule_message_update(
