@@ -22,7 +22,7 @@ import logging
 import time
 import datetime
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 from cachetools import TTLCache
 
@@ -41,6 +41,7 @@ except Exception:  # pragma: no cover
 
 
 logger = logging.getLogger(__name__)
+debug_trace_logger = logging.getLogger("pokerbot.debug_trace")
 
 
 CacheKey = Tuple[int, int]
@@ -114,6 +115,10 @@ class MessagingService:
         cache_maxsize: int = 500,
         logger_: Optional[logging.Logger] = None,
         request_metrics: Optional[RequestMetrics] = None,
+        deleted_messages: Optional[Set[int]] = None,
+        deleted_messages_lock: Optional[asyncio.Lock] = None,
+        last_message_hash: Optional[Dict[int, str]] = None,
+        last_message_hash_lock: Optional[asyncio.Lock] = None,
     ) -> None:
         self._bot = bot
         self._logger = logger_ or logger.getChild("service")
@@ -127,6 +132,10 @@ class MessagingService:
         self._metrics = request_metrics or RequestMetrics(logger_=self._logger)
         self._pending_edits: Dict[CacheKey, _PendingEditState] = {}
         self._last_edit_timestamp: Dict[CacheKey, datetime.datetime] = {}
+        self._deleted_messages_ref = deleted_messages
+        self._deleted_messages_lock = deleted_messages_lock
+        self._last_message_hash_ref = last_message_hash
+        self._last_message_hash_lock = last_message_hash_lock
 
     async def send_message(
         self,
@@ -462,6 +471,38 @@ class MessagingService:
                 )
                 return message_id
 
+            if await self._was_marked_deleted(message_id):
+                debug_trace_logger.info(
+                    "Skipping editMessageText in MessagingService for message_id=%s because it was deleted before send",
+                    message_id,
+                )
+                await self._log_skip(
+                    chat_id=chat_id,
+                    message_id=message_id,
+                    category=payload.request_category,
+                    reason="deleted_before_send",
+                )
+                return message_id
+
+            if (
+                not payload.force
+                and payload.text is not None
+            ):
+                text_hash = hashlib.md5(payload.text.encode("utf-8")).hexdigest()
+                last_hash = await self._last_known_text_hash(message_id)
+                if last_hash is not None and last_hash == text_hash:
+                    debug_trace_logger.info(
+                        "Skipping editMessageText in MessagingService for message_id=%s due to no content change before send",
+                        message_id,
+                    )
+                    await self._log_skip(
+                        chat_id=chat_id,
+                        message_id=message_id,
+                        category=payload.request_category,
+                        reason="text_hash_match",
+                    )
+                    return message_id
+
             try:
                 trace_telegram_api_call(
                     "editMessageText",
@@ -627,7 +668,17 @@ class MessagingService:
             finally:
                 await self._forget_content(chat_id, message_id)
 
-        self._pending_edits.pop(key, None)
+        state = self._pending_edits.pop(key, None)
+        if state is not None:
+            if state.flush_task is not None and not state.flush_task.done():
+                state.flush_task.cancel()
+            state.pending_payload = None
+            state.waiters.clear()
+            state.update_event.set()
+            for future in state.delete_waiters:
+                if not future.done():
+                    future.set_result(True)
+            state.delete_waiters.clear()
         self._last_edit_timestamp.pop(key, None)
 
         self._log_api_call(
@@ -760,6 +811,26 @@ class MessagingService:
         key = (int(chat_id), int(message_id), content_hash)
         async with self._cache_lock:
             return self._content_cache.get(key)
+
+    async def _was_marked_deleted(self, message_id: int) -> bool:
+        if self._deleted_messages_ref is None:
+            return False
+        target = int(message_id)
+        lock = self._deleted_messages_lock
+        if lock is None:
+            return target in self._deleted_messages_ref
+        async with lock:
+            return target in self._deleted_messages_ref
+
+    async def _last_known_text_hash(self, message_id: int) -> Optional[str]:
+        if self._last_message_hash_ref is None:
+            return None
+        target = int(message_id)
+        lock = self._last_message_hash_lock
+        if lock is None:
+            return self._last_message_hash_ref.get(target)
+        async with lock:
+            return self._last_message_hash_ref.get(target)
 
     async def _log_skip(
         self,

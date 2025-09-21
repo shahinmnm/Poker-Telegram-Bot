@@ -224,11 +224,6 @@ class PokerBotViewer:
         self._request_metrics = request_metrics or RequestMetrics(
             logger_=logger.getChild("request_metrics")
         )
-        self._messenger = MessagingService(
-            bot,
-            logger_=logger.getChild("messaging_service"),
-            request_metrics=self._request_metrics,
-        )
         # Legacy rate-limit attributes are retained for backwards compatibility
         # with configuration code but do not influence runtime behaviour.
         self._legacy_rate_limit_per_minute = rate_limit_per_minute
@@ -259,6 +254,16 @@ class PokerBotViewer:
             maxsize=4096
         )
         self._stage_payload_hash_lock = asyncio.Lock()
+
+        self._messenger = MessagingService(
+            bot,
+            logger_=logger.getChild("messaging_service"),
+            request_metrics=self._request_metrics,
+            deleted_messages=self._deleted_messages,
+            deleted_messages_lock=self._deleted_messages_lock,
+            last_message_hash=self._last_message_hash,
+            last_message_hash_lock=self._last_message_hash_lock,
+        )
 
     def _payload_hash(
         self,
