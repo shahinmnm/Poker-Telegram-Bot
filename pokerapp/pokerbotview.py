@@ -254,6 +254,14 @@ class PokerBotViewer:
             maxsize=4096
         )
         self._stage_payload_hash_lock = asyncio.Lock()
+        self._pending_updates: Dict[
+            Tuple[ChatId, Optional[MessageId]], Dict[str, Any]
+        ] = {}
+        self._pending_update_tasks: Dict[
+            Tuple[ChatId, Optional[MessageId]], asyncio.Task[Optional[MessageId]]
+        ] = {}
+        self._pending_updates_lock = asyncio.Lock()
+        self._message_update_debounce_delay = 0.35
 
         self._messenger = MessagingService(
             bot,
@@ -289,6 +297,94 @@ class PokerBotViewer:
             return int(value)  # type: ignore[arg-type]
         except (TypeError, ValueError):
             return 0
+
+    async def schedule_message_update(
+        self,
+        *,
+        chat_id: ChatId,
+        message_id: Optional[MessageId],
+        text: str,
+        reply_markup: Optional[InlineKeyboardMarkup | ReplyKeyboardMarkup] = None,
+        parse_mode: str = ParseMode.MARKDOWN,
+        disable_web_page_preview: bool = True,
+        disable_notification: bool = False,
+        request_category: RequestCategory = RequestCategory.GENERAL,
+    ) -> Optional[MessageId]:
+        key = (chat_id, message_id)
+        loop = asyncio.get_running_loop()
+
+        async with self._pending_updates_lock:
+            pending_entry = self._pending_updates.get(key)
+            future_obj = pending_entry.get("future") if pending_entry else None
+            future: asyncio.Future[Optional[MessageId]]
+            if isinstance(future_obj, asyncio.Future) and not future_obj.done():
+                future = future_obj
+            else:
+                future = loop.create_future()
+
+            if not future.done():
+                payload: Dict[str, Any] = {
+                    "chat_id": chat_id,
+                    "message_id": message_id,
+                    "text": text,
+                    "reply_markup": reply_markup,
+                    "parse_mode": parse_mode,
+                    "disable_web_page_preview": disable_web_page_preview,
+                    "disable_notification": disable_notification,
+                    "request_category": request_category,
+                }
+                self._pending_updates[key] = {"payload": payload, "future": future}
+
+            pending_task = self._pending_update_tasks.get(key)
+            if pending_task is not None:
+                pending_task.cancel()
+
+            task = asyncio.create_task(
+                self._execute_debounced_update(key, self._message_update_debounce_delay)
+            )
+            self._pending_update_tasks[key] = task
+
+        return await future
+
+    async def _execute_debounced_update(
+        self, key: Tuple[ChatId, Optional[MessageId]], delay: float
+    ) -> None:
+        try:
+            await asyncio.sleep(delay)
+
+            async with self._pending_updates_lock:
+                active_task = self._pending_update_tasks.get(key)
+                current_task = asyncio.current_task()
+                if active_task is not current_task:
+                    return
+
+                entry = self._pending_updates.pop(key, None)
+                self._pending_update_tasks.pop(key, None)
+
+            if not entry:
+                return
+
+            payload = entry.get("payload", {})
+            future = entry.get("future")
+
+            try:
+                result = await self._update_message(**payload)
+            except Exception as exc:
+                if future is not None and not future.done():
+                    future.set_exception(exc)
+                logger.exception(
+                    "Debounced update failed",
+                    extra={
+                        "chat_id": payload.get("chat_id"),
+                        "message_id": payload.get("message_id"),
+                        "request_category": payload.get("request_category"),
+                    },
+                )
+            else:
+                if future is not None and not future.done():
+                    future.set_result(result)
+        except asyncio.CancelledError:
+            return
 
     async def _acquire_message_lock(
         self, chat_id: ChatId, message_id: Optional[MessageId]
@@ -1072,7 +1168,7 @@ class PokerBotViewer:
         reply_markup: Optional[InlineKeyboardMarkup] = None
         if active:
             text = f"{text}\n\n🎯 **نوبت بازی این بازیکن است.**"
-        return await self._update_message(
+        return await self.schedule_message_update(
             chat_id=chat_id,
             message_id=message_id,
             text=text,
@@ -1173,7 +1269,7 @@ class PokerBotViewer:
             lines.append("هنوز بازیکنی در میز حضور ندارد.")
 
         text = "\n".join(lines)
-        return await self._update_message(
+        return await self.schedule_message_update(
             chat_id=chat_id,
             message_id=message_id,
             text=text,
@@ -1746,7 +1842,7 @@ class PokerBotViewer:
 
         reply_markup = await self._build_turn_keyboard(call_text, call_action)
 
-        new_message_id = await self._update_message(
+        new_message_id = await self.schedule_message_update(
             chat_id=chat_id,
             message_id=message_id,
             text=text,
