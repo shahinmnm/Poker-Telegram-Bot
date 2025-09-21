@@ -68,7 +68,6 @@ def _prepare_view_mock(view: MagicMock) -> MagicMock:
             board_line="",
         )
     )
-    view.update_player_anchor = AsyncMock(return_value=None)
     return view
 
 
@@ -221,7 +220,6 @@ if __name__ == '__main__':
 
 def _build_model_with_game():
     view = _prepare_view_mock(MagicMock())
-    view.update_player_anchor = AsyncMock(return_value="anchor")
     view.send_message = AsyncMock()
     bot = MagicMock()
     cfg = MagicMock(DEBUG=False)
@@ -484,7 +482,7 @@ def test_clear_game_messages_updates_anchor_to_inactive_menu():
     model, game, player, view = _build_model_with_game()
     chat_id = -500
     view.delete_message = AsyncMock()
-    view.update_player_anchor = AsyncMock(return_value="anchor-7")
+    view.update_player_anchors_and_keyboards = AsyncMock()
 
     player.anchor_message = (chat_id, "anchor-7")
     game.message_ids_to_delete.extend(["anchor-7", 888, 999])
@@ -499,11 +497,7 @@ def test_clear_game_messages_updates_anchor_to_inactive_menu():
     assert (chat_id, 888) in deleted_pairs
     assert (chat_id, 999) in deleted_pairs
     assert (chat_id, "anchor-7") not in deleted_pairs
-    view.update_player_anchor.assert_awaited()
-    update_call = view.update_player_anchor.await_args_list[0]
-    assert update_call.kwargs["message_id"] == "anchor-7"
-    assert update_call.kwargs["game_state"] == GameState.FINISHED
-    assert update_call.kwargs["active"] is False
+    view.update_player_anchors_and_keyboards.assert_awaited_once_with(game)
     assert player.anchor_message == (chat_id, "anchor-7")
     assert game.message_ids == {}
     assert game.message_ids_to_delete == []
@@ -803,7 +797,6 @@ async def test_showdown_sends_new_hand_message_before_join_prompt():
 @pytest.mark.asyncio
 async def test_start_game_assigns_blinds_to_occupied_seats():
     view = _prepare_view_mock(MagicMock())
-    view.update_player_anchor = AsyncMock()
     view.send_message = AsyncMock()
     view.delete_message = AsyncMock()
     bot = MagicMock()
@@ -869,7 +862,6 @@ async def test_start_game_assigns_blinds_to_occupied_seats():
 @pytest.mark.asyncio
 async def test_start_game_keeps_ready_message_id_when_deletion_fails():
     view = _prepare_view_mock(MagicMock())
-    view.update_player_anchor = AsyncMock()
     view.send_message = AsyncMock()
     view.delete_message = AsyncMock(side_effect=BadRequest("not found"))
     bot = MagicMock()

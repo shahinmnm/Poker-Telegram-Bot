@@ -1291,43 +1291,21 @@ class PokerBotViewer:
         # Preserve insertion order while removing duplicates.
         return "، ".join(dict.fromkeys(roles))
 
-    async def update_player_anchor(
-        self,
-        *,
-        chat_id: ChatId,
-        player: Player,
-        seat_number: int,
-        role_label: str,
-        board_cards: Sequence[Card],
-        player_cards: Sequence[Card],
-        game_state: GameState,
-        active: bool,
-        message_id: Optional[MessageId] = None,
-    ) -> Optional[MessageId]:
-        text = self._build_anchor_text(
-            mention_markdown=player.mention_markdown,
-            seat_number=seat_number,
-            role_label=role_label,
-        )
-        player_hole_cards = [str(card) for card in player_cards]
-        community_cards = [str(card) for card in board_cards]
-        reply_markup = build_player_cards_keyboard(
-            hole_cards=player_hole_cards,
-            community_cards=community_cards,
-            current_stage=game_state.name,
-        )
-        if active:
-            text = f"{text}\n\n🎯 **نوبت بازی این بازیکن است.**"
-        return await self.schedule_message_update(
-            chat_id=chat_id,
-            message_id=message_id,
-            text=text,
-            reply_markup=reply_markup,
-            parse_mode=ParseMode.MARKDOWN,
-            disable_web_page_preview=True,
-            disable_notification=message_id is not None,
-            request_category=RequestCategory.ANCHOR,
-        )
+    @staticmethod
+    def _get_player_anchor_message_id(
+        chat_id: ChatId, player: Player
+    ) -> Optional[int]:
+        anchor_meta = getattr(player, "anchor_message", None)
+        if (
+            isinstance(anchor_meta, tuple)
+            and len(anchor_meta) >= 2
+            and anchor_meta[0] == chat_id
+        ):
+            try:
+                return int(anchor_meta[1])
+            except (TypeError, ValueError):
+                return None
+        return None
 
     async def update_player_anchors_and_keyboards(self, game: Game) -> None:
         chat_id = getattr(game, "chat_id", None)
@@ -1338,10 +1316,12 @@ class PokerBotViewer:
             )
             return
 
-        try:
-            board_cards: Sequence[Card] = list(getattr(game, "cards_table", []))
-        except Exception:
-            board_cards = []
+        if self._is_private_chat(chat_id):
+            logger.debug(
+                "Skipping anchor refresh for private chat",
+                extra={"chat_id": chat_id},
+            )
+            return
 
         stage = getattr(game, "state", GameState.INITIAL)
         if not isinstance(stage, GameState):
@@ -1350,81 +1330,130 @@ class PokerBotViewer:
             except Exception:
                 stage = GameState.INITIAL
 
+        community_cards_source: Sequence[Card] = []
+        if hasattr(game, "community_cards"):
+            try:
+                community_cards_source = list(getattr(game, "community_cards"))
+            except Exception:
+                community_cards_source = []
+        if not community_cards_source:
+            try:
+                community_cards_source = list(getattr(game, "cards_table", []))
+            except Exception:
+                community_cards_source = []
+        community_cards = [str(card) for card in community_cards_source]
+
         current_player: Optional[Player] = None
-        current_index = getattr(game, "current_player_index", -1)
-        try:
-            if current_index is not None and current_index >= 0:
+        current_index = getattr(game, "current_player_index", None)
+        if isinstance(current_index, int) and current_index >= 0:
+            try:
                 current_player = game.get_player_by_seat(current_index)
-        except Exception:
-            current_player = None
+            except Exception:
+                current_player = None
 
-        tracked_message_ids: Set[MessageId] = set()
+        tracked_message_ids: Set[int] = set()
 
-        for player in game.seated_players():
+        for player in list(getattr(game, "players", [])):
             if player is None:
                 continue
+
+            anchor_id = self._get_player_anchor_message_id(chat_id, player)
 
             role_label = self._describe_player_role(game, player)
             player.anchor_role = role_label
 
-            seat_number = (player.seat_index or 0) + 1
-            anchor_meta = getattr(player, "anchor_message", None)
-            previous_message_id: Optional[MessageId] = None
-            if (
-                isinstance(anchor_meta, tuple)
-                and len(anchor_meta) >= 2
-                and anchor_meta[0] == chat_id
-            ):
-                previous_message_id = anchor_meta[1]
+            seat_index = player.seat_index if player.seat_index is not None else 0
+            seat_number = seat_index + 1
 
-            is_active = (
-                current_player is not None
-                and player.user_id == current_player.user_id
-                and player.state == PlayerState.ACTIVE
+            hole_cards_source = getattr(player, "hole_cards", None)
+            if hole_cards_source is None:
+                hole_cards_source = getattr(player, "cards", [])
+            player_hole_cards = [str(card) for card in hole_cards_source or []]
+
+            keyboard = build_player_cards_keyboard(
+                hole_cards=player_hole_cards,
+                community_cards=community_cards,
+                current_stage=stage.name,
             )
 
+            is_current_turn = (
+                current_player is not None
+                and player is current_player
+                and getattr(player, "state", None) == PlayerState.ACTIVE
+            )
+
+            text = self._build_anchor_text(
+                mention_markdown=player.mention_markdown,
+                seat_number=seat_number,
+                role_label=role_label,
+            )
+            if is_current_turn:
+                text = f"{text}\n\n🎯 نوبت بازی این بازیکن است."
+
             try:
-                new_message_id = await self.update_player_anchor(
+                result = await self._update_message(
                     chat_id=chat_id,
-                    player=player,
-                    seat_number=seat_number,
-                    role_label=role_label,
-                    board_cards=board_cards,
-                    player_cards=list(getattr(player, "cards", [])),
-                    game_state=stage,
-                    active=is_active,
-                    message_id=previous_message_id,
+                    message_id=anchor_id,
+                    text=text,
+                    reply_markup=keyboard,
+                    parse_mode=ParseMode.MARKDOWN,
+                    disable_notification=anchor_id is not None,
+                    request_category=RequestCategory.ANCHOR,
                 )
             except Exception as exc:
                 logger.error(
                     "Failed to refresh anchor",
                     extra={
                         "chat_id": chat_id,
-                        "player_id": player.user_id,
+                        "player_id": getattr(player, "user_id", None),
                         "error_type": type(exc).__name__,
                     },
                 )
                 continue
 
-            resolved_message_id = new_message_id or previous_message_id
-            if resolved_message_id is None:
+            resolved_message_id: Optional[int]
+            if isinstance(result, Message):
+                resolved_message_id = getattr(result, "message_id", None)
+            elif isinstance(result, int):
+                resolved_message_id = result
+            elif isinstance(result, str):
+                try:
+                    resolved_message_id = int(result)
+                except (TypeError, ValueError):
+                    resolved_message_id = None
+            else:
+                resolved_message_id = anchor_id
+
+            candidate_message_id = (
+                resolved_message_id if resolved_message_id is not None else anchor_id
+            )
+            if candidate_message_id is None:
                 continue
 
-            player.anchor_message = (chat_id, resolved_message_id)
-            tracked_message_ids.add(resolved_message_id)
-            if resolved_message_id not in game.message_ids_to_delete:
-                game.message_ids_to_delete.append(resolved_message_id)
+            try:
+                normalized_message_id = int(candidate_message_id)
+            except (TypeError, ValueError):
+                continue
 
-        # Clear anchor metadata for players who no longer have an anchor in this chat.
-        for player in game.seated_players():
+            player.anchor_message = (chat_id, normalized_message_id)
+            tracked_message_ids.add(normalized_message_id)
+            if normalized_message_id not in game.message_ids_to_delete:
+                game.message_ids_to_delete.append(normalized_message_id)
+
+        for player in list(getattr(game, "players", [])):
             anchor_meta = getattr(player, "anchor_message", None)
             if (
                 isinstance(anchor_meta, tuple)
                 and len(anchor_meta) >= 2
                 and anchor_meta[0] == chat_id
-                and anchor_meta[1] not in tracked_message_ids
             ):
-                player.anchor_message = None
+                try:
+                    normalized_id = int(anchor_meta[1])
+                except (TypeError, ValueError):
+                    player.anchor_message = None
+                    continue
+                if normalized_id not in tracked_message_ids:
+                    player.anchor_message = None
 
     async def announce_player_seats(
         self,

@@ -133,137 +133,9 @@ def test_notify_admin_failure_logs_error(caplog):
 
 
 
-def test_update_player_anchor_creates_anchor_message():
+def test_update_player_anchors_and_keyboards_highlights_active_player():
     viewer = PokerBotViewer(bot=MagicMock())
-    viewer._messenger.send_message = AsyncMock(return_value=MagicMock(message_id=42))
-
-    player = MagicMock(mention_markdown=MENTION_MARKDOWN, user_id=111)
-    player.cards = [Card('A♣'), Card('K♥')]
-    board_cards = [Card('A♠'), Card('K♦'), Card('5♣')]
-
-    result = run(
-        viewer.update_player_anchor(
-            chat_id=555,
-            player=player,
-            seat_number=3,
-            role_label='دیلر',
-            board_cards=board_cards,
-            player_cards=player.cards,
-            game_state=GameState.ROUND_PRE_FLOP,
-            active=True,
-        )
-    )
-
-    assert result == 42
-    call = viewer._messenger.send_message.await_args
-    assert '🪑 صندلی: `3`' in call.kwargs['text']
-    assert '🎖️ نقش: دیلر' in call.kwargs['text']
-    assert '🃏 Board:' not in call.kwargs['text']
-    assert '🎯 **نوبت بازی این بازیکن است.**' in call.kwargs['text']
-    assert isinstance(call.kwargs['reply_markup'], ReplyKeyboardMarkup)
-
-
-def test_update_player_anchor_inactive_player_skips_redundant_updates():
-    viewer = PokerBotViewer(bot=MagicMock())
-
-    player = MagicMock(mention_markdown=MENTION_MARKDOWN, user_id=222)
-    player.cards = [Card('Q♣'), Card('J♥')]
-    flop_cards = [Card('Q♠'), Card('J♦'), Card('9♣')]
-    turn_cards = flop_cards + [Card('2♥')]
-
-    viewer._messenger.send_message = AsyncMock(
-        return_value=MagicMock(message_id=77)
-    )
-
-    first_result = run(
-        viewer.update_player_anchor(
-            chat_id=888,
-            player=player,
-            seat_number=4,
-            role_label='بازیکن',
-            board_cards=flop_cards,
-            player_cards=player.cards,
-            game_state=GameState.ROUND_FLOP,
-            active=False,
-        )
-    )
-
-    assert first_result == 77
-    assert viewer._messenger.send_message.await_count == 1
-
-    viewer._messenger.edit_message_text = AsyncMock()
-    viewer._messenger.edit_message_reply_markup = AsyncMock(return_value=True)
-    original_edit_markup = viewer.edit_message_reply_markup
-    viewer.edit_message_reply_markup = AsyncMock(wraps=original_edit_markup)
-
-    result = run(
-        viewer.update_player_anchor(
-            chat_id=888,
-            player=player,
-            seat_number=4,
-            role_label='بازیکن',
-            board_cards=turn_cards,
-            player_cards=player.cards,
-            game_state=GameState.ROUND_TURN,
-            active=False,
-            message_id=77,
-        )
-    )
-
-    assert result == 77
-    assert viewer._messenger.edit_message_text.await_count == 0
-    assert viewer.edit_message_reply_markup.await_count == 0
-    assert viewer._messenger.edit_message_reply_markup.await_count == 0
-
-
-def test_update_player_anchor_when_game_inactive_shows_menu():
-    viewer = PokerBotViewer(bot=MagicMock())
-    viewer._messenger.edit_message_text = AsyncMock(return_value=99)
-
-    player = MagicMock(mention_markdown=MENTION_MARKDOWN, user_id=333)
-    player.cards = [Card('2♣'), Card('3♦')]
-
-    result = run(
-        viewer.update_player_anchor(
-            chat_id=-777,
-            player=player,
-            seat_number=2,
-            role_label='بازیکن',
-            board_cards=[],
-            player_cards=player.cards,
-            game_state=GameState.INITIAL,
-            active=False,
-            message_id=99,
-        )
-    )
-
-    assert result == 99
-    call = viewer._messenger.edit_message_text.await_args
-    assert isinstance(call.kwargs['reply_markup'], ReplyKeyboardMarkup)
-
-
-def test_build_player_cards_keyboard_layout():
-    markup = build_player_cards_keyboard(
-        hole_cards=['A♠', 'K♥'],
-        community_cards=['❔', '5♦', '❔', '❔', '❔'],
-        current_stage='FLOP',
-    )
-
-    assert isinstance(markup, ReplyKeyboardMarkup)
-    assert markup.resize_keyboard is True
-    assert markup.one_time_keyboard is False
-    assert markup.selective is True
-    assert _row_texts(markup.keyboard[0]) == ['A♠', 'K♥']
-    assert _row_texts(markup.keyboard[1]) == ['❔', '5♦', '❔', '❔', '❔']
-    stage_row = _row_texts(markup.keyboard[2])
-    assert stage_row[0] == 'پری فلاپ'
-    assert stage_row[1].startswith('✅')
-    assert stage_row[2] == 'ترن'
-    assert stage_row[3] == 'ریور'
-
-def test_update_player_anchors_and_keyboards_updates_players():
-    viewer = PokerBotViewer(bot=MagicMock())
-    viewer.update_player_anchor = AsyncMock(side_effect=[101, 202])
+    viewer._update_message = AsyncMock(side_effect=[101, 202])
 
     game = Game()
     game.chat_id = -777
@@ -287,25 +159,78 @@ def test_update_player_anchors_and_keyboards_updates_players():
     game.add_player(player_two, seat_index=1)
     player_one.cards = [Card('J♠'), Card('J♦')]
     player_two.cards = [Card('9♣'), Card('9♦')]
+
+    player_one.anchor_message = (game.chat_id, 101)
+    player_two.anchor_message = (game.chat_id, 202)
     game.current_player_index = 0
 
     run(viewer.update_player_anchors_and_keyboards(game))
 
-    viewer.update_player_anchor.assert_awaited()
-    assert viewer.update_player_anchor.await_count == 2
+    assert viewer._update_message.await_count == 2
 
-    call_args = viewer.update_player_anchor.await_args_list
-    active_flags = {call.kwargs['player'].user_id: call.kwargs['active'] for call in call_args}
-    assert active_flags[1] is True
-    assert active_flags[2] is False
-    for call in call_args:
-        assert call.kwargs['chat_id'] == -777
-        assert call.kwargs['game_state'] == GameState.ROUND_FLOP
+    first_call = viewer._update_message.await_args_list[0]
+    second_call = viewer._update_message.await_args_list[1]
 
-    assert player_one.anchor_message == (-777, 101)
-    assert player_two.anchor_message == (-777, 202)
+    assert first_call.kwargs['message_id'] == 101
+    assert '🎯 نوبت بازی این بازیکن است.' in first_call.kwargs['text']
+    assert isinstance(first_call.kwargs['reply_markup'], ReplyKeyboardMarkup)
+    board_row = _row_texts(first_call.kwargs['reply_markup'].keyboard[1])
+    assert board_row == ['A♠', 'K♦', '5♣']
+
+    assert second_call.kwargs['message_id'] == 202
+    assert '🎯 نوبت بازی این بازیکن است.' not in second_call.kwargs['text']
+
+    assert player_one.anchor_message == (game.chat_id, 101)
+    assert player_two.anchor_message == (game.chat_id, 202)
     assert 101 in game.message_ids_to_delete
     assert 202 in game.message_ids_to_delete
+
+
+def test_update_player_anchors_and_keyboards_creates_anchor_when_missing():
+    viewer = PokerBotViewer(bot=MagicMock())
+    viewer._update_message = AsyncMock(side_effect=[303])
+
+    game = Game()
+    game.chat_id = -123
+    game.state = GameState.ROUND_PRE_FLOP
+
+    player = Player(
+        user_id=7,
+        mention_markdown='@seven',
+        wallet=MagicMock(),
+        ready_message_id='ready-7',
+    )
+    game.add_player(player, seat_index=0)
+    player.cards = [Card('A♣'), Card('K♥')]
+    player.anchor_message = None
+
+    run(viewer.update_player_anchors_and_keyboards(game))
+
+    viewer._update_message.assert_awaited_once()
+    call = viewer._update_message.await_args
+    assert call.kwargs['message_id'] is None
+    assert player.anchor_message == (game.chat_id, 303)
+    assert 303 in game.message_ids_to_delete
+
+
+def test_build_player_cards_keyboard_layout():
+    markup = build_player_cards_keyboard(
+        hole_cards=['A♠', 'K♥'],
+        community_cards=['❔', '5♦', '❔', '❔', '❔'],
+        current_stage='FLOP',
+    )
+
+    assert isinstance(markup, ReplyKeyboardMarkup)
+    assert markup.resize_keyboard is True
+    assert markup.one_time_keyboard is False
+    assert markup.selective is True
+    assert _row_texts(markup.keyboard[0]) == ['A♠', 'K♥']
+    assert _row_texts(markup.keyboard[1]) == ['❔', '5♦', '❔', '❔', '❔']
+    stage_row = _row_texts(markup.keyboard[2])
+    assert stage_row[0] == 'پری فلاپ'
+    assert stage_row[1].startswith('✅')
+    assert stage_row[2] == 'ترن'
+    assert stage_row[3] == 'ریور'
 
 def test_update_turn_message_includes_stage_and_keyboard():
     viewer = PokerBotViewer(bot=MagicMock())
