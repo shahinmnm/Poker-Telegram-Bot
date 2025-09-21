@@ -19,6 +19,7 @@ from typing import (
     List,
     Sequence,
     Set,
+    Callable,
 )
 from dataclasses import dataclass
 import asyncio
@@ -254,6 +255,8 @@ class PokerBotViewer:
             maxsize=4096
         )
         self._stage_payload_hash_lock = asyncio.Lock()
+        self._prestart_countdown_tasks: Dict[int, asyncio.Task[None]] = {}
+        self._prestart_countdown_lock = asyncio.Lock()
         self._pending_updates: Dict[
             Tuple[ChatId, Optional[MessageId]], Dict[str, Any]
         ] = {}
@@ -271,6 +274,129 @@ class PokerBotViewer:
             deleted_messages_lock=self._deleted_messages_lock,
             last_message_hash=self._last_message_hash,
             last_message_hash_lock=self._last_message_hash_lock,
+        )
+
+    async def _cancel_prestart_countdown(self, chat_id: ChatId) -> None:
+        normalized_chat = self._safe_int(chat_id)
+        async with self._prestart_countdown_lock:
+            task = self._prestart_countdown_tasks.pop(normalized_chat, None)
+            if task is not None:
+                task.cancel()
+                logger.info(
+                    "[Countdown] Cancelled prestart countdown for chat %s",
+                    normalized_chat,
+                )
+
+    def _create_countdown_task(
+        self,
+        normalized_chat: int,
+        anchor_message_id: Optional[int],
+        end_time: float,
+        payload_fn: Callable[[int], Tuple[str, Optional[InlineKeyboardMarkup | ReplyKeyboardMarkup]]],
+    ) -> asyncio.Task[None]:
+        """
+        Return an asyncio.Task that runs a per-second countdown until end_time.
+
+        payload_fn(seconds_left:int) -> (text:str, reply_markup|None)
+
+        The task uses schedule_message_update if available, otherwise falls back to _update_message.
+        It cleans up self._prestart_countdown_tasks entry when finished or cancelled.
+        """
+
+        async def _run() -> None:
+            current_message_id = anchor_message_id
+            try:
+                loop = asyncio.get_event_loop()
+                while True:
+                    now = loop.time()
+                    seconds_left = max(0, int(round(end_time - now)))
+                    try:
+                        text, reply_markup = payload_fn(seconds_left)
+                    except Exception:
+                        logger.exception("[Countdown] payload_fn failed")
+                        text, reply_markup = "", None
+                    try:
+                        schedule = getattr(self, "schedule_message_update", None)
+                        if callable(schedule):
+                            result = await schedule(
+                                chat_id=normalized_chat,
+                                message_id=current_message_id,
+                                text=text,
+                                reply_markup=reply_markup,
+                                request_category=RequestCategory.ANCHOR,
+                            )
+                        else:
+                            result = await self._update_message(
+                                chat_id=normalized_chat,
+                                message_id=current_message_id,
+                                text=text,
+                                reply_markup=reply_markup,
+                                request_category=RequestCategory.ANCHOR,
+                            )
+                    except asyncio.CancelledError:
+                        raise
+                    except Exception:
+                        logger.exception("[Countdown] failed to send countdown tick")
+                    else:
+                        if isinstance(result, int):
+                            current_message_id = result
+                        elif hasattr(result, "message_id"):
+                            maybe_id = getattr(result, "message_id", None)
+                            if isinstance(maybe_id, int):
+                                current_message_id = maybe_id
+                        elif result is not None:
+                            try:
+                                current_message_id = int(result)
+                            except (TypeError, ValueError):
+                                pass
+                    if seconds_left <= 0:
+                        break
+                    await asyncio.sleep(1.0)
+            except asyncio.CancelledError:
+                logger.debug(
+                    "[Countdown] Task cancelled for chat %s", normalized_chat
+                )
+                raise
+            finally:
+                async with self._prestart_countdown_lock:
+                    existing = self._prestart_countdown_tasks.get(normalized_chat)
+                    if existing is asyncio.current_task():
+                        self._prestart_countdown_tasks.pop(normalized_chat, None)
+                logger.info(
+                    "[Countdown] Prestart countdown finished for chat %s",
+                    normalized_chat,
+                )
+
+        return asyncio.create_task(_run())
+
+    async def start_prestart_countdown(
+        self,
+        chat_id: ChatId,
+        anchor_message_id: Optional[MessageId],
+        seconds: int,
+        payload_fn: Callable[[int], Tuple[str, Optional[InlineKeyboardMarkup | ReplyKeyboardMarkup]]],
+    ) -> None:
+        """
+        Start or replace a per-chat prestart countdown.
+
+        payload_fn(seconds_left:int) -> (text, reply_markup)
+        """
+
+        normalized_chat = self._safe_int(chat_id)
+        end_time = asyncio.get_event_loop().time() + max(0, int(seconds))
+        async with self._prestart_countdown_lock:
+            old = self._prestart_countdown_tasks.get(normalized_chat)
+            if old is not None:
+                old.cancel()
+            task = self._create_countdown_task(
+                normalized_chat, anchor_message_id, end_time, payload_fn
+            )
+            self._prestart_countdown_tasks[normalized_chat] = task
+        logger.info(
+            "[Countdown] Started prestart countdown for chat %s seconds=%s anchor=%s",
+            normalized_chat,
+            seconds,
+            anchor_message_id,
         )
 
     def _payload_hash(
