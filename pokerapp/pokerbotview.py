@@ -18,6 +18,7 @@ from typing import (
     Tuple,
     List,
     Sequence,
+    Set,
 )
 from dataclasses import dataclass
 import asyncio
@@ -242,8 +243,10 @@ class PokerBotViewer:
         self._message_payload_cache_lock = asyncio.Lock()
         self._last_callback_updates: Dict[Tuple[int, int, str, int], str] = {}
         self._last_callback_edit: Dict[Tuple[int, str], str] = {}
-        self._last_message_hash: LRUCache[int, str] = LRUCache(maxsize=2048)
+        self._last_message_hash: Dict[int, str] = {}
         self._last_message_hash_lock = asyncio.Lock()
+        self._deleted_messages: Set[int] = set()
+        self._deleted_messages_lock = asyncio.Lock()
         self._turn_message_cache: LRUCache[Tuple[int, int], str] = LRUCache(
             maxsize=256
         )
@@ -388,14 +391,25 @@ class PokerBotViewer:
         async with self._last_message_hash_lock:
             self._last_message_hash[message_id] = value
             logger.debug(
-                "Text hash cache size %s/%s",
-                self._last_message_hash.currsize,
-                self._last_message_hash.maxsize,
+                "Text hash cache size %s",
+                len(self._last_message_hash),
             )
 
     async def _pop_last_text_hash(self, message_id: int) -> None:
         async with self._last_message_hash_lock:
             self._last_message_hash.pop(message_id, None)
+
+    async def _is_message_deleted(self, message_id: int) -> bool:
+        async with self._deleted_messages_lock:
+            return message_id in self._deleted_messages
+
+    async def _mark_message_deleted(self, message_id: int) -> None:
+        async with self._deleted_messages_lock:
+            self._deleted_messages.add(message_id)
+
+    async def _unmark_message_deleted(self, message_id: int) -> None:
+        async with self._deleted_messages_lock:
+            self._deleted_messages.discard(message_id)
 
     async def _get_turn_cache_hash(
         self, key: Tuple[int, int]
@@ -598,8 +612,7 @@ class PokerBotViewer:
                 )
                 if last_callback_token == callback_id:
                     debug_trace_logger.info(
-                        f"Skipping editMessageText for message_id={message_id} "
-                        "(callback throttling)"
+                        f"Skipping editMessageText for message_id={message_id} due to callback throttling"
                     )
                     return message_id
                 if self._should_skip_callback_update(
@@ -625,6 +638,15 @@ class PokerBotViewer:
         )
         previous_payload_hash: Optional[str] = None
         if normalized_existing_message is not None:
+            if await self._is_message_deleted(normalized_existing_message):
+                debug_trace_logger.info(
+                    f"Skipping editMessageText for message_id={message_id} because it was deleted"
+                )
+                await self._request_metrics.record_skip(
+                    chat_id=normalized_chat,
+                    category=request_category,
+                )
+                return message_id
             previous_text_hash = await self._get_last_text_hash(
                 normalized_existing_message
             )
@@ -647,7 +669,7 @@ class PokerBotViewer:
                     )
                 else:
                     debug_trace_logger.info(
-                        f"Skipping editMessageText for message_id={message_id} (hash match)"
+                        f"Skipping editMessageText for message_id={message_id} due to no content change"
                     )
                     await self._request_metrics.record_skip(
                         chat_id=normalized_chat,
@@ -718,6 +740,15 @@ class PokerBotViewer:
         lock = await self._acquire_message_lock(chat_id, message_id)
         async with lock:
             if normalized_existing_message is not None:
+                if await self._is_message_deleted(normalized_existing_message):
+                    debug_trace_logger.info(
+                        f"Skipping editMessageText for message_id={message_id} because it was deleted"
+                    )
+                    await self._request_metrics.record_skip(
+                        chat_id=normalized_chat,
+                        category=request_category,
+                    )
+                    return message_id
                 previous_text_hash = await self._get_last_text_hash(
                     normalized_existing_message
                 )
@@ -745,11 +776,31 @@ class PokerBotViewer:
                                 },
                             )
                             reply_markup = None
-                        updated = await self.edit_message_reply_markup(
-                            chat_id=chat_id,
-                            message_id=message_id,
-                            reply_markup=reply_markup,
-                        )
+                        callback_token_registered = False
+                        if (
+                            callback_id is not None
+                            and callback_throttle_key is not None
+                        ):
+                            self._last_callback_edit[
+                                callback_throttle_key
+                            ] = callback_id
+                            callback_token_registered = True
+                        try:
+                            updated = await self.edit_message_reply_markup(
+                                chat_id=chat_id,
+                                message_id=message_id,
+                                reply_markup=reply_markup,
+                            )
+                        except Exception:
+                            if callback_token_registered:
+                                self._last_callback_edit.pop(
+                                    callback_throttle_key, None
+                                )
+                            raise
+                        if not updated and callback_token_registered:
+                            self._last_callback_edit.pop(
+                                callback_throttle_key, None
+                            )
                         if updated:
                             await self._set_last_text_hash(
                                 normalized_existing_message, message_text_hash
@@ -766,6 +817,9 @@ class PokerBotViewer:
                                 await self._set_turn_cache_hash(
                                     message_key, payload_hash
                                 )
+                            await self._unmark_message_deleted(
+                                normalized_existing_message
+                            )
                             if (
                                 callback_id is not None
                                 and callback_token_key is not None
@@ -782,7 +836,7 @@ class PokerBotViewer:
                                 ] = callback_id
                             return message_id
                     debug_trace_logger.info(
-                        f"Skipping editMessageText for message_id={message_id} (hash match)"
+                        f"Skipping editMessageText for message_id={message_id} due to no content change"
                     )
                     await self._request_metrics.record_skip(
                         chat_id=normalized_chat,
@@ -841,8 +895,7 @@ class PokerBotViewer:
                 )
                 if last_callback_token == callback_id:
                     debug_trace_logger.info(
-                        f"Skipping editMessageText for message_id={message_id} "
-                        "(callback throttling)"
+                        f"Skipping editMessageText for message_id={message_id} due to callback throttling"
                     )
                     await self._request_metrics.record_skip(
                         chat_id=normalized_chat,
@@ -872,6 +925,7 @@ class PokerBotViewer:
                 )
                 return message_id
 
+            callback_token_registered = False
             try:
                 if message_id is None:
                     result = await self._messenger.send_message(
@@ -887,6 +941,14 @@ class PokerBotViewer:
                         result, "message_id", None
                     )
                 else:
+                    if (
+                        callback_id is not None
+                        and callback_throttle_key is not None
+                    ):
+                        self._last_callback_edit[
+                            callback_throttle_key
+                        ] = callback_id
+                        callback_token_registered = True
                     result = await self._messenger.edit_message_text(
                         chat_id=chat_id,
                         message_id=message_id,
@@ -903,6 +965,8 @@ class PokerBotViewer:
                     else:
                         new_message_id = message_id
             except (BadRequest, Forbidden, RetryAfter, TelegramError) as exc:
+                if callback_token_registered and callback_throttle_key is not None:
+                    self._last_callback_edit.pop(callback_throttle_key, None)
                 logger.error(
                     "Failed to update message",
                     extra={
@@ -920,6 +984,7 @@ class PokerBotViewer:
             new_message_key = (normalized_chat, normalized_new_message)
             await self._set_payload_hash(new_message_key, payload_hash)
             await self._set_last_text_hash(normalized_new_message, message_text_hash)
+            await self._unmark_message_deleted(normalized_new_message)
             if turn_cache_key is not None:
                 await self._set_turn_cache_hash(new_message_key, payload_hash)
             new_stage_key = (
@@ -1177,7 +1242,9 @@ class PokerBotViewer:
                 disable_web_page_preview=True,
             )
             if isinstance(message, Message):
-                return message.message_id
+                message_id = message.message_id
+                await self._unmark_message_deleted(self._safe_int(message_id))
+                return message_id
         except Exception as e:
             logger.error(
                 "Error sending message and returning ID",
@@ -1242,7 +1309,9 @@ class PokerBotViewer:
                 disable_web_page_preview=True,
             )
             if isinstance(message, Message):
-                return message.message_id
+                message_id = message.message_id
+                await self._unmark_message_deleted(self._safe_int(message_id))
+                return message_id
         except Exception as e:
             logger.error(
                 "Error sending message",
@@ -1411,6 +1480,7 @@ class PokerBotViewer:
                     message_id=message_id,
                     request_category=RequestCategory.DELETE,
                 )
+                await self._mark_message_deleted(normalized_message)
             except (BadRequest, Forbidden) as e:
                 error_message = getattr(e, "message", None) or str(e) or ""
                 normalized_error = error_message.lower()
