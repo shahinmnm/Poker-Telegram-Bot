@@ -85,6 +85,10 @@ class Player:
         self.seat_index = seat_index
         self.anchor_message: Optional[Tuple[ChatId, MessageId]] = None
         self.anchor_role: str = "بازیکن"
+        self.role_label: str = "بازیکن"
+        self.is_dealer: bool = False
+        self.is_small_blind: bool = False
+        self.is_big_blind: bool = False
         # -------------------------
     def __repr__(self):
         return "{}({!r})".format(self.__class__.__name__, self.__dict__)
