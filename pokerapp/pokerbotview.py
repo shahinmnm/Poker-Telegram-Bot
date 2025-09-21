@@ -54,6 +54,36 @@ debug_trace_logger = logging.getLogger("pokerbot.debug_trace")
 _CARD_SPACER = "     "
 
 
+def build_player_cards_keyboard(
+    hole_cards: Sequence[str],
+    community_cards: Sequence[str],
+    current_stage: str,
+) -> ReplyKeyboardMarkup:
+    """Build a reply keyboard showing the player's cards and stage info."""
+
+    row1 = list(hole_cards)
+    row2 = list(community_cards)
+
+    stages = ["پری فلاپ", "فلاپ", "ترن", "ریور"]
+    stage_flags = [
+        current_stage.upper() == "PRE-FLOP",
+        current_stage.upper() == "FLOP",
+        current_stage.upper() == "TURN",
+        current_stage.upper() == "RIVER",
+    ]
+    row3 = [
+        f"✅ {label}" if is_current else label
+        for label, is_current in zip(stages, stage_flags)
+    ]
+
+    return ReplyKeyboardMarkup(
+        [row1, row2, row3],
+        resize_keyboard=True,
+        one_time_keyboard=False,
+        selective=True,
+    )
+
+
 @dataclass(slots=True)
 class TurnMessageUpdate:
     message_id: Optional[MessageId]
@@ -125,21 +155,6 @@ class PokerBotViewer:
         if isinstance(chat_id, str):
             return chat_id.startswith("private:")
         return False
-
-    @classmethod
-    def _format_card_button(cls, card: Card) -> str:
-        suit = cls._SUIT_EMOJI.get(card.suit, card.suit)
-        rank = card.rank
-        return f"{rank}{suit}"
-
-    @staticmethod
-    def _build_label_button(label: str) -> InlineKeyboardButton:
-        return InlineKeyboardButton(text=label, callback_data="anchor:noop")
-
-    @staticmethod
-    def _build_hand_card_callback(player: Player, index: int) -> str:
-        player_id = getattr(player, "user_id", "0")
-        return f"hand_card_{player_id}_{index}"
 
     @staticmethod
     def _build_hidden_mention(mention_markdown: Optional[Mention]) -> str:
@@ -951,79 +966,6 @@ class PokerBotViewer:
         return f"{label}: {cls._render_cards(cards)}"
 
     @classmethod
-    def _build_card_markup(
-        cls,
-        *,
-        player: Player,
-        player_cards: Sequence[Card],
-        board_cards: Sequence[Card],
-    ) -> Optional[InlineKeyboardMarkup]:
-        has_hand = bool(player_cards)
-        has_board = bool(board_cards)
-        if not has_hand and not has_board:
-            return None
-
-        rows: List[List[InlineKeyboardButton]] = []
-        if has_hand:
-            rows.append([cls._build_label_button("🎴 کارت‌های شما")])
-            total_cards = len(player_cards)
-            card_row = [
-                InlineKeyboardButton(
-                    text=f"🂠 کارت مخفی {index + 1}/{total_cards}",
-                    callback_data=cls._build_hand_card_callback(player, index),
-                )
-                for index, _ in enumerate(player_cards)
-            ]
-            rows.append(card_row)
-
-        if has_board:
-            rows.append([cls._build_label_button("🃏 کارت‌های روی میز")])
-            board_buttons = [
-                InlineKeyboardButton(
-                    text=cls._format_card_button(card),
-                    callback_data=f"board_card_{index}",
-                )
-                for index, card in enumerate(board_cards)
-            ]
-            for start in range(0, len(board_buttons), 3):
-                rows.append(board_buttons[start : start + 3])
-
-        return InlineKeyboardMarkup(inline_keyboard=rows)
-
-    @staticmethod
-    def _build_inactive_anchor_markup() -> InlineKeyboardMarkup:
-        return InlineKeyboardMarkup(
-            inline_keyboard=[
-                [
-                    InlineKeyboardButton(
-                        text="🎮 شروع بازی جدید",
-                        callback_data="start_game",
-                    ),
-                    InlineKeyboardButton(
-                        text="📊 آمار شما",
-                        callback_data="anchor:stats",
-                    ),
-                ],
-                [
-                    InlineKeyboardButton(
-                        text="🛠 راهنما / قوانین",
-                        callback_data="anchor:help",
-                    ),
-                    InlineKeyboardButton(
-                        text="💰 موجودی کیف پول",
-                        callback_data="anchor:wallet",
-                    ),
-                ],
-                [
-                    InlineKeyboardButton(
-                        text="💬 گفتگوی دوستانه",
-                        callback_data="anchor:chat",
-                    )
-                ],
-            ]
-        )
-
-    @classmethod
     def _build_anchor_text(
         cls,
         *,
@@ -1036,7 +978,7 @@ class PokerBotViewer:
             f"🪑 صندلی: `{seat_number}`",
             f"🎖️ نقش: {role_label}",
         ]
-        # کارت‌های بازیکن و میز در کیبورد اینلاین نمایش داده می‌شوند تا متن ثابت بماند.
+        # کارت‌های بازیکن در پیام جداگانه با کیبورد انتخابی ارسال می‌شوند.
         return "\n".join(lines)
 
     async def update_player_anchor(
@@ -1058,15 +1000,6 @@ class PokerBotViewer:
             role_label=role_label,
         )
         reply_markup: Optional[InlineKeyboardMarkup] = None
-        if not self._is_private_chat(chat_id):
-            if game_state in self._ACTIVE_ANCHOR_STATES:
-                reply_markup = self._build_card_markup(
-                    player=player,
-                    player_cards=player_cards,
-                    board_cards=board_cards,
-                )
-            else:
-                reply_markup = self._build_inactive_anchor_markup()
         if active:
             text = f"{text}\n\n🎯 **نوبت بازی این بازیکن است.**"
         return await self._update_message(
@@ -1078,6 +1011,69 @@ class PokerBotViewer:
             disable_web_page_preview=True,
             disable_notification=message_id is not None,
             request_category=RequestCategory.ANCHOR,
+        )
+
+    async def send_player_cards_keyboard(
+        self,
+        *,
+        chat_id: ChatId,
+        hole_cards: Sequence[str],
+        community_cards: Sequence[str],
+        current_stage: str,
+        message_id: Optional[MessageId] = None,
+        text: str = "کارت های شما 👇",
+    ) -> Optional[MessageId]:
+        """Send or update the per-player cards reply keyboard."""
+
+        markup = build_player_cards_keyboard(
+            hole_cards=hole_cards,
+            community_cards=community_cards,
+            current_stage=current_stage,
+        )
+
+        if message_id:
+            try:
+                edited_id = await self.edit_message_text(
+                    chat_id=chat_id,
+                    message_id=message_id,
+                    text=text,
+                    reply_markup=markup,
+                    parse_mode=ParseMode.MARKDOWN,
+                    request_category=RequestCategory.GENERAL,
+                )
+            except BadRequest as exc:
+                message = str(exc).lower()
+                if "message is not modified" in message:
+                    return message_id
+                logger.debug(
+                    "Falling back to send_message for cards keyboard",
+                    extra={
+                        "chat_id": chat_id,
+                        "message_id": message_id,
+                        "error_type": type(exc).__name__,
+                        "error_message": str(exc),
+                    },
+                )
+            except TelegramError as exc:
+                logger.debug(
+                    "Failed to edit cards keyboard message",
+                    extra={
+                        "chat_id": chat_id,
+                        "message_id": message_id,
+                        "error_type": type(exc).__name__,
+                    },
+                )
+            else:
+                if edited_id:
+                    return edited_id
+                return message_id
+
+        return await self.send_message(
+            chat_id=chat_id,
+            text=text,
+            reply_markup=markup,
+            parse_mode=ParseMode.MARKDOWN,
+            request_category=RequestCategory.GENERAL,
         )
 
     async def announce_player_seats(

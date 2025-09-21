@@ -128,6 +128,13 @@ class PokerBotModel:
         GameState.ROUND_RIVER,
     }
 
+    _STAGE_LABELS = {
+        GameState.ROUND_PRE_FLOP: "PRE-FLOP",
+        GameState.ROUND_FLOP: "FLOP",
+        GameState.ROUND_TURN: "TURN",
+        GameState.ROUND_RIVER: "RIVER",
+    }
+
     @staticmethod
     def _safe_int(value: UserId) -> int:
         try:
@@ -1138,7 +1145,6 @@ class PokerBotModel:
         if not new_message_id:
             return
 
-        player.cards_keyboard_message_id = new_message_id
         player.anchor_message = (chat_id, new_message_id)
         if new_message_id not in game.message_ids_to_delete:
             game.message_ids_to_delete.append(new_message_id)
@@ -1172,6 +1178,84 @@ class PokerBotModel:
             roles.append("بازیکن")
         return "، ".join(dict.fromkeys(roles))
 
+    def _resolve_player_cards_chat_id(self, player: Player) -> Optional[int]:
+        private_chat_id = getattr(player, "private_chat_id", None)
+        if private_chat_id:
+            return self._safe_int(private_chat_id)
+
+        safe_user_id = self._safe_int(player.user_id)
+        mapped_chat = self._private_chat_ids.get(safe_user_id)
+        if mapped_chat:
+            return mapped_chat
+
+        return safe_user_id or None
+
+    async def _sync_player_cards_keyboard(self, game: Game, chat_id: ChatId) -> None:
+        if isinstance(chat_id, str) and chat_id.startswith("private:"):
+            return
+
+        stage_label = self._STAGE_LABELS.get(game.state)
+        if not stage_label:
+            return
+
+        community_cards = [str(card) for card in game.cards_table]
+        while len(community_cards) < 5:
+            community_cards.append("❔")
+
+        for player in game.seated_players():
+            if not player.cards:
+                continue
+
+            target_chat_id = self._resolve_player_cards_chat_id(player)
+            if target_chat_id is None:
+                continue
+
+            hole_cards = [str(card) for card in player.cards]
+            while len(hole_cards) < 2:
+                hole_cards.append("❔")
+
+            previous_message_id = getattr(player, "cards_keyboard_message_id", None)
+            try:
+                new_message_id = await self._view.send_player_cards_keyboard(
+                    chat_id=target_chat_id,
+                    hole_cards=hole_cards,
+                    community_cards=community_cards,
+                    current_stage=stage_label,
+                    message_id=previous_message_id,
+                )
+            except Exception as exc:
+                logger.error(
+                    "Failed to deliver cards keyboard",
+                    extra={
+                        "chat_id": target_chat_id,
+                        "player_id": player.user_id,
+                        "error_type": type(exc).__name__,
+                    },
+                )
+                continue
+
+            if (
+                new_message_id
+                and previous_message_id
+                and new_message_id != previous_message_id
+            ):
+                try:
+                    await self._view.delete_message(
+                        target_chat_id, previous_message_id
+                    )
+                except Exception as delete_exc:
+                    logger.debug(
+                        "Failed to delete outdated cards keyboard",
+                        extra={
+                            "chat_id": target_chat_id,
+                            "message_id": previous_message_id,
+                            "error_type": type(delete_exc).__name__,
+                        },
+                    )
+
+            if new_message_id:
+                player.cards_keyboard_message_id = new_message_id
+
     async def _update_player_anchor_messages(
         self,
         game: Game,
@@ -1190,8 +1274,6 @@ class PokerBotModel:
             existing_id: Optional[MessageId] = None
             if player.anchor_message and player.anchor_message[0] == chat_id:
                 existing_id = player.anchor_message[1]
-            elif getattr(player, "cards_keyboard_message_id", None):
-                existing_id = player.cards_keyboard_message_id
 
             request = AnchorUpdateRequest(
                 player=player,
@@ -1933,6 +2015,8 @@ class PokerBotModel:
             cards = [game.remain_cards.pop(), game.remain_cards.pop()]
             player.cards = cards
 
+        await self._sync_player_cards_keyboard(game, chat_id)
+
     def _is_betting_round_over(self, game: Game) -> bool:
         """
         بررسی می‌کند که آیا دور شرط‌بندی فعلی به پایان رسیده است یا خیر.
@@ -2500,6 +2584,8 @@ class PokerBotModel:
                     if game.remain_cards:
                         game.cards_table.append(game.remain_cards.pop())
 
+            await self._sync_player_cards_keyboard(game, chat_id)
+
             if not send_message:
                 return
             if game.board_message_id:
@@ -2607,14 +2693,12 @@ class PokerBotModel:
                 game.turn_message_id = None
 
         for player in game.seated_players():
-            keyboard_message_id: Optional[MessageId] = None
+            anchor_message_id: Optional[MessageId] = None
             if player.anchor_message and player.anchor_message[0] == chat_id:
-                keyboard_message_id = player.anchor_message[1]
-            elif getattr(player, "cards_keyboard_message_id", None):
-                keyboard_message_id = player.cards_keyboard_message_id
+                anchor_message_id = player.anchor_message[1]
 
-            if keyboard_message_id:
-                ids_to_delete.discard(keyboard_message_id)
+            if anchor_message_id:
+                ids_to_delete.discard(anchor_message_id)
                 try:
                     await self._view.update_player_anchor(
                         chat_id=chat_id,
@@ -2625,23 +2709,37 @@ class PokerBotModel:
                         player_cards=list(player.cards),
                         game_state=GameState.FINISHED,
                         active=False,
-                        message_id=keyboard_message_id,
+                        message_id=anchor_message_id,
                     )
                 except Exception as exc:
                     logger.debug(
                         "Failed to update inactive anchor",
                         extra={
                             "chat_id": chat_id,
-                            "message_id": keyboard_message_id,
+                            "message_id": anchor_message_id,
                             "error_type": type(exc).__name__,
                         },
                     )
-            if keyboard_message_id:
-                player.anchor_message = (chat_id, keyboard_message_id)
-                player.cards_keyboard_message_id = keyboard_message_id
+                player.anchor_message = (chat_id, anchor_message_id)
             else:
                 player.anchor_message = None
-                player.cards_keyboard_message_id = None
+
+            cards_message_id = getattr(player, "cards_keyboard_message_id", None)
+            if cards_message_id:
+                target_chat_id = self._resolve_player_cards_chat_id(player)
+                if target_chat_id is not None:
+                    try:
+                        await self._view.delete_message(target_chat_id, cards_message_id)
+                    except Exception as exc:
+                        logger.debug(
+                            "Failed to delete cards keyboard message",
+                            extra={
+                                "chat_id": target_chat_id,
+                                "message_id": cards_message_id,
+                                "error_type": type(exc).__name__,
+                            },
+                        )
+            player.cards_keyboard_message_id = None
             player.anchor_role = "بازیکن"
 
             for message_id in ids_to_delete:
