@@ -520,6 +520,7 @@ class PokerBotModel:
         await self._request_metrics.end_cycle(
             self._safe_int(chat_id), cycle_token=game.id
         )
+        await self._clear_player_anchors(game)
         game.reset()
         for index, info in enumerate(players):
             safe_user_id = self._safe_int(info.user_id)
@@ -1673,6 +1674,7 @@ class PokerBotModel:
         await self._request_metrics.end_cycle(
             self._safe_int(chat_id), cycle_token=game.id
         )
+        await self._clear_player_anchors(game)
         game.reset()
         await self._table_manager.save_game(chat_id, game)
         await self._view.send_message(chat_id, "🛑 بازی متوقف شد.")
@@ -2188,17 +2190,17 @@ class PokerBotModel:
                 p.has_acted = False  # <-- این خط برای دور بعدی حیاتی است
 
             # رفتن به مرحله بعدی بر اساس وضعیت فعلی بازی
-            if game.state == GameState.ROUND_PRE_FLOP:
-                game.state = GameState.ROUND_FLOP
-                await self.add_cards_to_table(3, game, chat_id, "🃏 فلاپ")
-                await self._view.update_player_anchors_and_keyboards(game)
-            elif game.state == GameState.ROUND_FLOP:
-                game.state = GameState.ROUND_TURN
-                await self.add_cards_to_table(1, game, chat_id, "🃏 ترن")
-                await self._view.update_player_anchors_and_keyboards(game)
-            elif game.state == GameState.ROUND_TURN:
-                game.state = GameState.ROUND_RIVER
-                await self.add_cards_to_table(1, game, chat_id, "🃏 ریور")
+            stage_transitions: Dict[GameState, Tuple[GameState, int, str]] = {
+                GameState.ROUND_PRE_FLOP: (GameState.ROUND_FLOP, 3, "🃏 فلاپ"),
+                GameState.ROUND_FLOP: (GameState.ROUND_TURN, 1, "🃏 ترن"),
+                GameState.ROUND_TURN: (GameState.ROUND_RIVER, 1, "🃏 ریور"),
+            }
+
+            transition = stage_transitions.get(game.state)
+            if transition:
+                next_state, card_count, stage_label = transition
+                game.state = next_state
+                await self.add_cards_to_table(card_count, game, chat_id, stage_label)
                 await self._view.update_player_anchors_and_keyboards(game)
             elif game.state == GameState.ROUND_RIVER:
                 # بعد از ریور، دور شرط‌بندی تمام شده و باید showdown انجام شود
@@ -2420,42 +2422,14 @@ class PokerBotModel:
                 ids_to_delete.add(game.turn_message_id)
                 game.turn_message_id = None
 
-            anchor_message_map: Dict[Player, Optional[MessageId]] = {}
+            game.chat_id = chat_id
+
             for player in game.seated_players():
                 anchor_message_id: Optional[MessageId] = None
                 if player.anchor_message and player.anchor_message[0] == chat_id:
                     anchor_message_id = player.anchor_message[1]
                 if anchor_message_id:
                     ids_to_delete.discard(anchor_message_id)
-                anchor_message_map[player] = anchor_message_id
-
-            game.chat_id = chat_id
-
-        previous_state = game.state
-        previous_player_index = game.current_player_index
-        try:
-            game.state = GameState.FINISHED
-            game.current_player_index = -1
-            await self._view.update_player_anchors_and_keyboards(game)
-        except Exception as exc:
-            logger.debug(
-                "Failed to refresh anchors during cleanup",
-                extra={
-                    "chat_id": chat_id,
-                    "error_type": type(exc).__name__,
-                },
-            )
-        finally:
-            game.state = previous_state
-            game.current_player_index = previous_player_index
-
-        for player, anchor_message_id in anchor_message_map.items():
-            if anchor_message_id:
-                player.anchor_message = (chat_id, anchor_message_id)
-                ids_to_delete.discard(anchor_message_id)
-            else:
-                player.anchor_message = None
-            player.anchor_role = "بازیکن"
 
         for message_id in ids_to_delete:
             try:
@@ -2472,6 +2446,11 @@ class PokerBotModel:
 
         game.message_ids_to_delete.clear()
         game.message_ids.clear()
+
+    async def _clear_player_anchors(self, game: Game) -> None:
+        clear_method = getattr(self._view, "clear_all_player_anchors", None)
+        if callable(clear_method):
+            await clear_method(game)
 
     async def _showdown(
         self, game: Game, chat_id: ChatId, context: CallbackContext
@@ -2508,6 +2487,8 @@ class PokerBotModel:
                     # Background tasks now handle retries without manual pacing.
 
         contenders = game.players_by(states=(PlayerState.ACTIVE, PlayerState.ALL_IN))
+
+        game.chat_id = chat_id
 
         await self._clear_game_messages(game, chat_id)
 
@@ -2609,6 +2590,7 @@ class PokerBotModel:
         await self._request_metrics.end_cycle(
             self._safe_int(chat_id), cycle_token=game.id
         )
+        await self._clear_player_anchors(game)
         game.reset()
         await self._table_manager.save_game(chat_id, game)
 
@@ -2622,6 +2604,7 @@ class PokerBotModel:
         یک دست از بازی را تمام کرده، پیام‌ها را پاکسازی کرده و برای دست بعدی آماده می‌شود.
         """
         await self._clear_game_messages(game, chat_id)
+        await self._clear_player_anchors(game)
 
         # ۲. ذخیره بازیکنان برای دست بعدی
         # این باعث می‌شود در بازی بعدی، لازم نباشد همه دوباره دکمهٔ نشستن سر میز را بزنند

@@ -89,6 +89,11 @@ class Player:
     def __repr__(self):
         return "{}({!r})".format(self.__class__.__name__, self.__dict__)
 
+    def is_active(self) -> bool:
+        """Return ``True`` if the player is still participating in the hand."""
+
+        return self.state in (PlayerState.ACTIVE, PlayerState.ALL_IN)
+
     def __getstate__(self):
         state = self.__dict__.copy()
         wallet = state.pop("wallet", None)
