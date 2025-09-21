@@ -182,6 +182,9 @@ class MessagingService:
             if message_id is not None:
                 content_hash = self._content_hash(text, reply_markup)
                 await self._remember_content(chat_id, message_id, content_hash)
+                if text is not None:
+                    text_hash = hashlib.md5(text.encode("utf-8")).hexdigest()
+                    await self._set_last_text_hash(message_id, text_hash)
                 self._log_api_call(
                     "send_message",
                     chat_id=chat_id,
@@ -484,11 +487,11 @@ class MessagingService:
                 )
                 return message_id
 
-            if (
-                not payload.force
-                and payload.text is not None
-            ):
+            text_hash: Optional[str] = None
+            if payload.text is not None:
                 text_hash = hashlib.md5(payload.text.encode("utf-8")).hexdigest()
+
+            if not payload.force and text_hash is not None:
                 last_hash = await self._last_known_text_hash(message_id)
                 if last_hash is not None and last_hash == text_hash:
                     debug_trace_logger.info(
@@ -531,6 +534,8 @@ class MessagingService:
                 raise
 
         await self._remember_content(chat_id, message_id, content_hash)
+        if text_hash is not None:
+            await self._set_last_text_hash(message_id, text_hash)
         self._log_api_call(
             "edit_message_text",
             chat_id=chat_id,
@@ -629,6 +634,8 @@ class MessagingService:
         if message_id is None:
             return False
 
+        await self._mark_message_deleted(message_id)
+
         key = (int(chat_id), int(message_id))
         state = self._pending_edits.get(key)
         if state is not None:
@@ -654,6 +661,7 @@ class MessagingService:
         lock = await self._acquire_lock(chat_id, message_id)
         async with lock:
             result: Any = False
+            deletion_successful = False
             try:
                 trace_telegram_api_call(
                     "deleteMessage",
@@ -665,8 +673,13 @@ class MessagingService:
                     message_id=message_id,
                     **params,
                 )
+                deletion_successful = bool(result)
             finally:
                 await self._forget_content(chat_id, message_id)
+                if deletion_successful:
+                    await self._pop_last_text_hash(message_id)
+                else:
+                    await self._unmark_message_deleted(message_id)
 
         state = self._pending_edits.pop(key, None)
         if state is not None:
@@ -679,6 +692,10 @@ class MessagingService:
                 if not future.done():
                     future.set_result(True)
             state.delete_waiters.clear()
+            debug_trace_logger.info(
+                "[MessagingService] Purged pending edits for deleted message_id=%s",
+                message_id,
+            )
         self._last_edit_timestamp.pop(key, None)
 
         self._log_api_call(
@@ -822,6 +839,28 @@ class MessagingService:
         async with lock:
             return target in self._deleted_messages_ref
 
+    async def _mark_message_deleted(self, message_id: int) -> None:
+        if self._deleted_messages_ref is None:
+            return
+        target = int(message_id)
+        lock = self._deleted_messages_lock
+        if lock is None:
+            self._deleted_messages_ref.add(target)
+            return
+        async with lock:
+            self._deleted_messages_ref.add(target)
+
+    async def _unmark_message_deleted(self, message_id: int) -> None:
+        if self._deleted_messages_ref is None:
+            return
+        target = int(message_id)
+        lock = self._deleted_messages_lock
+        if lock is None:
+            self._deleted_messages_ref.discard(target)
+            return
+        async with lock:
+            self._deleted_messages_ref.discard(target)
+
     async def _last_known_text_hash(self, message_id: int) -> Optional[str]:
         if self._last_message_hash_ref is None:
             return None
@@ -831,6 +870,28 @@ class MessagingService:
             return self._last_message_hash_ref.get(target)
         async with lock:
             return self._last_message_hash_ref.get(target)
+
+    async def _set_last_text_hash(self, message_id: int, value: str) -> None:
+        if self._last_message_hash_ref is None:
+            return
+        target = int(message_id)
+        lock = self._last_message_hash_lock
+        if lock is None:
+            self._last_message_hash_ref[target] = value
+            return
+        async with lock:
+            self._last_message_hash_ref[target] = value
+
+    async def _pop_last_text_hash(self, message_id: int) -> None:
+        if self._last_message_hash_ref is None:
+            return
+        target = int(message_id)
+        lock = self._last_message_hash_lock
+        if lock is None:
+            self._last_message_hash_ref.pop(target, None)
+            return
+        async with lock:
+            self._last_message_hash_ref.pop(target, None)
 
     async def _log_skip(
         self,
@@ -849,6 +910,12 @@ class MessagingService:
                 "category": category.value,
                 "reason": reason,
             },
+        )
+        debug_trace_logger.info(
+            "[MessagingService] Skipping request for chat_id=%s message_id=%s reason=%s",
+            chat_id,
+            message_id,
+            reason,
         )
         if self._metrics is not None and message_id is not None:
             await self._metrics.record_skip(
