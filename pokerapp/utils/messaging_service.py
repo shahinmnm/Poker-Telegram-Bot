@@ -21,7 +21,7 @@ import json
 import logging
 import time
 import datetime
-from collections import defaultdict
+from collections import defaultdict, deque
 from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable, Dict, List, Optional, Set, Tuple
 
@@ -109,10 +109,12 @@ class MessagingService:
     _COALESCE_WINDOW = 1.5
     #: Minimum quiet period before flushing a queued edit.
     _COALESCE_IDLE = 0.35
-    #: Minimum delay between messages for a single chat (seconds).
-    _SEND_INTERVAL_CHAT = 0.25
+    #: Minimum delay applied to quiet chats (seconds).
+    _MIN_DELAY = 0.05
+    #: Maximum delay applied to very busy chats (seconds).
+    _MAX_DELAY = 0.25
     #: Minimum delay between any two messages globally (seconds).
-    _SEND_INTERVAL_GLOBAL = 0.05
+    _SAFE_GLOBAL_DELAY = 0.05
     #: RetryAfter exception classes recognised by the service.
     _RETRY_AFTER_EXCEPTIONS: Tuple[type, ...] = tuple(
         exc for exc in (TelegramRetryAfter, PTBRetryAfter) if exc is not None
@@ -147,41 +149,62 @@ class MessagingService:
         self._deleted_messages_lock = deleted_messages_lock
         self._last_message_hash_ref = last_message_hash
         self._last_message_hash_lock = last_message_hash_lock
-        self._last_send_time_per_chat: defaultdict[int, float] = defaultdict(float)
+        self._send_history_per_chat: defaultdict[int, deque[float]] = defaultdict(
+            lambda: deque(maxlen=10)
+        )
         self._global_last_send_time = 0.0
 
     async def _throttle_send(self, chat_id: int) -> None:
         """Apply per-chat and global throttling before contacting Telegram."""
 
         chat_key = int(chat_id)
-        if self._SEND_INTERVAL_CHAT > 0:
-            now = time.monotonic()
-            delay = self._SEND_INTERVAL_CHAT - (now - self._last_send_time_per_chat[chat_key])
-            if delay > 0:
-                debug_trace_logger.info(
-                    "[MessagingService] THROTTLE per-chat chat_id=%s delay=%.3fs",
-                    chat_id,
-                    delay,
-                )
-                await asyncio.sleep(delay)
+        now = time.monotonic()
+        history = self._send_history_per_chat[chat_key]
 
-        if self._SEND_INTERVAL_GLOBAL > 0:
-            now = time.monotonic()
-            delay = self._SEND_INTERVAL_GLOBAL - (now - self._global_last_send_time)
-            if delay > 0:
-                debug_trace_logger.info(
-                    "[MessagingService] THROTTLE global chat_id=%s delay=%.3fs",
-                    chat_id,
-                    delay,
-                )
-                await asyncio.sleep(delay)
+        if history:
+            time_since_chat = now - history[-1]
+        else:
+            time_since_chat = float("inf")
+
+        if len(history) > 1:
+            speed = len(history) / (history[-1] - history[0] + 1e-6)
+        else:
+            speed = 0.0
+
+        if speed < 2.0:
+            per_chat_delay = self._MIN_DELAY
+        elif speed < 4.0:
+            per_chat_delay = (self._MIN_DELAY + self._MAX_DELAY) / 2
+        else:
+            per_chat_delay = self._MAX_DELAY
+
+        if time_since_chat < per_chat_delay:
+            delay_needed = per_chat_delay - time_since_chat
+            debug_trace_logger.info(
+                "[MessagingService] ADAPTIVE_THROTTLE per-chat chat_id=%s delay=%.3fs (speed=%.2f msg/s)",
+                chat_id,
+                delay_needed,
+                speed,
+            )
+            await asyncio.sleep(delay_needed)
+
+        now = time.monotonic()
+        time_since_global = now - self._global_last_send_time
+        if time_since_global < self._SAFE_GLOBAL_DELAY:
+            delay_needed = self._SAFE_GLOBAL_DELAY - time_since_global
+            debug_trace_logger.info(
+                "[MessagingService] THROTTLE global chat_id=%s delay=%.3fs",
+                chat_id,
+                delay_needed,
+            )
+            await asyncio.sleep(delay_needed)
 
     def _register_send_time(self, chat_id: int) -> None:
         """Record when the last Telegram API call was successfully made."""
 
         timestamp = time.monotonic()
         chat_key = int(chat_id)
-        self._last_send_time_per_chat[chat_key] = timestamp
+        self._send_history_per_chat[chat_key].append(timestamp)
         self._global_last_send_time = timestamp
 
     async def _call_with_retry(
