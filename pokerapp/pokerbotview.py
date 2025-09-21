@@ -513,6 +513,23 @@ class PokerBotViewer:
         except asyncio.CancelledError:
             return
 
+    async def _purge_pending_updates(
+        self, chat_id: ChatId, message_id: Optional[MessageId]
+    ) -> None:
+        key = (chat_id, message_id)
+        async with self._pending_updates_lock:
+            entry = self._pending_updates.pop(key, None)
+            task = self._pending_update_tasks.pop(key, None)
+        if task is not None:
+            task.cancel()
+        if entry:
+            future = entry.get("future")
+            if isinstance(future, asyncio.Future) and not future.done():
+                try:
+                    future.set_result(message_id)
+                except asyncio.InvalidStateError:
+                    pass
+
     async def _acquire_message_lock(
         self, chat_id: ChatId, message_id: Optional[MessageId]
     ) -> asyncio.Lock:
@@ -767,6 +784,7 @@ class PokerBotViewer:
         disable_web_page_preview: bool = True,
         disable_notification: bool = False,
         request_category: RequestCategory = RequestCategory.GENERAL,
+        debug_extra: Optional[Dict[str, Any]] = None,
     ) -> Optional[MessageId]:
         context = self._build_context(
             "update_message", chat_id=chat_id, message_id=message_id
@@ -787,6 +805,13 @@ class PokerBotViewer:
             self._log_skip_empty(chat_id, message_id)
             return message_id
 
+        def _merge_extra(details: Dict[str, Any]) -> Dict[str, Any]:
+            if debug_extra:
+                merged = dict(debug_extra)
+                merged.update(details)
+                return merged
+            return details
+
         if (
             request_category == RequestCategory.ANCHOR
             and reply_markup is not None
@@ -803,7 +828,9 @@ class PokerBotViewer:
             reply_markup = None
 
         payload_hash = self._payload_hash(normalized_text, reply_markup)
-        message_text_hash = hashlib.md5(normalized_text.encode("utf-8")).hexdigest()
+        message_text_hash = MessagingService._content_hash(
+            normalized_text, reply_markup
+        )
         normalized_chat = self._safe_int(chat_id)
         normalized_existing_message = (
             self._safe_int(message_id) if message_id is not None else None
@@ -848,15 +875,17 @@ class PokerBotViewer:
                 ):
                     logger.debug(
                         "Skipping update_message due to callback throttling",
-                        extra={
-                            "chat_id": chat_id,
-                            "message_id": message_id,
-                            "payload_hash": payload_hash,
-                            "callback_id": callback_id,
-                            "game_stage": callback_stage_name,
-                            "callback_user_id": callback_user_id,
-                            "trigger": "callback_query",
-                        },
+                        extra=_merge_extra(
+                            {
+                                "chat_id": chat_id,
+                                "message_id": message_id,
+                                "payload_hash": payload_hash,
+                                "callback_id": callback_id,
+                                "game_stage": callback_stage_name,
+                                "callback_user_id": callback_user_id,
+                                "trigger": "callback_query",
+                            }
+                        ),
                     )
                     return message_id
         stage_key: Optional[Tuple[int, int, str]] = (
@@ -920,12 +949,14 @@ class PokerBotViewer:
             if cached_stage_hash == payload_hash:
                 logger.debug(
                     "Skipping update_message due to stage throttle",
-                    extra={
-                        "chat_id": chat_id,
-                        "message_id": message_id,
-                        "payload_hash": payload_hash,
-                        "game_stage": callback_stage_name,
-                    },
+                    extra=_merge_extra(
+                        {
+                            "chat_id": chat_id,
+                            "message_id": message_id,
+                            "payload_hash": payload_hash,
+                            "game_stage": callback_stage_name,
+                        }
+                    ),
                 )
                 await self._request_metrics.record_skip(
                     chat_id=normalized_chat,
@@ -939,17 +970,19 @@ class PokerBotViewer:
             if previous_payload_hash == payload_hash:
                 logger.debug(
                     "Skipping update_message due to identical payload",
-                    extra={
-                        "chat_id": chat_id,
-                        "message_id": message_id,
-                        "payload_hash": payload_hash,
-                        "callback_id": callback_id,
-                        "game_stage": callback_stage_name,
-                        "callback_user_id": callback_user_id,
-                        "trigger": "callback_query"
-                        if callback_id is not None
-                        else "automatic",
-                    },
+                    extra=_merge_extra(
+                        {
+                            "chat_id": chat_id,
+                            "message_id": message_id,
+                            "payload_hash": payload_hash,
+                            "callback_id": callback_id,
+                            "game_stage": callback_stage_name,
+                            "callback_user_id": callback_user_id,
+                            "trigger": "callback_query"
+                            if callback_id is not None
+                            else "automatic",
+                        }
+                    ),
                 )
                 await self._request_metrics.record_skip(
                     chat_id=normalized_chat,
@@ -962,11 +995,13 @@ class PokerBotViewer:
             if cached_turn_hash == payload_hash:
                 logger.debug(
                     "Skipping turn update due to LRU cache hit",
-                    extra={
-                        "chat_id": chat_id,
-                        "message_id": message_id,
-                        "payload_hash": payload_hash,
-                    },
+                    extra=_merge_extra(
+                        {
+                            "chat_id": chat_id,
+                            "message_id": message_id,
+                            "payload_hash": payload_hash,
+                        }
+                    ),
                 )
                 await self._request_metrics.record_skip(
                     chat_id=normalized_chat,
@@ -1015,11 +1050,13 @@ class PokerBotViewer:
                         ):
                             logger.debug(
                                 "Ignoring unsupported reply markup during anchor refresh",
-                                extra={
-                                    "chat_id": chat_id,
-                                    "message_id": message_id,
-                                    "markup_type": type(reply_markup).__name__,
-                                },
+                                extra=_merge_extra(
+                                    {
+                                        "chat_id": chat_id,
+                                        "message_id": message_id,
+                                        "markup_type": type(reply_markup).__name__,
+                                    }
+                                ),
                             )
                             reply_markup = None
                         callback_token_registered = False
@@ -1098,17 +1135,19 @@ class PokerBotViewer:
                 if previous_payload_hash == payload_hash:
                     logger.debug(
                         "Skipping update_message inside lock due to identical payload",
-                        extra={
-                            "chat_id": chat_id,
-                            "message_id": message_id,
-                            "payload_hash": payload_hash,
-                            "callback_id": callback_id,
-                            "game_stage": callback_stage_name,
-                            "callback_user_id": callback_user_id,
-                            "trigger": "callback_query"
-                            if callback_id is not None
-                            else "automatic",
-                        },
+                        extra=_merge_extra(
+                            {
+                                "chat_id": chat_id,
+                                "message_id": message_id,
+                                "payload_hash": payload_hash,
+                                "callback_id": callback_id,
+                                "game_stage": callback_stage_name,
+                                "callback_user_id": callback_user_id,
+                                "trigger": "callback_query"
+                                if callback_id is not None
+                                else "automatic",
+                            }
+                        ),
                     )
                     await self._request_metrics.record_skip(
                         chat_id=normalized_chat,
@@ -1120,12 +1159,14 @@ class PokerBotViewer:
                 if cached_stage_hash == payload_hash:
                     logger.debug(
                         "Skipping update_message inside lock due to stage throttle",
-                        extra={
-                            "chat_id": chat_id,
-                            "message_id": message_id,
-                            "payload_hash": payload_hash,
-                            "game_stage": callback_stage_name,
-                        },
+                        extra=_merge_extra(
+                            {
+                                "chat_id": chat_id,
+                                "message_id": message_id,
+                                "payload_hash": payload_hash,
+                                "game_stage": callback_stage_name,
+                            }
+                        ),
                     )
                     await self._request_metrics.record_skip(
                         chat_id=normalized_chat,
@@ -1156,15 +1197,17 @@ class PokerBotViewer:
             ):
                 logger.debug(
                     "Skipping update_message inside lock due to callback throttling",
-                    extra={
-                        "chat_id": chat_id,
-                        "message_id": message_id,
-                        "payload_hash": payload_hash,
-                        "callback_id": callback_id,
-                        "game_stage": callback_stage_name,
-                        "callback_user_id": callback_user_id,
-                        "trigger": "callback_query",
-                    },
+                    extra=_merge_extra(
+                        {
+                            "chat_id": chat_id,
+                            "message_id": message_id,
+                            "payload_hash": payload_hash,
+                            "callback_id": callback_id,
+                            "game_stage": callback_stage_name,
+                            "callback_user_id": callback_user_id,
+                            "trigger": "callback_query",
+                        }
+                    ),
                 )
                 await self._request_metrics.record_skip(
                     chat_id=normalized_chat,
@@ -1216,11 +1259,13 @@ class PokerBotViewer:
                     self._last_callback_edit.pop(callback_throttle_key, None)
                 logger.error(
                     "Failed to update message",
-                    extra={
-                        "chat_id": chat_id,
-                        "message_id": message_id,
-                        "error_type": type(exc).__name__,
-                    },
+                    extra=_merge_extra(
+                        {
+                            "chat_id": chat_id,
+                            "message_id": message_id,
+                            "error_type": type(exc).__name__,
+                        }
+                    ),
                 )
                 return message_id
 
@@ -1395,6 +1440,15 @@ class PokerBotViewer:
             player.anchor_message = (chat_id, normalized_anchor)
             player.anchor_role = role_label
             player.role_label = role_label
+            player.anchor_last_text = text
+            player.anchor_last_markup_signature = (
+                self._serialize_markup(keyboard) or ""
+            )
+            anchor_map = getattr(game, "player_anchor_messages", None)
+            if isinstance(anchor_map, dict):
+                anchor_map[self._safe_int(getattr(player, "user_id", None))] = (
+                    normalized_anchor
+                )
 
     @staticmethod
     def _describe_player_role(game: Game, player: Player) -> str:
@@ -1413,7 +1467,7 @@ class PokerBotViewer:
 
     @staticmethod
     def _get_player_anchor_message_id(
-        chat_id: ChatId, player: Player
+        chat_id: ChatId, player: Player, game: Optional[Game] = None
     ) -> Optional[int]:
         anchor_meta = getattr(player, "anchor_message", None)
         if (
@@ -1425,6 +1479,18 @@ class PokerBotViewer:
                 return int(anchor_meta[1])
             except (TypeError, ValueError):
                 return None
+        if game is not None:
+            anchor_map = getattr(game, "player_anchor_messages", None)
+            if isinstance(anchor_map, dict):
+                lookup_key = PokerBotViewer._safe_int(
+                    getattr(player, "user_id", None)
+                )
+                value = anchor_map.get(lookup_key)
+                if value is not None:
+                    try:
+                        return int(value)
+                    except (TypeError, ValueError):
+                        return None
         return None
 
     async def update_player_anchors_and_keyboards(self, game: Game) -> None:
@@ -1485,7 +1551,7 @@ class PokerBotViewer:
             ):
                 continue
 
-            anchor_id = self._get_player_anchor_message_id(chat_id, player)
+            anchor_id = self._get_player_anchor_message_id(chat_id, player, game)
             if not anchor_id:
                 continue
 
@@ -1526,18 +1592,57 @@ class PokerBotViewer:
             if is_current_turn:
                 text = "\n".join([text, "", "🎯 نوبت این بازیکن است."])
 
-            logger.debug(
-                "Anchor update: player=%s | seat=%s | role=%s | hole_cards=%s | "
-                "community_cards=%s | is_turn=%s | chat_id=%s | anchor_id=%s",
-                display_name,
-                seat_number,
-                role_label,
-                hole_cards,
-                community_cards,
-                is_current_turn,
-                chat_id,
-                anchor_id,
-            )
+            serialized_markup = self._serialize_markup(keyboard) or ""
+            payload_hash = self._payload_hash(text, keyboard)
+
+            extra_info: Dict[str, Any] = {
+                "chat_id": chat_id,
+                "player_name": display_name,
+                "seat_number": seat_number,
+                "role_label": role_label,
+                "is_turn": is_current_turn,
+                "payload_hash": payload_hash,
+            }
+
+            if not anchor_id:
+                logger.info(
+                    "Anchor update skipped; anchor id missing",
+                    extra={**extra_info, "skip_reason": "missing_anchor"},
+                )
+                continue
+
+            has_deleted = await self._is_message_deleted(anchor_id)
+            log_context = {
+                **extra_info,
+                "anchor_message_id": anchor_id,
+                "has_deleted": has_deleted,
+            }
+
+            logger.info("Anchor update attempt", extra=log_context)
+
+            if has_deleted:
+                logger.info(
+                    "Anchor update skipped; message marked deleted",
+                    extra={**log_context, "skip_reason": "deleted"},
+                )
+                continue
+
+            previous_text = getattr(player, "anchor_last_text", None)
+            previous_markup = getattr(player, "anchor_last_markup_signature", None) or ""
+            text_changed = text != previous_text
+            markup_changed = serialized_markup != previous_markup
+
+            if not text_changed and not markup_changed:
+                logger.info(
+                    "Anchor update skipped; text and markup unchanged",
+                    extra={
+                        **log_context,
+                        "skip_reason": "text_and_markup_equal",
+                        "text_changed": text_changed,
+                        "markup_changed": markup_changed,
+                    },
+                )
+                continue
 
             try:
                 result = await self._update_message(
@@ -1546,12 +1651,13 @@ class PokerBotViewer:
                     text=text,
                     reply_markup=keyboard,
                     request_category=RequestCategory.ANCHOR,
+                    debug_extra=log_context,
                 )
             except Exception as exc:
                 logger.error(
                     "Failed to refresh anchor",
                     extra={
-                        "chat_id": chat_id,
+                        **log_context,
                         "player_id": getattr(player, "user_id", None),
                         "error_type": type(exc).__name__,
                     },
@@ -1575,6 +1681,13 @@ class PokerBotViewer:
             except (TypeError, ValueError):
                 continue
             player.anchor_message = (chat_id, normalized_anchor)
+            player.anchor_last_text = text
+            player.anchor_last_markup_signature = serialized_markup
+            anchor_map = getattr(game, "player_anchor_messages", None)
+            if isinstance(anchor_map, dict):
+                anchor_map[self._safe_int(getattr(player, "user_id", None))] = (
+                    normalized_anchor
+                )
 
     async def clear_all_player_anchors(self, game: Game) -> None:
         chat_id = getattr(game, "chat_id", None)
@@ -1582,12 +1695,13 @@ class PokerBotViewer:
             return
 
         message_ids_to_delete = getattr(game, "message_ids_to_delete", [])
+        anchor_map = getattr(game, "player_anchor_messages", None)
 
         for player in list(getattr(game, "players", [])):
             if player is None:
                 continue
 
-            anchor_id = self._get_player_anchor_message_id(chat_id, player)
+            anchor_id = self._get_player_anchor_message_id(chat_id, player, game)
             if anchor_id:
                 try:
                     await self.delete_message(chat_id=chat_id, message_id=anchor_id)
@@ -1609,6 +1723,27 @@ class PokerBotViewer:
             player.anchor_message = None
             player.anchor_role = "بازیکن"
             player.role_label = "بازیکن"
+            player.anchor_last_text = None
+            player.anchor_last_markup_signature = None
+            if isinstance(anchor_map, dict):
+                anchor_map.pop(self._safe_int(getattr(player, "user_id", None)), None)
+
+        if isinstance(anchor_map, dict):
+            anchor_map.clear()
+
+    async def reset_player_anchor_state(self, game: Game) -> None:
+        anchor_map = getattr(game, "player_anchor_messages", None)
+        if isinstance(anchor_map, dict):
+            anchor_map.clear()
+
+        for player in list(getattr(game, "players", [])):
+            if player is None:
+                continue
+            player.anchor_message = None
+            player.anchor_role = "بازیکن"
+            player.role_label = "بازیکن"
+            player.anchor_last_text = None
+            player.anchor_last_markup_signature = None
 
     async def announce_player_seats(
         self,
@@ -1943,13 +2078,22 @@ class PokerBotViewer:
         normalized_message = self._safe_int(message_id)
         lock = await self._acquire_message_lock(chat_id, message_id)
         async with lock:
+            await self._mark_message_deleted(normalized_message)
+            delete_succeeded = False
             try:
                 await self._messenger.delete_message(
                     chat_id=chat_id,
                     message_id=message_id,
                     request_category=RequestCategory.DELETE,
                 )
-                await self._mark_message_deleted(normalized_message)
+                delete_succeeded = True
+                logger.info(
+                    "Deleted message",
+                    extra={
+                        "chat_id": chat_id,
+                        "message_id": message_id,
+                    },
+                )
             except (BadRequest, Forbidden) as e:
                 error_message = getattr(e, "message", None) or str(e) or ""
                 normalized_error = error_message.lower()
@@ -1991,9 +2135,19 @@ class PokerBotViewer:
                 )
                 return
             finally:
+                await self._purge_pending_updates(chat_id, message_id)
                 await self._clear_callback_tokens_for_message(
                     normalized_chat, normalized_message
                 )
+                await self._unmark_message_deleted(normalized_message)
+                if not delete_succeeded:
+                    logger.debug(
+                        "Delete message did not complete successfully",
+                        extra={
+                            "chat_id": chat_id,
+                            "message_id": message_id,
+                        },
+                    )
 
     async def send_single_card(
         self,
@@ -2294,49 +2448,81 @@ class PokerBotViewer:
         """Update a message's inline keyboard while handling common failures."""
         if not message_id:
             return False
-        try:
-            return await self._messenger.edit_message_reply_markup(
-                chat_id=chat_id,
-                message_id=message_id,
-                reply_markup=reply_markup,
-                request_category=RequestCategory.INLINE,
-            )
-        except BadRequest as e:
-            err = str(e).lower()
-            if "message is not modified" in err:
+        normalized_message = self._safe_int(message_id)
+        lock = await self._acquire_message_lock(chat_id, message_id)
+        async with lock:
+            if await self._is_message_deleted(normalized_message):
                 logger.info(
-                    "Reply markup already up to date",
+                    "Skipping reply markup edit; message marked deleted",
                     extra={"chat_id": chat_id, "message_id": message_id},
                 )
-                return True
-            if "message to edit not found" not in err:
-                logger.warning(
-                    "BadRequest editing reply markup",
+                return False
+            try:
+                return await self._messenger.edit_message_reply_markup(
+                    chat_id=chat_id,
+                    message_id=message_id,
+                    reply_markup=reply_markup,
+                    request_category=RequestCategory.INLINE,
+                )
+            except BadRequest as e:
+                err = str(e).lower()
+                if "message is not modified" in err:
+                    logger.info(
+                        "Reply markup already up to date",
+                        extra={"chat_id": chat_id, "message_id": message_id},
+                    )
+                    return True
+                if "message to edit not found" not in err:
+                    logger.warning(
+                        "BadRequest editing reply markup",
+                        extra={
+                            "error_type": type(e).__name__,
+                            "chat_id": chat_id,
+                            "message_id": message_id,
+                        },
+                    )
+                return False
+            except Forbidden as e:
+                logger.info(
+                    "Cannot edit reply markup, bot unauthorized",
                     extra={
                         "error_type": type(e).__name__,
                         "chat_id": chat_id,
                         "message_id": message_id,
                     },
                 )
-        except Forbidden as e:
-            logger.info(
-                "Cannot edit reply markup, bot unauthorized",
-                extra={
-                    "error_type": type(e).__name__,
-                    "chat_id": chat_id,
-                    "message_id": message_id,
-                },
-            )
-        except Exception as e:
-            logger.error(
-                "Unexpected error editing reply markup",
-                extra={
-                    "error_type": type(e).__name__,
-                    "chat_id": chat_id,
-                    "message_id": message_id,
-                },
-            )
-        return False
+                return False
+            except RetryAfter as e:
+                logger.warning(
+                    "RetryAfter editing reply markup",
+                    extra={
+                        "error_type": type(e).__name__,
+                        "chat_id": chat_id,
+                        "message_id": message_id,
+                        "retry_after": getattr(e, "retry_after", None),
+                    },
+                )
+                return False
+            except TelegramError as e:
+                logger.warning(
+                    "TelegramError editing reply markup",
+                    extra={
+                        "error_type": type(e).__name__,
+                        "chat_id": chat_id,
+                        "message_id": message_id,
+                    },
+                )
+                return False
+            except Exception as e:
+                logger.error(
+                    "Unexpected error editing reply markup",
+                    extra={
+                        "error_type": type(e).__name__,
+                        "chat_id": chat_id,
+                        "message_id": message_id,
+                    },
+                )
+                return False
 
     async def remove_markup(self, chat_id: ChatId, message_id: MessageId) -> None:
         """حذف دکمه‌های اینلاین از یک پیام و فیلتر کردن ارورهای رایج."""

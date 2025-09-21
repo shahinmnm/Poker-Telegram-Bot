@@ -3,7 +3,7 @@
 from abc import ABC, abstractmethod
 import enum
 import datetime
-from typing import Tuple, List, Optional
+from typing import Tuple, List, Optional, Dict
 from uuid import uuid4
 from pokerapp.cards import get_cards
 MAX_PLAYERS = 8
@@ -89,6 +89,8 @@ class Player:
         self.is_dealer: bool = False
         self.is_small_blind: bool = False
         self.is_big_blind: bool = False
+        self.anchor_last_text: Optional[str] = None
+        self.anchor_last_markup_signature: Optional[str] = None
         # -------------------------
     def __repr__(self):
         return "{}({!r})".format(self.__class__.__name__, self.__dict__)
@@ -163,6 +165,9 @@ class Game:
 
         # پیام لیست صندلی‌ها که ابتدای هر دست ارسال می‌شود
         self.seat_announcement_message_id: Optional[MessageId] = None
+
+        # شناسه پیام‌های لنگر بازیکنان که تا پایان دست باید باقی بمانند
+        self.player_anchor_messages: Dict[int, int] = {}
 
     # --- Seats / players helpers ----------------------------------------
     @property
