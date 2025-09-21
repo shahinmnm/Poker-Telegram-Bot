@@ -161,6 +161,8 @@ def test_update_player_anchors_and_keyboards_highlights_active_player():
     player_two.cards = [Card('9♣'), Card('9♦')]
     player_one.display_name = 'Player One'
     player_two.display_name = 'Player Two'
+    player_one.role_label = 'دیلر'
+    player_two.role_label = 'بلایند بزرگ'
 
     player_one.anchor_message = (game.chat_id, 101)
     player_two.anchor_message = (game.chat_id, 202)
@@ -177,6 +179,7 @@ def test_update_player_anchors_and_keyboards_highlights_active_player():
     assert "🎯 It's this player's turn." in first_call.kwargs['text']
     assert 'Player One' in first_call.kwargs['text']
     assert 'Seat: 1' in first_call.kwargs['text']
+    assert 'Role: دیلر' in first_call.kwargs['text']
     assert isinstance(first_call.kwargs['reply_markup'], ReplyKeyboardMarkup)
     board_row = _row_texts(first_call.kwargs['reply_markup'].keyboard[1])
     assert board_row == ['A♠', 'K♦', '5♣']
@@ -184,6 +187,7 @@ def test_update_player_anchors_and_keyboards_highlights_active_player():
     assert second_call.kwargs['message_id'] == 202
     assert "🎯 It's this player's turn." not in second_call.kwargs['text']
     assert 'Player Two' in second_call.kwargs['text']
+    assert 'Role: بلایند بزرگ' in second_call.kwargs['text']
 
     assert player_one.anchor_message == (game.chat_id, 101)
     assert player_two.anchor_message == (game.chat_id, 202)
@@ -235,6 +239,7 @@ def test_clear_all_player_anchors_deletes_messages():
     viewer.delete_message.assert_awaited_once_with(chat_id=game.chat_id, message_id=404)
     assert player.anchor_message is None
     assert player.anchor_role == 'بازیکن'
+    assert player.role_label == 'بازیکن'
     assert 404 not in game.message_ids_to_delete
 
 

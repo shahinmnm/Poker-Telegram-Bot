@@ -1383,11 +1383,12 @@ class PokerBotViewer:
                 current_stage=stage_name,
             )
 
-            role_label = self._describe_player_role(game, player)
-            player.anchor_role = role_label
+            role_label = getattr(player, "role_label", None) or getattr(
+                player, "anchor_role", "بازیکن"
+            )
 
-            seat_index = player.seat_index if player.seat_index is not None else 0
-            seat_number = seat_index + 1
+            seat_index = player.seat_index if player.seat_index is not None else -1
+            seat_number = seat_index + 1 if seat_index >= 0 else "?"
             display_name = (
                 getattr(player, "display_name", None) or player.mention_markdown
             )
@@ -1397,10 +1398,24 @@ class PokerBotViewer:
                 f"🪑 Seat: {seat_number}",
                 f"🎖️ Role: {role_label}",
             ]
-            if current_player is player:
+            is_current_turn = current_player is player
+            if is_current_turn:
                 lines.append("")
                 lines.append("🎯 It's this player's turn.")
             text = "\n".join(lines)
+
+            logger.debug(
+                "Anchor update: player=%s | seat=%s | role=%s | hole_cards=%s | "
+                "community_cards=%s | is_turn=%s | chat_id=%s | anchor_id=%s",
+                display_name,
+                seat_number,
+                role_label,
+                hole_cards,
+                community_cards,
+                is_current_turn,
+                chat_id,
+                anchor_id,
+            )
 
             try:
                 result = await self._update_message(
@@ -1471,6 +1486,7 @@ class PokerBotViewer:
 
             player.anchor_message = None
             player.anchor_role = "بازیکن"
+            player.role_label = "بازیکن"
 
     async def announce_player_seats(
         self,

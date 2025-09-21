@@ -107,6 +107,64 @@ PRIVATE_MATCH_STATE_TTL = 3600  # seconds
 logger = logging.getLogger(__name__)
 
 
+ROLE_TRANSLATIONS = {
+    "dealer": "دیلر",
+    "small_blind": "بلایند کوچک",
+    "big_blind": "بلایند بزرگ",
+    "player": "بازیکن",
+}
+
+
+def assign_role_labels(game: Game) -> None:
+    """Assign localized role labels to players based on current blinds."""
+
+    players = list(getattr(game, "players", []))
+    if not players:
+        return
+
+    dealer_index = getattr(game, "dealer_index", -1)
+    small_blind_index = getattr(game, "small_blind_index", -1)
+    big_blind_index = getattr(game, "big_blind_index", -1)
+
+    for player in players:
+        seat_index = getattr(player, "seat_index", None)
+        is_valid_seat = isinstance(seat_index, int) and seat_index >= 0
+
+        is_dealer = is_valid_seat and seat_index == dealer_index
+        is_small_blind = is_valid_seat and seat_index == small_blind_index
+        is_big_blind = is_valid_seat and seat_index == big_blind_index
+
+        roles: List[str] = []
+        if is_dealer:
+            roles.append(ROLE_TRANSLATIONS["dealer"])
+        if is_small_blind:
+            roles.append(ROLE_TRANSLATIONS["small_blind"])
+        if is_big_blind:
+            roles.append(ROLE_TRANSLATIONS["big_blind"])
+        if not roles:
+            roles.append(ROLE_TRANSLATIONS["player"])
+
+        role_label = "، ".join(dict.fromkeys(roles))
+
+        player.role_label = role_label
+        player.anchor_role = role_label
+        player.is_dealer = is_dealer
+        player.is_small_blind = is_small_blind
+        player.is_big_blind = is_big_blind
+
+        seat_number = (seat_index + 1) if is_valid_seat else "?"
+        display_name = getattr(player, "display_name", None) or getattr(
+            player, "mention_markdown", getattr(player, "user_id", "?")
+        )
+
+        logger.debug(
+            "Assigned role_label: player=%s seat=%s role=%s",
+            display_name,
+            seat_number,
+            role_label,
+        )
+
+
 @dataclass(slots=True)
 class PrivateMatchPlayerInfo:
     user_id: int
@@ -1748,6 +1806,7 @@ class PokerBotModel:
             # این متد به تنهایی تمام کارهای لازم برای شروع راند را انجام می‌دهد.
             # از جمله تعیین بلایندها، تعیین نوبت اول و ارسال پیام نوبت.
             current_player = await self._round_rate.set_blinds(game, chat_id)
+            assign_role_labels(game)
 
             action_str = "بازی شروع شد"
             game.last_actions.append(action_str)
