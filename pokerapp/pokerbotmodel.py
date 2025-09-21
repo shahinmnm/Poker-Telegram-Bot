@@ -1790,16 +1790,23 @@ class PokerBotModel:
                 self._safe_int(chat_id), game.id
             )
 
-            stage_lock = await self._get_stage_lock(chat_id)
-            async with stage_lock:
-                seat_message_id = await self._view.announce_player_seats(
-                    chat_id=chat_id,
-                    players=list(game.seated_players()),
-                    dealer_index=game.dealer_index,
-                    message_id=game.seat_announcement_message_id,
-                )
-                if seat_message_id:
-                    game.seat_announcement_message_id = seat_message_id
+            if game.seat_announcement_message_id:
+                try:
+                    await self._view.delete_message(
+                        chat_id, game.seat_announcement_message_id
+                    )
+                except Exception as exc:
+                    logger.debug(
+                        "Failed to delete seat announcement",
+                        extra={
+                            "chat_id": chat_id,
+                            "message_id": game.seat_announcement_message_id,
+                            "error_type": type(exc).__name__,
+                        },
+                    )
+                game.seat_announcement_message_id = None
+
+            await self._clear_player_anchors(game)
 
             await self._divide_cards(game, chat_id)
 
@@ -1808,12 +1815,17 @@ class PokerBotModel:
             current_player = await self._round_rate.set_blinds(game, chat_id)
             assign_role_labels(game)
 
+            game.chat_id = chat_id
+
+            stage_lock = await self._get_stage_lock(chat_id)
+            async with stage_lock:
+                await self._view.send_player_role_anchors(game=game, chat_id=chat_id)
+
             action_str = "بازی شروع شد"
             game.last_actions.append(action_str)
             if len(game.last_actions) > 5:
                 game.last_actions.pop(0)
             if current_player:
-                game.chat_id = chat_id
                 await self._send_turn_message(
                     game,
                     current_player,

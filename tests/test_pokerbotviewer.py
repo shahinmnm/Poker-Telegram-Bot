@@ -176,18 +176,20 @@ def test_update_player_anchors_and_keyboards_highlights_active_player():
     second_call = viewer._update_message.await_args_list[1]
 
     assert first_call.kwargs['message_id'] == 101
-    assert "🎯 It's this player's turn." in first_call.kwargs['text']
-    assert 'Player One' in first_call.kwargs['text']
-    assert 'Seat: 1' in first_call.kwargs['text']
-    assert 'Role: دیلر' in first_call.kwargs['text']
+    first_text = first_call.kwargs['text']
+    assert "🎯 نوبت این بازیکن است." in first_text
+    assert 'Player One' in first_text
+    assert '🪑 صندلی: 1' in first_text
+    assert '🎖️ نقش: دیلر' in first_text
     assert isinstance(first_call.kwargs['reply_markup'], ReplyKeyboardMarkup)
     board_row = _row_texts(first_call.kwargs['reply_markup'].keyboard[1])
     assert board_row == ['A♠', 'K♦', '5♣']
 
     assert second_call.kwargs['message_id'] == 202
-    assert "🎯 It's this player's turn." not in second_call.kwargs['text']
-    assert 'Player Two' in second_call.kwargs['text']
-    assert 'Role: بلایند بزرگ' in second_call.kwargs['text']
+    second_text = second_call.kwargs['text']
+    assert "🎯 نوبت این بازیکن است." not in second_text
+    assert 'Player Two' in second_text
+    assert '🎖️ نقش: بلایند بزرگ' in second_text
 
     assert player_one.anchor_message == (game.chat_id, 101)
     assert player_two.anchor_message == (game.chat_id, 202)
