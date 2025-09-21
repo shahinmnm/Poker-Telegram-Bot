@@ -44,6 +44,7 @@ async def _build_model():
     view.send_message = AsyncMock()
     view.send_message_return_id = AsyncMock(return_value=None)
     view.update_player_anchors_and_keyboards = AsyncMock()
+    view.clear_all_player_anchors = AsyncMock(return_value=None)
     bot = MagicMock()
     cfg = Config()
     table_manager = TableManager(kv)

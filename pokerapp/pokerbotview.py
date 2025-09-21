@@ -1329,19 +1329,17 @@ class PokerBotViewer:
                 stage = GameState(stage)
             except Exception:
                 stage = GameState.INITIAL
+        stage_name = stage.name
 
-        community_cards_source: Sequence[Card] = []
-        if hasattr(game, "community_cards"):
-            try:
-                community_cards_source = list(getattr(game, "community_cards"))
-            except Exception:
-                community_cards_source = []
-        if not community_cards_source:
-            try:
-                community_cards_source = list(getattr(game, "cards_table", []))
-            except Exception:
-                community_cards_source = []
-        community_cards = [str(card) for card in community_cards_source]
+        community_cards_source: Optional[Sequence[Card]] = getattr(
+            game, "community_cards", None
+        )
+        if community_cards_source is None:
+            community_cards_source = getattr(game, "cards_table", [])
+        try:
+            community_cards = [str(card) for card in community_cards_source or []]
+        except Exception:
+            community_cards = []
 
         current_player: Optional[Player] = None
         current_index = getattr(game, "current_player_index", None)
@@ -1351,44 +1349,58 @@ class PokerBotViewer:
             except Exception:
                 current_player = None
 
-        tracked_message_ids: Set[int] = set()
-
         for player in list(getattr(game, "players", [])):
             if player is None:
                 continue
+            is_active = getattr(player, "is_active", None)
+            if callable(is_active):
+                try:
+                    if not player.is_active():
+                        continue
+                except Exception:
+                    continue
+            elif getattr(player, "state", None) not in (
+                PlayerState.ACTIVE,
+                PlayerState.ALL_IN,
+            ):
+                continue
 
             anchor_id = self._get_player_anchor_message_id(chat_id, player)
+            if not anchor_id:
+                continue
+
+            hole_cards_source = getattr(player, "hole_cards", None)
+            if hole_cards_source is None:
+                hole_cards_source = getattr(player, "cards", [])
+            try:
+                hole_cards = [str(card) for card in hole_cards_source or []]
+            except Exception:
+                hole_cards = []
+
+            keyboard = build_player_cards_keyboard(
+                hole_cards=hole_cards,
+                community_cards=community_cards,
+                current_stage=stage_name,
+            )
 
             role_label = self._describe_player_role(game, player)
             player.anchor_role = role_label
 
             seat_index = player.seat_index if player.seat_index is not None else 0
             seat_number = seat_index + 1
-
-            hole_cards_source = getattr(player, "hole_cards", None)
-            if hole_cards_source is None:
-                hole_cards_source = getattr(player, "cards", [])
-            player_hole_cards = [str(card) for card in hole_cards_source or []]
-
-            keyboard = build_player_cards_keyboard(
-                hole_cards=player_hole_cards,
-                community_cards=community_cards,
-                current_stage=stage.name,
+            display_name = (
+                getattr(player, "display_name", None) or player.mention_markdown
             )
 
-            is_current_turn = (
-                current_player is not None
-                and player is current_player
-                and getattr(player, "state", None) == PlayerState.ACTIVE
-            )
-
-            text = self._build_anchor_text(
-                mention_markdown=player.mention_markdown,
-                seat_number=seat_number,
-                role_label=role_label,
-            )
-            if is_current_turn:
-                text = f"{text}\n\n🎯 نوبت بازی این بازیکن است."
+            lines = [
+                f"🎮 {display_name}",
+                f"🪑 Seat: {seat_number}",
+                f"🎖️ Role: {role_label}",
+            ]
+            if current_player is player:
+                lines.append("")
+                lines.append("🎯 It's this player's turn.")
+            text = "\n".join(lines)
 
             try:
                 result = await self._update_message(
@@ -1396,8 +1408,6 @@ class PokerBotViewer:
                     message_id=anchor_id,
                     text=text,
                     reply_markup=keyboard,
-                    parse_mode=ParseMode.MARKDOWN,
-                    disable_notification=anchor_id is not None,
                     request_category=RequestCategory.ANCHOR,
                 )
             except Exception as exc:
@@ -1411,49 +1421,56 @@ class PokerBotViewer:
                 )
                 continue
 
-            resolved_message_id: Optional[int]
+            resolved_anchor_id: Optional[int] = None
             if isinstance(result, Message):
-                resolved_message_id = getattr(result, "message_id", None)
+                resolved_anchor_id = getattr(result, "message_id", None)
             elif isinstance(result, int):
-                resolved_message_id = result
+                resolved_anchor_id = result
             elif isinstance(result, str):
                 try:
-                    resolved_message_id = int(result)
+                    resolved_anchor_id = int(result)
                 except (TypeError, ValueError):
-                    resolved_message_id = None
-            else:
-                resolved_message_id = anchor_id
+                    resolved_anchor_id = None
 
-            candidate_message_id = (
-                resolved_message_id if resolved_message_id is not None else anchor_id
-            )
-            if candidate_message_id is None:
-                continue
-
+            final_anchor_id = resolved_anchor_id or anchor_id
             try:
-                normalized_message_id = int(candidate_message_id)
+                normalized_anchor = int(final_anchor_id)
             except (TypeError, ValueError):
                 continue
+            player.anchor_message = (chat_id, normalized_anchor)
 
-            player.anchor_message = (chat_id, normalized_message_id)
-            tracked_message_ids.add(normalized_message_id)
-            if normalized_message_id not in game.message_ids_to_delete:
-                game.message_ids_to_delete.append(normalized_message_id)
+    async def clear_all_player_anchors(self, game: Game) -> None:
+        chat_id = getattr(game, "chat_id", None)
+        if chat_id is None or self._is_private_chat(chat_id):
+            return
+
+        message_ids_to_delete = getattr(game, "message_ids_to_delete", [])
 
         for player in list(getattr(game, "players", [])):
-            anchor_meta = getattr(player, "anchor_message", None)
-            if (
-                isinstance(anchor_meta, tuple)
-                and len(anchor_meta) >= 2
-                and anchor_meta[0] == chat_id
-            ):
+            if player is None:
+                continue
+
+            anchor_id = self._get_player_anchor_message_id(chat_id, player)
+            if anchor_id:
                 try:
-                    normalized_id = int(anchor_meta[1])
-                except (TypeError, ValueError):
-                    player.anchor_message = None
-                    continue
-                if normalized_id not in tracked_message_ids:
-                    player.anchor_message = None
+                    await self.delete_message(chat_id=chat_id, message_id=anchor_id)
+                except Exception as exc:
+                    logger.debug(
+                        "Failed to delete player anchor",
+                        extra={
+                            "chat_id": chat_id,
+                            "player_id": getattr(player, "user_id", None),
+                            "message_id": anchor_id,
+                            "error_type": type(exc).__name__,
+                        },
+                    )
+                try:
+                    message_ids_to_delete.remove(anchor_id)
+                except (ValueError, AttributeError):
+                    pass
+
+            player.anchor_message = None
+            player.anchor_role = "بازیکن"
 
     async def announce_player_seats(
         self,

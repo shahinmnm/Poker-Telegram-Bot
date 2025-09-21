@@ -159,6 +159,8 @@ def test_update_player_anchors_and_keyboards_highlights_active_player():
     game.add_player(player_two, seat_index=1)
     player_one.cards = [Card('J♠'), Card('J♦')]
     player_two.cards = [Card('9♣'), Card('9♦')]
+    player_one.display_name = 'Player One'
+    player_two.display_name = 'Player Two'
 
     player_one.anchor_message = (game.chat_id, 101)
     player_two.anchor_message = (game.chat_id, 202)
@@ -172,23 +174,24 @@ def test_update_player_anchors_and_keyboards_highlights_active_player():
     second_call = viewer._update_message.await_args_list[1]
 
     assert first_call.kwargs['message_id'] == 101
-    assert '🎯 نوبت بازی این بازیکن است.' in first_call.kwargs['text']
+    assert "🎯 It's this player's turn." in first_call.kwargs['text']
+    assert 'Player One' in first_call.kwargs['text']
+    assert 'Seat: 1' in first_call.kwargs['text']
     assert isinstance(first_call.kwargs['reply_markup'], ReplyKeyboardMarkup)
     board_row = _row_texts(first_call.kwargs['reply_markup'].keyboard[1])
     assert board_row == ['A♠', 'K♦', '5♣']
 
     assert second_call.kwargs['message_id'] == 202
-    assert '🎯 نوبت بازی این بازیکن است.' not in second_call.kwargs['text']
+    assert "🎯 It's this player's turn." not in second_call.kwargs['text']
+    assert 'Player Two' in second_call.kwargs['text']
 
     assert player_one.anchor_message == (game.chat_id, 101)
     assert player_two.anchor_message == (game.chat_id, 202)
-    assert 101 in game.message_ids_to_delete
-    assert 202 in game.message_ids_to_delete
 
 
-def test_update_player_anchors_and_keyboards_creates_anchor_when_missing():
+def test_update_player_anchors_and_keyboards_skips_players_without_anchor():
     viewer = PokerBotViewer(bot=MagicMock())
-    viewer._update_message = AsyncMock(side_effect=[303])
+    viewer._update_message = AsyncMock()
 
     game = Game()
     game.chat_id = -123
@@ -206,11 +209,33 @@ def test_update_player_anchors_and_keyboards_creates_anchor_when_missing():
 
     run(viewer.update_player_anchors_and_keyboards(game))
 
-    viewer._update_message.assert_awaited_once()
-    call = viewer._update_message.await_args
-    assert call.kwargs['message_id'] is None
-    assert player.anchor_message == (game.chat_id, 303)
-    assert 303 in game.message_ids_to_delete
+    viewer._update_message.assert_not_awaited()
+    assert player.anchor_message is None
+
+
+def test_clear_all_player_anchors_deletes_messages():
+    viewer = PokerBotViewer(bot=MagicMock())
+    viewer.delete_message = AsyncMock()
+
+    game = Game()
+    game.chat_id = -321
+
+    player = Player(
+        user_id=9,
+        mention_markdown='@player',
+        wallet=MagicMock(),
+        ready_message_id='ready',
+    )
+    game.add_player(player, seat_index=0)
+    player.anchor_message = (game.chat_id, 404)
+    game.message_ids_to_delete.append(404)
+
+    run(viewer.clear_all_player_anchors(game))
+
+    viewer.delete_message.assert_awaited_once_with(chat_id=game.chat_id, message_id=404)
+    assert player.anchor_message is None
+    assert player.anchor_role == 'بازیکن'
+    assert 404 not in game.message_ids_to_delete
 
 
 def test_build_player_cards_keyboard_layout():

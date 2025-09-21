@@ -59,6 +59,7 @@ def _prepare_view_mock(view: MagicMock) -> MagicMock:
     view.delete_message = AsyncMock()
     view.start_prestart_countdown = AsyncMock(return_value=None)
     view._cancel_prestart_countdown = AsyncMock(return_value=None)
+    view.clear_all_player_anchors = AsyncMock(return_value=None)
     view.update_player_anchors_and_keyboards = AsyncMock(return_value=None)
     view.update_turn_message = AsyncMock(
         return_value=TurnMessageUpdate(
@@ -478,7 +479,7 @@ def test_add_cards_to_table_removes_existing_stage_message():
     assert game.board_message_id is None
     assert 222 not in game.message_ids_to_delete
     view.update_player_anchors_and_keyboards.assert_not_awaited()
-def test_clear_game_messages_updates_anchor_to_inactive_menu():
+def test_clear_game_messages_preserves_anchor_messages():
     model, game, player, view = _build_model_with_game()
     chat_id = -500
     view.delete_message = AsyncMock()
@@ -497,7 +498,7 @@ def test_clear_game_messages_updates_anchor_to_inactive_menu():
     assert (chat_id, 888) in deleted_pairs
     assert (chat_id, 999) in deleted_pairs
     assert (chat_id, "anchor-7") not in deleted_pairs
-    view.update_player_anchors_and_keyboards.assert_awaited_once_with(game)
+    view.update_player_anchors_and_keyboards.assert_not_awaited()
     assert player.anchor_message == (chat_id, "anchor-7")
     assert game.message_ids == {}
     assert game.message_ids_to_delete == []
@@ -762,6 +763,9 @@ async def test_showdown_sends_new_hand_message_before_join_prompt():
     view.send_showdown_results = AsyncMock()
     view.send_new_hand_ready_message = AsyncMock(side_effect=record_new_hand)
     view.send_message = AsyncMock()
+    view.clear_all_player_anchors = AsyncMock(
+        side_effect=lambda *args, **kwargs: call_order.append("clear_anchors")
+    )
     bot = MagicMock()
     cfg = MagicMock(DEBUG=False)
     kv = MagicMock()
@@ -788,10 +792,11 @@ async def test_showdown_sends_new_hand_message_before_join_prompt():
 
     await model._showdown(game, chat_id, context)
 
-    assert call_order == ["new_hand", "join_prompt"]
+    assert call_order == ["clear_anchors", "new_hand", "join_prompt"]
     table_manager.save_game.assert_awaited()
     model._clear_game_messages.assert_awaited_once()
     view.send_showdown_results.assert_awaited_once()
+    view.clear_all_player_anchors.assert_awaited_once_with(game)
 
 
 @pytest.mark.asyncio
