@@ -2381,7 +2381,8 @@ class PokerBotModel:
                 next_state, card_count, stage_label = transition
                 game.state = next_state
                 await self.add_cards_to_table(card_count, game, chat_id, stage_label)
-                await self._view.update_player_anchors_and_keyboards(game)
+                if card_count == 0:
+                    await self._view.update_player_anchors_and_keyboards(game)
             elif game.state == GameState.ROUND_RIVER:
                 # بعد از ریور، دور شرط‌بندی تمام شده و باید showdown انجام شود
                 await self._showdown(game, chat_id, context)
@@ -2491,10 +2492,14 @@ class PokerBotModel:
         وضعیت دکمه‌های اینلاین و خطوط کارت‌ها با هم هماهنگ بمانند.
         """
         async with self._chat_guard(chat_id):
+            should_refresh_anchors = count > 0
             if count > 0:
                 for _ in range(count):
                     if game.remain_cards:
                         game.cards_table.append(game.remain_cards.pop())
+
+            if should_refresh_anchors:
+                await self._view.update_player_anchors_and_keyboards(game)
 
             if not send_message:
                 return

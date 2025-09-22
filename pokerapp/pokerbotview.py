@@ -159,16 +159,26 @@ class PokerBotViewer:
         stage_name: str,
         hole_cards: Sequence[str],
         community_cards: Sequence[str],
-    ) -> Tuple[ReplyKeyboardMarkup, str]:
-        keyboard = build_player_cards_keyboard(
+    ) -> ReplyKeyboardMarkup:
+        return build_player_cards_keyboard(
             hole_cards=hole_cards,
             community_cards=community_cards,
             current_stage=stage_name or "",
         )
-        markup_signature = self._serialize_markup(keyboard) or ""
-        stage_token = stage_name or ""
-        signature_payload = f"{stage_token}|{markup_signature}"
-        return keyboard, signature_payload
+
+    def _reply_keyboard_signature(
+        self,
+        *,
+        text: str,
+        reply_markup: ReplyKeyboardMarkup,
+        stage_name: str,
+        community_cards: Sequence[str],
+    ) -> str:
+        markup_signature = self._serialize_markup(reply_markup) or ""
+        stage_token = (stage_name or "").upper()
+        board_token = "|".join(str(card) for card in (community_cards or []))
+        payload = f"{text}|{markup_signature}|stage={stage_token}|board={board_token}"
+        return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
     def _extract_community_cards(self, game: Game) -> List[str]:
         community_cards_source: Optional[Sequence[Card]] = getattr(
@@ -1030,7 +1040,9 @@ class PokerBotViewer:
                     return message_id
         turn_cache_key = message_key if request_category == RequestCategory.TURN else None
 
-        if stage_key is not None and not force_send:
+        is_reply_keyboard = isinstance(reply_markup, ReplyKeyboardMarkup)
+
+        if stage_key is not None and not force_send and not is_reply_keyboard:
             cached_stage_hash = await self._get_stage_payload_hash(stage_key)
             if cached_stage_hash == payload_hash:
                 logger.debug(
@@ -1457,7 +1469,7 @@ class PokerBotViewer:
             )
 
             hole_cards = self._extract_player_hole_cards(player)
-            keyboard, signature_payload = self._compose_anchor_keyboard(
+            keyboard = self._compose_anchor_keyboard(
                 stage_name=stage_name,
                 hole_cards=hole_cards,
                 community_cards=community_cards,
@@ -1479,6 +1491,13 @@ class PokerBotViewer:
                 mention_markdown=getattr(player, "mention_markdown", None),
                 seat_number=seat_number,
                 role_label=role_label,
+            )
+
+            signature_payload = self._reply_keyboard_signature(
+                text=text,
+                reply_markup=keyboard,
+                stage_name=stage_name,
+                community_cards=community_cards,
             )
 
             try:
@@ -1656,10 +1675,14 @@ class PokerBotViewer:
             role_label=resolved_role_label,
         )
 
+        signature_payload = self._reply_keyboard_signature(
+            text=text,
+            reply_markup=keyboard,
+            stage_name=stage_name,
+            community_cards=community_cards,
+        )
+
         previous_signature = getattr(player, "private_keyboard_signature", None)
-        markup_signature = self._serialize_markup(keyboard) or ""
-        stage_token = stage_name or ""
-        signature_payload = f"{stage_token}|{markup_signature}"
 
         message_meta = getattr(player, "private_keyboard_message", None)
         message_id: Optional[int] = None
@@ -1839,14 +1862,11 @@ class PokerBotViewer:
 
             hole_cards = self._extract_player_hole_cards(player)
 
-            keyboard, signature_payload = self._compose_anchor_keyboard(
+            keyboard = self._compose_anchor_keyboard(
                 stage_name=stage_name,
                 hole_cards=hole_cards,
                 community_cards=community_cards,
             )
-
-            previous_signature = getattr(player, "anchor_keyboard_signature", None)
-            keyboard_changed = previous_signature != signature_payload
 
             seat_index = player.seat_index if player.seat_index is not None else -1
             seat_number = seat_index + 1 if seat_index >= 0 else "?"
@@ -1871,6 +1891,16 @@ class PokerBotViewer:
             if is_current_turn:
                 text = "\n".join([text, "", "🎯 نوبت این بازیکن است."])
 
+            signature_payload = self._reply_keyboard_signature(
+                text=text,
+                reply_markup=keyboard,
+                stage_name=stage_name,
+                community_cards=community_cards,
+            )
+
+            previous_signature = getattr(player, "anchor_keyboard_signature", None)
+            keyboard_changed = previous_signature != signature_payload
+
             logger.debug(
                 "Anchor update: player=%s | seat=%s | role=%s | hole_cards=%s | "
                 "community_cards=%s | is_turn=%s | chat_id=%s | anchor_id=%s | "
@@ -1886,18 +1916,18 @@ class PokerBotViewer:
                 keyboard_changed,
             )
 
-            if keyboard_changed:
-                logger.info(
-                    "Updating anchor keyboard",
-                    extra={
-                        "chat_id": chat_id,
-                        "player_id": getattr(player, "user_id", None),
-                        "message_id": anchor_id,
-                        "stage": stage_name,
-                        "hole_cards": hole_cards,
-                        "community_cards": community_cards,
-                    },
-                )
+            logger.info(
+                "Updating anchor keyboard",
+                extra={
+                    "chat_id": chat_id,
+                    "player_id": getattr(player, "user_id", None),
+                    "message_id": anchor_id,
+                    "stage": stage_name,
+                    "hole_cards": hole_cards,
+                    "community_cards": community_cards,
+                    "keyboard_changed": keyboard_changed,
+                },
+            )
 
             try:
                 await self._purge_pending_updates(chat_id, anchor_id)

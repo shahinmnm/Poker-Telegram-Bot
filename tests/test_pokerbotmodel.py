@@ -500,7 +500,7 @@ def test_add_cards_to_table_does_not_send_stage_message():
     view.send_message_return_id.assert_not_awaited()
     view.delete_message.assert_not_awaited()
     assert game.board_message_id is None
-    view.update_player_anchors_and_keyboards.assert_not_awaited()
+    view.update_player_anchors_and_keyboards.assert_awaited_once_with(game)
     view.sync_player_private_keyboards.assert_not_awaited()
 
 
