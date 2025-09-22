@@ -155,21 +155,8 @@ class PokerBotCotroller:
         await self._model.join_game(update, context)
 
     async def _handle_start(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        query = update.callback_query
-        if query:
-            await query.answer()
-            data = query.data or ""
-            if data.startswith("start_game:"):
-                _, _, game_id = data.partition(":")
-                chat = update.effective_chat
-                if chat:
-                    await self._model.start_hand(
-                        context=context,
-                        chat_id=chat.id,
-                        game_id=game_id,
-                        trigger="button",
-                    )
-                return
+        if update.callback_query:
+            await update.callback_query.answer()
         await self._model.start(update, context)
 
     async def _handle_stop(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -277,9 +264,6 @@ class PokerBotCotroller:
         chat = update.effective_chat
 
         if action == "noop":
-            await query.answer()
-            return
-        if action.startswith("card") or action.startswith("board") or action.startswith("stage"):
             await query.answer()
             return
 
