@@ -181,9 +181,14 @@ def test_update_player_anchors_and_keyboards_highlights_active_player():
     assert 'Player One' in first_text
     assert '🪑 صندلی: 1' in first_text
     assert '🎖️ نقش: دیلر' in first_text
-    assert isinstance(first_call.kwargs['reply_markup'], ReplyKeyboardMarkup)
-    board_row = _row_texts(first_call.kwargs['reply_markup'].keyboard[1])
-    assert board_row == ['A♠', 'K♦', '5♣']
+    assert isinstance(first_call.kwargs['reply_markup'], InlineKeyboardMarkup)
+    markup = first_call.kwargs['reply_markup']
+    hole_row = markup.inline_keyboard[0]
+    assert [button.text for button in hole_row] == ['J♠', 'J♦']
+    board_row = markup.inline_keyboard[1]
+    assert [button.text for button in board_row] == ['A♠', 'K♦', '5♣']
+    stage_row = markup.inline_keyboard[2]
+    assert any(button.text.startswith('✅') for button in stage_row)
 
     assert second_call.kwargs['message_id'] == 202
     second_text = second_call.kwargs['text']
@@ -250,19 +255,29 @@ def test_build_player_cards_keyboard_layout():
         hole_cards=['A♠', 'K♥'],
         community_cards=['❔', '5♦', '❔', '❔', '❔'],
         current_stage='FLOP',
+        player_id=123,
     )
 
-    assert isinstance(markup, ReplyKeyboardMarkup)
-    assert markup.resize_keyboard is True
-    assert markup.one_time_keyboard is False
-    assert markup.selective is True
-    assert _row_texts(markup.keyboard[0]) == ['A♠', 'K♥']
-    assert _row_texts(markup.keyboard[1]) == ['❔', '5♦', '❔', '❔', '❔']
-    stage_row = _row_texts(markup.keyboard[2])
-    assert stage_row[0] == 'پری فلاپ'
-    assert stage_row[1].startswith('✅')
-    assert stage_row[2] == 'ترن'
-    assert stage_row[3] == 'ریور'
+    assert isinstance(markup, InlineKeyboardMarkup)
+    hole_row = markup.inline_keyboard[0]
+    assert [button.text for button in hole_row] == ['A♠', 'K♥']
+    assert [button.callback_data for button in hole_row] == [
+        'hand_card_123_0',
+        'hand_card_123_1',
+    ]
+    board_row = markup.inline_keyboard[1]
+    assert [button.text for button in board_row] == ['❔', '5♦', '❔', '❔', '❔']
+    assert all(
+        callback.startswith('board_card_') for callback in [
+            button.callback_data for button in board_row
+        ]
+    )
+    stage_row = markup.inline_keyboard[2]
+    assert stage_row[0].text == 'پری فلاپ'
+    assert stage_row[1].text.startswith('✅')
+    assert stage_row[2].text == 'ترن'
+    assert stage_row[3].text == 'ریور'
+    assert all(button.callback_data == 'anchor:noop' for button in stage_row)
 
 def test_update_turn_message_includes_stage_and_keyboard():
     viewer = PokerBotViewer(bot=MagicMock())
