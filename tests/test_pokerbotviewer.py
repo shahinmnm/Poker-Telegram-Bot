@@ -181,8 +181,9 @@ def test_update_player_anchors_and_keyboards_highlights_active_player():
     assert 'Player One' in first_text
     assert '🪑 صندلی: 1' in first_text
     assert '🎖️ نقش: دیلر' in first_text
-    assert isinstance(first_call.kwargs['reply_markup'], ReplyKeyboardMarkup)
-    board_row = _row_texts(first_call.kwargs['reply_markup'].keyboard[1])
+    first_markup = first_call.kwargs['reply_markup']
+    assert isinstance(first_markup, InlineKeyboardMarkup)
+    board_row = [button.text for button in first_markup.inline_keyboard[1]]
     assert board_row == ['A♠', 'K♦', '5♣']
 
     assert second_call.kwargs['message_id'] == 202
@@ -252,13 +253,12 @@ def test_build_player_cards_keyboard_layout():
         current_stage='FLOP',
     )
 
-    assert isinstance(markup, ReplyKeyboardMarkup)
-    assert markup.resize_keyboard is True
-    assert markup.one_time_keyboard is False
-    assert markup.selective is True
-    assert _row_texts(markup.keyboard[0]) == ['A♠', 'K♥']
-    assert _row_texts(markup.keyboard[1]) == ['❔', '5♦', '❔', '❔', '❔']
-    stage_row = _row_texts(markup.keyboard[2])
+    assert isinstance(markup, InlineKeyboardMarkup)
+    first_row = [button.text for button in markup.inline_keyboard[0]]
+    assert first_row == ['A♠', 'K♥']
+    community_row = [button.text for button in markup.inline_keyboard[1]]
+    assert community_row == ['❔', '5♦', '❔', '❔', '❔']
+    stage_row = [button.text for button in markup.inline_keyboard[2]]
     assert stage_row[0] == 'پری فلاپ'
     assert stage_row[1].startswith('✅')
     assert stage_row[2] == 'ترن'
