@@ -291,8 +291,69 @@ class PokerBotModel:
         private_chat_id: Optional[int] = None,
         display_name: Optional[str] = None,
     ) -> None:
+        player_id = self._safe_int(user.id)
         if private_chat_id:
-            self._private_chat_ids[self._safe_int(user.id)] = private_chat_id
+            self._private_chat_ids[player_id] = private_chat_id
+
+            table_manager = getattr(self, "_table_manager", None)
+            if table_manager is not None:
+                try:
+                    game = None
+                    chat_id: Optional[ChatId] = None
+
+                    tables = getattr(table_manager, "_tables", None)
+                    if isinstance(tables, dict):
+                        for candidate_chat_id, candidate_game in tables.items():
+                            if candidate_game is None:
+                                continue
+                            players = getattr(candidate_game, "players", [])
+                            for candidate_player in players:
+                                if getattr(candidate_player, "user_id", None) == player_id:
+                                    game = candidate_game
+                                    chat_id = candidate_chat_id
+                                    break
+                            if game is not None:
+                                break
+
+                    if game is None:
+                        finder = getattr(table_manager, "find_game_by_user", None)
+                        if finder is not None:
+                            try:
+                                result = finder(player_id)
+                                if inspect.isawaitable(result):
+                                    game, chat_id = await result
+                                elif result:
+                                    game, chat_id = result
+                            except LookupError:
+                                game = None
+                                chat_id = None
+
+                    if game is not None:
+                        updated = False
+                        for player in getattr(game, "players", []):
+                            if getattr(player, "user_id", None) == player_id:
+                                if getattr(player, "private_chat_id", None) != private_chat_id:
+                                    player.private_chat_id = private_chat_id
+                                    updated = True
+                                break
+
+                        if updated and chat_id is not None:
+                            saver = getattr(table_manager, "save_game", None)
+                            if saver is not None:
+                                try:
+                                    save_result = saver(chat_id, game)
+                                    if inspect.isawaitable(save_result):
+                                        await save_result
+                                except Exception:
+                                    logger.exception(
+                                        "Failed to persist game after updating private chat id",
+                                        extra={"chat_id": chat_id, "user_id": player_id},
+                                    )
+                except Exception:
+                    logger.exception(
+                        "Failed to update player private chat id in active game",
+                        extra={"user_id": player_id},
+                    )
         if not self._stats_enabled():
             return
         identity = PlayerIdentity(

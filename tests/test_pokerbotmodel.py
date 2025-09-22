@@ -25,7 +25,7 @@ from pokerapp.pokerbotmodel import (
     STOP_CONFIRM_CALLBACK,
     STOP_RESUME_CALLBACK,
 )
-from pokerapp.pokerbotview import TurnMessageUpdate
+from pokerapp.pokerbotview import TurnMessageUpdate, PokerBotViewer
 from telegram.error import BadRequest
 from telegram import InlineKeyboardMarkup
 
@@ -237,6 +237,52 @@ def _build_model_with_game():
     game.add_player(player, seat_index=0)
     player.cards = [Card("A♠"), Card("K♦")]
     return model, game, player, view
+
+
+@pytest.mark.asyncio
+async def test_register_player_identity_updates_active_game_private_chat():
+    chat_id = -4242
+    kv = fakeredis.aioredis.FakeRedis()
+    bot = MagicMock()
+    view = PokerBotViewer(bot=bot)
+    view._send_player_private_keyboard = AsyncMock()
+
+    game = Game()
+    wallet = make_wallet_mock()
+    player = Player(
+        user_id=321,
+        mention_markdown="@player",
+        wallet=wallet,
+        ready_message_id="ready",
+    )
+    game.add_player(player, seat_index=0)
+
+    table_manager = SimpleNamespace()
+    table_manager._tables = {chat_id: game}
+    table_manager.save_game = AsyncMock()
+
+    cfg = MagicMock(DEBUG=False)
+    model = PokerBotModel(view=view, bot=bot, cfg=cfg, kv=kv, table_manager=table_manager)
+
+    user = SimpleNamespace(
+        id=player.user_id,
+        full_name="Test Player",
+        first_name="Test",
+        username="tester",
+    )
+
+    await model._register_player_identity(user, private_chat_id=999)
+
+    assert player.private_chat_id == 999
+    assert model._private_chat_ids[player.user_id] == 999
+    table_manager.save_game.assert_awaited_once_with(chat_id, game)
+
+    await view.sync_player_private_keyboards(game)
+
+    view._send_player_private_keyboard.assert_awaited_once()
+    send_call = view._send_player_private_keyboard.await_args
+    assert send_call.kwargs["player"] is player
+    assert send_call.kwargs["game"] is game
 
 
 @pytest.mark.asyncio
