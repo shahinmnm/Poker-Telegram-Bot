@@ -5,6 +5,7 @@ from telegram import (
     InlineKeyboardButton,
     InlineKeyboardMarkup,
     ReplyKeyboardMarkup,
+    ReplyKeyboardRemove,
     Bot,
     InputMediaPhoto,
 )
@@ -94,9 +95,9 @@ def build_player_cards_keyboard(
     # Construct and return the final keyboard object.
     return ReplyKeyboardMarkup(
         keyboard=[row1, row2, row3],
-        resize_keyboard=True,      # Makes the keyboard fit the content.
-        one_time_keyboard=False,   # The keyboard persists until replaced.
-        selective=True,            # CRITICAL: Shows the keyboard ONLY to the @-mentioned user.
+        resize_keyboard=True,    # Makes the keyboard fit the content.
+        one_time_keyboard=False,  # The keyboard persists until replaced.
+        selective=False,          # Visible to the entire group chat per requirements.
     )
 
 
@@ -465,11 +466,14 @@ class PokerBotViewer:
         chat_id: ChatId,
         message_id: Optional[MessageId],
         text: str,
-        reply_markup: Optional[InlineKeyboardMarkup | ReplyKeyboardMarkup] = None,
+        reply_markup: Optional[
+            InlineKeyboardMarkup | ReplyKeyboardMarkup | ReplyKeyboardRemove
+        ] = None,
         parse_mode: str = ParseMode.MARKDOWN,
         disable_web_page_preview: bool = True,
         disable_notification: bool = False,
         request_category: RequestCategory = RequestCategory.GENERAL,
+        force_delivery: bool = False,
     ) -> Optional[MessageId]:
         key = (chat_id, message_id)
         loop = asyncio.get_running_loop()
@@ -493,6 +497,7 @@ class PokerBotViewer:
                     "disable_web_page_preview": disable_web_page_preview,
                     "disable_notification": disable_notification,
                     "request_category": request_category,
+                    "force_delivery": force_delivery,
                 }
                 self._pending_updates[key] = {"payload": payload, "future": future}
 
@@ -819,11 +824,14 @@ class PokerBotViewer:
         chat_id: ChatId,
         message_id: Optional[MessageId],
         text: str,
-        reply_markup: Optional[InlineKeyboardMarkup | ReplyKeyboardMarkup] = None,
+        reply_markup: Optional[
+            InlineKeyboardMarkup | ReplyKeyboardMarkup | ReplyKeyboardRemove
+        ] = None,
         parse_mode: str = ParseMode.MARKDOWN,
         disable_web_page_preview: bool = True,
         disable_notification: bool = False,
         request_category: RequestCategory = RequestCategory.GENERAL,
+        force_delivery: bool = False,
     ) -> Optional[MessageId]:
         context = self._build_context(
             "update_message", chat_id=chat_id, message_id=message_id
@@ -847,7 +855,10 @@ class PokerBotViewer:
         if (
             request_category == RequestCategory.ANCHOR
             and reply_markup is not None
-            and not isinstance(reply_markup, (InlineKeyboardMarkup, ReplyKeyboardMarkup))
+            and not isinstance(
+                reply_markup,
+                (InlineKeyboardMarkup, ReplyKeyboardMarkup, ReplyKeyboardRemove),
+            )
         ):
             logger.warning(
                 "Discarding unsupported reply markup for anchor update",
@@ -961,7 +972,7 @@ class PokerBotViewer:
                             "payload_hash": payload_hash,
                         },
                     )
-                elif not force_full_anchor_update:
+                elif not force_full_anchor_update and not force_delivery:
                     debug_trace_logger.info(
                         f"Skipping editMessageText for message_id={message_id} due to no content change"
                     )
@@ -974,7 +985,7 @@ class PokerBotViewer:
 
         if stage_key is not None:
             cached_stage_hash = await self._get_stage_payload_hash(stage_key)
-            if cached_stage_hash == payload_hash:
+            if cached_stage_hash == payload_hash and not force_delivery:
                 logger.debug(
                     "Skipping update_message due to stage throttle",
                     extra={
@@ -993,7 +1004,7 @@ class PokerBotViewer:
         if message_key is not None:
             if previous_payload_hash is None:
                 previous_payload_hash = await self._get_payload_hash(message_key)
-            if previous_payload_hash == payload_hash:
+            if previous_payload_hash == payload_hash and not force_delivery:
                 logger.debug(
                     "Skipping update_message due to identical payload",
                     extra={
@@ -1068,7 +1079,8 @@ class PokerBotViewer:
 
                     if anchor_markup_only:
                         if reply_markup is not None and not isinstance(
-                            reply_markup, (InlineKeyboardMarkup, ReplyKeyboardMarkup)
+                            reply_markup,
+                            (InlineKeyboardMarkup, ReplyKeyboardMarkup, ReplyKeyboardRemove),
                         ):
                             logger.debug(
                                 "Ignoring unsupported reply markup during anchor refresh",
@@ -1138,7 +1150,7 @@ class PokerBotViewer:
                                     callback_throttle_key
                                 ] = callback_id
                             return message_id
-                    if not force_full_anchor_update:
+                    if not force_full_anchor_update and not force_delivery:
                         debug_trace_logger.info(
                             f"Skipping editMessageText for message_id={message_id} due to no content change"
                         )
@@ -1152,7 +1164,7 @@ class PokerBotViewer:
                     previous_payload_hash = await self._get_payload_hash(
                         message_key
                     )
-                if previous_payload_hash == payload_hash:
+                if previous_payload_hash == payload_hash and not force_delivery:
                     logger.debug(
                         "Skipping update_message inside lock due to identical payload",
                         extra={
@@ -1174,7 +1186,7 @@ class PokerBotViewer:
                     return message_id
             if stage_key is not None:
                 cached_stage_hash = await self._get_stage_payload_hash(stage_key)
-                if cached_stage_hash == payload_hash:
+                if cached_stage_hash == payload_hash and not force_delivery:
                     logger.debug(
                         "Skipping update_message inside lock due to stage throttle",
                         extra={
@@ -1258,6 +1270,7 @@ class PokerBotViewer:
                         message_id=message_id,
                         text=normalized_text,
                         reply_markup=reply_markup,
+                        force=force_delivery,
                         request_category=request_category,
                         parse_mode=parse_mode,
                         disable_web_page_preview=disable_web_page_preview,
@@ -1371,6 +1384,16 @@ class PokerBotViewer:
                 stage = GameState.INITIAL
         stage_name = stage.name
 
+        community_cards_source: Optional[Sequence[Card]] = getattr(
+            game, "community_cards", None
+        )
+        if community_cards_source is None:
+            community_cards_source = getattr(game, "cards_table", [])
+        try:
+            community_cards = [str(card) for card in community_cards_source or []]
+        except Exception:
+            community_cards = []
+
         await self.sync_player_private_keyboards(
             game=game,
             include_inactive=True,
@@ -1394,6 +1417,14 @@ class PokerBotViewer:
                 game, player
             )
 
+            hole_cards_source = getattr(player, "hole_cards", None)
+            if hole_cards_source is None:
+                hole_cards_source = getattr(player, "cards", [])
+            try:
+                hole_cards = [str(card) for card in hole_cards_source or []]
+            except Exception:
+                hole_cards = []
+
             display_name = str(
                 getattr(player, "display_name", None)
                 or getattr(player, "full_name", None)
@@ -1408,11 +1439,25 @@ class PokerBotViewer:
                 role_label=role_label,
             )
 
+            if stage in self._ACTIVE_ANCHOR_STATES:
+                keyboard_markup: ReplyKeyboardMarkup | ReplyKeyboardRemove = (
+                    build_player_cards_keyboard(
+                        hole_cards=hole_cards,
+                        community_cards=community_cards,
+                        current_stage=stage_name or "",
+                    )
+                )
+            else:
+                keyboard_markup = ReplyKeyboardRemove(selective=False)
+
+            serialized_keyboard = self._serialize_markup(keyboard_markup)
+            keyboard_signature = f"{stage_name}|{serialized_keyboard or ''}"
+
             try:
                 message_id = await self.send_message_return_id(
                     chat_id=chat_id,
                     text=text,
-                    reply_markup=None,
+                    reply_markup=keyboard_markup,
                     request_category=RequestCategory.ANCHOR,
                 )
             except Exception as exc:
@@ -1437,6 +1482,18 @@ class PokerBotViewer:
             player.anchor_message = (chat_id, normalized_anchor)
             player.anchor_role = role_label
             player.role_label = role_label
+            player.anchor_keyboard_signature = keyboard_signature
+            logger.info(
+                "Group anchor keyboard sent",
+                extra={
+                    "chat_id": chat_id,
+                    "message_id": normalized_anchor,
+                    "player_id": getattr(player, "user_id", None),
+                    "stage": stage_name,
+                    "hole_cards": hole_cards,
+                    "community_cards": community_cards,
+                },
+            )
 
     @staticmethod
     def _describe_player_role(game: Game, player: Player) -> str:
@@ -1807,6 +1864,20 @@ class PokerBotViewer:
             if is_current_turn:
                 text = "\n".join([text, "", "🎯 نوبت این بازیکن است."])
 
+            if stage in self._ACTIVE_ANCHOR_STATES:
+                keyboard_markup = build_player_cards_keyboard(
+                    hole_cards=hole_cards,
+                    community_cards=community_cards,
+                    current_stage=stage_name or "",
+                )
+            else:
+                keyboard_markup = ReplyKeyboardRemove(selective=False)
+
+            serialized_keyboard = self._serialize_markup(keyboard_markup)
+            keyboard_signature = f"{stage_name}|{serialized_keyboard or ''}"
+            previous_signature = getattr(player, "anchor_keyboard_signature", None)
+            force_delivery = keyboard_signature != previous_signature
+
             logger.debug(
                 "Anchor update: player=%s | seat=%s | role=%s | hole_cards=%s | "
                 "community_cards=%s | is_turn=%s | chat_id=%s | anchor_id=%s",
@@ -1820,14 +1891,29 @@ class PokerBotViewer:
                 anchor_id,
             )
 
+            logger.info(
+                "Group anchor keyboard update",
+                extra={
+                    "chat_id": chat_id,
+                    "message_id": anchor_id,
+                    "player_id": getattr(player, "user_id", None),
+                    "stage": stage_name,
+                    "hole_cards": hole_cards,
+                    "community_cards": community_cards,
+                    "force_delivery": force_delivery,
+                    "signature": keyboard_signature,
+                },
+            )
+
             try:
                 await self._purge_pending_updates(chat_id, anchor_id)
                 result = await self._update_message(
                     chat_id=chat_id,
                     message_id=anchor_id,
                     text=text,
-                    reply_markup=None,
+                    reply_markup=keyboard_markup,
                     request_category=RequestCategory.ANCHOR,
+                    force_delivery=force_delivery,
                 )
             except Exception as exc:
                 logger.error(
@@ -1857,6 +1943,7 @@ class PokerBotViewer:
             except (TypeError, ValueError):
                 continue
             player.anchor_message = (chat_id, normalized_anchor)
+            player.anchor_keyboard_signature = keyboard_signature
 
     async def clear_all_player_anchors(self, game: Game) -> None:
         chat_id = getattr(game, "chat_id", None)
@@ -1892,6 +1979,7 @@ class PokerBotViewer:
             player.anchor_message = None
             player.anchor_role = "بازیکن"
             player.role_label = "بازیکن"
+            player.anchor_keyboard_signature = None
 
     async def announce_player_seats(
         self,
@@ -1964,7 +2052,7 @@ class PokerBotViewer:
         self,
         chat_id: ChatId,
         text: str,
-        reply_markup: ReplyKeyboardMarkup = None,
+        reply_markup: Optional[ReplyKeyboardMarkup | ReplyKeyboardRemove] = None,
         request_category: RequestCategory = RequestCategory.GENERAL,
     ) -> Optional[MessageId]:
         """Sends a message and returns its ID, or None if not applicable."""
@@ -2031,7 +2119,7 @@ class PokerBotViewer:
         self,
         chat_id: ChatId,
         text: str,
-        reply_markup: ReplyKeyboardMarkup = None,
+        reply_markup: Optional[ReplyKeyboardMarkup | ReplyKeyboardRemove] = None,
         parse_mode: str = ParseMode.MARKDOWN,  # <--- پارامتر جدید اضافه شد
         request_category: RequestCategory = RequestCategory.GENERAL,
     ) -> Optional[MessageId]:

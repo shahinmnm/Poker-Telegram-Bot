@@ -92,6 +92,7 @@ class Player:
         self.private_chat_id: Optional[ChatId] = None
         self.private_keyboard_message: Optional[Tuple[ChatId, MessageId]] = None
         self.private_keyboard_signature: Optional[str] = None
+        self.anchor_keyboard_signature: Optional[str] = None
         # -------------------------
     def __repr__(self):
         return "{}({!r})".format(self.__class__.__name__, self.__dict__)

@@ -192,14 +192,22 @@ def test_update_player_anchors_and_keyboards_highlights_active_player():
     assert 'Player One' in first_text
     assert '🪑 صندلی: 1' in first_text
     assert '🎖️ نقش: دیلر' in first_text
-    assert first_call.kwargs['reply_markup'] is None
+    assert isinstance(first_call.kwargs['reply_markup'], ReplyKeyboardMarkup)
+    assert first_call.kwargs['force_delivery'] is True
+    first_anchor_keyboard = first_call.kwargs['reply_markup']
+    first_stage_row = _row_texts(first_anchor_keyboard.keyboard[2])
+    assert first_stage_row[0] == 'پری فلاپ'
+    assert first_stage_row[1].startswith('✅')
+    assert first_stage_row[2] == 'ترن'
+    assert first_stage_row[3] == 'ریور'
 
     assert second_call.kwargs['message_id'] == 202
     second_text = second_call.kwargs['text']
     assert "🎯 نوبت این بازیکن است." not in second_text
     assert 'Player Two' in second_text
     assert '🎖️ نقش: بلایند بزرگ' in second_text
-    assert second_call.kwargs['reply_markup'] is None
+    assert isinstance(second_call.kwargs['reply_markup'], ReplyKeyboardMarkup)
+    assert second_call.kwargs['force_delivery'] is True
 
     first_keyboard_call = viewer.edit_message_reply_markup.await_args_list[0]
     assert first_keyboard_call.kwargs['chat_id'] == player_one.private_chat_id
@@ -215,6 +223,8 @@ def test_update_player_anchors_and_keyboards_highlights_active_player():
 
     assert player_one.anchor_message == (game.chat_id, 101)
     assert player_two.anchor_message == (game.chat_id, 202)
+    assert player_one.anchor_keyboard_signature is not None
+    assert player_two.anchor_keyboard_signature is not None
     assert player_one.private_keyboard_signature != 'old-one'
     assert player_two.private_keyboard_signature != 'old-two'
 
@@ -296,7 +306,7 @@ def test_send_player_role_anchors_pushes_private_keyboard_and_plain_anchor():
         if chat_id == player.private_chat_id:
             assert isinstance(reply_markup, ReplyKeyboardMarkup)
             return 777
-        assert reply_markup is None
+        assert isinstance(reply_markup, ReplyKeyboardMarkup)
         return 321
 
     viewer.send_message_return_id = AsyncMock(side_effect=fake_send_message_return_id)
@@ -315,12 +325,28 @@ def test_send_player_role_anchors_pushes_private_keyboard_and_plain_anchor():
     assert hole_row == ['A♠', 'K♦']
 
     assert anchor_call['chat_id'] == game.chat_id
-    assert anchor_call['reply_markup'] is None
+    assert isinstance(anchor_call['reply_markup'], ReplyKeyboardMarkup)
     assert anchor_call['request_category'] == RequestCategory.ANCHOR
+
+    anchor_keyboard = anchor_call['reply_markup']
+    assert anchor_keyboard.resize_keyboard is True
+    assert anchor_keyboard.one_time_keyboard is False
+    assert anchor_keyboard.selective is False
+
+    anchor_hole_row = _row_texts(anchor_keyboard.keyboard[0])
+    assert anchor_hole_row == ['A♠', 'K♦']
+
+    stage_row = _row_texts(anchor_keyboard.keyboard[2])
+    assert stage_row[0].startswith('✅')
+    assert 'پری فلاپ' in stage_row[0]
+    assert stage_row[1] == 'فلاپ'
+    assert stage_row[2] == 'ترن'
+    assert stage_row[3] == 'ریور'
 
     assert player.private_keyboard_message == (player.private_chat_id, 777)
     assert player.anchor_message == (game.chat_id, 321)
     assert player.private_keyboard_signature is not None
+    assert player.anchor_keyboard_signature is not None
 
 
 def test_build_player_cards_keyboard_layout():
@@ -333,7 +359,7 @@ def test_build_player_cards_keyboard_layout():
     assert isinstance(markup, ReplyKeyboardMarkup)
     assert markup.resize_keyboard is True
     assert markup.one_time_keyboard is False
-    assert markup.selective is True
+    assert markup.selective is False
     assert _row_texts(markup.keyboard[0]) == ['A♠', 'K♥']
     assert _row_texts(markup.keyboard[1]) == ['❔', '5♦', '❔', '❔', '❔']
     stage_row = _row_texts(markup.keyboard[2])
