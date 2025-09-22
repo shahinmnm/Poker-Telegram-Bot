@@ -20,10 +20,7 @@ from pokerapp.pokerbotmodel import (
     WalletManagerModel,
     KEY_CHAT_DATA_GAME,
     KEY_START_COUNTDOWN_LAST_TEXT,
-    KEY_START_COUNTDOWN_LAST_TIMESTAMP,
-    KEY_PRESTART_COUNTDOWN_ACTIVE,
-    KEY_PRESTART_COUNTDOWN_ANCHOR,
-    KEY_PRESTART_COUNTDOWN_SECONDS,
+    KEY_START_COUNTDOWN_CONTEXT,
     KEY_STOP_REQUEST,
     STOP_CONFIRM_CALLBACK,
     STOP_RESUME_CALLBACK,
@@ -520,6 +517,7 @@ async def test_auto_start_tick_starts_prestart_countdown_and_updates_state():
     table_manager = MagicMock()
     game = Game()
     game.ready_message_main_id = 111
+    game.id = "game-42"
     game.ready_message_main_text = "prompt"
     table_manager.get_game = AsyncMock(return_value=game)
     table_manager.save_game = AsyncMock()
@@ -528,13 +526,18 @@ async def test_auto_start_tick_starts_prestart_countdown_and_updates_state():
 
     job = SimpleNamespace(chat_id=chat_id)
     job.schedule_removal = MagicMock()
-    context = SimpleNamespace(job=job, chat_data={"start_countdown": 5})
+    countdown_state = {(chat_id, str(game.id)): {"seconds": 5}}
+    context = SimpleNamespace(
+        job=job,
+        chat_data={KEY_START_COUNTDOWN_CONTEXT: countdown_state},
+    )
 
     await model._auto_start_tick(context)
 
     view.start_prestart_countdown.assert_awaited_once()
     countdown_call = view.start_prestart_countdown.await_args
     assert countdown_call.kwargs["chat_id"] == chat_id
+    assert countdown_call.kwargs["game_id"] == str(game.id)
     assert countdown_call.kwargs["anchor_message_id"] == 111
     assert countdown_call.kwargs["seconds"] == 5
     payload_fn = countdown_call.kwargs["payload_fn"]
@@ -542,11 +545,11 @@ async def test_auto_start_tick_starts_prestart_countdown_and_updates_state():
     assert "5 ثانیه" in initial_text
     preview_text, _ = payload_fn(3)
     assert "3 ثانیه" in preview_text
-    assert context.chat_data["start_countdown"] == 4
-    assert context.chat_data[KEY_PRESTART_COUNTDOWN_ACTIVE] is True
-    assert context.chat_data[KEY_PRESTART_COUNTDOWN_ANCHOR] == 111
-    assert context.chat_data[KEY_PRESTART_COUNTDOWN_SECONDS] == 5
-    assert context.chat_data[KEY_START_COUNTDOWN_LAST_TEXT] == preview_text
+    state = context.chat_data[KEY_START_COUNTDOWN_CONTEXT][(chat_id, str(game.id))]
+    assert state["seconds"] == 4
+    assert state["active"] is True
+    assert state["last_seconds"] == 5
+    assert state[KEY_START_COUNTDOWN_LAST_TEXT] == preview_text
     assert context.chat_data[KEY_CHAT_DATA_GAME] is game
     assert game.ready_message_main_text == preview_text
     assert view._cancel_prestart_countdown.await_count == 0
@@ -563,6 +566,7 @@ async def test_auto_start_tick_does_not_restart_on_regular_tick():
     table_manager = MagicMock()
     game = Game()
     game.ready_message_main_id = 321
+    game.id = "game-43"
     table_manager.get_game = AsyncMock(return_value=game)
     table_manager.save_game = AsyncMock()
 
@@ -570,14 +574,20 @@ async def test_auto_start_tick_does_not_restart_on_regular_tick():
 
     job = SimpleNamespace(chat_id=chat_id)
     job.schedule_removal = MagicMock()
-    context = SimpleNamespace(job=job, chat_data={"start_countdown": 4})
+    countdown_state = {(chat_id, str(game.id)): {"seconds": 4}}
+    context = SimpleNamespace(
+        job=job,
+        chat_data={KEY_START_COUNTDOWN_CONTEXT: countdown_state},
+    )
 
     await model._auto_start_tick(context)
     await model._auto_start_tick(context)
 
     assert view.start_prestart_countdown.await_count == 1
-    assert context.chat_data["start_countdown"] == 2
-    assert context.chat_data[KEY_PRESTART_COUNTDOWN_ACTIVE] is True
+    state = context.chat_data[KEY_START_COUNTDOWN_CONTEXT][(chat_id, str(game.id))]
+    assert state["seconds"] == 2
+    assert state["active"] is True
+    assert state["last_seconds"] == 3
     table_manager.save_game.assert_not_awaited()
 
 
@@ -591,6 +601,7 @@ async def test_auto_start_tick_restarts_when_countdown_increases():
     table_manager = MagicMock()
     game = Game()
     game.ready_message_main_id = 555
+    game.id = "game-44"
     table_manager.get_game = AsyncMock(return_value=game)
     table_manager.save_game = AsyncMock()
 
@@ -598,17 +609,24 @@ async def test_auto_start_tick_restarts_when_countdown_increases():
 
     job = SimpleNamespace(chat_id=chat_id)
     job.schedule_removal = MagicMock()
-    context = SimpleNamespace(job=job, chat_data={"start_countdown": 5})
+    countdown_state = {(chat_id, str(game.id)): {"seconds": 5}}
+    context = SimpleNamespace(
+        job=job,
+        chat_data={KEY_START_COUNTDOWN_CONTEXT: countdown_state},
+    )
 
     await model._auto_start_tick(context)
-    context.chat_data["start_countdown"] = 8
+    context.chat_data[KEY_START_COUNTDOWN_CONTEXT][(chat_id, str(game.id))][
+        "seconds"
+    ] = 8
 
     await model._auto_start_tick(context)
 
     assert view.start_prestart_countdown.await_count == 2
     last_call = view.start_prestart_countdown.await_args_list[-1]
     assert last_call.kwargs["seconds"] == 8
-    assert context.chat_data["start_countdown"] == 7
+    state = context.chat_data[KEY_START_COUNTDOWN_CONTEXT][(chat_id, str(game.id))]
+    assert state["seconds"] == 7
 
 
 @pytest.mark.asyncio
@@ -620,6 +638,7 @@ async def test_auto_start_tick_triggers_game_start_when_zero():
     kv = MagicMock()
     table_manager = MagicMock()
     game = Game()
+    game.id = "game-45"
     table_manager.get_game = AsyncMock(return_value=game)
     table_manager.save_game = AsyncMock()
 
@@ -631,11 +650,14 @@ async def test_auto_start_tick_triggers_game_start_when_zero():
     context = SimpleNamespace(
         job=job,
         chat_data={
-            "start_countdown": 0,
+            KEY_START_COUNTDOWN_CONTEXT: {
+                (chat_id, str(game.id)): {
+                    "seconds": 0,
+                    "active": True,
+                    "last_seconds": 0,
+                }
+            },
             "start_countdown_job": object(),
-            KEY_PRESTART_COUNTDOWN_ACTIVE: True,
-            KEY_PRESTART_COUNTDOWN_ANCHOR: 111,
-            KEY_PRESTART_COUNTDOWN_SECONDS: 0,
         },
     )
 
@@ -644,9 +666,8 @@ async def test_auto_start_tick_triggers_game_start_when_zero():
     model._start_game.assert_awaited_once_with(context, game, chat_id)
     table_manager.save_game.assert_awaited_once_with(chat_id, game)
     job.schedule_removal.assert_called_once()
-    assert "start_countdown" not in context.chat_data
-    assert KEY_PRESTART_COUNTDOWN_ACTIVE not in context.chat_data
-    assert view._cancel_prestart_countdown.await_count == 1
+    assert KEY_START_COUNTDOWN_CONTEXT not in context.chat_data
+    view._cancel_prestart_countdown.assert_awaited_once_with(chat_id, str(game.id))
 
 
 @pytest.mark.asyncio
@@ -660,6 +681,7 @@ async def test_auto_start_tick_creates_message_when_missing():
     table_manager = MagicMock()
     game = Game()
     game.ready_message_main_id = None
+    game.id = "game-46"
     game.ready_message_main_text = ""
     table_manager.get_game = AsyncMock(return_value=game)
     table_manager.save_game = AsyncMock()
@@ -668,7 +690,11 @@ async def test_auto_start_tick_creates_message_when_missing():
 
     job = SimpleNamespace(chat_id=chat_id)
     job.schedule_removal = MagicMock()
-    context = SimpleNamespace(job=job, chat_data={"start_countdown": 3})
+    countdown_state = {(chat_id, str(game.id)): {"seconds": 3}}
+    context = SimpleNamespace(
+        job=job,
+        chat_data={KEY_START_COUNTDOWN_CONTEXT: countdown_state},
+    )
 
     await model._auto_start_tick(context)
 
@@ -678,7 +704,9 @@ async def test_auto_start_tick_creates_message_when_missing():
     assert view.start_prestart_countdown.await_count == 1
     call_kwargs = view.start_prestart_countdown.await_args.kwargs
     assert call_kwargs["anchor_message_id"] == 999
-    assert context.chat_data["start_countdown"] == 2
+    assert call_kwargs["game_id"] == str(game.id)
+    state = context.chat_data[KEY_START_COUNTDOWN_CONTEXT][(chat_id, str(game.id))]
+    assert state["seconds"] == 2
 
 
 @pytest.mark.asyncio
@@ -692,6 +720,7 @@ async def test_auto_start_tick_does_not_start_when_message_creation_fails():
     table_manager = MagicMock()
     game = Game()
     game.ready_message_main_id = None
+    game.id = "game-47"
     table_manager.get_game = AsyncMock(return_value=game)
     table_manager.save_game = AsyncMock()
 
@@ -699,14 +728,19 @@ async def test_auto_start_tick_does_not_start_when_message_creation_fails():
 
     job = SimpleNamespace(chat_id=chat_id)
     job.schedule_removal = MagicMock()
-    context = SimpleNamespace(job=job, chat_data={"start_countdown": 3})
+    countdown_state = {(chat_id, str(game.id)): {"seconds": 3}}
+    context = SimpleNamespace(
+        job=job,
+        chat_data={KEY_START_COUNTDOWN_CONTEXT: countdown_state},
+    )
 
     await model._auto_start_tick(context)
 
     assert view.start_prestart_countdown.await_count == 0
-    assert context.chat_data["start_countdown"] == 3
-    assert context.chat_data[KEY_PRESTART_COUNTDOWN_ACTIVE] is False
-    view._cancel_prestart_countdown.assert_awaited_once_with(chat_id)
+    state = context.chat_data[KEY_START_COUNTDOWN_CONTEXT][(chat_id, str(game.id))]
+    assert state["seconds"] == 3
+    assert state["active"] is False
+    view._cancel_prestart_countdown.assert_awaited_once_with(chat_id, str(game.id))
     table_manager.save_game.assert_not_awaited()
 
 
