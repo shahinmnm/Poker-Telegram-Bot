@@ -79,9 +79,7 @@ AUTO_START_MIN_UPDATE_INTERVAL = datetime.timedelta(
 )
 KEY_START_COUNTDOWN_LAST_TEXT = "start_countdown_last_text"
 KEY_START_COUNTDOWN_LAST_TIMESTAMP = "start_countdown_last_timestamp"
-KEY_PRESTART_COUNTDOWN_ANCHOR = "prestart_countdown_anchor"
-KEY_PRESTART_COUNTDOWN_SECONDS = "prestart_countdown_seconds"
-KEY_PRESTART_COUNTDOWN_ACTIVE = "prestart_countdown_active"
+KEY_START_COUNTDOWN_CONTEXT = "start_countdown_context"
 
 # legacy keys kept for backward compatibility but unused
 KEY_OLD_PLAYERS = "old_players"
@@ -917,6 +915,49 @@ class PokerBotModel:
                 extra={"chat_id": chat_id, "cache_max": self._countdown_cache.maxsize},
             )
 
+    def _countdown_context_key(
+        self, chat_id: ChatId, game_id: Optional[object]
+    ) -> Tuple[int, str]:
+        return self._safe_int(chat_id), str(game_id if game_id is not None else 0)
+
+    def _get_countdown_context(
+        self, context: CallbackContext, chat_id: ChatId, game: Game
+    ) -> Dict[str, Any]:
+        store = context.chat_data.setdefault(KEY_START_COUNTDOWN_CONTEXT, {})
+        key = self._countdown_context_key(chat_id, getattr(game, "id", None))
+        state = store.get(key)
+        if state is None:
+            state = {}
+            store[key] = state
+        return state
+
+    def _clear_countdown_context(
+        self, context: CallbackContext, chat_id: ChatId, game_id: Optional[object]
+    ) -> None:
+        store = context.chat_data.get(KEY_START_COUNTDOWN_CONTEXT)
+        if not isinstance(store, dict):
+            return
+        key = self._countdown_context_key(chat_id, game_id)
+        store.pop(key, None)
+        if not store:
+            context.chat_data.pop(KEY_START_COUNTDOWN_CONTEXT, None)
+
+    async def _handle_countdown_expiry(
+        self, context: CallbackContext, chat_id: ChatId, game_id: int | str
+    ) -> None:
+        async with self._chat_guard(chat_id):
+            game = await self._table_manager.get_game(chat_id)
+            if str(getattr(game, "id", None)) != str(game_id):
+                return
+            if game.state != GameState.INITIAL:
+                self._clear_countdown_context(context, chat_id, game_id)
+                return
+            logger.info(
+                "[Countdown] Expired for chat %s game %s", chat_id, game_id
+            )
+            await self._start_game(context, game, chat_id)
+            await self._table_manager.save_game(chat_id, game)
+
     def _build_ready_message(
         self, game: Game, countdown: Optional[int]
     ) -> Tuple[str, InlineKeyboardMarkup]:
@@ -983,28 +1024,21 @@ class PokerBotModel:
                 )
                 return
 
-            remaining = context.chat_data.get("start_countdown")
+            countdown_ctx = self._get_countdown_context(context, chat_id, game)
+            game_identifier = getattr(game, "id", None)
+            remaining = countdown_ctx.get("seconds")
             if remaining is None:
                 job.schedule_removal()
                 context.chat_data.pop("start_countdown_job", None)
-                context.chat_data.pop(KEY_START_COUNTDOWN_LAST_TEXT, None)
-                context.chat_data.pop(KEY_START_COUNTDOWN_LAST_TIMESTAMP, None)
-                context.chat_data.pop(KEY_PRESTART_COUNTDOWN_ANCHOR, None)
-                context.chat_data.pop(KEY_PRESTART_COUNTDOWN_SECONDS, None)
-                context.chat_data.pop(KEY_PRESTART_COUNTDOWN_ACTIVE, None)
-                await self._view._cancel_prestart_countdown(chat_id)
+                await self._view._cancel_prestart_countdown(chat_id, game_identifier)
+                self._clear_countdown_context(context, chat_id, game_identifier)
                 return
 
             if remaining <= 0 or game.state != GameState.INITIAL:
                 job.schedule_removal()
                 context.chat_data.pop("start_countdown_job", None)
-                context.chat_data.pop("start_countdown", None)
-                context.chat_data.pop(KEY_START_COUNTDOWN_LAST_TEXT, None)
-                context.chat_data.pop(KEY_START_COUNTDOWN_LAST_TIMESTAMP, None)
-                context.chat_data.pop(KEY_PRESTART_COUNTDOWN_ANCHOR, None)
-                context.chat_data.pop(KEY_PRESTART_COUNTDOWN_SECONDS, None)
-                context.chat_data.pop(KEY_PRESTART_COUNTDOWN_ACTIVE, None)
-                await self._view._cancel_prestart_countdown(chat_id)
+                await self._view._cancel_prestart_countdown(chat_id, game_identifier)
+                self._clear_countdown_context(context, chat_id, game_identifier)
                 if remaining <= 0 and game.state == GameState.INITIAL:
                     await self._start_game(context, game, chat_id)
                     await self._table_manager.save_game(chat_id, game)
@@ -1013,8 +1047,8 @@ class PokerBotModel:
             countdown_value = max(int(remaining), 0)
             now = datetime.datetime.now(datetime.timezone.utc)
             text, keyboard = self._build_ready_message(game, countdown_value)
-            context.chat_data[KEY_START_COUNTDOWN_LAST_TEXT] = text
-            context.chat_data[KEY_START_COUNTDOWN_LAST_TIMESTAMP] = now
+            countdown_ctx[KEY_START_COUNTDOWN_LAST_TEXT] = text
+            countdown_ctx[KEY_START_COUNTDOWN_LAST_TIMESTAMP] = now
             game.ready_message_main_text = text
 
             message_id = game.ready_message_main_id
@@ -1030,22 +1064,21 @@ class PokerBotModel:
                     await self._table_manager.save_game(chat_id, game)
                     message_id = new_message_id
                 else:
-                    await self._view._cancel_prestart_countdown(chat_id)
-                    context.chat_data["start_countdown"] = countdown_value
-                    context.chat_data[KEY_PRESTART_COUNTDOWN_ACTIVE] = False
+                    await self._view._cancel_prestart_countdown(chat_id, game_identifier)
+                    countdown_ctx["seconds"] = countdown_value
+                    countdown_ctx["active"] = False
                     return
 
-            previous_anchor = context.chat_data.get(KEY_PRESTART_COUNTDOWN_ANCHOR)
-            previous_seconds = context.chat_data.get(KEY_PRESTART_COUNTDOWN_SECONDS)
-            countdown_active = context.chat_data.get(KEY_PRESTART_COUNTDOWN_ACTIVE)
+            previous_seconds = countdown_ctx.get("last_seconds")
+            countdown_active = bool(countdown_ctx.get("active"))
 
             def payload_fn(seconds_left: int) -> Tuple[str, InlineKeyboardMarkup]:
                 payload_text, payload_keyboard = self._build_ready_message(
                     game, max(seconds_left, 0)
                 )
                 game.ready_message_main_text = payload_text
-                context.chat_data[KEY_START_COUNTDOWN_LAST_TEXT] = payload_text
-                context.chat_data[KEY_START_COUNTDOWN_LAST_TIMESTAMP] = (
+                countdown_ctx[KEY_START_COUNTDOWN_LAST_TEXT] = payload_text
+                countdown_ctx[KEY_START_COUNTDOWN_LAST_TIMESTAMP] = (
                     datetime.datetime.now(datetime.timezone.utc)
                 )
                 return payload_text, payload_keyboard
@@ -1054,31 +1087,30 @@ class PokerBotModel:
             if message_id is not None:
                 if not countdown_active:
                     should_start_countdown = True
-                elif previous_anchor != message_id:
-                    should_start_countdown = True
                 elif previous_seconds is None:
                     should_start_countdown = True
                 elif countdown_value > int(previous_seconds):
                     should_start_countdown = True
 
             if should_start_countdown:
+                async def _on_countdown_complete() -> None:
+                    await self._handle_countdown_expiry(
+                        context, chat_id, game_identifier
+                    )
+
                 await self._view.start_prestart_countdown(
                     chat_id=chat_id,
+                    game_id=game_identifier,
                     anchor_message_id=message_id,
                     seconds=countdown_value,
                     payload_fn=payload_fn,
+                    on_complete=_on_countdown_complete,
                 )
                 countdown_active = True
-                previous_anchor = message_id
 
-            if countdown_active:
-                context.chat_data[KEY_PRESTART_COUNTDOWN_ACTIVE] = True
-                context.chat_data[KEY_PRESTART_COUNTDOWN_ANCHOR] = previous_anchor
-            else:
-                context.chat_data[KEY_PRESTART_COUNTDOWN_ACTIVE] = False
-
-            context.chat_data[KEY_PRESTART_COUNTDOWN_SECONDS] = countdown_value
-            context.chat_data["start_countdown"] = max(countdown_value - 1, 0)
+            countdown_ctx["active"] = countdown_active
+            countdown_ctx["last_seconds"] = countdown_value
+            countdown_ctx["seconds"] = max(countdown_value - 1, 0)
 
     async def _schedule_auto_start(
         self, context: CallbackContext, game: Game, chat_id: ChatId
@@ -1090,12 +1122,12 @@ class PokerBotModel:
             logger.warning("JobQueue not available; auto start disabled")
             return
 
-        context.chat_data["start_countdown"] = 60
-        context.chat_data[KEY_START_COUNTDOWN_LAST_TEXT] = game.ready_message_main_text
-        context.chat_data.pop(KEY_START_COUNTDOWN_LAST_TIMESTAMP, None)
-        context.chat_data.pop(KEY_PRESTART_COUNTDOWN_ANCHOR, None)
-        context.chat_data.pop(KEY_PRESTART_COUNTDOWN_SECONDS, None)
-        context.chat_data[KEY_PRESTART_COUNTDOWN_ACTIVE] = False
+        countdown_ctx = self._get_countdown_context(context, chat_id, game)
+        countdown_ctx["seconds"] = 60
+        countdown_ctx[KEY_START_COUNTDOWN_LAST_TEXT] = game.ready_message_main_text
+        countdown_ctx.pop(KEY_START_COUNTDOWN_LAST_TIMESTAMP, None)
+        countdown_ctx.pop("last_seconds", None)
+        countdown_ctx["active"] = False
         job = context.job_queue.run_repeating(
             self._auto_start_tick,
             interval=1,
@@ -1108,21 +1140,25 @@ class PokerBotModel:
         context.chat_data["start_countdown_job"] = job
 
     async def _cancel_auto_start(
-        self, context: CallbackContext, chat_id: Optional[ChatId] = None
+        self,
+        context: CallbackContext,
+        chat_id: Optional[ChatId] = None,
+        game: Optional[Game] = None,
     ) -> None:
         job = context.chat_data.pop("start_countdown_job", None)
         if job:
             job.schedule_removal()
             if chat_id is None:
                 chat_id = getattr(job, "chat_id", None)
-        context.chat_data.pop("start_countdown", None)
-        context.chat_data.pop(KEY_START_COUNTDOWN_LAST_TEXT, None)
-        context.chat_data.pop(KEY_START_COUNTDOWN_LAST_TIMESTAMP, None)
-        context.chat_data.pop(KEY_PRESTART_COUNTDOWN_ANCHOR, None)
-        context.chat_data.pop(KEY_PRESTART_COUNTDOWN_SECONDS, None)
-        context.chat_data.pop(KEY_PRESTART_COUNTDOWN_ACTIVE, None)
+        game_identifier = getattr(game, "id", None) if game is not None else None
         if chat_id is not None:
-            await self._view._cancel_prestart_countdown(chat_id)
+            await self._view._cancel_prestart_countdown(chat_id, game_identifier)
+            if game_identifier is not None:
+                self._clear_countdown_context(context, chat_id, game_identifier)
+            else:
+                context.chat_data.pop(KEY_START_COUNTDOWN_CONTEXT, None)
+        else:
+            context.chat_data.pop(KEY_START_COUNTDOWN_CONTEXT, None)
 
     async def hide_cards(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
@@ -1333,10 +1369,15 @@ class PokerBotModel:
         if game.seated_count() >= self._min_players:
             await self._schedule_auto_start(context, game, chat_id)
         else:
-            await self._cancel_auto_start(context, chat_id)
+            await self._cancel_auto_start(context, chat_id, game)
 
-        countdown_value = context.chat_data.get("start_countdown")
+        countdown_ctx = self._get_countdown_context(context, chat_id, game)
+        countdown_value = countdown_ctx.get("seconds")
         text, keyboard = self._build_ready_message(game, countdown_value)
+        countdown_ctx[KEY_START_COUNTDOWN_LAST_TEXT] = text
+        countdown_ctx[KEY_START_COUNTDOWN_LAST_TIMESTAMP] = (
+            datetime.datetime.now(datetime.timezone.utc)
+        )
         current_text = getattr(game, "ready_message_main_text", "")
 
         if game.ready_message_main_id:
@@ -1406,7 +1447,7 @@ class PokerBotModel:
         await self._register_player_identity(user)
 
         game, chat_id = await self._get_game(update, context)
-        await self._cancel_auto_start(context, chat_id)
+        await self._cancel_auto_start(context, chat_id, game)
         if game.state not in (GameState.INITIAL, GameState.FINISHED):
             await self._view.send_message(
                 chat_id, "🎮 یک بازی در حال حاضر در جریان است."
@@ -1742,7 +1783,14 @@ class PokerBotModel:
     ) -> None:
         """مراحل شروع یک دست جدید بازی را انجام می‌دهد."""
         async with self._chat_guard(chat_id):
-            await self._cancel_auto_start(context, chat_id)
+            await self._cancel_auto_start(context, chat_id, game)
+            logger.info(
+                "[Game] start_hand invoked",
+                extra={
+                    "chat_id": chat_id,
+                    "game_id": getattr(game, "id", None),
+                },
+            )
             if game.ready_message_main_id:
                 deleted_ready_message = False
                 try:
