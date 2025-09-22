@@ -1820,6 +1820,9 @@ class PokerBotModel:
             stage_lock = await self._get_stage_lock(chat_id)
             async with stage_lock:
                 await self._view.send_player_role_anchors(game=game, chat_id=chat_id)
+                await self._view.sync_player_private_keyboards(
+                    game, include_inactive=True
+                )
 
             action_str = "بازی شروع شد"
             game.last_actions.append(action_str)
@@ -2041,6 +2044,7 @@ class PokerBotModel:
             async with stage_lock:
                 game.chat_id = chat_id
                 await self._view.update_player_anchors_and_keyboards(game)
+                await self._view.sync_player_private_keyboards(game)
 
                 money = await player.wallet.value()
                 recent_actions = list(game.last_actions)
@@ -2273,6 +2277,7 @@ class PokerBotModel:
                 game.state = next_state
                 await self.add_cards_to_table(card_count, game, chat_id, stage_label)
                 await self._view.update_player_anchors_and_keyboards(game)
+                await self._view.sync_player_private_keyboards(game)
             elif game.state == GameState.ROUND_RIVER:
                 # بعد از ریور، دور شرط‌بندی تمام شده و باید showdown انجام شود
                 await self._showdown(game, chat_id, context)

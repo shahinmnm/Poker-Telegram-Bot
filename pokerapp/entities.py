@@ -89,6 +89,9 @@ class Player:
         self.is_dealer: bool = False
         self.is_small_blind: bool = False
         self.is_big_blind: bool = False
+        self.private_chat_id: Optional[ChatId] = None
+        self.private_keyboard_message: Optional[Tuple[ChatId, MessageId]] = None
+        self.private_keyboard_signature: Optional[str] = None
         # -------------------------
     def __repr__(self):
         return "{}({!r})".format(self.__class__.__name__, self.__dict__)

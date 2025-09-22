@@ -15,6 +15,7 @@ from pokerapp.config import (
 )
 from pokerapp.entities import Game, GameState, Player, PlayerAction
 from pokerapp.pokerbotview import PokerBotViewer, build_player_cards_keyboard
+from pokerapp.utils.request_metrics import RequestCategory
 
 
 MENTION_LINK = "tg://user?id=123"
@@ -136,6 +137,8 @@ def test_notify_admin_failure_logs_error(caplog):
 def test_update_player_anchors_and_keyboards_highlights_active_player():
     viewer = PokerBotViewer(bot=MagicMock())
     viewer._update_message = AsyncMock(side_effect=[101, 202])
+    viewer.edit_message_reply_markup = AsyncMock(return_value=True)
+    viewer.send_message_return_id = AsyncMock()
 
     game = Game()
     game.chat_id = -777
@@ -163,6 +166,12 @@ def test_update_player_anchors_and_keyboards_highlights_active_player():
     player_two.display_name = 'Player Two'
     player_one.role_label = 'دیلر'
     player_two.role_label = 'بلایند بزرگ'
+    player_one.private_chat_id = 1001
+    player_two.private_chat_id = 1002
+    player_one.private_keyboard_message = (player_one.private_chat_id, 501)
+    player_two.private_keyboard_message = (player_two.private_chat_id, 502)
+    player_one.private_keyboard_signature = 'old-one'
+    player_two.private_keyboard_signature = 'old-two'
 
     player_one.anchor_message = (game.chat_id, 101)
     player_two.anchor_message = (game.chat_id, 202)
@@ -171,6 +180,8 @@ def test_update_player_anchors_and_keyboards_highlights_active_player():
     run(viewer.update_player_anchors_and_keyboards(game))
 
     assert viewer._update_message.await_count == 2
+    assert viewer.edit_message_reply_markup.await_count == 2
+    viewer.send_message_return_id.assert_not_awaited()
 
     first_call = viewer._update_message.await_args_list[0]
     second_call = viewer._update_message.await_args_list[1]
@@ -181,18 +192,31 @@ def test_update_player_anchors_and_keyboards_highlights_active_player():
     assert 'Player One' in first_text
     assert '🪑 صندلی: 1' in first_text
     assert '🎖️ نقش: دیلر' in first_text
-    assert isinstance(first_call.kwargs['reply_markup'], ReplyKeyboardMarkup)
-    board_row = _row_texts(first_call.kwargs['reply_markup'].keyboard[1])
-    assert board_row == ['A♠', 'K♦', '5♣']
+    assert first_call.kwargs['reply_markup'] is None
 
     assert second_call.kwargs['message_id'] == 202
     second_text = second_call.kwargs['text']
     assert "🎯 نوبت این بازیکن است." not in second_text
     assert 'Player Two' in second_text
     assert '🎖️ نقش: بلایند بزرگ' in second_text
+    assert second_call.kwargs['reply_markup'] is None
+
+    first_keyboard_call = viewer.edit_message_reply_markup.await_args_list[0]
+    assert first_keyboard_call.kwargs['chat_id'] == player_one.private_chat_id
+    assert first_keyboard_call.kwargs['message_id'] == 501
+    assert isinstance(first_keyboard_call.kwargs['reply_markup'], ReplyKeyboardMarkup)
+    board_row = _row_texts(first_keyboard_call.kwargs['reply_markup'].keyboard[1])
+    assert board_row == ['A♠', 'K♦', '5♣']
+
+    second_keyboard_call = viewer.edit_message_reply_markup.await_args_list[1]
+    assert second_keyboard_call.kwargs['chat_id'] == player_two.private_chat_id
+    assert second_keyboard_call.kwargs['message_id'] == 502
+    assert isinstance(second_keyboard_call.kwargs['reply_markup'], ReplyKeyboardMarkup)
 
     assert player_one.anchor_message == (game.chat_id, 101)
     assert player_two.anchor_message == (game.chat_id, 202)
+    assert player_one.private_keyboard_signature != 'old-one'
+    assert player_two.private_keyboard_signature != 'old-two'
 
 
 def test_update_player_anchors_and_keyboards_skips_players_without_anchor():
@@ -243,6 +267,60 @@ def test_clear_all_player_anchors_deletes_messages():
     assert player.anchor_role == 'بازیکن'
     assert player.role_label == 'بازیکن'
     assert 404 not in game.message_ids_to_delete
+
+
+def test_send_player_role_anchors_pushes_private_keyboard_and_plain_anchor():
+    viewer = PokerBotViewer(bot=MagicMock())
+    viewer.edit_message_reply_markup = AsyncMock()
+
+    game = Game()
+    game.chat_id = -555
+    game.state = GameState.ROUND_PRE_FLOP
+
+    player = Player(
+        user_id=42,
+        mention_markdown='@hero',
+        wallet=MagicMock(),
+        ready_message_id='ready-hero',
+    )
+    player.cards = [Card('A♠'), Card('K♦')]
+    player.private_chat_id = 9991
+    game.add_player(player, seat_index=0)
+
+    send_calls = []
+
+    async def fake_send_message_return_id(**kwargs):
+        send_calls.append(kwargs)
+        chat_id = kwargs['chat_id']
+        reply_markup = kwargs['reply_markup']
+        if chat_id == player.private_chat_id:
+            assert isinstance(reply_markup, ReplyKeyboardMarkup)
+            return 777
+        assert reply_markup is None
+        return 321
+
+    viewer.send_message_return_id = AsyncMock(side_effect=fake_send_message_return_id)
+
+    run(viewer.send_player_role_anchors(game=game, chat_id=game.chat_id))
+
+    assert viewer.send_message_return_id.await_count == 2
+    assert viewer.edit_message_reply_markup.await_count == 0
+
+    private_call, anchor_call = send_calls
+
+    assert private_call['chat_id'] == player.private_chat_id
+    assert isinstance(private_call['reply_markup'], ReplyKeyboardMarkup)
+    assert private_call['request_category'] == RequestCategory.GENERAL
+    hole_row = _row_texts(private_call['reply_markup'].keyboard[0])
+    assert hole_row == ['A♠', 'K♦']
+
+    assert anchor_call['chat_id'] == game.chat_id
+    assert anchor_call['reply_markup'] is None
+    assert anchor_call['request_category'] == RequestCategory.ANCHOR
+
+    assert player.private_keyboard_message == (player.private_chat_id, 777)
+    assert player.anchor_message == (game.chat_id, 321)
+    assert player.private_keyboard_signature is not None
 
 
 def test_build_player_cards_keyboard_layout():
