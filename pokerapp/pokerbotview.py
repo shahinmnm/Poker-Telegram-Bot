@@ -1303,7 +1303,7 @@ class PokerBotViewer:
     ) -> None:
         """Send one anchor message per player with their current role."""
 
-        if chat_id is None or self._is_private_chat(chat_id):
+        if chat_id is None:
             return
 
         stage = getattr(game, "state", GameState.INITIAL)
@@ -1314,15 +1314,14 @@ class PokerBotViewer:
                 stage = GameState.INITIAL
         stage_name = stage.name
 
-        community_cards_source: Optional[Sequence[Card]] = getattr(
-            game, "community_cards", None
+        await self.sync_player_private_keyboards(
+            game=game,
+            include_inactive=True,
+            stage_name=stage_name,
         )
-        if community_cards_source is None:
-            community_cards_source = getattr(game, "cards_table", [])
-        try:
-            community_cards = [str(card) for card in community_cards_source or []]
-        except Exception:
-            community_cards = []
+
+        if self._is_private_chat(chat_id):
+            return
 
         players: Sequence[Optional[Player]] = getattr(game, "players", [])
         ordered_players = sorted(
@@ -1336,20 +1335,6 @@ class PokerBotViewer:
 
             role_label = getattr(player, "role_label", None) or self._describe_player_role(
                 game, player
-            )
-
-            hole_cards_source = getattr(player, "hole_cards", None)
-            if hole_cards_source is None:
-                hole_cards_source = getattr(player, "cards", [])
-            try:
-                hole_cards = [str(card) for card in hole_cards_source or []]
-            except Exception:
-                hole_cards = []
-
-            keyboard = build_player_cards_keyboard(
-                hole_cards=hole_cards,
-                community_cards=community_cards,
-                current_stage=stage_name,
             )
 
             display_name = str(
@@ -1370,7 +1355,7 @@ class PokerBotViewer:
                 message_id = await self.send_message_return_id(
                     chat_id=chat_id,
                     text=text,
-                    reply_markup=keyboard,
+                    reply_markup=None,
                     request_category=RequestCategory.ANCHOR,
                 )
             except Exception as exc:
@@ -1427,19 +1412,243 @@ class PokerBotViewer:
                 return None
         return None
 
+    async def sync_player_private_keyboards(
+        self,
+        *,
+        game: Game,
+        include_inactive: bool = False,
+        stage_name: Optional[str] = None,
+        community_cards: Optional[Sequence[str]] = None,
+    ) -> None:
+        stage = getattr(game, "state", GameState.INITIAL)
+        if stage_name is None:
+            if not isinstance(stage, GameState):
+                try:
+                    stage = GameState(stage)
+                except Exception:
+                    stage = GameState.INITIAL
+            stage_name = stage.name
+
+        if community_cards is None:
+            community_cards_source: Optional[Sequence[Card]] = getattr(
+                game, "community_cards", None
+            )
+            if community_cards_source is None:
+                community_cards_source = getattr(game, "cards_table", [])
+            try:
+                community_cards = [str(card) for card in community_cards_source or []]
+            except Exception:
+                community_cards = []
+
+        players: Sequence[Optional[Player]] = getattr(game, "players", [])
+        for player in players:
+            if player is None:
+                continue
+            if not include_inactive:
+                is_active = getattr(player, "is_active", None)
+                if callable(is_active):
+                    try:
+                        if not player.is_active():
+                            continue
+                    except Exception:
+                        continue
+                elif getattr(player, "state", None) not in (
+                    PlayerState.ACTIVE,
+                    PlayerState.ALL_IN,
+                ):
+                    continue
+
+            await self._send_player_private_keyboard(
+                game=game,
+                player=player,
+                stage_name=stage_name,
+                community_cards=community_cards,
+            )
+
+    async def _send_player_private_keyboard(
+        self,
+        *,
+        game: Game,
+        player: Player,
+        stage_name: str,
+        community_cards: Sequence[str],
+        role_label: Optional[str] = None,
+        display_name: Optional[str] = None,
+    ) -> None:
+        private_chat_id = getattr(player, "private_chat_id", None)
+        if not private_chat_id:
+            return
+
+        hole_cards_source = getattr(player, "hole_cards", None)
+        if hole_cards_source is None:
+            hole_cards_source = getattr(player, "cards", [])
+        try:
+            hole_cards = [str(card) for card in hole_cards_source or []]
+        except Exception:
+            hole_cards = []
+
+        keyboard = build_player_cards_keyboard(
+            hole_cards=hole_cards,
+            community_cards=community_cards,
+            current_stage=stage_name,
+        )
+
+        seat_index = player.seat_index if player.seat_index is not None else -1
+        seat_number = seat_index + 1 if seat_index >= 0 else "?"
+
+        resolved_role_label = (
+            role_label
+            or getattr(player, "role_label", None)
+            or getattr(player, "anchor_role", None)
+            or self._describe_player_role(game, player)
+        )
+
+        resolved_display_name = display_name or (
+            getattr(player, "display_name", None)
+            or getattr(player, "full_name", None)
+            or getattr(player, "username", None)
+            or getattr(player, "mention_markdown", "بازیکن")
+        )
+        resolved_display_name = str(resolved_display_name)
+
+        text = self._build_anchor_text(
+            display_name=resolved_display_name,
+            mention_markdown=getattr(player, "mention_markdown", None),
+            seat_number=seat_number,
+            role_label=resolved_role_label,
+        )
+
+        signature = self.payload_signature(text, keyboard)
+        previous_signature = getattr(player, "private_keyboard_signature", None)
+
+        message_meta = getattr(player, "private_keyboard_message", None)
+        message_id: Optional[int] = None
+        if (
+            isinstance(message_meta, tuple)
+            and len(message_meta) >= 2
+            and message_meta[0] == private_chat_id
+        ):
+            try:
+                message_id = int(message_meta[1])
+            except (TypeError, ValueError):
+                message_id = None
+
+        if message_id is None:
+            try:
+                new_message_id = await self.send_message_return_id(
+                    chat_id=private_chat_id,
+                    text=text,
+                    reply_markup=keyboard,
+                    request_category=RequestCategory.GENERAL,
+                )
+            except Exception as exc:
+                logger.error(
+                    "Failed to send private keyboard",
+                    extra={
+                        "chat_id": private_chat_id,
+                        "player_id": getattr(player, "user_id", None),
+                        "error_type": type(exc).__name__,
+                    },
+                )
+                return
+
+            if new_message_id is None:
+                return
+
+            normalized_message_id = self._safe_int(new_message_id)
+            player.private_keyboard_message = (private_chat_id, normalized_message_id)
+            player.private_keyboard_signature = signature
+            logger.info(
+                "Private keyboard sent",
+                extra={
+                    "chat_id": private_chat_id,
+                    "player_id": getattr(player, "user_id", None),
+                    "message_id": normalized_message_id,
+                },
+            )
+            return
+
+        if previous_signature == signature:
+            logger.debug(
+                "Skipping private keyboard refresh (unchanged)",
+                extra={
+                    "chat_id": private_chat_id,
+                    "player_id": getattr(player, "user_id", None),
+                    "message_id": message_id,
+                },
+            )
+            return
+
+        try:
+            updated = await self.edit_message_reply_markup(
+                chat_id=private_chat_id,
+                message_id=message_id,
+                reply_markup=keyboard,
+            )
+        except Exception as exc:
+            logger.error(
+                "Failed to update private keyboard",
+                extra={
+                    "chat_id": private_chat_id,
+                    "player_id": getattr(player, "user_id", None),
+                    "message_id": message_id,
+                    "error_type": type(exc).__name__,
+                },
+            )
+            updated = False
+
+        if updated:
+            player.private_keyboard_signature = signature
+            logger.info(
+                "Private keyboard updated",
+                extra={
+                    "chat_id": private_chat_id,
+                    "player_id": getattr(player, "user_id", None),
+                    "message_id": message_id,
+                },
+            )
+            return
+
+        try:
+            fallback_id = await self.send_message_return_id(
+                chat_id=private_chat_id,
+                text=text,
+                reply_markup=keyboard,
+                request_category=RequestCategory.GENERAL,
+            )
+        except Exception as exc:
+            logger.error(
+                "Failed to resend private keyboard",
+                extra={
+                    "chat_id": private_chat_id,
+                    "player_id": getattr(player, "user_id", None),
+                    "message_id": message_id,
+                    "error_type": type(exc).__name__,
+                },
+            )
+            return
+
+        if fallback_id is None:
+            return
+
+        normalized_fallback_id = self._safe_int(fallback_id)
+        player.private_keyboard_message = (private_chat_id, normalized_fallback_id)
+        player.private_keyboard_signature = signature
+        logger.info(
+            "Private keyboard resent",
+            extra={
+                "chat_id": private_chat_id,
+                "player_id": getattr(player, "user_id", None),
+                "message_id": normalized_fallback_id,
+            },
+        )
+
     async def update_player_anchors_and_keyboards(self, game: Game) -> None:
         chat_id = getattr(game, "chat_id", None)
         if chat_id is None:
             logger.warning(
                 "Cannot update anchors without chat id",
                 extra={"game_id": getattr(game, "id", None)},
-            )
-            return
-
-        if self._is_private_chat(chat_id):
-            logger.debug(
-                "Skipping anchor refresh for private chat",
-                extra={"chat_id": chat_id},
             )
             return
 
@@ -1460,6 +1669,20 @@ class PokerBotViewer:
             community_cards = [str(card) for card in community_cards_source or []]
         except Exception:
             community_cards = []
+
+        await self.sync_player_private_keyboards(
+            game=game,
+            include_inactive=False,
+            stage_name=stage_name,
+            community_cards=community_cards,
+        )
+
+        if self._is_private_chat(chat_id):
+            logger.debug(
+                "Skipping anchor refresh for private chat",
+                extra={"chat_id": chat_id},
+            )
+            return
 
         current_player: Optional[Player] = None
         current_index = getattr(game, "current_player_index", None)
@@ -1496,12 +1719,6 @@ class PokerBotViewer:
                 hole_cards = [str(card) for card in hole_cards_source or []]
             except Exception:
                 hole_cards = []
-
-            keyboard = build_player_cards_keyboard(
-                hole_cards=hole_cards,
-                community_cards=community_cards,
-                current_stage=stage_name,
-            )
 
             seat_index = player.seat_index if player.seat_index is not None else -1
             seat_number = seat_index + 1 if seat_index >= 0 else "?"
@@ -1544,7 +1761,7 @@ class PokerBotViewer:
                     chat_id=chat_id,
                     message_id=anchor_id,
                     text=text,
-                    reply_markup=keyboard,
+                    reply_markup=None,
                     request_category=RequestCategory.ANCHOR,
                 )
             except Exception as exc:
