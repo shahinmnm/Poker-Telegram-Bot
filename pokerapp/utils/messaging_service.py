@@ -290,7 +290,8 @@ class MessagingService:
                 content_hash = self._content_hash(text, reply_markup)
                 await self._remember_content(chat_id, message_id, content_hash)
                 if text is not None:
-                    await self._set_last_text_hash(message_id, content_hash)
+                    text_hash = hashlib.md5(text.encode("utf-8")).hexdigest()
+                    await self._set_last_text_hash(message_id, text_hash)
                 self._log_api_call(
                     "send_message",
                     chat_id=chat_id,
@@ -612,7 +613,7 @@ class MessagingService:
 
             text_hash: Optional[str] = None
             if payload.text is not None:
-                text_hash = content_hash
+                text_hash = hashlib.md5(payload.text.encode("utf-8")).hexdigest()
 
             if not payload.force and text_hash is not None:
                 last_hash = await self._last_known_text_hash(message_id)

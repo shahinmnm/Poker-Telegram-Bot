@@ -578,7 +578,7 @@ class PokerBotModel:
         await self._request_metrics.end_cycle(
             self._safe_int(chat_id), cycle_token=game.id
         )
-        await self._clear_player_anchors(game, reason="setup")
+        await self._clear_player_anchors(game)
         game.reset()
         for index, info in enumerate(players):
             safe_user_id = self._safe_int(info.user_id)
@@ -1732,7 +1732,7 @@ class PokerBotModel:
         await self._request_metrics.end_cycle(
             self._safe_int(chat_id), cycle_token=game.id
         )
-        await self._clear_player_anchors(game, reason="end_hand")
+        await self._clear_player_anchors(game)
         game.reset()
         await self._table_manager.save_game(chat_id, game)
         await self._view.send_message(chat_id, "🛑 بازی متوقف شد.")
@@ -1806,7 +1806,7 @@ class PokerBotModel:
                     )
                 game.seat_announcement_message_id = None
 
-            await self._clear_player_anchors(game, reason="setup")
+            await self._clear_player_anchors(game)
 
             await self._divide_cards(game, chat_id)
 
@@ -2518,20 +2518,10 @@ class PokerBotModel:
         game.message_ids_to_delete.clear()
         game.message_ids.clear()
 
-    async def _clear_player_anchors(
-        self, game: Game, *, reason: str = "general"
-    ) -> None:
+    async def _clear_player_anchors(self, game: Game) -> None:
         clear_method = getattr(self._view, "clear_all_player_anchors", None)
-        reset_method = getattr(self._view, "reset_player_anchor_state", None)
-        if reason in {"end_hand", "showdown"}:
-            if callable(clear_method):
-                result = clear_method(game)
-                if inspect.isawaitable(result):
-                    await result
-        elif callable(reset_method):
-            result = reset_method(game)
-            if inspect.isawaitable(result):
-                await result
+        if callable(clear_method):
+            await clear_method(game)
 
     async def _showdown(
         self, game: Game, chat_id: ChatId, context: CallbackContext
@@ -2671,7 +2661,7 @@ class PokerBotModel:
         await self._request_metrics.end_cycle(
             self._safe_int(chat_id), cycle_token=game.id
         )
-        await self._clear_player_anchors(game, reason="showdown")
+        await self._clear_player_anchors(game)
         game.reset()
         await self._table_manager.save_game(chat_id, game)
 
@@ -2685,7 +2675,7 @@ class PokerBotModel:
         یک دست از بازی را تمام کرده، پیام‌ها را پاکسازی کرده و برای دست بعدی آماده می‌شود.
         """
         await self._clear_game_messages(game, chat_id)
-        await self._clear_player_anchors(game, reason="end_hand")
+        await self._clear_player_anchors(game)
 
         # ۲. ذخیره بازیکنان برای دست بعدی
         # این باعث می‌شود در بازی بعدی، لازم نباشد همه دوباره دکمهٔ نشستن سر میز را بزنند
