@@ -277,12 +277,7 @@ async def test_register_player_identity_updates_active_game_private_chat():
     assert model._private_chat_ids[player.user_id] == 999
     table_manager.save_game.assert_awaited_once_with(chat_id, game)
 
-    await view.sync_player_private_keyboards(game)
-
-    view._send_player_private_keyboard.assert_awaited_once()
-    send_call = view._send_player_private_keyboard.await_args
-    assert send_call.kwargs["player"] is player
-    assert send_call.kwargs["game"] is game
+    view._send_player_private_keyboard.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -486,7 +481,7 @@ def test_send_turn_message_updates_turn_message_only():
     assert game.turn_message_id == 321
     view.update_turn_message.assert_awaited_once()
     view.update_player_anchors_and_keyboards.assert_awaited_once_with(game)
-    view.sync_player_private_keyboards.assert_awaited_once_with(game)
+    view.sync_player_private_keyboards.assert_not_awaited()
 
 
 def test_add_cards_to_table_does_not_send_stage_message():
@@ -945,9 +940,7 @@ async def test_start_game_assigns_blinds_to_occupied_seats():
     assert blind_players == {1, 2}
 
     view.send_player_role_anchors.assert_awaited_once_with(game=game, chat_id=chat_id)
-    view.sync_player_private_keyboards.assert_awaited_once_with(
-        game, include_inactive=True
-    )
+    view.sync_player_private_keyboards.assert_not_awaited()
 
     model._send_turn_message.assert_awaited_once()
     send_call = model._send_turn_message.await_args
@@ -995,9 +988,7 @@ async def test_start_game_keeps_ready_message_id_when_deletion_fails():
     model._divide_cards.assert_awaited_once_with(game, chat_id)
     model._round_rate.set_blinds.assert_awaited_once_with(game, chat_id)
     view.send_player_role_anchors.assert_awaited_once_with(game=game, chat_id=chat_id)
-    view.sync_player_private_keyboards.assert_awaited_once_with(
-        game, include_inactive=True
-    )
+    view.sync_player_private_keyboards.assert_not_awaited()
 
 
 def test_send_turn_message_updates_existing_message():
