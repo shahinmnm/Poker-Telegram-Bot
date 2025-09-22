@@ -505,34 +505,19 @@ class PokerBotViewer:
         self,
         text: str,
         reply_markup: Optional[InlineKeyboardMarkup | ReplyKeyboardMarkup],
-        *,
-        stage_name: Optional[str] = None,
-        community_cards: Optional[Sequence[str]] = None,
     ) -> str:
         markup_hash = self._serialize_markup(reply_markup) or ""
-        stage_token = (stage_name or "").upper()
-        board_token = "".join(str(card) for card in (community_cards or []))
-        payload = (
-            f"{text}|{markup_hash}|stage={stage_token}|board={board_token}"
-        )
+        payload = f"{text}|{markup_hash}"
         return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
     def payload_signature(
         self,
         text: str,
         reply_markup: Optional[InlineKeyboardMarkup | ReplyKeyboardMarkup],
-        *,
-        stage_name: Optional[str] = None,
-        community_cards: Optional[Sequence[str]] = None,
     ) -> str:
         """Public helper exposing the stable payload hash for callers."""
 
-        return self._payload_hash(
-            text,
-            reply_markup,
-            stage_name=stage_name,
-            community_cards=community_cards,
-        )
+        return self._payload_hash(text, reply_markup)
 
     @staticmethod
     def _safe_int(value: Optional[int | str]) -> int:
@@ -552,8 +537,6 @@ class PokerBotViewer:
         disable_web_page_preview: bool = True,
         disable_notification: bool = False,
         request_category: RequestCategory = RequestCategory.GENERAL,
-        stage_name: Optional[str] = None,
-        community_cards: Optional[Sequence[str]] = None,
     ) -> Optional[MessageId]:
         key = (chat_id, message_id)
         loop = asyncio.get_running_loop()
@@ -577,8 +560,6 @@ class PokerBotViewer:
                     "disable_web_page_preview": disable_web_page_preview,
                     "disable_notification": disable_notification,
                     "request_category": request_category,
-                    "stage_name": stage_name,
-                    "community_cards": community_cards,
                 }
                 self._pending_updates[key] = {"payload": payload, "future": future}
 
@@ -909,8 +890,6 @@ class PokerBotViewer:
         parse_mode: str = ParseMode.MARKDOWN,
         disable_web_page_preview: bool = True,
         disable_notification: bool = False,
-        stage_name: Optional[str] = None,
-        community_cards: Optional[Sequence[str]] = None,
         force_send: bool = False,
         request_category: RequestCategory = RequestCategory.GENERAL,
     ) -> Optional[MessageId]:
@@ -948,49 +927,19 @@ class PokerBotViewer:
             )
             reply_markup = None
 
-        board_cards = tuple(str(card) for card in (community_cards or []))
-        explicit_stage_token = (
-            self._normalize_stage_name(stage_name) if stage_name else None
-        )
-
+        payload_hash = self._payload_hash(normalized_text, reply_markup)
         message_text_hash = hashlib.md5(normalized_text.encode("utf-8")).hexdigest()
         normalized_chat = self._safe_int(chat_id)
         normalized_existing_message = (
             self._safe_int(message_id) if message_id is not None else None
         )
-        previous_message_key: Optional[Tuple[int, int]] = None
-        if normalized_existing_message is not None:
-            previous_message_key = (normalized_chat, normalized_existing_message)
-            if await self._is_message_deleted(normalized_existing_message):
-                logger.info(
-                    "Anchor message %s no longer exists; sending fresh message",
-                    message_id,
-                )
-                await self._clear_callback_tokens_for_message(
-                    normalized_chat, normalized_existing_message
-                )
-                await self._pop_payload_hash(previous_message_key)
-                if request_category == RequestCategory.TURN:
-                    await self._pop_turn_cache_hash(previous_message_key)
-                await self._mark_message_deleted(normalized_existing_message)
-                normalized_existing_message = None
-
         message_key: Optional[Tuple[int, int]] = (
             (normalized_chat, normalized_existing_message)
             if normalized_existing_message is not None
             else None
         )
-
-        callback_stage_name = explicit_stage_token or self._normalize_stage_name(
-            request_category.value
-        )
-        payload_hash = self._payload_hash(
-            normalized_text,
-            reply_markup,
-            stage_name=callback_stage_name,
-            community_cards=board_cards,
-        )
         callback_id: Optional[str] = None
+        callback_stage_name = self._normalize_stage_name(request_category.value)
         callback_user_id: Optional[int] = None
         callback_token_key: Optional[Tuple[int, int, str, int]] = None
         callback_throttle_key: Optional[Tuple[int, str]] = None
@@ -999,9 +948,7 @@ class PokerBotViewer:
                 self._detect_callback_context()
             )
             if callback_id is not None:
-                if explicit_stage_token is None:
-                    detected_stage_token = self._normalize_stage_name(detected_stage)
-                    callback_stage_name = detected_stage_token or callback_stage_name
+                callback_stage_name = self._normalize_stage_name(detected_stage)
                 callback_user_id = self._safe_int(detected_user_id)
                 callback_token_key = (
                     normalized_chat,
@@ -1012,12 +959,6 @@ class PokerBotViewer:
                 callback_throttle_key = (
                     normalized_existing_message,
                     callback_stage_name,
-                )
-                payload_hash = self._payload_hash(
-                    normalized_text,
-                    reply_markup,
-                    stage_name=callback_stage_name,
-                    community_cards=board_cards,
                 )
                 last_callback_token = self._last_callback_edit.get(
                     callback_throttle_key
@@ -1048,19 +989,17 @@ class PokerBotViewer:
             if normalized_existing_message is not None
             else None
         )
-        previous_turn_cache_key: Optional[Tuple[int, int]] = (
-            previous_message_key
-            if previous_message_key is not None
-            and request_category == RequestCategory.TURN
-            else None
-        )
-        turn_cache_key: Optional[Tuple[int, int]] = (
-            message_key
-            if message_key is not None and request_category == RequestCategory.TURN
-            else None
-        )
         previous_payload_hash: Optional[str] = None
         if normalized_existing_message is not None:
+            if await self._is_message_deleted(normalized_existing_message):
+                debug_trace_logger.info(
+                    f"Skipping editMessageText for message_id={message_id} because it was deleted"
+                )
+                await self._request_metrics.record_skip(
+                    chat_id=normalized_chat,
+                    category=request_category,
+                )
+                return message_id
             previous_text_hash = await self._get_last_text_hash(
                 normalized_existing_message
             )
@@ -1099,6 +1038,8 @@ class PokerBotViewer:
                         category=request_category,
                     )
                     return message_id
+        turn_cache_key = message_key if request_category == RequestCategory.TURN else None
+
         is_reply_keyboard = isinstance(reply_markup, ReplyKeyboardMarkup)
 
         if stage_key is not None and not force_send and not is_reply_keyboard:
@@ -1358,121 +1299,49 @@ class PokerBotViewer:
                 )
                 return message_id
 
-        callback_token_registered = False
-        new_message_id: Optional[MessageId] = None
-        try:
-            if message_id is None:
-                result = await self._messenger.send_message(
-                    chat_id=chat_id,
-                    text=normalized_text,
-                    reply_markup=reply_markup,
-                    request_category=request_category,
-                    parse_mode=parse_mode,
-                    disable_web_page_preview=disable_web_page_preview,
-                    disable_notification=disable_notification,
-                )
-                new_message_id = getattr(result, "message_id", None)
-            else:
-                if (
-                    callback_id is not None
-                    and callback_throttle_key is not None
-                ):
-                    self._last_callback_edit[callback_throttle_key] = callback_id
-                    callback_token_registered = True
-                result = await self._messenger.edit_message_text(
-                    chat_id=chat_id,
-                    message_id=message_id,
-                    text=normalized_text,
-                    reply_markup=reply_markup,
-                    force=force_send,
-                    request_category=request_category,
-                    parse_mode=parse_mode,
-                    disable_web_page_preview=disable_web_page_preview,
-                )
-                if hasattr(result, "message_id"):
-                    new_message_id = result.message_id  # type: ignore[assignment]
-                elif isinstance(result, int):
-                    new_message_id = result
-                else:
-                    new_message_id = message_id
-        except (BadRequest, Forbidden, RetryAfter, TelegramError) as exc:
-            if callback_token_registered and callback_throttle_key is not None:
-                self._last_callback_edit.pop(callback_throttle_key, None)
-
-            normalized_existing = (
-                self._safe_int(message_id) if message_id is not None else None
-            )
-            fallback_sent = False
-            if isinstance(exc, BadRequest):
-                error_text = getattr(exc, "message", None) or str(exc) or ""
-                normalized_error = error_text.lower()
-                fallback_triggers = (
-                    "message to edit not found",
-                    "message can't be edited",
-                    "message cant be edited",
-                )
-                if any(token in normalized_error for token in fallback_triggers):
-                    logger.warning(
-                        "Edit failed; sending replacement message",
-                        extra={
-                            "chat_id": chat_id,
-                            "message_id": message_id,
-                            "stage": callback_stage_name,
-                            "community_cards": board_cards,
-                            "error_message": error_text,
-                        },
+            callback_token_registered = False
+            try:
+                if message_id is None:
+                    result = await self._messenger.send_message(
+                        chat_id=chat_id,
+                        text=normalized_text,
+                        reply_markup=reply_markup,
+                        request_category=request_category,
+                        parse_mode=parse_mode,
+                        disable_web_page_preview=disable_web_page_preview,
+                        disable_notification=disable_notification,
                     )
-                    try:
-                        replacement = await self._messenger.send_message(
-                            chat_id=chat_id,
-                            text=normalized_text,
-                            reply_markup=reply_markup,
-                            request_category=request_category,
-                            parse_mode=parse_mode,
-                            disable_web_page_preview=disable_web_page_preview,
-                            disable_notification=True,
-                        )
-                    except Exception as send_exc:
-                        logger.error(
-                            "Failed to send replacement message",
-                            extra={
-                                "chat_id": chat_id,
-                                "message_id": message_id,
-                                "error_type": type(send_exc).__name__,
-                            },
-                        )
+                    new_message_id: Optional[MessageId] = getattr(
+                        result, "message_id", None
+                    )
+                else:
+                    if (
+                        callback_id is not None
+                        and callback_throttle_key is not None
+                    ):
+                        self._last_callback_edit[
+                            callback_throttle_key
+                        ] = callback_id
+                        callback_token_registered = True
+                    result = await self._messenger.edit_message_text(
+                        chat_id=chat_id,
+                        message_id=message_id,
+                        text=normalized_text,
+                        reply_markup=reply_markup,
+                        force=force_send,
+                        request_category=request_category,
+                        parse_mode=parse_mode,
+                        disable_web_page_preview=disable_web_page_preview,
+                    )
+                    if hasattr(result, "message_id"):
+                        new_message_id = result.message_id  # type: ignore[assignment]
+                    elif isinstance(result, int):
+                        new_message_id = result
                     else:
-                        new_message_id = getattr(replacement, "message_id", None)
-                        if new_message_id is not None:
-                            fallback_sent = True
-                            if normalized_existing is not None:
-                                await self._mark_message_deleted(
-                                    normalized_existing
-                                )
-                            callback_id = None
-                            callback_token_key = None
-                            callback_throttle_key = None
-                            message_id = None
-                            normalized_existing_message = None
-                            logger.info(
-                                "Replacement message sent",
-                                extra={
-                                    "chat_id": chat_id,
-                                    "new_message_id": new_message_id,
-                                    "stage": callback_stage_name,
-                                    "community_cards": board_cards,
-                                },
-                            )
-                        else:
-                            logger.error(
-                                "Replacement message missing id after edit failure",
-                                extra={
-                                    "chat_id": chat_id,
-                                    "message_id": message_id,
-                                    "stage": callback_stage_name,
-                                },
-                            )
-            if not fallback_sent:
+                        new_message_id = message_id
+            except (BadRequest, Forbidden, RetryAfter, TelegramError) as exc:
+                if callback_token_registered and callback_throttle_key is not None:
+                    self._last_callback_edit.pop(callback_throttle_key, None)
                 logger.error(
                     "Failed to update message",
                     extra={
@@ -1514,15 +1383,15 @@ class PokerBotViewer:
                     (normalized_new_message, callback_stage_name)
                 ] = callback_id
             if (
-                previous_message_key is not None
-                and new_message_key != previous_message_key
+                message_key is not None
+                and new_message_key != message_key
             ):
-                await self._pop_payload_hash(previous_message_key)
-                if previous_turn_cache_key is not None:
-                    await self._pop_turn_cache_hash(previous_turn_cache_key)
+                await self._pop_payload_hash(message_key)
+                if turn_cache_key is not None:
+                    await self._pop_turn_cache_hash(message_key)
                 await self._clear_callback_tokens_for_message(
-                    previous_message_key[0],
-                    previous_message_key[1],
+                    message_key[0],
+                    message_key[1],
                 )
             return new_message_id
 
@@ -1988,26 +1857,7 @@ class PokerBotViewer:
                 continue
 
             anchor_id = self._get_player_anchor_message_id(chat_id, player)
-            original_anchor_id = anchor_id
-            if anchor_id:
-                try:
-                    normalized_anchor_id = self._safe_int(anchor_id)
-                except (TypeError, ValueError):
-                    normalized_anchor_id = 0
-                if normalized_anchor_id and await self._is_message_deleted(
-                    normalized_anchor_id
-                ):
-                    logger.info(
-                        "Anchor message %s was deleted; creating a replacement",
-                        normalized_anchor_id,
-                        extra={
-                            "chat_id": chat_id,
-                            "player_id": getattr(player, "user_id", None),
-                            "stage": stage_name,
-                        },
-                    )
-                    anchor_id = None
-            elif original_anchor_id is None:
+            if not anchor_id:
                 continue
 
             hole_cards = self._extract_player_hole_cards(player)
@@ -2080,17 +1930,14 @@ class PokerBotViewer:
             )
 
             try:
-                if anchor_id:
-                    await self._purge_pending_updates(chat_id, anchor_id)
+                await self._purge_pending_updates(chat_id, anchor_id)
                 result = await self._update_message(
                     chat_id=chat_id,
                     message_id=anchor_id,
                     text=text,
                     reply_markup=keyboard,
-                    force_send=keyboard_changed or anchor_id is None,
+                    force_send=keyboard_changed,
                     request_category=RequestCategory.ANCHOR,
-                    stage_name=stage_name,
-                    community_cards=community_cards,
                 )
             except Exception as exc:
                 logger.error(
@@ -2119,27 +1966,6 @@ class PokerBotViewer:
                 normalized_anchor = int(final_anchor_id)
             except (TypeError, ValueError):
                 continue
-            if original_anchor_id and normalized_anchor != original_anchor_id:
-                logger.info(
-                    "Anchor message replaced",
-                    extra={
-                        "chat_id": chat_id,
-                        "player_id": getattr(player, "user_id", None),
-                        "old_message_id": original_anchor_id,
-                        "new_message_id": normalized_anchor,
-                        "stage": stage_name,
-                    },
-                )
-            elif original_anchor_id is None:
-                logger.info(
-                    "Anchor message created",
-                    extra={
-                        "chat_id": chat_id,
-                        "player_id": getattr(player, "user_id", None),
-                        "new_message_id": normalized_anchor,
-                        "stage": stage_name,
-                    },
-                )
             player.anchor_message = (chat_id, normalized_anchor)
             player.anchor_keyboard_signature = signature_payload
 
@@ -2753,15 +2579,6 @@ class PokerBotViewer:
             GameState.ROUND_RIVER: "River",
         }
         stage_name = stage_labels.get(game.state, "Pre-Flop")
-        stage_state = getattr(game, "state", None)
-        stage_state_name = (
-            getattr(stage_state, "name", None)
-            if stage_state is not None
-            else None
-        )
-        board_cards_for_hash = self._format_cards_for_keyboard(
-            getattr(game, "cards_table", [])
-        )
 
         info_lines = [
             f"🎯 **نوبت:** {player.mention_markdown} (صندلی {seat_number})",
@@ -2797,8 +2614,6 @@ class PokerBotViewer:
             disable_web_page_preview=True,
             disable_notification=message_id is not None,
             request_category=RequestCategory.TURN,
-            stage_name=stage_state_name,
-            community_cards=board_cards_for_hash,
         )
 
         return TurnMessageUpdate(
