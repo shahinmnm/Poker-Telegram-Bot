@@ -60,16 +60,35 @@ def build_player_cards_keyboard(
     hole_cards: Sequence[str],
     community_cards: Sequence[str],
     current_stage: str,
-) -> ReplyKeyboardMarkup:
-    """Builds a personalized ReplyKeyboardMarkup for a player."""
+    *,
+    player_id: Optional[int] = None,
+) -> InlineKeyboardMarkup:
+    """Build an inline keyboard summarizing the visible cards for a player."""
 
-    # Row 1: The player's unique hole cards.
-    row1 = list(hole_cards)
+    def _ensure_row(
+        values: Sequence[str],
+        *,
+        prefix: str,
+        allow_click: bool,
+    ) -> List[InlineKeyboardButton]:
+        if not values:
+            return [
+                InlineKeyboardButton(
+                    text="—",
+                    callback_data="anchor:noop",
+                )
+            ]
+        buttons: List[InlineKeyboardButton] = []
+        for index, value in enumerate(values):
+            if allow_click:
+                callback_data = f"{prefix}_{index}"
+            else:
+                callback_data = "anchor:noop"
+            buttons.append(
+                InlineKeyboardButton(text=value, callback_data=callback_data)
+            )
+        return buttons
 
-    # Row 2: The shared community cards on the board.
-    row2 = list(community_cards)
-
-    # Row 3: Game stages, with the current stage highlighted by a '✅' emoji.
     stages_persian = ["پری فلاپ", "فلاپ", "ترن", "ریور"]
     stage_map = {
         "ROUND_PRE_FLOP": "پری فلاپ",
@@ -82,21 +101,33 @@ def build_player_cards_keyboard(
         "ROUND_RIVER": "ریور",
         "RIVER": "ریور",
     }
-
     current_stage_label = stage_map.get(current_stage.upper(), "")
 
-    row3 = [
-        f"✅ {label}" if label == current_stage_label else label
-        for label in stages_persian
-    ]
+    if player_id is not None:
+        hand_prefix = f"hand_card_{player_id}"
+    else:
+        hand_prefix = "anchor:noop"
 
-    # Construct and return the final keyboard object.
-    return ReplyKeyboardMarkup(
-        keyboard=[row1, row2, row3],
-        resize_keyboard=True,      # Makes the keyboard fit the content.
-        one_time_keyboard=False,   # The keyboard persists until replaced.
-        selective=True,            # CRITICAL: Shows the keyboard ONLY to the @-mentioned user.
+    hole_row = _ensure_row(
+        list(hole_cards),
+        prefix=hand_prefix,
+        allow_click=player_id is not None,
     )
+
+    board_row = _ensure_row(
+        list(community_cards),
+        prefix="board_card",
+        allow_click=True,
+    )
+
+    stage_row: List[InlineKeyboardButton] = []
+    for label in stages_persian:
+        text = f"✅ {label}" if label == current_stage_label else label
+        stage_row.append(
+            InlineKeyboardButton(text=text, callback_data="anchor:noop")
+        )
+
+    return InlineKeyboardMarkup(inline_keyboard=[hole_row, board_row, stage_row])
 
 
 @dataclass(slots=True)
@@ -105,6 +136,13 @@ class TurnMessageUpdate:
     call_label: str
     call_action: PlayerAction
     board_line: str
+
+
+@dataclass(slots=True)
+class _CountdownContext:
+    chat_id: int
+    game_id: str
+    message_id: Optional[int]
 
 class PokerBotViewer:
     _ZERO_WIDTH_SPACE = "\u2063"
@@ -257,7 +295,10 @@ class PokerBotViewer:
             maxsize=4096
         )
         self._stage_payload_hash_lock = asyncio.Lock()
-        self._prestart_countdown_tasks: Dict[int, asyncio.Task[None]] = {}
+        self._prestart_countdown_tasks: Dict[
+            Tuple[int, str], asyncio.Task[None]
+        ] = {}
+        self._prestart_countdown_context: Dict[Tuple[int, str], _CountdownContext] = {}
         self._prestart_countdown_lock = asyncio.Lock()
         self._pending_updates: Dict[
             Tuple[ChatId, Optional[MessageId]], Dict[str, Any]
@@ -277,21 +318,34 @@ class PokerBotViewer:
             last_message_hash_lock=self._last_message_hash_lock,
         )
 
-    async def _cancel_prestart_countdown(self, chat_id: ChatId) -> None:
+    async def _cancel_prestart_countdown(
+        self, chat_id: ChatId, game_id: Optional[str] = None
+    ) -> None:
         normalized_chat = self._safe_int(chat_id)
+        normalized_game = str(game_id) if game_id is not None else None
         async with self._prestart_countdown_lock:
-            task = self._prestart_countdown_tasks.pop(normalized_chat, None)
-            if task is not None:
-                task.cancel()
+            target_keys = [
+                key
+                for key in list(self._prestart_countdown_tasks.keys())
+                if key[0] == normalized_chat
+                and (normalized_game is None or key[1] == normalized_game)
+            ]
+            for key in target_keys:
+                task = self._prestart_countdown_tasks.pop(key, None)
+                if task is not None:
+                    task.cancel()
+                self._prestart_countdown_context.pop(key, None)
+            if target_keys:
                 logger.info(
-                    "[Countdown] Cancelled prestart countdown for chat %s",
+                    "[Countdown] Cancelled prestart countdown for chat %s keys=%s",
                     normalized_chat,
+                    target_keys,
                 )
 
     def _create_countdown_task(
         self,
-        normalized_chat: int,
-        anchor_message_id: Optional[int],
+        key: Tuple[int, str],
+        context: _CountdownContext,
         end_time: float,
         payload_fn: Callable[[int], Tuple[str, Optional[InlineKeyboardMarkup | ReplyKeyboardMarkup]]],
     ) -> asyncio.Task[None]:
@@ -305,7 +359,8 @@ class PokerBotViewer:
         """
 
         async def _run() -> None:
-            current_message_id = anchor_message_id
+            normalized_chat, normalized_game = key
+            current_message_id = context.message_id
             try:
                 loop = asyncio.get_event_loop()
                 while True:
@@ -324,7 +379,7 @@ class PokerBotViewer:
                                 message_id=current_message_id,
                                 text=text,
                                 reply_markup=reply_markup,
-                                request_category=RequestCategory.ANCHOR,
+                                request_category=RequestCategory.COUNTDOWN,
                             )
                         else:
                             result = await self._update_message(
@@ -332,7 +387,7 @@ class PokerBotViewer:
                                 message_id=current_message_id,
                                 text=text,
                                 reply_markup=reply_markup,
-                                request_category=RequestCategory.ANCHOR,
+                                request_category=RequestCategory.COUNTDOWN,
                             )
                     except asyncio.CancelledError:
                         raise
@@ -350,22 +405,30 @@ class PokerBotViewer:
                                 current_message_id = int(result)
                             except (TypeError, ValueError):
                                 pass
+                        async with self._prestart_countdown_lock:
+                            stored = self._prestart_countdown_context.get(key)
+                            if stored is not None:
+                                stored.message_id = current_message_id
                     if seconds_left <= 0:
                         break
                     await asyncio.sleep(1.0)
             except asyncio.CancelledError:
                 logger.debug(
-                    "[Countdown] Task cancelled for chat %s", normalized_chat
+                    "[Countdown] Task cancelled for chat %s game %s",
+                    normalized_chat,
+                    normalized_game,
                 )
                 raise
             finally:
                 async with self._prestart_countdown_lock:
-                    existing = self._prestart_countdown_tasks.get(normalized_chat)
+                    existing = self._prestart_countdown_tasks.get(key)
                     if existing is asyncio.current_task():
-                        self._prestart_countdown_tasks.pop(normalized_chat, None)
+                        self._prestart_countdown_tasks.pop(key, None)
+                        self._prestart_countdown_context.pop(key, None)
                 logger.info(
-                    "[Countdown] Prestart countdown finished for chat %s",
+                    "[Countdown] Prestart countdown finished for chat %s game %s",
                     normalized_chat,
+                    normalized_game,
                 )
 
         return asyncio.create_task(_run())
@@ -373,29 +436,35 @@ class PokerBotViewer:
     async def start_prestart_countdown(
         self,
         chat_id: ChatId,
+        game_id: str,
         anchor_message_id: Optional[MessageId],
         seconds: int,
         payload_fn: Callable[[int], Tuple[str, Optional[InlineKeyboardMarkup | ReplyKeyboardMarkup]]],
     ) -> None:
-        """
-        Start or replace a per-chat prestart countdown.
-
-        payload_fn(seconds_left:int) -> (text, reply_markup)
-        """
+        """Start or replace a per-chat prestart countdown scoped to ``game_id``."""
 
         normalized_chat = self._safe_int(chat_id)
+        normalized_game = str(game_id)
         end_time = asyncio.get_event_loop().time() + max(0, int(seconds))
         async with self._prestart_countdown_lock:
-            old = self._prestart_countdown_tasks.get(normalized_chat)
+            key = (normalized_chat, normalized_game)
+            old = self._prestart_countdown_tasks.get(key)
             if old is not None:
                 old.cancel()
-            task = self._create_countdown_task(
-                normalized_chat, anchor_message_id, end_time, payload_fn
+            context = _CountdownContext(
+                chat_id=normalized_chat,
+                game_id=normalized_game,
+                message_id=self._safe_int(anchor_message_id)
+                if anchor_message_id is not None
+                else None,
             )
-            self._prestart_countdown_tasks[normalized_chat] = task
+            task = self._create_countdown_task(key, context, end_time, payload_fn)
+            self._prestart_countdown_tasks[key] = task
+            self._prestart_countdown_context[key] = context
         logger.info(
-            "[Countdown] Started prestart countdown for chat %s seconds=%s anchor=%s",
+            "[Countdown] Started prestart countdown for chat %s game %s seconds=%s anchor=%s",
             normalized_chat,
+            normalized_game,
             seconds,
             anchor_message_id,
         )
@@ -512,6 +581,20 @@ class PokerBotViewer:
                     future.set_result(result)
         except asyncio.CancelledError:
             return
+
+    async def _cancel_pending_update(
+        self, chat_id: ChatId, message_id: Optional[MessageId]
+    ) -> None:
+        key = (chat_id, message_id)
+        async with self._pending_updates_lock:
+            entry = self._pending_updates.pop(key, None)
+            task = self._pending_update_tasks.pop(key, None)
+        if task is not None:
+            task.cancel()
+        if entry:
+            future = entry.get("future")
+            if isinstance(future, asyncio.Future) and not future.done():
+                future.set_result(message_id)
 
     async def _acquire_message_lock(
         self, chat_id: ChatId, message_id: Optional[MessageId]
@@ -1350,6 +1433,7 @@ class PokerBotViewer:
                 hole_cards=hole_cards,
                 community_cards=community_cards,
                 current_stage=stage_name,
+                player_id=getattr(player, "user_id", None),
             )
 
             display_name = str(
@@ -1501,6 +1585,7 @@ class PokerBotViewer:
                 hole_cards=hole_cards,
                 community_cards=community_cards,
                 current_stage=stage_name,
+                player_id=getattr(player, "user_id", None),
             )
 
             seat_index = player.seat_index if player.seat_index is not None else -1
@@ -1589,6 +1674,18 @@ class PokerBotViewer:
 
             anchor_id = self._get_player_anchor_message_id(chat_id, player)
             if anchor_id:
+                normalized_chat = self._safe_int(chat_id)
+                normalized_anchor = self._safe_int(anchor_id)
+                await self._cancel_pending_update(normalized_chat, normalized_anchor)
+                await self._mark_message_deleted(normalized_anchor)
+                await self._pop_payload_hash((normalized_chat, normalized_anchor))
+                await self._pop_turn_cache_hash((normalized_chat, normalized_anchor))
+                await self._clear_stage_payloads_for_message(
+                    normalized_chat, normalized_anchor
+                )
+                await self._clear_callback_tokens_for_message(
+                    normalized_chat, normalized_anchor
+                )
                 try:
                     await self.delete_message(chat_id=chat_id, message_id=anchor_id)
                 except Exception as exc:

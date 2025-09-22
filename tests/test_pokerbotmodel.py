@@ -21,9 +21,8 @@ from pokerapp.pokerbotmodel import (
     KEY_CHAT_DATA_GAME,
     KEY_START_COUNTDOWN_LAST_TEXT,
     KEY_START_COUNTDOWN_LAST_TIMESTAMP,
-    KEY_PRESTART_COUNTDOWN_ACTIVE,
-    KEY_PRESTART_COUNTDOWN_ANCHOR,
-    KEY_PRESTART_COUNTDOWN_SECONDS,
+    KEY_PRESTART_COUNTDOWN_STATE,
+    PrestartCountdownState,
     KEY_STOP_REQUEST,
     STOP_CONFIRM_CALLBACK,
     STOP_RESUME_CALLBACK,
@@ -62,6 +61,9 @@ def _prepare_view_mock(view: MagicMock) -> MagicMock:
     view._cancel_prestart_countdown = AsyncMock(return_value=None)
     view.clear_all_player_anchors = AsyncMock(return_value=None)
     view.update_player_anchors_and_keyboards = AsyncMock(return_value=None)
+    view.payload_signature = MagicMock(
+        side_effect=lambda text, markup: f"{hash(text)}|{hash(str(markup))}"
+    )
     view.update_turn_message = AsyncMock(
         return_value=TurnMessageUpdate(
             message_id=None,
@@ -530,6 +532,7 @@ async def test_auto_start_tick_starts_prestart_countdown_and_updates_state():
     view.start_prestart_countdown.assert_awaited_once()
     countdown_call = view.start_prestart_countdown.await_args
     assert countdown_call.kwargs["chat_id"] == chat_id
+    assert countdown_call.kwargs["game_id"] == game.id
     assert countdown_call.kwargs["anchor_message_id"] == 111
     assert countdown_call.kwargs["seconds"] == 5
     payload_fn = countdown_call.kwargs["payload_fn"]
@@ -538,9 +541,12 @@ async def test_auto_start_tick_starts_prestart_countdown_and_updates_state():
     preview_text, _ = payload_fn(3)
     assert "3 ثانیه" in preview_text
     assert context.chat_data["start_countdown"] == 4
-    assert context.chat_data[KEY_PRESTART_COUNTDOWN_ACTIVE] is True
-    assert context.chat_data[KEY_PRESTART_COUNTDOWN_ANCHOR] == 111
-    assert context.chat_data[KEY_PRESTART_COUNTDOWN_SECONDS] == 5
+    state = context.chat_data[KEY_PRESTART_COUNTDOWN_STATE]
+    assert isinstance(state, PrestartCountdownState)
+    assert state.active is True
+    assert state.message_id == 111
+    assert state.seconds_remaining == 3  # updated by payload_fn
+    assert state.payload_signature is not None
     assert context.chat_data[KEY_START_COUNTDOWN_LAST_TEXT] == preview_text
     assert context.chat_data[KEY_CHAT_DATA_GAME] is game
     assert game.ready_message_main_text == preview_text
@@ -572,7 +578,9 @@ async def test_auto_start_tick_does_not_restart_on_regular_tick():
 
     assert view.start_prestart_countdown.await_count == 1
     assert context.chat_data["start_countdown"] == 2
-    assert context.chat_data[KEY_PRESTART_COUNTDOWN_ACTIVE] is True
+    state = context.chat_data[KEY_PRESTART_COUNTDOWN_STATE]
+    assert isinstance(state, PrestartCountdownState)
+    assert state.active is True
     table_manager.save_game.assert_not_awaited()
 
 
@@ -602,8 +610,12 @@ async def test_auto_start_tick_restarts_when_countdown_increases():
 
     assert view.start_prestart_countdown.await_count == 2
     last_call = view.start_prestart_countdown.await_args_list[-1]
+    assert last_call.kwargs["game_id"] == game.id
     assert last_call.kwargs["seconds"] == 8
     assert context.chat_data["start_countdown"] == 7
+    state = context.chat_data[KEY_PRESTART_COUNTDOWN_STATE]
+    assert isinstance(state, PrestartCountdownState)
+    assert state.seconds_remaining == 8
 
 
 @pytest.mark.asyncio
@@ -628,9 +640,13 @@ async def test_auto_start_tick_triggers_game_start_when_zero():
         chat_data={
             "start_countdown": 0,
             "start_countdown_job": object(),
-            KEY_PRESTART_COUNTDOWN_ACTIVE: True,
-            KEY_PRESTART_COUNTDOWN_ANCHOR: 111,
-            KEY_PRESTART_COUNTDOWN_SECONDS: 0,
+            KEY_PRESTART_COUNTDOWN_STATE: PrestartCountdownState(
+                chat_id=chat_id,
+                game_id=str(game.id),
+                message_id=111,
+                active=True,
+                seconds_remaining=0,
+            ),
         },
     )
 
@@ -640,8 +656,10 @@ async def test_auto_start_tick_triggers_game_start_when_zero():
     table_manager.save_game.assert_awaited_once_with(chat_id, game)
     job.schedule_removal.assert_called_once()
     assert "start_countdown" not in context.chat_data
-    assert KEY_PRESTART_COUNTDOWN_ACTIVE not in context.chat_data
-    assert view._cancel_prestart_countdown.await_count == 1
+    assert KEY_PRESTART_COUNTDOWN_STATE not in context.chat_data
+    view._cancel_prestart_countdown.assert_awaited_once_with(
+        chat_id, game_id=str(game.id)
+    )
 
 
 @pytest.mark.asyncio
@@ -672,8 +690,14 @@ async def test_auto_start_tick_creates_message_when_missing():
     assert game.ready_message_main_id == 999
     assert view.start_prestart_countdown.await_count == 1
     call_kwargs = view.start_prestart_countdown.await_args.kwargs
+    assert call_kwargs["game_id"] == game.id
     assert call_kwargs["anchor_message_id"] == 999
     assert context.chat_data["start_countdown"] == 2
+    state = context.chat_data[KEY_PRESTART_COUNTDOWN_STATE]
+    assert isinstance(state, PrestartCountdownState)
+    assert state.message_id == 999
+    assert state.active is True
+    assert state.seconds_remaining == 3
 
 
 @pytest.mark.asyncio
@@ -700,8 +724,12 @@ async def test_auto_start_tick_does_not_start_when_message_creation_fails():
 
     assert view.start_prestart_countdown.await_count == 0
     assert context.chat_data["start_countdown"] == 3
-    assert context.chat_data[KEY_PRESTART_COUNTDOWN_ACTIVE] is False
-    view._cancel_prestart_countdown.assert_awaited_once_with(chat_id)
+    state = context.chat_data[KEY_PRESTART_COUNTDOWN_STATE]
+    assert isinstance(state, PrestartCountdownState)
+    assert state.active is False
+    view._cancel_prestart_countdown.assert_awaited_once_with(
+        chat_id, game_id=str(game.id)
+    )
     table_manager.save_game.assert_not_awaited()
 
 
