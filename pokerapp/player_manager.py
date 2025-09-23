@@ -16,6 +16,9 @@ from pokerapp.pokerbotview import PokerBotViewer
 from pokerapp.stats import BaseStatsService, NullStatsService, PlayerIdentity
 from pokerapp.table_manager import TableManager
 from pokerapp.utils.cache import AdaptivePlayerReportCache
+from pokerapp.utils.player_report_cache import (
+    PlayerReportCache as RedisPlayerReportCache,
+)
 
 
 class PlayerManager:
@@ -35,6 +38,8 @@ class PlayerManager:
         kv: aioredis.Redis,
         stats_service: BaseStatsService,
         player_report_cache: AdaptivePlayerReportCache,
+        shared_report_cache: Optional[RedisPlayerReportCache],
+        shared_report_ttl: int,
         view: PokerBotViewer,
         build_private_menu: Callable[[], object],
         logger: logging.Logger,
@@ -43,6 +48,8 @@ class PlayerManager:
         self._kv = kv
         self._stats_service = stats_service
         self._player_report_cache = player_report_cache
+        self._shared_report_cache = shared_report_cache
+        self._shared_report_ttl = max(int(shared_report_ttl or 0), 0)
         self._view = view
         self._build_private_menu = build_private_menu
         self._logger = logger
@@ -86,6 +93,19 @@ class PlayerManager:
 
         user_id_int = self._safe_int(user.id)
 
+        formatted_report: Optional[str] = None
+        if self._shared_report_cache is not None:
+            cached_payload = await self._shared_report_cache.get_report(user_id_int)
+            if isinstance(cached_payload, dict):
+                formatted_report = cached_payload.get("formatted")
+                if formatted_report:
+                    await self._view.send_message(
+                        chat.id,
+                        formatted_report,
+                        reply_markup=self._build_private_menu(),
+                    )
+                    return
+
         async def _load_report() -> Optional[Any]:
             return await self._stats_service.build_player_report(user_id_int)
 
@@ -104,6 +124,12 @@ class PlayerManager:
             return
 
         formatted = self._stats_service.format_report(report)
+        if self._shared_report_cache is not None:
+            await self._shared_report_cache.set_report(
+                user_id_int,
+                {"formatted": formatted},
+                ttl_seconds=self._shared_report_ttl,
+            )
         await self._view.send_message(
             chat.id,
             formatted,

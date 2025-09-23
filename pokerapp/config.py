@@ -54,6 +54,7 @@ _DEFAULT_GAME_CONSTANTS_DATA: Dict[str, Any] = {
         "private_match_record_key_prefix": "pokerbot:private_matchmaking:match:",
         "private_match_queue_ttl": 180,
         "private_match_state_ttl": 3600,
+        "player_report_cache_ttl_seconds": 300,
     },
     "engine": {
         "key_old_players": "old_players",
@@ -274,6 +275,22 @@ class Config:
             "POKERBOT_REDIS_DB",
             default="0"
         ))
+        redis_constants = self.constants.redis
+        player_report_cache_ttl_env = os.getenv(
+            "POKERBOT_PLAYER_REPORT_CACHE_TTL"
+        )
+        parsed_player_report_cache_ttl = self._parse_positive_int(
+            player_report_cache_ttl_env,
+            env_var="POKERBOT_PLAYER_REPORT_CACHE_TTL",
+        )
+        default_player_report_cache_ttl = int(
+            redis_constants.get("player_report_cache_ttl_seconds", 300)
+        )
+        self.PLAYER_REPORT_CACHE_TTL: int = (
+            parsed_player_report_cache_ttl
+            if parsed_player_report_cache_ttl is not None
+            else default_player_report_cache_ttl
+        )
         database_url_env = os.getenv("POKERBOT_DATABASE_URL", "").strip()
         if database_url_env:
             self.DATABASE_URL = database_url_env

@@ -18,6 +18,7 @@ from pokerapp.private_match_service import PrivateMatchService
 from pokerapp.utils.messaging_service import MessagingService
 from pokerapp.utils.redis_safeops import RedisSafeOps
 from pokerapp.utils.request_metrics import RequestMetrics
+from pokerapp.utils.player_report_cache import PlayerReportCache
 
 
 @dataclass(frozen=True)
@@ -56,6 +57,7 @@ class PokerBot:
         table_manager: TableManager,
         stats_service: BaseStatsService,
         redis_ops: RedisSafeOps,
+        player_report_cache: PlayerReportCache,
         request_metrics: RequestMetrics,
         private_match_service: PrivateMatchService,
         messaging_service_factory: MessagingServiceFactory,
@@ -86,6 +88,7 @@ class PokerBot:
         self._request_metrics = request_metrics
         self._private_match_service = private_match_service
         self._messaging_service_factory = messaging_service_factory
+        self._player_report_cache = player_report_cache
         self._build_application()
 
     def run(self) -> None:
@@ -225,6 +228,7 @@ class PokerBot:
             private_match_service=self._private_match_service,
             stats_service=self._stats_service,
             redis_ops=self._redis_ops,
+            player_report_cache=self._player_report_cache,
         )
         self._controller = PokerBotCotroller(self._model, self._application)
 
