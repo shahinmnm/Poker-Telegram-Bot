@@ -118,6 +118,7 @@ class RoleAnchorRecord:
     payload_signature: str
     markup_signature: str
     turn_light: str = ""
+    refresh_toggle: str = ""
 
 
 @dataclass(slots=True)
@@ -132,6 +133,7 @@ class ChatAnchorState:
     turn_anchor: TurnAnchorRecord = field(default_factory=TurnAnchorRecord)
     edit_count: int = 0
     fallback_count: int = 0
+    role_retry_count: int = 0
 
 
 class AnchorRegistry:
@@ -153,6 +155,7 @@ class AnchorRegistry:
         state.role_anchors.clear()
         state.edit_count = 0
         state.fallback_count = 0
+        state.role_retry_count = 0
         return state
 
     def get_chat_state(self, chat_id: ChatId) -> ChatAnchorState:
@@ -194,6 +197,7 @@ class AnchorRegistry:
         payload_signature: Optional[str] = None,
         markup_signature: Optional[str] = None,
         turn_light: Optional[str] = None,
+        refresh_toggle: Optional[str] = None,
     ) -> Optional[RoleAnchorRecord]:
         record = self.get_chat_state(chat_id).role_anchors.get(player_id)
         if record is None:
@@ -210,7 +214,17 @@ class AnchorRegistry:
             record.markup_signature = markup_signature
         if turn_light is not None:
             record.turn_light = turn_light
+        if refresh_toggle is not None:
+            record.refresh_toggle = refresh_toggle
         return record
+
+    def increment_role_retry(self, chat_id: ChatId) -> None:
+        state = self.get_chat_state(chat_id)
+        state.role_retry_count += 1
+
+    def get_role_retry_count(self, chat_id: ChatId) -> int:
+        state = self.get_chat_state(chat_id)
+        return state.role_retry_count
 
     def get_role(self, chat_id: ChatId, player_id: Any) -> Optional[RoleAnchorRecord]:
         return self.get_chat_state(chat_id).role_anchors.get(player_id)
@@ -252,8 +266,10 @@ class AnchorRegistry:
 
 class PokerBotViewer:
     _ZERO_WIDTH_SPACE = "\u2063"
+    _FORCE_REFRESH_CHARS = ("\u200b", "\u200a")
     _INVISIBLE_CHARS = {
         "\u200b",  # zero width space
+        "\u200a",  # hair space
         "\u200c",  # zero width non-joiner
         "\u200d",  # zero width joiner
         "\u200e",  # left-to-right mark
@@ -992,11 +1008,30 @@ class PokerBotViewer:
             return False
         return None
 
-    def _force_anchor_text_refresh(self, text: str) -> str:
+    def _strip_invisible_suffix(self, text: str) -> Tuple[str, str]:
         stripped = text.rstrip("".join(self._INVISIBLE_CHARS))
-        if stripped.endswith(self._ZERO_WIDTH_SPACE):
-            return stripped + "\u200b"
-        return stripped + self._ZERO_WIDTH_SPACE
+        suffix = text[len(stripped) :]
+        return stripped, suffix
+
+    def _force_anchor_text_refresh(
+        self, text: str, *, last_toggle: Optional[str] = None
+    ) -> Tuple[str, str, str]:
+        base_text, suffix = self._strip_invisible_suffix(text)
+        previous_toggle: Optional[str] = None
+        if last_toggle in self._FORCE_REFRESH_CHARS:
+            previous_toggle = last_toggle
+        if not previous_toggle:
+            for char in reversed(suffix):
+                if char in self._FORCE_REFRESH_CHARS:
+                    previous_toggle = char
+                    break
+        next_toggle = (
+            self._FORCE_REFRESH_CHARS[1]
+            if previous_toggle == self._FORCE_REFRESH_CHARS[0]
+            else self._FORCE_REFRESH_CHARS[0]
+        )
+        refreshed_text = base_text + next_toggle
+        return refreshed_text, base_text, next_toggle
 
     async def _should_create_anchor_fallback(
         self,
@@ -1006,6 +1041,9 @@ class PokerBotViewer:
         player_id: Any,
         last_error: Optional[str],
         forced_refresh: bool,
+        reply_markup: Optional[InlineKeyboardMarkup | ReplyKeyboardMarkup] = None,
+        request_category: Optional[RequestCategory] = None,
+        current_text: Optional[str] = None,
     ) -> Tuple[bool, str, Dict[str, Any]]:
         normalized_message = self._safe_int(message_id)
         diagnostics: Dict[str, Any] = {
@@ -1022,12 +1060,185 @@ class PokerBotViewer:
             return True, "missing_message_id", diagnostics
 
         deleted_flag = await self._is_message_deleted(normalized_message)
-        diagnostics["registry_deleted"] = deleted_flag
+        diagnostics["deleted_flag"] = deleted_flag
+
+        record: Optional[RoleAnchorRecord] = None
+        role_anchor_detected = False
+        if request_category == RequestCategory.ANCHOR or request_category is None:
+            record = self._anchor_registry.get_role(chat_id, player_id)
+            if record is not None and record.message_id == normalized_message:
+                role_anchor_detected = True
+        diagnostics["has_record"] = record is not None
+        diagnostics["registry_message_match"] = (
+            record.message_id == normalized_message if record is not None else False
+        )
 
         error_text = (last_error or "").lower()
         if error_text:
             diagnostics["last_error"] = error_text
             diagnostics["last_error_raw"] = last_error
+
+        if role_anchor_detected:
+            diagnostics["anchor_type"] = "role"
+            diagnostics["anchor_no_fallback"] = True
+            diagnostics["role_retry_count"] = self._anchor_registry.get_role_retry_count(
+                chat_id
+            )
+            toggle_char = ""
+            retry_success = False
+            text_source: Optional[str] = (
+                current_text
+                or (record.current_text or record.base_text if record is not None else None)
+            )
+            if text_source:
+                await asyncio.sleep(0.15)
+                refreshed_text, base_text, toggle_char = self._force_anchor_text_refresh(
+                    text_source, last_toggle=record.refresh_toggle if record else None
+                )
+                diagnostics["retry_attempted"] = True
+                diagnostics["retry_attempts"] = 1
+                diagnostics["retry_reason"] = "role_anchor_recovery"
+                diagnostics["retry_invisible_char"] = toggle_char
+                self._anchor_registry.increment_role_retry(chat_id)
+                diagnostics["role_retry_count"] = (
+                    self._anchor_registry.get_role_retry_count(chat_id)
+                )
+                try:
+                    result = await self._update_message(
+                        chat_id=chat_id,
+                        message_id=message_id,
+                        text=refreshed_text,
+                        reply_markup=reply_markup,
+                        force_send=True,
+                        request_category=RequestCategory.ANCHOR,
+                    )
+                except Exception as exc:
+                    diagnostics["retry_exception"] = type(exc).__name__
+                else:
+                    resolved_id = self._resolve_message_id(result)
+                    if resolved_id is not None:
+                        retry_success = True
+                        diagnostics["retry_success"] = True
+                        diagnostics["decision"] = "edit_recovered"
+                        if record is not None:
+                            self._anchor_registry.update_role(
+                                chat_id,
+                                player_id,
+                                message_id=resolved_id,
+                                current_text=base_text,
+                                refresh_toggle=toggle_char,
+                            )
+                        logger.info(
+                            "Role anchor edit retry",
+                            extra={
+                                "chat_id": chat_id,
+                                "player_id": player_id,
+                                "message_id": message_id,
+                                "retry_success": True,
+                                "last_error": error_text,
+                                "invisible_char": toggle_char,
+                                "anchor_no_fallback": True,
+                            },
+                        )
+                        return False, "edit_recovered", diagnostics
+            else:
+                diagnostics["retry_unavailable"] = "no_text"
+
+            normalized_anchor = self._safe_int(message_id)
+            retry_error: Optional[str] = None
+            if normalized_anchor is not None:
+                try:
+                    retry_error = await self._get_last_edit_error(chat_id, normalized_anchor)
+                except Exception:
+                    retry_error = None
+            if retry_error:
+                error_text = retry_error.lower()
+                diagnostics["retry_last_error"] = error_text
+                diagnostics["last_error"] = error_text
+                diagnostics["last_error_raw"] = retry_error
+
+            if error_text and (
+                "message can't be edited" in error_text
+                or "telegram_not_editable" in error_text
+            ):
+                logger.warning(
+                    "Role anchor not editable",
+                    extra={
+                        "chat_id": chat_id,
+                        "player_id": player_id,
+                        "message_id": message_id,
+                        "last_error": error_text,
+                        "anchor_no_fallback": True,
+                    },
+                )
+                alternate_success = False
+                diagnostics["alternate_markup_attempted"] = reply_markup is not None
+                if reply_markup is not None:
+                    try:
+                        alternate_success = await self.edit_message_reply_markup(
+                            chat_id=chat_id,
+                            message_id=message_id,
+                            reply_markup=reply_markup,
+                        )
+                    except Exception as exc:
+                        diagnostics["alternate_exception"] = type(exc).__name__
+                if alternate_success:
+                    diagnostics["alternate_markup_success"] = True
+                    diagnostics["decision"] = "edit_recovered"
+                    logger.info(
+                        "Role anchor alternate markup edit",
+                        extra={
+                            "chat_id": chat_id,
+                            "player_id": player_id,
+                            "message_id": message_id,
+                            "retry_success": True,
+                            "anchor_no_fallback": True,
+                        },
+                    )
+                    return False, "edit_recovered", diagnostics
+                diagnostics["alternate_markup_success"] = False
+
+            if error_text and "message to edit not found" in error_text and not deleted_flag:
+                diagnostics["anomaly"] = "message_not_found"
+                logger.warning(
+                    "Role anchor edit anomaly",
+                    extra={
+                        "chat_id": chat_id,
+                        "player_id": player_id,
+                        "message_id": message_id,
+                        "anchor_no_fallback": True,
+                    },
+                )
+
+            logger.info(
+                "Role anchor fallback skipped",
+                extra={
+                    "chat_id": chat_id,
+                    "player_id": player_id,
+                    "message_id": message_id,
+                    "retry_success": retry_success,
+                    "last_error": error_text,
+                    "invisible_char": toggle_char,
+                    "anchor_no_fallback": True,
+                },
+            )
+            diagnostics.setdefault("retry_success", False)
+            diagnostics.setdefault("decision", "anchor_no_fallback")
+            return False, diagnostics["decision"], diagnostics
+
+        if deleted_flag:
+            diagnostics["decision"] = "deleted_flag"
+            return True, "deleted_flag", diagnostics
+
+        history_probe = await self._probe_message_existence(chat_id, normalized_message)
+        diagnostics["history_probe"] = history_probe
+
+        effective_deleted = deleted_flag or history_probe is False
+        diagnostics["effective_deleted"] = effective_deleted
+
+        fallback_reason: Optional[str] = None
+        if effective_deleted:
+            fallback_reason = "registry_marked_deleted"
 
         if error_text and "too many requests" in error_text:
             diagnostics["decision"] = "rate_limited"
@@ -1044,18 +1255,9 @@ class PokerBotViewer:
                 return False, "force_refresh", diagnostics
             retry_reason = "not_modified_after_refresh"
 
-        fallback_reason: Optional[str] = None
-
-        if deleted_flag:
-            fallback_reason = "registry_marked_deleted"
-
-        if error_text:
-            if "message to edit not found" in error_text:
-                fallback_reason = "telegram_not_found"
-            elif "message can't be edited" in error_text:
-                fallback_reason = "telegram_not_editable"
-
-        record = self._anchor_registry.get_role(chat_id, player_id)
+        if fallback_reason is None and history_probe is False and not effective_deleted:
+            retry_reason = retry_reason or "history_probe_missing"
+            fallback_reason = "history_missing"
 
         retry_attempts = 0
 
@@ -1074,12 +1276,14 @@ class PokerBotViewer:
             diagnostics["retry_attempted"] = True
             diagnostics["retry_attempts"] = retry_attempts
             diagnostics["retry_reason"] = reason
-            attempt_text = self._force_anchor_text_refresh(text_source)
+            refreshed_text, base_text, toggle_char = self._force_anchor_text_refresh(
+                text_source, last_toggle=record.refresh_toggle if record else None
+            )
             try:
                 result = await self._update_message(
                     chat_id=chat_id,
                     message_id=message_id,
-                    text=attempt_text,
+                    text=refreshed_text,
                     reply_markup=None,
                     force_send=True,
                     request_category=RequestCategory.ANCHOR,
@@ -1094,7 +1298,8 @@ class PokerBotViewer:
                         chat_id,
                         player_id,
                         message_id=resolved_id,
-                        current_text=attempt_text,
+                        current_text=base_text,
+                        refresh_toggle=toggle_char,
                     )
                     diagnostics["decision"] = "edit_recovered"
                     return True
@@ -1114,16 +1319,6 @@ class PokerBotViewer:
                     diagnostics["last_error_raw"] = retry_error
             diagnostics["retry_success"] = False
             return False
-
-        history_probe = await self._probe_message_existence(chat_id, normalized_message)
-        diagnostics["history_probe"] = history_probe
-        if (
-            fallback_reason is None
-            and history_probe is False
-            and not deleted_flag
-        ):
-            retry_reason = retry_reason or "history_probe_missing"
-            fallback_reason = "history_missing"
 
         if retry_reason is not None and fallback_reason not in {
             "registry_marked_deleted",
@@ -1150,7 +1345,6 @@ class PokerBotViewer:
         )
         await self._mark_message_deleted(normalized_message)
         return True, fallback_reason, diagnostics
-
     async def _get_turn_cache_hash(
         self, key: Tuple[int, int]
     ) -> Optional[str]:
@@ -1991,6 +2185,7 @@ class PokerBotViewer:
                         payload_signature=payload_signature,
                         markup_signature=markup_signature,
                         turn_light="",
+                        refresh_toggle="",
                     )
                     if updated_record is not None:
                         updated_record.seat_index = seat_index
@@ -2345,6 +2540,7 @@ class PokerBotViewer:
             payload_signature=payload_signature,
             markup_signature=markup_signature,
             turn_light=turn_light,
+            refresh_toggle="",
         )
 
         self._anchor_registry.increment_fallback(chat_id)
@@ -2531,6 +2727,7 @@ class PokerBotViewer:
                 forced_refresh_attempted = False
                 rate_retry_performed = False
                 last_edit_error: Optional[str] = None
+                applied_refresh_toggle = record.refresh_toggle if record else ""
 
                 while True:
                     try:
@@ -2585,8 +2782,24 @@ class PokerBotViewer:
 
                     if not forced_refresh_attempted:
                         forced_refresh_attempted = True
-                        attempt_text = self._force_anchor_text_refresh(
-                            intended_display_text
+                        (
+                            attempt_text,
+                            _,
+                            forced_toggle,
+                        ) = self._force_anchor_text_refresh(
+                            intended_display_text,
+                            last_toggle=record.refresh_toggle if record else None,
+                        )
+                        applied_refresh_toggle = forced_toggle
+                        diagnostics_hint = {
+                            "chat_id": chat_id,
+                            "player_id": player_id,
+                            "message_id": anchor_id,
+                            "invisible_char": forced_toggle,
+                        }
+                        logger.debug(
+                            "Role anchor local forced refresh",
+                            extra=diagnostics_hint,
                         )
                         attempt_payload_signature = self._reply_keyboard_signature(
                             text=attempt_text,
@@ -2611,6 +2824,9 @@ class PokerBotViewer:
                             player_id=player_id,
                             last_error=last_edit_error,
                             forced_refresh=forced_refresh_attempted,
+                            reply_markup=keyboard,
+                            request_category=RequestCategory.ANCHOR,
+                            current_text=intended_display_text,
                         )
                     )
                     diagnostics.update(
@@ -2667,15 +2883,17 @@ class PokerBotViewer:
                         if edit_success
                         else intended_payload_signature
                     )
+                    stripped_applied_text, _ = self._strip_invisible_suffix(applied_text)
                     self._anchor_registry.update_role(
                         chat_id,
                         player_id,
                         base_text=base_text,
                         message_id=new_message_id,
-                        current_text=applied_text,
+                        current_text=stripped_applied_text,
                         payload_signature=applied_signature,
                         markup_signature=markup_signature,
                         turn_light=next_light,
+                        refresh_toggle=applied_refresh_toggle,
                     )
                     player.anchor_message = (chat_id, new_message_id)
                     player.anchor_keyboard_signature = applied_signature
