@@ -735,34 +735,6 @@ class PokerBotViewer:
         except (TypeError, ValueError):
             return 0
 
-    def _is_countdown_active(self, chat_id: ChatId) -> bool:
-        """Return True if a prestart countdown task is active for the chat."""
-
-        normalized_chat = self._safe_int(chat_id)
-        if normalized_chat == 0:
-            return False
-        try:
-            items = list(self._prestart_countdown_tasks.items())
-        except Exception:
-            return False
-        for (task_chat, _), task in items:
-            if task_chat != normalized_chat:
-                continue
-            if task is None:
-                continue
-            if not task.done():
-                return True
-        return False
-
-    def _is_anchor_stage_guarded(
-        self, *, chat_id: ChatId, stage: Optional[GameState]
-    ) -> bool:
-        if stage in self._ACTIVE_ANCHOR_STATES:
-            return True
-        if stage == GameState.INITIAL and self._is_countdown_active(chat_id):
-            return True
-        return False
-
     async def _get_anchor_lock(self, chat_id: ChatId, kind: str) -> asyncio.Lock:
         normalized_chat = self._safe_int(chat_id)
         key = (normalized_chat, kind)
@@ -2423,10 +2395,6 @@ class PokerBotViewer:
 
         stage_label = getattr(resolved_stage, "name", None)
         normalized_reason = (reason or "").strip() or None
-        countdown_active = self._is_countdown_active(chat_id)
-        guard_active = self._is_anchor_stage_guarded(
-            chat_id=chat_id, stage=resolved_stage
-        )
 
         if self._is_anchor_deletion_authorized(
             stage=resolved_stage,
@@ -2436,12 +2404,10 @@ class PokerBotViewer:
             return False
 
         details: Dict[str, Any] = {"stage": stage_label}
-        if guard_active:
-            details["reason"] = normalized_reason or "guarded"
-            if resolved_stage == GameState.INITIAL:
-                details["countdown_active"] = countdown_active
+        if normalized_reason:
+            details["reason"] = normalized_reason
         else:
-            details["reason"] = normalized_reason or "unauthorized"
+            details["reason"] = "guarded"
 
         self._log_anchor_preservation_skip(
             chat_id=chat_id,
@@ -2457,8 +2423,7 @@ class PokerBotViewer:
             extra={
                 "chat_id": chat_id,
                 "player_id": getattr(record, "player_id", None),
-                "reason": details.get("reason"),
-                "countdown_active": countdown_active if guard_active else None,
+                "reason": normalized_reason or "guarded",
             },
         )
 
@@ -2480,7 +2445,7 @@ class PokerBotViewer:
             return True
 
         if normalized_reason == "hand_end":
-            allowed_states: Set[GameState] = set()
+            allowed_states: Set[GameState] = {GameState.INITIAL}
             showdown_state = getattr(GameState, "ROUND_SHOWDOWN", None)
             if isinstance(showdown_state, GameState):
                 allowed_states.add(showdown_state)
@@ -2490,28 +2455,6 @@ class PokerBotViewer:
             return stage in allowed_states
 
         return False
-
-    def _resolve_anchor_recreate_reason(
-        self,
-        *,
-        fallback_reason: Optional[str],
-        text_changed: bool,
-        keyboard_changed: bool,
-        payload_changed: bool,
-    ) -> str:
-        normalized = (fallback_reason or "").strip().lower()
-        if normalized in {
-            "registry_marked_deleted",
-            "deleted_flag",
-            "history_missing",
-            "telegram_not_found",
-        }:
-            return "message deleted"
-        if normalized in {"guard_override", "guard_bypass"}:
-            return "guard bypassed"
-        if text_changed or keyboard_changed or payload_changed:
-            return "hash change"
-        return "edit failed"
 
     async def sync_player_private_keyboards(
         self,
@@ -2772,7 +2715,6 @@ class PokerBotViewer:
         turn_light: str,
         previous_message_id: Optional[int],
         fallback_reason: str,
-        recreate_reason: str,
     ) -> Optional[int]:
         try:
             if previous_message_id:
@@ -2853,14 +2795,13 @@ class PokerBotViewer:
 
         self._anchor_registry.increment_fallback(chat_id)
 
-        logger.info(
-            "[AnchorPersistence] Created anchor replacement",
+        logger.debug(
+            "Anchor fallback-new-msg",
             extra={
                 "chat_id": chat_id,
                 "player_id": getattr(player, "user_id", None),
                 "message_id": normalized_id,
-                "reason": recreate_reason,
-                "fallback_reason": fallback_reason,
+                "reason": fallback_reason,
             },
         )
 
@@ -3149,95 +3090,18 @@ class PokerBotViewer:
                             "Anchor fallback triggered",
                             extra=diagnostics,
                         )
-                        recreate_reason = self._resolve_anchor_recreate_reason(
+                        new_message_id = await self._send_new_role_anchor(
+                            chat_id=chat_id,
+                            player=player,
+                            base_text=base_text,
+                            display_text=intended_display_text,
+                            keyboard=keyboard,
+                            payload_signature=intended_payload_signature,
+                            markup_signature=markup_signature,
+                            turn_light=next_light,
+                            previous_message_id=anchor_id,
                             fallback_reason=fallback_reason,
-                            text_changed=text_changed,
-                            keyboard_changed=keyboard_changed,
-                            payload_changed=payload_changed,
                         )
-                        fallback_recovered = False
-                        if fallback_reason not in {
-                            "registry_marked_deleted",
-                            "deleted_flag",
-                            "history_missing",
-                            "telegram_not_found",
-                        }:
-                            try:
-                                (
-                                    forced_text,
-                                    _,
-                                    forced_toggle,
-                                ) = self._force_anchor_text_refresh(
-                                    intended_display_text,
-                                    last_toggle=record.refresh_toggle if record else None,
-                                )
-                            except Exception:
-                                forced_text = (
-                                    intended_display_text + self._FORCE_REFRESH_CHARS[0]
-                                )
-                                forced_toggle = self._FORCE_REFRESH_CHARS[0]
-                            try:
-                                forced_result = await self.edit_message_text(
-                                    chat_id,
-                                    anchor_id,
-                                    forced_text,
-                                    reply_markup=keyboard,
-                                    request_category=RequestCategory.ANCHOR,
-                                )
-                            except Exception as exc:
-                                logger.debug(
-                                    "Forced edit during fallback failed",
-                                    extra={
-                                        "chat_id": chat_id,
-                                        "player_id": player_id,
-                                        "message_id": anchor_id,
-                                        "error_type": type(exc).__name__,
-                                    },
-                                )
-                            else:
-                                resolved_forced = self._resolve_message_id(forced_result)
-                                normalized_forced = self._safe_int(
-                                    resolved_forced if resolved_forced is not None else anchor_id
-                                )
-                                if normalized_forced == self._safe_int(anchor_id):
-                                    new_message_id = normalized_forced
-                                    final_display_text = forced_text
-                                    final_payload_signature = self._reply_keyboard_signature(
-                                        text=forced_text,
-                                        reply_markup=keyboard,
-                                        stage_name=stage_name,
-                                        community_cards=community_cards,
-                                        hole_cards=hole_cards,
-                                        turn_indicator=next_light,
-                                    )
-                                    applied_refresh_toggle = forced_toggle
-                                    edit_success = True
-                                    fallback_recovered = True
-                                    logger.info(
-                                        "[AnchorPersistence] Anchor forced edit recovered",
-                                        extra={
-                                            "chat_id": chat_id,
-                                            "player_id": player_id,
-                                            "message_id": anchor_id,
-                                            "reason": fallback_reason,
-                                            "invisible_char": forced_toggle,
-                                        },
-                                    )
-
-                        if not fallback_recovered:
-                            new_message_id = await self._send_new_role_anchor(
-                                chat_id=chat_id,
-                                player=player,
-                                base_text=base_text,
-                                display_text=intended_display_text,
-                                keyboard=keyboard,
-                                payload_signature=intended_payload_signature,
-                                markup_signature=markup_signature,
-                                turn_light=next_light,
-                                previous_message_id=anchor_id,
-                                fallback_reason=fallback_reason,
-                                recreate_reason=recreate_reason,
-                            )
                     else:
                         logger.info(
                             "Fallback prevented – message still valid, retried edit successfully",
@@ -3294,7 +3158,7 @@ class PokerBotViewer:
         raw_stage = getattr(game, "state", GameState.INITIAL)
         stage = self._record_chat_stage(chat_id, raw_stage)
         stage_name = getattr(stage, "name", None)
-        if self._is_anchor_stage_guarded(chat_id=chat_id, stage=stage):
+        if stage in self._ACTIVE_ANCHOR_STATES:
             logger.info(
                 "[AnchorPersistence] Skipped anchor cleanup during active stage",
                 extra={"chat_id": chat_id, "stage": stage_name},
