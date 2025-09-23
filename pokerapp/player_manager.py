@@ -15,7 +15,7 @@ from pokerapp.entities import ChatId, Game, Player
 from pokerapp.pokerbotview import PokerBotViewer
 from pokerapp.stats import BaseStatsService, NullStatsService, PlayerIdentity
 from pokerapp.table_manager import TableManager
-from pokerapp.utils.cache import PlayerReportCache
+from pokerapp.utils.cache import AdaptivePlayerReportCache
 
 
 class PlayerManager:
@@ -34,7 +34,7 @@ class PlayerManager:
         table_manager: TableManager,
         kv: aioredis.Redis,
         stats_service: BaseStatsService,
-        player_report_cache: PlayerReportCache,
+        player_report_cache: AdaptivePlayerReportCache,
         view: PokerBotViewer,
         build_private_menu: Callable[[], object],
         logger: logging.Logger,
@@ -89,7 +89,10 @@ class PlayerManager:
         async def _load_report() -> Optional[Any]:
             return await self._stats_service.build_player_report(user_id_int)
 
-        report = await self._player_report_cache.get(user_id_int, _load_report)
+        report = await self._player_report_cache.get_with_context(
+            user_id_int,
+            _load_report,
+        )
         if report is None or (
             report.stats.total_games <= 0 and not report.recent_games
         ):

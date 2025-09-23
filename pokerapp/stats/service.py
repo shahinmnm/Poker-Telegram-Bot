@@ -6,7 +6,7 @@ import logging
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, Iterable, List, Optional
+from typing import Dict, Iterable, List, Optional, TYPE_CHECKING
 
 from sqlalchemy import (
     BigInteger,
@@ -30,6 +30,9 @@ from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 from sqlalchemy.pool import StaticPool
 
 from pokerapp.utils.markdown import escape_markdown_v1
+
+if TYPE_CHECKING:
+    from pokerapp.utils.cache import AdaptivePlayerReportCache
 
 
 logger = logging.getLogger(__name__)
@@ -214,6 +217,12 @@ class BaseStatsService:
     async def build_player_report(self, user_id: int) -> Optional[PlayerStatisticsReport]:
         raise NotImplementedError
 
+    def bind_player_report_cache(
+        self, cache: "AdaptivePlayerReportCache"
+    ) -> None:
+        """Allow services to access the adaptive player report cache."""
+
+
     def format_report(self, report: PlayerStatisticsReport) -> str:
         raise NotImplementedError
 
@@ -261,17 +270,29 @@ class NullStatsService(BaseStatsService):
     def format_report(self, report: PlayerStatisticsReport) -> str:
         return ""
 
+    def bind_player_report_cache(
+        self, cache: "AdaptivePlayerReportCache"
+    ) -> None:
+        return None
+
 
 class StatsService(BaseStatsService):
     """Concrete implementation backed by an async SQLAlchemy engine."""
 
-    def __init__(self, database_url: str, *, echo: bool = False) -> None:
+    def __init__(
+        self,
+        database_url: str,
+        *,
+        echo: bool = False,
+        player_report_cache: Optional["AdaptivePlayerReportCache"] = None,
+    ) -> None:
         self._enabled = bool(database_url)
         self._engine: Optional[AsyncEngine] = None
         self._sessionmaker: Optional[async_sessionmaker[AsyncSession]] = None
         self._schema_lock = asyncio.Lock()
         self._initialized = False
         self._active_hands: Dict[str, _HandContext] = {}
+        self._player_report_cache = player_report_cache
         if not self._enabled:
             return
 
@@ -282,6 +303,11 @@ class StatsService(BaseStatsService):
         self._sessionmaker = async_sessionmaker(
             self._engine, expire_on_commit=False
         )
+
+    def bind_player_report_cache(
+        self, cache: "AdaptivePlayerReportCache"
+    ) -> None:
+        self._player_report_cache = cache
 
     @staticmethod
     def _utcnow() -> dt.datetime:
@@ -576,6 +602,8 @@ class StatsService(BaseStatsService):
                 for player in context.players
             ]
 
+        players_for_invalidation: List[int] = []
+
         async with self._sessionmaker() as session:
             async with session.begin():
                 game = await session.get(GameSession, hand_id)
@@ -624,6 +652,7 @@ class StatsService(BaseStatsService):
                     return
 
                 player_ids = [result.user_id for result in normalized_results]
+                players_for_invalidation = list(dict.fromkeys(player_ids))
                 existing_stats = {
                     stat.user_id: stat
                     for stat in (
@@ -748,6 +777,14 @@ class StatsService(BaseStatsService):
                         )
                     )
 
+        if (
+            players_for_invalidation
+            and self._player_report_cache is not None
+        ):
+            self._player_report_cache.invalidate_on_event(
+                players_for_invalidation, event_type="hand_finished"
+            )
+
     async def record_daily_bonus(
         self, user_id: int, amount: int, *, timestamp: Optional[dt.datetime] = None
     ) -> None:
@@ -771,6 +808,11 @@ class StatsService(BaseStatsService):
                     stats.total_bonus_claimed += amount
                     stats.last_bonus_at = now
                     stats.last_seen = now
+
+        if self._player_report_cache is not None:
+            self._player_report_cache.invalidate_on_event(
+                [self._coerce_int(user_id)], event_type="bonus_claimed"
+            )
 
     async def build_player_report(self, user_id: int) -> Optional[PlayerStatisticsReport]:
         if not self._enabled or self._sessionmaker is None:

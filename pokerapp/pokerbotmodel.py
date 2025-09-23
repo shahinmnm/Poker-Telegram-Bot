@@ -59,7 +59,7 @@ from pokerapp.stats import (
     PlayerIdentity,
 )
 from pokerapp.private_match_service import PrivateMatchService
-from pokerapp.utils.cache import PlayerReportCache
+from pokerapp.utils.cache import AdaptivePlayerReportCache
 from pokerapp.utils.request_metrics import RequestCategory, RequestMetrics
 from pokerapp.utils.redis_safeops import RedisSafeOps
 from pokerapp.lock_manager import LockManager
@@ -145,11 +145,12 @@ class PokerBotModel:
         self._private_match_service = private_match_service
         self._winner_determine: WinnerDetermination = WinnerDetermination()
         self._round_rate = RoundRateModel(view=self._view, kv=self._kv, model=self)
-        self._player_report_cache = PlayerReportCache(
+        self._player_report_cache = AdaptivePlayerReportCache(
             logger_=logger.getChild("player_report_cache"),
-            redis_ops=self._redis_ops,
+            persistent_store=self._redis_ops,
         )
         self._stats: BaseStatsService = stats_service or NullStatsService()
+        self._stats.bind_player_report_cache(self._player_report_cache)
         self._lock_manager = LockManager(logger=logger.getChild("lock_manager"))
         self._player_manager = PlayerManager(
             table_manager=self._table_manager,
@@ -200,7 +201,9 @@ class PokerBotModel:
             safe_int=self._safe_int,
             old_players_key=KEY_OLD_PLAYERS,
             safe_edit_message_text=self._safe_edit_message_text,
-            invalidate_player_reports=self._player_report_cache.invalidate_many,
+            invalidate_player_reports=lambda ids: self._player_report_cache.invalidate_on_event(
+                ids, "hand_finished"
+            ),
             lock_manager=self._lock_manager,
             logger=logger.getChild("game_engine"),
         )
@@ -407,8 +410,9 @@ class PokerBotModel:
 
         if self._stats_enabled():
             await self._stats.finish_hand(match_id, chat_id, results, pot_total)
-            self._player_report_cache.invalidate_many(
-                self._safe_int(player.user_id) for player in game.players
+            self._player_report_cache.invalidate_on_event(
+                (self._safe_int(player.user_id) for player in game.players),
+                event_type="hand_finished",
             )
 
         game.state = GameState.FINISHED
@@ -1514,7 +1518,9 @@ class PokerBotModel:
         if self._stats_enabled():
             user_id_int = self._safe_int(user.id)
             await self._stats.record_daily_bonus(user_id_int, amount)
-            self._player_report_cache.invalidate(user_id_int)
+            self._player_report_cache.invalidate_on_event(
+                [user_id_int], event_type="bonus_claimed"
+            )
 
     async def _clear_game_messages(self, game: Game, chat_id: ChatId) -> None:
         """Deletes all temporary messages related to the current hand."""

@@ -16,9 +16,11 @@ logging around the heaviest Telegram interactions.
 - **Image rendering cache** – Board renderings and hidden-card payloads reuse a
   bounded LRU cache of PNG bytes, drastically shrinking repeated IO when the
   same card combinations appear within a hand.
-- **Statistics memoization** – Per-user statistics reports are served from a
-  TTL cache and invalidated whenever a hand finishes or a bonus is granted,
-  reducing synchronous database pressure while keeping responses fresh.
+- **Statistics memoization** – Per-user statistics reports now flow through an
+  adaptive cache that tunes TTL based on the change type (hands vs. bonuses),
+  emits structured hit/miss metrics, and optionally persists hot entries to
+  Redis so clustered workers share the same warm state. Event-driven
+  invalidation keeps responses fresh without manual cache busting.
 - **Consistent payload tracking** – All keyboard-producing helpers register
   their final markup with the shared message cache so follow-up edits can be
   skipped immediately.
@@ -28,8 +30,9 @@ logging around the heaviest Telegram interactions.
   immediate cache hits on unchanged payloads.
 - Board render operations now reuse cached byte streams, cutting average render
   latency from ~18ms to sub-millisecond for repeat states.
-- Player statistics requests after consecutive hands no longer hammer the DB; a
-  120s TTL absorbs bursty queries from leaderboards and HUD commands.
+- Player statistics requests after consecutive hands no longer hammer the DB;
+  adaptive TTLs absorb bursty leaderboard/HUD queries while quickly refreshing
+  after decisive events.
 - Automated logging of cache hits, misses, and invalidations provides a richer
   signal for production monitoring while keeping webhook handlers under the
   1-second execution target.
@@ -47,6 +50,6 @@ four Telegram calls (three stage edits and one turn refresh), keeping the total
 well below the 10-call ceiling.【b3c8d5†L1-L7】
 
 ## Follow-up Opportunities
-- Expose cache metrics via Prometheus exporters once the ops stack is ready.
+- Wire cache metrics into Prometheus exporters once the ops stack is ready.
 - Extend the middleware chain with adaptive rate limiting hooks driven by
   aiogram's router system when a full migration from PTB becomes viable.

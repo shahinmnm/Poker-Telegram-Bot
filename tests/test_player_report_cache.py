@@ -1,0 +1,174 @@
+import asyncio
+from typing import Any, Dict, Optional
+
+import pytest
+
+from pokerapp.utils.cache import AdaptivePlayerReportCache
+
+
+class _FakeRedisOps:
+    def __init__(self) -> None:
+        self.storage: Dict[str, bytes] = {}
+        self.safe_set_calls: int = 0
+        self.safe_delete_calls: int = 0
+
+    async def safe_set(
+        self,
+        key: str,
+        value: bytes,
+        *,
+        expire: Optional[int] = None,
+        log_extra: Optional[Dict[str, Any]] = None,
+    ) -> bool:
+        self.safe_set_calls += 1
+        self.storage[key] = value
+        return True
+
+    async def safe_get(
+        self,
+        key: str,
+        *,
+        log_extra: Optional[Dict[str, Any]] = None,
+    ) -> Optional[bytes]:
+        return self.storage.get(key)
+
+    async def safe_delete(
+        self,
+        key: str,
+        *,
+        log_extra: Optional[Dict[str, Any]] = None,
+    ) -> int:
+        self.safe_delete_calls += 1
+        if key in self.storage:
+            del self.storage[key]
+            return 1
+        return 0
+
+
+@pytest.mark.asyncio
+async def test_default_ttl_hit_and_miss(monkeypatch):
+    cache = AdaptivePlayerReportCache(default_ttl=100)
+    calls: Dict[str, int] = {"count": 0}
+
+    async def loader() -> Dict[str, int]:
+        calls["count"] += 1
+        return {"value": 42}
+
+    # First access should miss and load via loader
+    result_one = await cache.get_with_context(1, loader)
+    assert result_one == {"value": 42}
+    assert calls["count"] == 1
+
+    # Second access should hit cache without calling loader again
+    result_two = await cache.get_with_context(1, loader)
+    assert result_two == {"value": 42}
+    assert calls["count"] == 1
+
+    metrics = cache.metrics()
+    assert metrics["default"]["hits"] == 1
+    assert metrics["default"]["misses"] == 1
+
+
+@pytest.mark.asyncio
+async def test_bonus_event_applies_shorter_ttl(monkeypatch):
+    cache = AdaptivePlayerReportCache(default_ttl=120, bonus_ttl=30)
+    fake_time = 0.0
+    monkeypatch.setattr(cache, "_timer", lambda: fake_time)
+
+    async def loader() -> Dict[str, int]:
+        return {"value": 99}
+
+    cache.invalidate_on_event([7], event_type="bonus_claimed")
+    await cache.get_with_context(7, loader)
+    assert cache.metrics()["bonus_claimed"]["misses"] == 1
+
+    # Verify expiry was set using the bonus TTL
+    expires_at = cache._expiry_map[7]
+    assert expires_at - fake_time == pytest.approx(30)
+
+    # Advance time just shy of TTL to confirm cache hit still works
+    fake_time = 29.0
+    result = await cache.get_with_context(7, loader)
+    assert result == {"value": 99}
+    assert cache.metrics()["default"]["hits"] >= 1
+
+
+@pytest.mark.asyncio
+async def test_invalidate_on_event_triggers_loader_again():
+    cache = AdaptivePlayerReportCache(default_ttl=100)
+    calls = {"count": 0}
+
+    async def loader() -> str:
+        calls["count"] += 1
+        return "report"
+
+    await cache.get_with_context(33, loader)
+    assert calls["count"] == 1
+
+    cache.invalidate_on_event([33], event_type="hand_finished")
+    await cache.get_with_context(33, loader)
+    assert calls["count"] == 2
+    assert cache.metrics()["hand_finished"]["misses"] == 1
+
+
+@pytest.mark.asyncio
+async def test_persistent_store_roundtrip():
+    store = _FakeRedisOps()
+    cache = AdaptivePlayerReportCache(default_ttl=50, persistent_store=store)
+
+    calls = {"count": 0}
+
+    async def loader() -> Dict[str, str]:
+        calls["count"] += 1
+        return {"player": "sam"}
+
+    await cache.get_with_context(5, loader)
+    assert store.safe_set_calls == 1
+    key = "stats:5"
+    assert key in store.storage
+    assert calls["count"] == 1
+
+    # Clear in-memory cache to force persistent retrieval
+    cache._cache.clear()
+    cache._expiry_map.clear()
+
+    fetched = await cache.get_with_context(5, loader)
+    assert fetched == {"player": "sam"}
+    # Loader should not have been called a second time because of persistent hit
+    assert store.safe_set_calls == 1
+    assert calls["count"] == 1
+
+    cache.invalidate_on_event([5], event_type="hand_finished")
+    await asyncio.sleep(0)
+    assert key not in store.storage
+    assert store.safe_delete_calls >= 1
+
+
+@pytest.mark.asyncio
+async def test_concurrent_get_uses_single_loader_call():
+    cache = AdaptivePlayerReportCache(default_ttl=90)
+    calls = {"count": 0}
+    loader_event = asyncio.Event()
+
+    async def loader() -> str:
+        calls["count"] += 1
+        await loader_event.wait()
+        return "payload"
+
+    async def call_get() -> str:
+        return await cache.get_with_context(77, loader)
+
+    task_one = asyncio.create_task(call_get())
+    await asyncio.sleep(0)
+    task_two = asyncio.create_task(call_get())
+    await asyncio.sleep(0)
+    loader_event.set()
+    results = await asyncio.gather(task_one, task_two)
+
+    assert results == ["payload", "payload"]
+    assert calls["count"] == 1
+
+    # Subsequent call should hit cache immediately
+    result = await cache.get_with_context(77, loader)
+    assert result == "payload"
+    assert cache.metrics()["default"]["hits"] >= 1
