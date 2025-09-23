@@ -61,6 +61,9 @@ from pokerapp.stats import (
 )
 from pokerapp.private_match_service import PrivateMatchService
 from pokerapp.utils.cache import AdaptivePlayerReportCache
+from pokerapp.utils.player_report_cache import (
+    PlayerReportCache as RedisPlayerReportCache,
+)
 from pokerapp.utils.request_metrics import RequestCategory, RequestMetrics
 from pokerapp.utils.redis_safeops import RedisSafeOps
 from pokerapp.lock_manager import LockManager
@@ -139,6 +142,7 @@ class PokerBotModel:
         stats_service: Optional[BaseStatsService] = None,
         *,
         redis_ops: Optional[RedisSafeOps] = None,
+        player_report_cache: Optional[RedisPlayerReportCache] = None,
     ):
         self._view: PokerBotViewer = view
         self._bot: Bot = bot
@@ -147,6 +151,14 @@ class PokerBotModel:
         self._kv = kv
         self._redis_ops = redis_ops or RedisSafeOps(
             kv, logger=logger.getChild("redis_safeops")
+        )
+        self._shared_player_report_cache = (
+            player_report_cache
+            if player_report_cache is not None
+            else RedisPlayerReportCache(self._redis_ops, logger=logger)
+        )
+        self._player_report_cache_ttl = max(
+            int(getattr(cfg, "PLAYER_REPORT_CACHE_TTL", 300) or 0), 0
         )
         self._table_manager = table_manager
         self._private_match_service = private_match_service
@@ -164,6 +176,8 @@ class PokerBotModel:
             kv=self._kv,
             stats_service=self._stats,
             player_report_cache=self._player_report_cache,
+            shared_report_cache=self._shared_player_report_cache,
+            shared_report_ttl=self._player_report_cache_ttl,
             view=self._view,
             build_private_menu=self._build_private_menu,
             logger=logger.getChild("player_manager"),
@@ -205,9 +219,7 @@ class PokerBotModel:
             safe_int=self._safe_int,
             old_players_key=KEY_OLD_PLAYERS,
             safe_edit_message_text=self._safe_edit_message_text,
-            invalidate_player_reports=lambda ids: self._player_report_cache.invalidate_on_event(
-                ids, "hand_finished"
-            ),
+            player_report_cache=self._shared_player_report_cache,
             lock_manager=self._lock_manager,
             logger=logger.getChild("game_engine"),
         )

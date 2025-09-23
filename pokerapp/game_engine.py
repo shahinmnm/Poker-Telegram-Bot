@@ -45,6 +45,9 @@ from pokerapp.stats import (
 )
 from pokerapp.table_manager import TableManager
 from pokerapp.utils.request_metrics import RequestCategory, RequestMetrics
+from pokerapp.utils.player_report_cache import (
+    PlayerReportCache as RedisPlayerReportCache,
+)
 from pokerapp.winnerdetermination import (
     HAND_NAMES_TRANSLATIONS,
     HandsOfPoker,
@@ -145,7 +148,7 @@ class GameEngine:
         safe_int: Callable[[ChatId], int],
         old_players_key: str,
         safe_edit_message_text: Callable[..., Awaitable[Optional[MessageId]]],
-        invalidate_player_reports: Callable[[Iterable[int]], None],
+        player_report_cache: RedisPlayerReportCache,
         lock_manager: LockManager,
         logger: logging.Logger,
     ) -> None:
@@ -164,9 +167,21 @@ class GameEngine:
         self._safe_int = safe_int
         self._old_players_key = old_players_key
         self._safe_edit_message_text = safe_edit_message_text
-        self._invalidate_player_reports = invalidate_player_reports
+        self._player_report_cache = player_report_cache
         self._lock_manager = lock_manager
         self._logger = logger
+
+    async def _invalidate_reports(self, user_ids: Iterable[int]) -> None:
+        if not self._player_report_cache:
+            return
+        normalized_ids: Set[int] = set()
+        for user_id in user_ids:
+            normalized = self._safe_int(user_id)
+            if normalized:
+                normalized_ids.add(normalized)
+        if not normalized_ids:
+            return
+        await self._player_report_cache.invalidate(normalized_ids)
 
     @staticmethod
     def state_token(state: Any) -> str:
@@ -217,6 +232,8 @@ class GameEngine:
                 players=identities,
             )
 
+        await self._invalidate_reports(player.user_id for player in game.seated_players())
+
         game.state = GameState.ROUND_PRE_FLOP
         await self._request_metrics.start_cycle(
             self._safe_int(chat_id), game.id
@@ -244,6 +261,8 @@ class GameEngine:
 
         current_player = await self._round_rate.set_blinds(game, chat_id)
         self._assign_role_labels(game)
+
+        await self._invalidate_reports(player.user_id for player in game.players)
 
         game.chat_id = chat_id
 
@@ -587,9 +606,8 @@ class GameEngine:
                     results=stats_results,
                     pot_total=pot_total,
                 )
-                self._invalidate_player_reports(
-                    self._safe_int(player.user_id) for player in game.players
-                )
+
+            await self._invalidate_reports(player.user_id for player in game.players)
 
             game.pot = 0
             game.state = GameState.FINISHED
@@ -1025,6 +1043,8 @@ class GameEngine:
         for player in players_snapshot:
             if player.wallet:
                 await player.wallet.cancel(original_game_id)
+
+        await self._invalidate_reports(player.user_id for player in players_snapshot)
 
         game.pot = 0
 

@@ -16,6 +16,7 @@ from pokerapp.private_match_service import PrivateMatchService
 from pokerapp.utils.messaging_service import MessagingService
 from pokerapp.utils.redis_safeops import RedisSafeOps
 from pokerapp.utils.request_metrics import RequestMetrics
+from pokerapp.utils.player_report_cache import PlayerReportCache
 
 
 @dataclass(frozen=True)
@@ -27,6 +28,7 @@ class ApplicationServices:
     redis_ops: RedisSafeOps
     table_manager: TableManager
     stats_service: BaseStatsService
+    player_report_cache: PlayerReportCache
     request_metrics: RequestMetrics
     private_match_service: PrivateMatchService
     messaging_service_factory: Callable[..., MessagingService]
@@ -71,6 +73,11 @@ def build_services(cfg: Config) -> ApplicationServices:
 
     stats_service = _build_stats_service(logger.getChild("stats"), cfg)
 
+    player_report_cache = PlayerReportCache(
+        redis_ops,
+        logger=logger,
+    )
+
     request_metrics = RequestMetrics(logger_=logger.getChild("metrics"))
 
     private_match_service = PrivateMatchService(
@@ -109,6 +116,7 @@ def build_services(cfg: Config) -> ApplicationServices:
         redis_ops=redis_ops,
         table_manager=table_manager,
         stats_service=stats_service,
+        player_report_cache=player_report_cache,
         request_metrics=request_metrics,
         private_match_service=private_match_service,
         messaging_service_factory=messaging_service_factory,

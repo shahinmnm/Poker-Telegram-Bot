@@ -1,9 +1,15 @@
 import asyncio
+import logging
 from typing import Any, Dict, Optional
 
 import pytest
+import fakeredis.aioredis
 
 from pokerapp.utils.cache import AdaptivePlayerReportCache
+from pokerapp.utils.player_report_cache import (
+    PlayerReportCache as RedisPlayerReportCache,
+)
+from pokerapp.utils.redis_safeops import RedisSafeOps
 
 
 class _FakeRedisOps:
@@ -91,6 +97,42 @@ async def test_bonus_event_applies_shorter_ttl(monkeypatch):
     result = await cache.get_with_context(7, loader)
     assert result == {"value": 99}
     assert cache.metrics()["default"]["hits"] >= 1
+
+
+@pytest.mark.asyncio
+async def test_player_report_cache_roundtrip_and_invalidate():
+    redis = fakeredis.aioredis.FakeRedis()
+    redis_ops = RedisSafeOps(redis, max_retries=0, timeout_seconds=0.1)
+    cache = RedisPlayerReportCache(
+        redis_ops,
+        logger=logging.getLogger("test.player_report_cache"),
+    )
+
+    payload = {"formatted": "example"}
+    stored = await cache.set_report(42, payload, ttl_seconds=30)
+    assert stored is True
+
+    fetched = await cache.get_report(42)
+    assert fetched == payload
+
+    removed = await cache.invalidate([42])
+    assert removed == 1
+    assert await cache.get_report(42) is None
+
+
+@pytest.mark.asyncio
+async def test_player_report_cache_respects_ttl_expiry():
+    redis = fakeredis.aioredis.FakeRedis()
+    redis_ops = RedisSafeOps(redis, max_retries=0, timeout_seconds=0.1)
+    cache = RedisPlayerReportCache(
+        redis_ops,
+        logger=logging.getLogger("test.player_report_cache"),
+    )
+
+    await cache.set_report(77, {"formatted": "soon-expire"}, ttl_seconds=1)
+    await asyncio.sleep(1.2)
+
+    assert await cache.get_report(77) is None
 
 
 @pytest.mark.asyncio
