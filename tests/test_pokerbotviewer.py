@@ -309,7 +309,11 @@ def test_clear_all_player_anchors_deletes_messages():
     run(viewer.clear_all_player_anchors(game))
 
     viewer.delete_message.assert_awaited_once_with(
-        chat_id=game.chat_id, message_id=404, allow_anchor_deletion=True
+        chat_id=game.chat_id,
+        message_id=404,
+        allow_anchor_deletion=True,
+        game=game,
+        reason="hand_end",
     )
     assert player.anchor_message is None
     assert player.anchor_role == 'بازیکن'
@@ -439,6 +443,7 @@ def test_delete_message_allows_anchor_cleanup_after_hand():
             chat_id=chat_id,
             message_id=message_id,
             allow_anchor_deletion=True,
+            reason="hand_end",
         )
     )
 
