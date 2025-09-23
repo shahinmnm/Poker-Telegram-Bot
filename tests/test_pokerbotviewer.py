@@ -309,7 +309,11 @@ def test_clear_all_player_anchors_deletes_messages():
     run(viewer.clear_all_player_anchors(game))
 
     viewer.delete_message.assert_awaited_once_with(
-        chat_id=game.chat_id, message_id=404, allow_anchor_deletion=True
+        chat_id=game.chat_id,
+        message_id=404,
+        allow_anchor_deletion=True,
+        anchor_deletion_reason="hand_end",
+        game=game,
     )
     assert player.anchor_message is None
     assert player.anchor_role == 'بازیکن'
@@ -409,11 +413,47 @@ def test_delete_message_skips_anchor_even_with_allow_flag_mid_hand():
             chat_id=chat_id,
             message_id=message_id,
             allow_anchor_deletion=True,
+            anchor_deletion_reason="hand_end",
         )
     )
 
     viewer._messenger.delete_message.assert_not_awaited()
     viewer._mark_message_deleted.assert_not_awaited()
+
+
+def test_delete_message_allows_player_leave_mid_hand():
+    viewer = PokerBotViewer(bot=MagicMock())
+    viewer._messenger.delete_message = AsyncMock()
+    viewer._mark_message_deleted = AsyncMock()
+
+    chat_id = -888
+    message_id = 1357
+    viewer._anchor_registry.register_role(
+        chat_id=chat_id,
+        player_id=21,
+        seat_index=3,
+        message_id=message_id,
+        base_text="anchor",
+        payload_signature="sig",
+        markup_signature="markup",
+    )
+    viewer._anchor_registry.set_stage(chat_id, GameState.ROUND_FLOP)
+
+    run(
+        viewer.delete_message(
+            chat_id=chat_id,
+            message_id=message_id,
+            allow_anchor_deletion=True,
+            anchor_deletion_reason="player_leave",
+        )
+    )
+
+    viewer._messenger.delete_message.assert_awaited_once_with(
+        chat_id=chat_id,
+        message_id=message_id,
+        request_category=RequestCategory.DELETE,
+    )
+    viewer._mark_message_deleted.assert_awaited_once_with(message_id)
 
 
 def test_delete_message_allows_anchor_cleanup_after_hand():
@@ -439,6 +479,7 @@ def test_delete_message_allows_anchor_cleanup_after_hand():
             chat_id=chat_id,
             message_id=message_id,
             allow_anchor_deletion=True,
+            anchor_deletion_reason="hand_end",
         )
     )
 
