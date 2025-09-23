@@ -68,6 +68,7 @@ from pokerapp.utils.cache import PlayerReportCache
 from pokerapp.utils.request_metrics import RequestCategory, RequestMetrics
 from pokerapp.utils.locks import ReentrantAsyncLock
 from pokerapp.player_manager import PlayerManager
+from pokerapp.game_engine import GameEngine
 
 DICE_MULT = 10
 DICE_DELAY_SEC = 5
@@ -94,7 +95,7 @@ STOP_RESUME_CALLBACK = "stop:resume"
 # MIN_PLAYERS = 2 (Defined in entities)
 # SMALL_BLIND = 5 (Defined in entities)
 # DEFAULT_MONEY = 1000 (Defined in entities)
-MAX_TIME_FOR_TURN = datetime.timedelta(minutes=2)
+MAX_TIME_FOR_TURN = GameEngine.MAX_TIME_FOR_TURN
 DESCRIPTION_FILE = "assets/description_bot.md"
 
 PRIVATE_MATCH_QUEUE_KEY = "pokerbot:private_matchmaking:queue"
@@ -125,12 +126,7 @@ class _CountdownCacheEntry:
 
 
 class PokerBotModel:
-    ACTIVE_GAME_STATES = {
-        GameState.ROUND_PRE_FLOP,
-        GameState.ROUND_FLOP,
-        GameState.ROUND_TURN,
-        GameState.ROUND_RIVER,
-    }
+    ACTIVE_GAME_STATES = GameEngine.ACTIVE_GAME_STATES
 
     @staticmethod
     def _safe_int(value: UserId) -> int:
@@ -139,15 +135,8 @@ class PokerBotModel:
         except (TypeError, ValueError):
             return 0
 
-    @staticmethod
-    def _state_token(state: Any) -> str:
-        name = getattr(state, "name", None)
-        if isinstance(name, str):
-            return name
-        value = getattr(state, "value", None)
-        if isinstance(value, str):
-            return value
-        return str(state)
+    def _state_token(self, state: Any) -> str:
+        return self._game_engine.state_token(state)
 
     def _hand_type_to_label(self, hand_type: Optional[HandsOfPoker]) -> Optional[str]:
         if not hand_type:
@@ -180,6 +169,7 @@ class PokerBotModel:
         self._player_report_cache = PlayerReportCache(
             logger_=logger.getChild("player_report_cache")
         )
+        self._game_engine: GameEngine = GameEngine()
         self._stats: BaseStatsService = stats_service or NullStatsService()
         self._player_manager = PlayerManager(
             table_manager=self._table_manager,
@@ -1187,7 +1177,7 @@ class PokerBotModel:
             chat_id,
         )
 
-        if game.state in self.ACTIVE_GAME_STATES and game.cards_table:
+        if game.state in self._game_engine.ACTIVE_GAME_STATES and game.cards_table:
             # از متد اصلاح‌شده برای نمایش میز استفاده می‌کنیم
             # با count=0 و یک عنوان عمومی و زیبا
             await self.add_cards_to_table(0, game, chat_id, "🃏 کارت‌های روی میز")
