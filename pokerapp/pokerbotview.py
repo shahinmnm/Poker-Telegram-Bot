@@ -509,7 +509,8 @@ class PokerBotViewer:
         rate_limit_per_second: Optional[int] = DEFAULT_RATE_LIMIT_PER_SECOND,
         rate_limiter_delay: Optional[float] = 0.05,
         update_debounce: float = 0.25,
-        request_metrics: Optional[RequestMetrics] = None,
+        request_metrics: RequestMetrics,
+        messaging_service_factory: Callable[..., MessagingService],
     ):
         # ``update_debounce`` historically controlled how quickly message edits
         # were flushed to Telegram.  The messaging rewrite in mid-2023 stopped
@@ -523,9 +524,12 @@ class PokerBotViewer:
         self._validator = TelegramPayloadValidator(
             logger_=logger.getChild("validation")
         )
-        self._request_metrics = request_metrics or RequestMetrics(
-            logger_=logger.getChild("request_metrics")
-        )
+        if request_metrics is None:
+            raise ValueError("request_metrics dependency must be provided")
+        if messaging_service_factory is None:
+            raise ValueError("messaging_service_factory dependency must be provided")
+
+        self._request_metrics = request_metrics
         # Legacy rate-limit attributes are retained for backwards compatibility
         # with configuration code but do not influence runtime behaviour.
         self._legacy_rate_limit_per_minute = rate_limit_per_minute
@@ -574,10 +578,8 @@ class PokerBotViewer:
         self._anchor_locks: Dict[Tuple[int, str], asyncio.Lock] = {}
         self._anchor_lock_guard = asyncio.Lock()
 
-        self._messenger = MessagingService(
-            bot,
-            logger_=logger.getChild("messaging_service"),
-            request_metrics=self._request_metrics,
+        self._messenger = messaging_service_factory(
+            bot=bot,
             deleted_messages=self._deleted_messages,
             deleted_messages_lock=self._deleted_messages_lock,
             last_message_hash=self._last_message_hash,

@@ -1,9 +1,8 @@
 #!/usr/bin/env python3
 import asyncio
 import logging
-import os
 from dataclasses import dataclass
-from typing import Optional, Sequence, TYPE_CHECKING
+from typing import Callable, Optional, Sequence, TYPE_CHECKING
 
 import redis.asyncio as aioredis
 from telegram.error import TelegramError
@@ -14,15 +13,11 @@ from pokerapp.pokerbotcontrol import PokerBotCotroller
 from pokerapp.pokerbotmodel import PokerBotModel
 from pokerapp.pokerbotview import PokerBotViewer
 from pokerapp.table_manager import TableManager
-from pokerapp.stats import NullStatsService, StatsService
-from pokerapp.logging_config import setup_logging
+from pokerapp.stats import BaseStatsService
 from pokerapp.private_match_service import PrivateMatchService
+from pokerapp.utils.messaging_service import MessagingService
 from pokerapp.utils.redis_safeops import RedisSafeOps
-
-_DEBUG_ENV = os.getenv("POKERBOT_DEBUG", "0").strip().lower() in {"1", "true", "yes", "on"}
-setup_logging(logging.INFO, debug_mode=_DEBUG_ENV)
-
-logger = logging.getLogger(__name__)
+from pokerapp.utils.request_metrics import RequestMetrics
 
 
 @dataclass(frozen=True)
@@ -37,13 +32,29 @@ if TYPE_CHECKING:
     from telegram.ext import Application
 
 
+MessagingServiceFactory = Callable[..., MessagingService]
+
+
 class PokerBot:
     """Telegram bot wrapper using PTB v20 async Application."""
 
-    def __init__(self, token: str, cfg: Config):
-        setup_logging(logging.INFO, debug_mode=cfg.DEBUG)
+    def __init__(
+        self,
+        token: str,
+        cfg: Config,
+        *,
+        logger: logging.Logger,
+        kv_async: aioredis.Redis,
+        table_manager: TableManager,
+        stats_service: BaseStatsService,
+        redis_ops: RedisSafeOps,
+        request_metrics: RequestMetrics,
+        private_match_service: PrivateMatchService,
+        messaging_service_factory: MessagingServiceFactory,
+    ):
         self._cfg = cfg
         self._token = token
+        self._logger = logger
         self._webhook_settings = WebhookSettings(
             secret_token=cfg.WEBHOOK_SECRET or None,
             max_connections=getattr(
@@ -60,35 +71,13 @@ class PokerBot:
         self._model: Optional[PokerBotModel] = None
         self._controller: Optional[PokerBotCotroller] = None
 
-        # Shared async Redis client for both wallet operations and
-        # asynchronous table persistence
-        self._kv_async = aioredis.Redis(
-            host=cfg.REDIS_HOST,
-            port=cfg.REDIS_PORT,
-            db=cfg.REDIS_DB,
-            password=cfg.REDIS_PASS if cfg.REDIS_PASS != "" else None,
-        )
-
-        self._redis_ops = RedisSafeOps(
-            self._kv_async, logger=logger.getChild("redis_safeops")
-        )
-        self._table_manager = TableManager(
-            self._kv_async,
-            redis_ops=self._redis_ops,
-        )
-        if cfg.DATABASE_URL:
-            try:
-                stats_service = StatsService(
-                    cfg.DATABASE_URL,
-                    echo=getattr(cfg, "DATABASE_ECHO", False),
-                )
-                stats_service.ensure_ready_blocking()
-            except Exception:
-                logger.exception("Failed to initialize statistics service; using null backend.")
-                stats_service = NullStatsService()
-        else:
-            stats_service = NullStatsService()
+        self._kv_async = kv_async
+        self._redis_ops = redis_ops
+        self._table_manager = table_manager
         self._stats_service = stats_service
+        self._request_metrics = request_metrics
+        self._private_match_service = private_match_service
+        self._messaging_service_factory = messaging_service_factory
         self._build_application()
 
     def run(self) -> None:
@@ -106,7 +95,7 @@ class PokerBot:
         """Start the bot using webhook delivery."""
         if self._application is None:
             self._build_application()
-        logger.info(
+        self._logger.info(
             "Starting webhook listener on %s:%s%s targeting %s",
             self._cfg.WEBHOOK_LISTEN,
             self._cfg.WEBHOOK_PORT,
@@ -127,16 +116,16 @@ class PokerBot:
                 max_connections=settings.max_connections,
             )
         except Exception:
-            logger.exception("Webhook run terminated due to an error.")
+            self._logger.exception("Webhook run terminated due to an error.")
             raise
         finally:
-            logger.info("Webhook listener stopped.")
+            self._logger.info("Webhook listener stopped.")
 
     def run_polling(self) -> None:
         """Start the bot using long polling."""
         if self._application is None:
             self._build_application()
-        logger.info(
+        self._logger.info(
             "Starting polling mode for development; webhook configuration will be ignored."
         )
         try:
@@ -145,10 +134,10 @@ class PokerBot:
                 drop_pending_updates=self._webhook_settings.drop_pending_updates,
             )
         except Exception:
-            logger.exception("Polling run terminated due to an error.")
+            self._logger.exception("Polling run terminated due to an error.")
             raise
         finally:
-            logger.info("Polling stopped.")
+            self._logger.info("Polling stopped.")
             try:
                 asyncio.run(self._stats_service.close())
             except RuntimeError:
@@ -158,7 +147,7 @@ class PokerBot:
                 finally:
                     loop.close()
             except Exception:
-                logger.exception("Failed to close statistics service after polling stop.")
+                self._logger.exception("Failed to close statistics service after polling stop.")
 
     def _handle_webhook_start_failure(self, exc: Exception) -> bool:
         """Handle failures when starting the webhook listener.
@@ -168,23 +157,23 @@ class PokerBot:
         """
 
         if getattr(self._cfg, "ALLOW_POLLING_FALLBACK", False):
-            logger.error(
+            self._logger.error(
                 "Webhook startup failed; falling back to polling mode because "
                 "ALLOW_POLLING_FALLBACK is enabled. Error: %s",
                 exc,
             )
-            logger.warning("Using polling mode as a fallback.")
+            self._logger.warning("Using polling mode as a fallback.")
             self._build_application()
             self.run_polling()
             return True
 
         if self._should_force_polling_due_to_webhook_failure(exc):
-            logger.error(
+            self._logger.error(
                 "Webhook startup failed due to a network resolution error; automatically "
                 "falling back to polling mode. Error: %s",
                 exc,
             )
-            logger.warning(
+            self._logger.warning(
                 "Automatic polling fallback triggered because the webhook host could not "
                 "be resolved. Verify the webhook configuration or provide a reachable "
                 "public URL to resume webhook delivery."
@@ -213,13 +202,8 @@ class PokerBot:
             admin_chat_id=self._cfg.ADMIN_CHAT_ID,
             rate_limit_per_minute=self._cfg.RATE_LIMIT_PER_MINUTE,
             rate_limit_per_second=self._cfg.RATE_LIMIT_PER_SECOND,
-        )
-        private_match_service = PrivateMatchService(
-            kv=self._kv_async,
-            table_manager=self._table_manager,
-            logger=logger.getChild("private_match"),
-            constants=self._cfg.constants,
-            redis_ops=self._redis_ops,
+            request_metrics=self._request_metrics,
+            messaging_service_factory=self._messaging_service_factory,
         )
         self._model = PokerBotModel(
             view=self._view,
@@ -227,7 +211,7 @@ class PokerBot:
             kv=self._kv_async,
             cfg=self._cfg,
             table_manager=self._table_manager,
-            private_match_service=private_match_service,
+            private_match_service=self._private_match_service,
             stats_service=self._stats_service,
             redis_ops=self._redis_ops,
         )
@@ -242,7 +226,7 @@ class PokerBot:
             if callable(stop_running):
                 stop_running()
         except Exception:
-            logger.debug("Failed to stop running application cleanly.", exc_info=True)
+            self._logger.debug("Failed to stop running application cleanly.", exc_info=True)
 
         self._application = None
         self._job_queue = None
@@ -286,7 +270,7 @@ class PokerBot:
                 name="webhook-verification",
             )
         except Exception:
-            logger.exception("Unable to schedule webhook verification job.")
+            self._logger.exception("Unable to schedule webhook verification job.")
 
     async def _webhook_verification_job(
         self, _context: ContextTypes.DEFAULT_TYPE
@@ -297,14 +281,14 @@ class PokerBot:
         try:
             webhook_info = await self._application.bot.get_webhook_info()
         except Exception:
-            logger.exception("Unable to confirm webhook registration with Telegram.")
+            self._logger.exception("Unable to confirm webhook registration with Telegram.")
             return
 
         expected_url = self._cfg.WEBHOOK_PUBLIC_URL or ""
         if webhook_info.url == expected_url:
-            logger.info("Webhook registered at expected URL %s", webhook_info.url)
+            self._logger.info("Webhook registered at expected URL %s", webhook_info.url)
         else:
-            logger.warning(
+            self._logger.warning(
                 "Webhook URL mismatch: expected %s, got %s",
                 expected_url,
                 webhook_info.url,
@@ -314,17 +298,17 @@ class PokerBot:
         expected_secret = settings.secret_token or ""
         registered_secret = getattr(webhook_info, "secret_token", None)
         if expected_secret and not registered_secret:
-            logger.info(
+            self._logger.info(
                 "Webhook secret token not returned by Telegram; configured secret not verifiable."
             )
         elif expected_secret and registered_secret == expected_secret:
-            logger.info("Webhook secret token matches configured value.")
+            self._logger.info("Webhook secret token matches configured value.")
         elif expected_secret and registered_secret != expected_secret:
-            logger.warning("Webhook secret token does not match the configured value.")
+            self._logger.warning("Webhook secret token does not match the configured value.")
         elif not expected_secret and registered_secret:
-            logger.warning("Webhook secret token set unexpectedly.")
+            self._logger.warning("Webhook secret token set unexpectedly.")
         else:
-            logger.info("Webhook secret token is not configured, as expected.")
+            self._logger.info("Webhook secret token is not configured, as expected.")
 
         registered_allowed_updates = (
             tuple(webhook_info.allowed_updates)
@@ -333,9 +317,12 @@ class PokerBot:
         )
         expected_allowed_updates = tuple(settings.allowed_updates or ())
         if expected_allowed_updates == registered_allowed_updates:
-            logger.info("Webhook allowed updates match configured values: %s", registered_allowed_updates)
+            self._logger.info(
+                "Webhook allowed updates match configured values: %s",
+                registered_allowed_updates,
+            )
         else:
-            logger.warning(
+            self._logger.warning(
                 "Webhook allowed updates mismatch: expected %s, got %s",
                 expected_allowed_updates,
                 registered_allowed_updates,
@@ -343,59 +330,59 @@ class PokerBot:
 
         registered_max_connections = getattr(webhook_info, "max_connections", None)
         if settings.max_connections is None:
-            logger.info(
+            self._logger.info(
                 "Webhook max_connections not configured; accepting Telegram-reported value: %s",
                 registered_max_connections,
             )
         elif registered_max_connections is None:
-            logger.info(
+            self._logger.info(
                 "Webhook max_connections not reported by Telegram; configured value is %s",
                 settings.max_connections,
             )
         elif settings.max_connections == registered_max_connections:
-            logger.info(
+            self._logger.info(
                 "Webhook max_connections matches configured value: %s",
                 registered_max_connections,
             )
         else:
-            logger.warning(
+            self._logger.warning(
                 "Webhook max_connections mismatch: expected %s, got %s",
                 settings.max_connections,
                 registered_max_connections,
             )
 
-        logger.info(
+        self._logger.info(
             "Webhook configured to drop pending updates: %s",
             settings.drop_pending_updates,
         )
 
     async def _cleanup_webhook(self, application: "Application") -> None:
         drop_updates = bool(self._webhook_settings.drop_pending_updates)
-        logger.info("Removing webhook; drop_pending_updates=%s", drop_updates)
+        self._logger.info("Removing webhook; drop_pending_updates=%s", drop_updates)
         try:
             await application.bot.delete_webhook(drop_pending_updates=drop_updates)
         except Exception:
-            logger.exception("Failed to delete webhook during shutdown.")
+            self._logger.exception("Failed to delete webhook during shutdown.")
             return
 
         try:
             webhook_info = await application.bot.get_webhook_info()
         except Exception:
-            logger.exception("Unable to verify webhook removal.")
+            self._logger.exception("Unable to verify webhook removal.")
             return
 
         if webhook_info.url:
-            logger.warning(
+            self._logger.warning(
                 "Webhook still registered at %s after deletion attempt.",
                 webhook_info.url,
             )
         else:
-            logger.info("Webhook successfully removed from Telegram.")
+            self._logger.info("Webhook successfully removed from Telegram.")
 
         try:
             await self._stats_service.close()
         except Exception:
-            logger.exception("Failed to close statistics service cleanly.")
+            self._logger.exception("Failed to close statistics service cleanly.")
 
     async def _handle_error(
         self, update: object, context: ContextTypes.DEFAULT_TYPE

@@ -28,8 +28,10 @@ from pokerapp.pokerbotmodel import (
 )
 from pokerapp.pokerbotview import TurnMessageUpdate, PokerBotViewer
 from pokerapp.private_match_service import PrivateMatchService
+from pokerapp.utils.request_metrics import RequestMetrics
 from telegram.error import BadRequest
 from telegram import InlineKeyboardMarkup
+import logging
 
 
 HANDS_FILE = "./tests/hands.txt"
@@ -78,6 +80,9 @@ def _prepare_view_mock(view: MagicMock) -> MagicMock:
             call_action=PlayerAction.CHECK,
             board_line="",
         )
+    )
+    view.request_metrics = RequestMetrics(
+        logger_=logging.getLogger("test.pokerbotmodel.request_metrics")
     )
     return view
 

@@ -1,24 +1,20 @@
 #!/usr/bin/env python3
 
-import logging
 import os
 import sys
 
 from dotenv import load_dotenv
 
+from pokerapp.bootstrap import build_services
 from pokerapp.config import Config
 from pokerapp.pokerbot import PokerBot
-from pokerapp.logging_config import setup_logging
-
-_DEBUG_ENV = os.getenv("POKERBOT_DEBUG", "0").strip().lower() in {"1", "true", "yes", "on"}
-setup_logging(logging.INFO, debug_mode=_DEBUG_ENV)
-logger = logging.getLogger(__name__)
 
 
 def main() -> None:
     load_dotenv()
     cfg: Config = Config()
-    setup_logging(logging.INFO, debug_mode=cfg.DEBUG)
+    services = build_services(cfg)
+    logger = services.logger.getChild(__name__)
 
     logger.info(
         "Ensure required configuration values are provided via environment or .env file.",
@@ -116,7 +112,18 @@ def main() -> None:
                 )
             sys.exit(1)
 
-    bot = PokerBot(token=cfg.TOKEN, cfg=cfg)
+    bot = PokerBot(
+        token=cfg.TOKEN,
+        cfg=cfg,
+        logger=services.logger.getChild("bot"),
+        kv_async=services.kv_async,
+        table_manager=services.table_manager,
+        stats_service=services.stats_service,
+        redis_ops=services.redis_ops,
+        request_metrics=services.request_metrics,
+        private_match_service=services.private_match_service,
+        messaging_service_factory=services.messaging_service_factory,
+    )
     if use_polling:
         bot.run_polling()
     else:

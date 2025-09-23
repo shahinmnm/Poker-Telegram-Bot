@@ -1,5 +1,7 @@
 import logging
 from types import SimpleNamespace
+import logging
+from types import SimpleNamespace
 from unittest.mock import Mock
 
 import pytest
@@ -12,6 +14,7 @@ def _create_bot(allow_polling_fallback: bool) -> PokerBot:
     bot = PokerBot.__new__(PokerBot)
     bot._cfg = SimpleNamespace(ALLOW_POLLING_FALLBACK=allow_polling_fallback)
     bot._build_application = Mock()
+    bot._logger = logging.getLogger("test.pokerbot")
     return bot
 
 

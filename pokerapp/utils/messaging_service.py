@@ -143,15 +143,20 @@ class MessagingService:
         *,
         cache_ttl: int = 3,
         cache_maxsize: int = 500,
-        logger_: Optional[logging.Logger] = None,
-        request_metrics: Optional[RequestMetrics] = None,
+        logger_: logging.Logger,
+        request_metrics: RequestMetrics,
         deleted_messages: Optional[Set[int]] = None,
         deleted_messages_lock: Optional[asyncio.Lock] = None,
         last_message_hash: Optional[Dict[int, str]] = None,
         last_message_hash_lock: Optional[asyncio.Lock] = None,
     ) -> None:
         self._bot = bot
-        self._logger = logger_ or logger.getChild("service")
+        if logger_ is None:
+            raise ValueError("logger_ dependency must be provided")
+        if request_metrics is None:
+            raise ValueError("request_metrics dependency must be provided")
+
+        self._logger = logger_
         self._content_cache: TTLCache[CacheEntryKey, bool] = TTLCache(
             maxsize=cache_maxsize,
             ttl=cache_ttl,
@@ -159,7 +164,7 @@ class MessagingService:
         self._cache_lock = asyncio.Lock()
         self._locks: Dict[CacheKey, asyncio.Lock] = {}
         self._locks_guard = asyncio.Lock()
-        self._metrics = request_metrics or RequestMetrics(logger_=self._logger)
+        self._metrics = request_metrics
         self._pending_edits: Dict[CacheKey, _PendingEditState] = {}
         self._last_edit_timestamp: Dict[CacheKey, datetime.datetime] = {}
         self._deleted_messages_ref = deleted_messages

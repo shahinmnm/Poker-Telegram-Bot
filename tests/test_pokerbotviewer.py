@@ -522,11 +522,11 @@ def test_delete_message_allows_anchor_cleanup_after_hand():
         )
     )
 
-    viewer._messenger.delete_message.assert_awaited_once_with(
-        chat_id=chat_id,
-        message_id=message_id,
-        request_category=RequestCategory.DELETE,
-    )
+    viewer._messenger.delete_message.assert_awaited_once()
+    delete_kwargs = viewer._messenger.delete_message.await_args.kwargs
+    assert delete_kwargs["chat_id"] == chat_id
+    assert delete_kwargs["message_id"] == message_id
+    assert delete_kwargs["request_category"] is RequestCategory.DELETE
     viewer._mark_message_deleted.assert_awaited_once_with(message_id)
 
 

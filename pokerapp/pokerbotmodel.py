@@ -175,10 +175,7 @@ class PokerBotModel:
         self._countdown_cache_lock = asyncio.Lock()
         metrics_candidate = getattr(self._view, "request_metrics", None)
         if not isinstance(metrics_candidate, RequestMetrics):
-            metrics_candidate = RequestMetrics(
-                logger_=logger.getChild("request_metrics")
-            )
-            setattr(self._view, "request_metrics", metrics_candidate)
+            raise ValueError("PokerBotViewer must expose a RequestMetrics instance")
         self._request_metrics = metrics_candidate
         self._private_match_service.configure(
             safe_int=self._safe_int,
