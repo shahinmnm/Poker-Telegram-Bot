@@ -1013,6 +1013,9 @@ class PokerBotViewer:
             "player_id": player_id,
             "message_id": message_id,
             "forced_refresh": forced_refresh,
+            "retry_attempted": False,
+            "retry_success": False,
+            "retry_attempts": 0,
         }
         if normalized_message is None:
             diagnostics["decision"] = "missing_message_id"
@@ -1024,6 +1027,7 @@ class PokerBotViewer:
         error_text = (last_error or "").lower()
         if error_text:
             diagnostics["last_error"] = error_text
+            diagnostics["last_error_raw"] = last_error
 
         if error_text and "too many requests" in error_text:
             diagnostics["decision"] = "rate_limited"
@@ -1033,9 +1037,12 @@ class PokerBotViewer:
             diagnostics["decision"] = "retry_later"
             return False, "retry_later", diagnostics
 
-        if error_text and "message is not modified" in error_text and not forced_refresh:
-            diagnostics["decision"] = "force_refresh"
-            return False, "force_refresh", diagnostics
+        retry_reason: Optional[str] = None
+        if error_text and "message is not modified" in error_text:
+            if not forced_refresh:
+                diagnostics["decision"] = "force_refresh"
+                return False, "force_refresh", diagnostics
+            retry_reason = "not_modified_after_refresh"
 
         fallback_reason: Optional[str] = None
 
@@ -1048,16 +1055,99 @@ class PokerBotViewer:
             elif "message can't be edited" in error_text:
                 fallback_reason = "telegram_not_editable"
 
+        record = self._anchor_registry.get_role(chat_id, player_id)
+
+        retry_attempts = 0
+
+        async def attempt_forced_refresh(reason: str) -> bool:
+            nonlocal retry_attempts, error_text, last_error
+            if retry_attempts >= 1:
+                diagnostics["retry_limit_reached"] = True
+                return False
+            text_source: Optional[str] = None
+            if record is not None:
+                text_source = record.current_text or record.base_text
+            if not text_source:
+                diagnostics["retry_unavailable"] = "no_text"
+                return False
+            retry_attempts += 1
+            diagnostics["retry_attempted"] = True
+            diagnostics["retry_attempts"] = retry_attempts
+            diagnostics["retry_reason"] = reason
+            attempt_text = self._force_anchor_text_refresh(text_source)
+            try:
+                result = await self._update_message(
+                    chat_id=chat_id,
+                    message_id=message_id,
+                    text=attempt_text,
+                    reply_markup=None,
+                    force_send=True,
+                    request_category=RequestCategory.ANCHOR,
+                )
+            except Exception as exc:
+                diagnostics["retry_exception"] = type(exc).__name__
+            else:
+                resolved_id = self._resolve_message_id(result)
+                if resolved_id is not None:
+                    diagnostics["retry_success"] = True
+                    self._anchor_registry.update_role(
+                        chat_id,
+                        player_id,
+                        message_id=resolved_id,
+                        current_text=attempt_text,
+                    )
+                    diagnostics["decision"] = "edit_recovered"
+                    return True
+            normalized_anchor = self._safe_int(message_id)
+            if normalized_anchor:
+                try:
+                    retry_error = await self._get_last_edit_error(
+                        chat_id, normalized_anchor
+                    )
+                except Exception:
+                    retry_error = None
+                if retry_error:
+                    last_error = retry_error
+                    error_text = retry_error.lower()
+                    diagnostics["retry_last_error"] = error_text
+                    diagnostics["last_error"] = error_text
+                    diagnostics["last_error_raw"] = retry_error
+            diagnostics["retry_success"] = False
+            return False
+
         history_probe = await self._probe_message_existence(chat_id, normalized_message)
         diagnostics["history_probe"] = history_probe
-        if fallback_reason is None and history_probe is False:
+        if (
+            fallback_reason is None
+            and history_probe is False
+            and not deleted_flag
+        ):
+            retry_reason = retry_reason or "history_probe_missing"
             fallback_reason = "history_missing"
+
+        if retry_reason is not None and fallback_reason not in {
+            "registry_marked_deleted",
+            "telegram_not_found",
+            "telegram_not_editable",
+        }:
+            if await attempt_forced_refresh(retry_reason):
+                return False, "edit_recovered", diagnostics
 
         if fallback_reason is None:
             diagnostics["decision"] = "skip"
             return False, "skip", diagnostics
 
+        if diagnostics.get("retry_attempted"):
+            diagnostics.setdefault("retry_success", False)
+
         diagnostics["decision"] = fallback_reason
+        logger.info(
+            "Pre-fallback diagnostics",
+            extra={
+                **diagnostics,
+                "fallback_reason": fallback_reason,
+            },
+        )
         await self._mark_message_deleted(normalized_message)
         return True, fallback_reason, diagnostics
 

@@ -470,6 +470,113 @@ def test_new_hand_ready_message_uses_reply_keyboard():
     assert _row_texts(markup.keyboard[1]) == ["/stop"]
 
 
+@pytest.mark.asyncio
+async def test_should_create_anchor_fallback_recovers_when_history_probe_missing():
+    viewer = PokerBotViewer(bot=MagicMock())
+    viewer._is_message_deleted = AsyncMock(return_value=False)
+    viewer._probe_message_existence = AsyncMock(return_value=False)
+    viewer._update_message = AsyncMock(return_value=321)
+    viewer._get_last_edit_error = AsyncMock(return_value=None)
+    viewer._mark_message_deleted = AsyncMock()
+
+    viewer._anchor_registry.register_role(
+        chat_id=99,
+        player_id=7,
+        seat_index=0,
+        message_id=321,
+        base_text="anchor",
+        payload_signature="sig",
+        markup_signature="markup",
+    )
+
+    should_fallback, reason, diagnostics = await viewer._should_create_anchor_fallback(
+        chat_id=99,
+        message_id=321,
+        player_id=7,
+        last_error=None,
+        forced_refresh=False,
+    )
+
+    assert not should_fallback
+    assert reason == "edit_recovered"
+    assert diagnostics["retry_attempted"] is True
+    assert diagnostics["retry_success"] is True
+    viewer._update_message.assert_awaited_once()
+    viewer._mark_message_deleted.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_should_create_anchor_fallback_triggers_fallback_after_retry_failure():
+    viewer = PokerBotViewer(bot=MagicMock())
+    viewer._is_message_deleted = AsyncMock(return_value=False)
+    viewer._probe_message_existence = AsyncMock(return_value=False)
+    viewer._update_message = AsyncMock(return_value=None)
+    viewer._get_last_edit_error = AsyncMock(
+        return_value="message to edit not found"
+    )
+    viewer._mark_message_deleted = AsyncMock()
+
+    viewer._anchor_registry.register_role(
+        chat_id=101,
+        player_id=9,
+        seat_index=0,
+        message_id=555,
+        base_text="anchor",
+        payload_signature="sig",
+        markup_signature="markup",
+    )
+
+    should_fallback, reason, diagnostics = await viewer._should_create_anchor_fallback(
+        chat_id=101,
+        message_id=555,
+        player_id=9,
+        last_error=None,
+        forced_refresh=False,
+    )
+
+    assert should_fallback
+    assert reason == "history_missing"
+    assert diagnostics["retry_attempted"] is True
+    assert diagnostics["retry_success"] is False
+    viewer._update_message.assert_awaited_once()
+    viewer._mark_message_deleted.assert_awaited_once_with(555)
+
+
+@pytest.mark.asyncio
+async def test_should_create_anchor_fallback_retries_on_not_modified_error():
+    viewer = PokerBotViewer(bot=MagicMock())
+    viewer._is_message_deleted = AsyncMock(return_value=False)
+    viewer._probe_message_existence = AsyncMock(return_value=True)
+    viewer._update_message = AsyncMock(return_value=777)
+    viewer._get_last_edit_error = AsyncMock(return_value=None)
+    viewer._mark_message_deleted = AsyncMock()
+
+    viewer._anchor_registry.register_role(
+        chat_id=202,
+        player_id=11,
+        seat_index=0,
+        message_id=777,
+        base_text="anchor",
+        payload_signature="sig",
+        markup_signature="markup",
+    )
+
+    should_fallback, reason, diagnostics = await viewer._should_create_anchor_fallback(
+        chat_id=202,
+        message_id=777,
+        player_id=11,
+        last_error="Message is not modified",
+        forced_refresh=True,
+    )
+
+    assert not should_fallback
+    assert reason == "edit_recovered"
+    assert diagnostics["retry_attempted"] is True
+    assert diagnostics["retry_success"] is True
+    viewer._update_message.assert_awaited_once()
+    viewer._mark_message_deleted.assert_not_awaited()
+
+
 def test_send_message_uses_validated_payload():
     viewer = PokerBotViewer(bot=MagicMock())
     viewer._bot.send_message = AsyncMock(return_value=MagicMock(message_id=7))
