@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 import asyncio
 import logging
+import os
 from dataclasses import dataclass
 from typing import Optional, Sequence, TYPE_CHECKING
 
@@ -18,7 +19,8 @@ from pokerapp.logging_config import setup_logging
 from pokerapp.private_match_service import PrivateMatchService
 from pokerapp.utils.redis_safeops import RedisSafeOps
 
-setup_logging(logging.INFO)
+_DEBUG_ENV = os.getenv("POKERBOT_DEBUG", "0").strip().lower() in {"1", "true", "yes", "on"}
+setup_logging(logging.INFO, debug_mode=_DEBUG_ENV)
 
 logger = logging.getLogger(__name__)
 
@@ -39,6 +41,7 @@ class PokerBot:
     """Telegram bot wrapper using PTB v20 async Application."""
 
     def __init__(self, token: str, cfg: Config):
+        setup_logging(logging.INFO, debug_mode=cfg.DEBUG)
         self._cfg = cfg
         self._token = token
         self._webhook_settings = WebhookSettings(

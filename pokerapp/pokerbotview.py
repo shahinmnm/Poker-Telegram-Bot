@@ -2084,6 +2084,7 @@ class PokerBotViewer:
                         text=normalized_text,
                         reply_markup=reply_markup,
                         request_category=request_category,
+                        context=context,
                         parse_mode=parse_mode,
                         disable_web_page_preview=disable_web_page_preview,
                         disable_notification=disable_notification,
@@ -2232,6 +2233,7 @@ class PokerBotViewer:
                         reply_markup=reply_markup,
                         force=force_send,
                         request_category=request_category,
+                        context=context,
                         parse_mode=parse_mode,
                         disable_web_page_preview=disable_web_page_preview,
                     )
@@ -3024,6 +3026,7 @@ class PokerBotViewer:
                     reply_markup=keyboard,
                     force=True,
                     request_category=RequestCategory.ANCHOR,
+                    context=context,
                     parse_mode=ParseMode.MARKDOWN,
                     disable_web_page_preview=True,
                 )
@@ -3789,6 +3792,7 @@ class PokerBotViewer:
                 chat_id=self._admin_chat_id,
                 text=text,
                 request_category=RequestCategory.GENERAL,
+                context=context,
             )
         except Exception as e:
             logger.error(
@@ -3828,6 +3832,7 @@ class PokerBotViewer:
                 text=normalized_text,
                 reply_markup=reply_markup,
                 request_category=request_category,
+                context=context,
                 parse_mode=ParseMode.MARKDOWN,
                 disable_notification=True,
                 disable_web_page_preview=True,
@@ -3895,6 +3900,7 @@ class PokerBotViewer:
                 text=normalized_text,
                 reply_markup=reply_markup,
                 request_category=request_category,
+                context=context,
                 parse_mode=parse_mode,
                 disable_notification=True,
                 disable_web_page_preview=True,
@@ -3916,11 +3922,13 @@ class PokerBotViewer:
 
     async def send_photo(self, chat_id: ChatId) -> None:
         try:
+            context = self._build_context("send_photo", chat_id=chat_id)
             with open("./assets/poker_hand.jpg", "rb") as f:
                 await self._messenger.send_photo(
                     chat_id=chat_id,
                     photo=f,
                     request_category=RequestCategory.MEDIA,
+                    context=context,
                     parse_mode=ParseMode.MARKDOWN,
                     disable_notification=True,
                 )
@@ -3987,6 +3995,7 @@ class PokerBotViewer:
                 text=normalized_text,
                 reply_markup=None,
                 request_category=RequestCategory.GENERAL,
+                context=context,
                 parse_mode=ParseMode.MARKDOWN,
                 disable_notification=True,
                 reply_to_message_id=message_id,
@@ -4041,6 +4050,7 @@ class PokerBotViewer:
                 text=normalized_text,
                 reply_markup=reply_markup,
                 request_category=request_category,
+                context=context,
                 parse_mode=parse_mode,
                 disable_web_page_preview=disable_web_page_preview,
             )
@@ -4069,6 +4079,9 @@ class PokerBotViewer:
         """Delete a message while keeping the cache in sync."""
         normalized_message = self._safe_int(message_id)
         normalized_chat = self._safe_int(chat_id)
+        context = self._build_context(
+            "delete_message", chat_id=chat_id, message_id=message_id
+        )
 
         resolved_stage = None
         if game is not None:
@@ -4151,6 +4164,7 @@ class PokerBotViewer:
                     chat_id=chat_id,
                     message_id=message_id,
                     request_category=RequestCategory.DELETE,
+                    context=context,
                 )
                 await self._mark_message_deleted(normalized_message)
                 if anchor_record is not None:
@@ -4226,10 +4240,12 @@ class PokerBotViewer:
             bio.name = "card.png"
             im_card.save(bio, "PNG")
             bio.seek(0)
+            context = self._build_context("send_single_card", chat_id=chat_id)
             await self._messenger.send_photo(
                 chat_id=chat_id,
                 photo=bio,
                 request_category=RequestCategory.MEDIA,
+                context=context,
                 disable_notification=disable_notification,
             )
         except Exception as e:
@@ -4277,6 +4293,7 @@ class PokerBotViewer:
                 parse_mode=parse_mode,
                 disable_notification=disable_notification,
                 reply_markup=reply_markup,
+                context=context,
             )
             if isinstance(message, Message):
                 return message
@@ -4534,12 +4551,16 @@ class PokerBotViewer:
         """Update a message's inline keyboard while handling common failures."""
         if not message_id:
             return False
+        context = self._build_context(
+            "edit_message_reply_markup", chat_id=chat_id, message_id=message_id
+        )
         try:
             return await self._messenger.edit_message_reply_markup(
                 chat_id=chat_id,
                 message_id=message_id,
                 reply_markup=reply_markup,
                 request_category=RequestCategory.INLINE,
+                context=context,
             )
         except BadRequest as e:
             err = str(e).lower()
@@ -4765,6 +4786,7 @@ class PokerBotViewer:
                 disable_notification=True,
                 disable_web_page_preview=True,
                 reply_markup=reply_keyboard,
+                context=context,
             )
         except Exception as e:
             logger.error(

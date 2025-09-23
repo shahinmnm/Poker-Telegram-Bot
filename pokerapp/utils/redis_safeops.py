@@ -10,7 +10,7 @@ from typing import Any, Awaitable, Callable, Dict, Optional, Sequence, Union
 import redis.asyncio as aioredis
 from redis.exceptions import ConnectionError, NoScriptError, ResponseError, TimeoutError
 
-from pokerapp.logging_config import JsonFormatter
+from pokerapp.logging_config import ContextJsonFormatter
 
 MetricsRecorder = Callable[[str, float, str], None]
 
@@ -20,7 +20,7 @@ class RedisSafeOps:
 
     The helper provides a single :meth:`call` entry point that handles
     transient connection issues, applies exponential backoff and emits
-    structured log entries compatible with :class:`JsonFormatter`.  The
+    structured log entries compatible with :class:`ContextJsonFormatter`.  The
     public ``safe_*`` convenience methods cover the most common Redis
     operations used throughout the bot.
     """
@@ -49,7 +49,7 @@ class RedisSafeOps:
         # logging we simply propagate to the parent handlers.
         if not self._logger.handlers and not self._logger.propagate:
             handler = logging.StreamHandler()
-            handler.setFormatter(JsonFormatter())
+            handler.setFormatter(ContextJsonFormatter())
             self._logger.addHandler(handler)
             self._logger.setLevel(logging.INFO)
 

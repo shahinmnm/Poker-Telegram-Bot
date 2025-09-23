@@ -23,9 +23,14 @@ import time
 import datetime
 from collections import defaultdict, deque
 from dataclasses import dataclass, field
-from typing import Any, Awaitable, Callable, Dict, List, Optional, Set, Tuple
+from typing import Any, Awaitable, Callable, Dict, List, Mapping, Optional, Set, Tuple
 
 from cachetools import TTLCache
+
+try:  # pragma: no cover - prometheus_client optional
+    from prometheus_client import Counter
+except Exception:  # pragma: no cover - optional dependency missing
+    Counter = None  # type: ignore[assignment]
 
 from pokerapp.utils.datetime_utils import utc_now
 from pokerapp.utils.debug_trace import trace_telegram_api_call
@@ -47,6 +52,15 @@ except Exception:  # pragma: no cover
 logger = logging.getLogger(__name__)
 debug_trace_logger = logging.getLogger("pokerbot.debug_trace")
 
+if Counter is not None:  # pragma: no branch - simple configuration
+    _TELEGRAM_EVENT_COUNTER = Counter(
+        "pokerbot_telegram_events_total",
+        "Total number of MessagingService events emitted.",
+        ("action", "method", "category"),
+    )
+else:  # pragma: no cover - dependency not installed during tests
+    _TELEGRAM_EVENT_COUNTER = None
+
 
 CacheKey = Tuple[int, int]
 CacheEntryKey = Tuple[int, int, str]
@@ -62,6 +76,7 @@ class _EditPayload:
     force: bool
     request_category: RequestCategory
     content_hash: str
+    context: Dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(slots=True)
@@ -72,6 +87,7 @@ class _EditWaiter:
     category: RequestCategory
     content_hash: str
     superseded: bool = False
+    context: Dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(slots=True)
@@ -157,12 +173,89 @@ class MessagingService:
         self._last_edit_failures: Dict[CacheKey, str] = {}
         self._last_edit_failure_lock = asyncio.Lock()
 
-    async def _throttle_send(self, chat_id: int) -> None:
+    @staticmethod
+    def _coerce_context_value(value: Any) -> Any:
+        if isinstance(value, RequestCategory):
+            return value.value
+        return value
+
+    def _merge_context(
+        self,
+        context: Optional[Mapping[str, Any]],
+        **defaults: Any,
+    ) -> Dict[str, Any]:
+        merged: Dict[str, Any] = {}
+        if context:
+            for key, value in context.items():
+                if value is None:
+                    continue
+                merged[key] = self._coerce_context_value(value)
+        for key, value in defaults.items():
+            if value is None:
+                continue
+            merged[key] = self._coerce_context_value(value)
+        if "service" not in merged:
+            merged["service"] = "MessagingService"
+        return merged
+
+    def _record_event_metric(
+        self,
+        action: str,
+        *,
+        method: Optional[str],
+        category: Optional[Any],
+    ) -> None:
+        if _TELEGRAM_EVENT_COUNTER is None:  # pragma: no cover - optional metrics
+            return
+        label_method = method or "unknown"
+        if isinstance(category, RequestCategory):
+            label_category = category.value
+        elif isinstance(category, str):
+            label_category = category
+        elif category is None:
+            label_category = "none"
+        else:
+            label_category = str(category)
+        _TELEGRAM_EVENT_COUNTER.labels(
+            action=action,
+            method=label_method,
+            category=label_category,
+        ).inc()
+
+    def _log_event(
+        self,
+        action: str,
+        *,
+        level: int = logging.INFO,
+        context: Optional[Mapping[str, Any]] = None,
+        include_debug_trace: bool = False,
+    ) -> None:
+        payload = self._merge_context(context, action=action)
+        method = payload.get("method")
+        category = payload.get("category")
+        self._logger.log(level, action, extra=dict(payload))
+        if include_debug_trace:
+            debug_trace_logger.log(level, action, extra=dict(payload))
+        self._record_event_metric(action, method=method, category=category)
+
+    async def _throttle_send(
+        self,
+        chat_id: int,
+        *,
+        method: Optional[str] = None,
+        context: Optional[Mapping[str, Any]] = None,
+    ) -> None:
         """Apply per-chat and global throttling before contacting Telegram."""
 
         chat_key = int(chat_id)
         now = time.monotonic()
         history = self._send_history_per_chat[chat_key]
+        base_context = self._merge_context(
+            context,
+            chat_id=chat_id,
+            method=method,
+            category="throttle",
+        )
 
         if history:
             time_since_chat = now - history[-1]
@@ -183,11 +276,16 @@ class MessagingService:
 
         if time_since_chat < per_chat_delay:
             delay_needed = per_chat_delay - time_since_chat
-            debug_trace_logger.info(
-                "[MessagingService] ADAPTIVE_THROTTLE per-chat chat_id=%s delay=%.3fs (speed=%.2f msg/s)",
-                chat_id,
-                delay_needed,
-                speed,
+            throttle_context = self._merge_context(
+                base_context,
+                delay=delay_needed,
+                speed=speed,
+                throttle_scope="chat",
+            )
+            self._log_event(
+                "THROTTLE_CHAT",
+                context=throttle_context,
+                include_debug_trace=True,
             )
             await asyncio.sleep(delay_needed)
 
@@ -195,10 +293,15 @@ class MessagingService:
         time_since_global = now - self._global_last_send_time
         if time_since_global < self._SAFE_GLOBAL_DELAY:
             delay_needed = self._SAFE_GLOBAL_DELAY - time_since_global
-            debug_trace_logger.info(
-                "[MessagingService] THROTTLE global chat_id=%s delay=%.3fs",
-                chat_id,
-                delay_needed,
+            global_context = self._merge_context(
+                base_context,
+                delay=delay_needed,
+                throttle_scope="global",
+            )
+            self._log_event(
+                "THROTTLE_GLOBAL",
+                context=global_context,
+                include_debug_trace=True,
             )
             await asyncio.sleep(delay_needed)
 
@@ -215,8 +318,10 @@ class MessagingService:
         *,
         chat_id: int,
         message_id: Optional[int],
+        method: str,
         call: Callable[[], Awaitable[Any]],
         throttle: Callable[[], Awaitable[None]],
+        context: Optional[Mapping[str, Any]] = None,
     ) -> Any:
         """Execute a Telegram API call, retrying once if a RetryAfter occurs."""
 
@@ -224,21 +329,47 @@ class MessagingService:
         if not retry_classes:
             return await call()
 
+        base_context = self._merge_context(
+            context,
+            chat_id=chat_id,
+            message_id=message_id,
+            method=method,
+        )
+
         try:
             return await call()
         except retry_classes as exc:  # type: ignore[misc]
             delay = getattr(exc, "retry_after", None)
             if delay is None:
                 raise
-            debug_trace_logger.info(
-                "[MessagingService] BACKOFF retry_after chat_id=%s message_id=%s delay=%.3fs",
-                chat_id,
-                message_id,
-                float(delay),
+            retry_context = self._merge_context(
+                base_context,
+                retry_after=float(delay),
+                error_type=type(exc).__name__,
+                category=base_context.get("category") or "retry_after",
+            )
+            self._log_event(
+                "RETRY_AFTER",
+                level=logging.WARNING,
+                context=retry_context,
+                include_debug_trace=True,
             )
             await asyncio.sleep(float(delay))
             await throttle()
             return await call()
+        except Exception as exc:
+            error_context = self._merge_context(
+                base_context,
+                error_type=type(exc).__name__,
+                category=base_context.get("category") or "api_error",
+            )
+            self._log_event(
+                "API_ERROR",
+                level=logging.ERROR,
+                context=error_context,
+                include_debug_trace=True,
+            )
+            raise
 
     async def send_message(
         self,
@@ -247,6 +378,7 @@ class MessagingService:
         text: Optional[str],
         reply_markup: Any = None,
         request_category: RequestCategory = RequestCategory.GENERAL,
+        context: Optional[Mapping[str, Any]] = None,
         **params: Any,
     ) -> Any:
         """Send a Telegram message and register its content hash.
@@ -265,9 +397,22 @@ class MessagingService:
         ):
             return None
 
+        telegram_method = "sendMessage"
+        base_context = self._merge_context(
+            context,
+            chat_id=chat_id,
+            message_id=None,
+            category=request_category,
+            method=telegram_method,
+        )
+
         lock = await self._acquire_lock(chat_id, 0)
         async with lock:
-            await self._throttle_send(chat_id)
+            await self._throttle_send(
+                chat_id,
+                method=telegram_method,
+                context=base_context,
+            )
             trace_telegram_api_call(
                 "sendMessage",
                 chat_id=chat_id,
@@ -278,13 +423,19 @@ class MessagingService:
             result = await self._call_with_retry(
                 chat_id=chat_id,
                 message_id=None,
+                method=telegram_method,
                 call=lambda: self._bot.send_message(
                     chat_id=chat_id,
                     text=text,
                     reply_markup=reply_markup,
                     **params,
                 ),
-                throttle=lambda: self._throttle_send(chat_id),
+                throttle=lambda: self._throttle_send(
+                    chat_id,
+                    method=telegram_method,
+                    context=base_context,
+                ),
+                context=base_context,
             )
             self._register_send_time(chat_id)
 
@@ -296,17 +447,20 @@ class MessagingService:
                     text_hash = hashlib.md5(text.encode("utf-8")).hexdigest()
                     await self._set_last_text_hash(message_id, text_hash)
                 self._log_api_call(
-                    "send_message",
-                    chat_id=chat_id,
-                    message_id=message_id,
-                    content_hash=content_hash,
+                    telegram_method,
+                    context=self._merge_context(
+                        base_context,
+                        message_id=message_id,
+                        content_hash=content_hash,
+                    ),
                 )
             else:
                 self._log_api_call(
-                    "send_message",
-                    chat_id=chat_id,
-                    message_id=None,
-                    content_hash=self._content_hash(text, reply_markup),
+                    telegram_method,
+                    context=self._merge_context(
+                        base_context,
+                        content_hash=self._content_hash(text, reply_markup),
+                    ),
                 )
 
             return result
@@ -318,6 +472,7 @@ class MessagingService:
         photo: Any,
         request_category: RequestCategory = RequestCategory.MEDIA,
         caption: Optional[str] = None,
+        context: Optional[Mapping[str, Any]] = None,
         **params: Any,
     ) -> Any:
         """Send a photo message while recording the request budget usage."""
@@ -330,9 +485,22 @@ class MessagingService:
         ):
             return None
 
+        telegram_method = "sendPhoto"
+        base_context = self._merge_context(
+            context,
+            chat_id=chat_id,
+            message_id=None,
+            category=request_category,
+            method=telegram_method,
+        )
+
         lock = await self._acquire_lock(chat_id, 0)
         async with lock:
-            await self._throttle_send(chat_id)
+            await self._throttle_send(
+                chat_id,
+                method=telegram_method,
+                context=base_context,
+            )
             trace_telegram_api_call(
                 "sendPhoto",
                 chat_id=chat_id,
@@ -342,22 +510,30 @@ class MessagingService:
             result = await self._call_with_retry(
                 chat_id=chat_id,
                 message_id=None,
+                method=telegram_method,
                 call=lambda: self._bot.send_photo(
                     chat_id=chat_id,
                     photo=photo,
                     caption=caption,
                     **params,
                 ),
-                throttle=lambda: self._throttle_send(chat_id),
+                throttle=lambda: self._throttle_send(
+                    chat_id,
+                    method=telegram_method,
+                    context=base_context,
+                ),
+                context=base_context,
             )
             self._register_send_time(chat_id)
 
             message_id = getattr(result, "message_id", None)
             self._log_api_call(
-                "send_photo",
-                chat_id=chat_id,
-                message_id=message_id,
-                content_hash="-",
+                telegram_method,
+                context=self._merge_context(
+                    base_context,
+                    message_id=message_id,
+                    content_hash="-",
+                ),
             )
             return result
 
@@ -370,6 +546,7 @@ class MessagingService:
         reply_markup: Any = None,
         force: bool = False,
         request_category: RequestCategory = RequestCategory.GENERAL,
+        context: Optional[Mapping[str, Any]] = None,
         **params: Any,
     ) -> Optional[int]:
         """Edit an existing Telegram message while avoiding duplicate edits."""
@@ -379,6 +556,15 @@ class MessagingService:
 
         loop = asyncio.get_running_loop()
         content_hash = self._content_hash(text, reply_markup)
+        telegram_method = "editMessageText"
+        base_context = self._merge_context(
+            context,
+            chat_id=chat_id,
+            message_id=message_id,
+            category=request_category,
+            method=telegram_method,
+        )
+
         payload = _EditPayload(
             text=text,
             reply_markup=reply_markup,
@@ -386,12 +572,14 @@ class MessagingService:
             force=force,
             request_category=request_category,
             content_hash=content_hash,
+            context=dict(base_context),
         )
         future: "asyncio.Future[Optional[int]]" = loop.create_future()
         waiter = _EditWaiter(
             future=future,
             category=request_category,
             content_hash=content_hash,
+            context=dict(base_context),
         )
 
         await self._enqueue_edit(
@@ -427,6 +615,7 @@ class MessagingService:
                         message_id=message_id,
                         category=payload.request_category,
                         reason="hash_match",
+                        context=payload.context,
                     )
                     if not waiter.future.done():
                         waiter.future.set_result(message_id)
@@ -454,6 +643,7 @@ class MessagingService:
                                 message_id=message_id,
                                 category=existing.category,
                                 reason="superseded",
+                                context=existing.context,
                             )
                     state.pending_payload = payload
                     state.waiters.append(waiter)
@@ -579,6 +769,7 @@ class MessagingService:
                 message_id=message_id,
                 category=payload.request_category,
                 reason="hash_match",
+                context=payload.context,
             )
             return message_id
 
@@ -598,19 +789,17 @@ class MessagingService:
                     message_id=message_id,
                     category=payload.request_category,
                     reason="hash_match",
+                    context=payload.context,
                 )
                 return message_id
 
             if await self._was_marked_deleted(message_id):
-                debug_trace_logger.info(
-                    "Skipping editMessageText in MessagingService for message_id=%s because it was deleted before send",
-                    message_id,
-                )
                 await self._log_skip(
                     chat_id=chat_id,
                     message_id=message_id,
                     category=payload.request_category,
                     reason="deleted_before_send",
+                    context=payload.context,
                 )
                 return message_id
 
@@ -621,20 +810,21 @@ class MessagingService:
             if not payload.force and text_hash is not None:
                 last_hash = await self._last_known_text_hash(message_id)
                 if last_hash is not None and last_hash == text_hash:
-                    debug_trace_logger.info(
-                        "Skipping editMessageText in MessagingService for message_id=%s due to no content change before send",
-                        message_id,
-                    )
                     await self._log_skip(
                         chat_id=chat_id,
                         message_id=message_id,
                         category=payload.request_category,
                         reason="text_hash_match",
+                        context=payload.context,
                     )
                     return message_id
 
             try:
-                await self._throttle_send(chat_id)
+                await self._throttle_send(
+                    chat_id,
+                    method="editMessageText",
+                    context=payload.context,
+                )
                 trace_telegram_api_call(
                     "editMessageText",
                     chat_id=chat_id,
@@ -645,6 +835,7 @@ class MessagingService:
                 result = await self._call_with_retry(
                     chat_id=chat_id,
                     message_id=message_id,
+                    method="editMessageText",
                     call=lambda: self._bot.edit_message_text(
                         chat_id=chat_id,
                         message_id=message_id,
@@ -652,7 +843,12 @@ class MessagingService:
                         reply_markup=payload.reply_markup,
                         **payload.params,
                     ),
-                    throttle=lambda: self._throttle_send(chat_id),
+                    throttle=lambda: self._throttle_send(
+                        chat_id,
+                        method="editMessageText",
+                        context=payload.context,
+                    ),
+                    context=payload.context,
                 )
                 self._register_send_time(chat_id)
                 await self._clear_edit_failure(chat_id, message_id)
@@ -663,19 +859,32 @@ class MessagingService:
                     message_id=message_id,
                     content_hash=content_hash,
                     category=payload.request_category,
+                    context=payload.context,
                 )
                 if handled is not None:
                     return handled
+                self._log_event(
+                    "API_ERROR",
+                    level=logging.ERROR,
+                    context=self._merge_context(
+                        payload.context,
+                        error_type=type(exc).__name__,
+                        category=payload.request_category,
+                    ),
+                    include_debug_trace=True,
+                )
                 raise
 
         await self._remember_content(chat_id, message_id, content_hash)
         if text_hash is not None:
             await self._set_last_text_hash(message_id, text_hash)
         self._log_api_call(
-            "edit_message_text",
-            chat_id=chat_id,
-            message_id=message_id,
-            content_hash=content_hash,
+            "editMessageText",
+            context=self._merge_context(
+                payload.context,
+                message_id=message_id,
+                content_hash=content_hash,
+            ),
         )
 
         if hasattr(result, "message_id"):
@@ -692,6 +901,7 @@ class MessagingService:
         reply_markup: Any = None,
         force: bool = False,
         request_category: RequestCategory = RequestCategory.INLINE,
+        context: Optional[Mapping[str, Any]] = None,
         **params: Any,
     ) -> bool:
         """Edit only the reply markup for a message if it changed."""
@@ -700,17 +910,26 @@ class MessagingService:
             return False
 
         content_hash = self._content_hash(None, reply_markup)
+        telegram_method = "editMessageReplyMarkup"
+        base_context = self._merge_context(
+            context,
+            chat_id=chat_id,
+            message_id=message_id,
+            category=request_category,
+            method=telegram_method,
+        )
         if not force and await self._should_skip(chat_id, message_id, content_hash):
             await self._log_skip(
                 chat_id=chat_id,
                 message_id=message_id,
                 category=request_category,
                 reason="hash_match",
+                context=base_context,
             )
             return True
 
         if not await self._consume_budget(
-            method="editMessageReplyMarkup",
+            method=telegram_method,
             chat_id=chat_id,
             message_id=message_id,
             category=request_category,
@@ -725,6 +944,7 @@ class MessagingService:
                     message_id=message_id,
                     category=request_category,
                     reason="hash_match",
+                    context=base_context,
                 )
                 return True
 
@@ -743,17 +963,28 @@ class MessagingService:
                     message_id=message_id,
                     content_hash=content_hash,
                     category=request_category,
+                    context=base_context,
                 )
                 if handled is not None:
                     return bool(handled)
+                self._log_event(
+                    "API_ERROR",
+                    level=logging.ERROR,
+                    context=self._merge_context(
+                        base_context,
+                        error_type=type(exc).__name__,
+                    ),
+                    include_debug_trace=True,
+                )
                 raise
 
             await self._remember_content(chat_id, message_id, content_hash)
             self._log_api_call(
-                "edit_message_reply_markup",
-                chat_id=chat_id,
-                message_id=message_id,
-                content_hash=content_hash,
+                telegram_method,
+                context=self._merge_context(
+                    base_context,
+                    content_hash=content_hash,
+                ),
             )
             return True
 
@@ -763,12 +994,22 @@ class MessagingService:
         chat_id: int,
         message_id: int,
         request_category: RequestCategory = RequestCategory.DELETE,
+        context: Optional[Mapping[str, Any]] = None,
         **params: Any,
     ) -> bool:
         """Delete a message and clear its cached hash."""
 
         if message_id is None:
             return False
+
+        telegram_method = "deleteMessage"
+        base_context = self._merge_context(
+            context,
+            chat_id=chat_id,
+            message_id=message_id,
+            category=request_category,
+            method=telegram_method,
+        )
 
         await self._mark_message_deleted(message_id)
 
@@ -787,7 +1028,7 @@ class MessagingService:
                 await waiter
 
         if not await self._consume_budget(
-            method="deleteMessage",
+            method=telegram_method,
             chat_id=chat_id,
             message_id=message_id,
             category=request_category,
@@ -800,7 +1041,7 @@ class MessagingService:
             deletion_successful = False
             try:
                 trace_telegram_api_call(
-                    "deleteMessage",
+                    telegram_method,
                     chat_id=chat_id,
                     message_id=message_id,
                 )
@@ -828,17 +1069,22 @@ class MessagingService:
                 if not future.done():
                     future.set_result(True)
             state.delete_waiters.clear()
-            debug_trace_logger.info(
-                "[MessagingService] Purged pending edits for deleted message_id=%s",
-                message_id,
+            self._log_event(
+                "PURGE_PENDING_EDITS",
+                context=self._merge_context(
+                    base_context,
+                    category="cleanup",
+                ),
+                include_debug_trace=True,
             )
         self._last_edit_timestamp.pop(key, None)
 
         self._log_api_call(
-            "delete_message",
-            chat_id=chat_id,
-            message_id=message_id,
-            content_hash="-",
+            telegram_method,
+            context=self._merge_context(
+                base_context,
+                content_hash="-",
+            ),
         )
 
         await self._clear_edit_failure(chat_id, message_id)
@@ -892,11 +1138,20 @@ class MessagingService:
         message_id: int,
         content_hash: str,
         category: RequestCategory,
+        context: Optional[Mapping[str, Any]] = None,
     ) -> Optional[int]:
         if not self._is_bad_request(exc):
             return None
 
         message = self._normalise_exception_message(exc)
+        base_context = self._merge_context(
+            context,
+            chat_id=chat_id,
+            message_id=message_id,
+            category=category,
+            error_type=type(exc).__name__,
+            normalized_error=message,
+        )
         await self._record_edit_failure(chat_id, message_id, message)
         if "message is not modified" in message:
             await self._remember_content(chat_id, message_id, content_hash)
@@ -905,16 +1160,18 @@ class MessagingService:
                 message_id=message_id,
                 category=category,
                 reason="hash_match",
+                context=base_context,
             )
             return message_id
 
         if "message to edit not found" in message or "message can't be edited" in message:
             await self._forget_content(chat_id, message_id)
             await self._mark_message_deleted(message_id)
-            self._logger.warning(
-                "EDIT FAILED: message missing or not editable for chat %s, msg %s",
-                chat_id,
-                message_id,
+            self._log_event(
+                "EDIT_FAILED",
+                level=logging.WARNING,
+                context=base_context,
+                include_debug_trace=True,
             )
             return None
 
@@ -1039,22 +1296,19 @@ class MessagingService:
         message_id: Optional[int],
         category: RequestCategory,
         reason: str,
+        context: Optional[Mapping[str, Any]] = None,
     ) -> None:
-        self._logger.info(
-            "SKIP %s",
-            reason,
-            extra={
-                "chat_id": chat_id,
-                "message_id": message_id,
-                "category": category.value,
-                "reason": reason,
-            },
+        payload = self._merge_context(
+            context,
+            chat_id=chat_id,
+            message_id=message_id,
+            category=category,
+            reason=reason,
         )
-        debug_trace_logger.info(
-            "[MessagingService] Skipping request for chat_id=%s message_id=%s reason=%s",
-            chat_id,
-            message_id,
-            reason,
+        self._log_event(
+            "SKIP",
+            context=payload,
+            include_debug_trace=True,
         )
         if self._metrics is not None and message_id is not None:
             await self._metrics.record_skip(
@@ -1098,18 +1352,13 @@ class MessagingService:
         self,
         method: str,
         *,
-        chat_id: int,
-        message_id: Optional[int],
-        content_hash: str,
+        context: Mapping[str, Any],
     ) -> None:
-        self._logger.info(
-            "API CALL: %s",
-            method,
-            extra={
-                "chat_id": chat_id,
-                "message_id": message_id,
-                "content_hash": content_hash,
-            },
+        payload = self._merge_context(context, method=method)
+        self._log_event(
+            "API_CALL",
+            context=payload,
+            include_debug_trace=True,
         )
 
     async def _record_edit_failure(
