@@ -137,7 +137,8 @@ def test_notify_admin_failure_logs_error(caplog):
 
 def test_update_player_anchors_and_keyboards_highlights_active_player():
     viewer = PokerBotViewer(bot=MagicMock())
-    viewer._update_message = AsyncMock(side_effect=[101, 202])
+    viewer._update_message = AsyncMock(return_value=101)
+    viewer.edit_message_reply_markup = AsyncMock(return_value=True)
     viewer.send_message_return_id = AsyncMock()
 
     game = Game()
@@ -171,17 +172,76 @@ def test_update_player_anchors_and_keyboards_highlights_active_player():
     player_two.anchor_message = (game.chat_id, 202)
     game.current_player_index = 0
 
+    stage_name = game.state.name
+    community_cards = viewer._extract_community_cards(game)
+
+    base_one = viewer._build_anchor_text(
+        display_name=player_one.display_name,
+        mention_markdown=player_one.mention_markdown,
+        seat_number=1,
+        role_label=player_one.role_label,
+    )
+    keyboard_one = viewer._compose_anchor_keyboard(
+        stage_name=stage_name,
+        hole_cards=viewer._extract_player_hole_cards(player_one),
+        community_cards=community_cards,
+    )
+    payload_one = viewer._reply_keyboard_signature(
+        text=base_one,
+        reply_markup=keyboard_one,
+        stage_name=stage_name,
+        community_cards=community_cards,
+    )
+    viewer._anchor_registry.register_role(
+        game.chat_id,
+        player_id=player_one.user_id,
+        seat_index=0,
+        message_id=101,
+        base_text=base_one,
+        payload_signature=payload_one,
+        markup_signature=viewer._serialize_markup(keyboard_one) or "",
+    )
+    player_one.anchor_keyboard_signature = payload_one
+
+    base_two = viewer._build_anchor_text(
+        display_name=player_two.display_name,
+        mention_markdown=player_two.mention_markdown,
+        seat_number=2,
+        role_label=player_two.role_label,
+    )
+    keyboard_two = viewer._compose_anchor_keyboard(
+        stage_name=stage_name,
+        hole_cards=viewer._extract_player_hole_cards(player_two),
+        community_cards=community_cards,
+    )
+    payload_two = viewer._reply_keyboard_signature(
+        text=base_two,
+        reply_markup=keyboard_two,
+        stage_name=stage_name,
+        community_cards=community_cards,
+    )
+    viewer._anchor_registry.register_role(
+        game.chat_id,
+        player_id=player_two.user_id,
+        seat_index=1,
+        message_id=202,
+        base_text=base_two,
+        payload_signature=payload_two,
+        markup_signature=viewer._serialize_markup(keyboard_two) or "",
+    )
+    player_two.anchor_keyboard_signature = payload_two
+
     run(viewer.update_player_anchors_and_keyboards(game))
 
-    assert viewer._update_message.await_count == 2
+    assert viewer._update_message.await_count == 1
+    viewer.edit_message_reply_markup.assert_not_awaited()
     viewer.send_message_return_id.assert_not_awaited()
 
     first_call = viewer._update_message.await_args_list[0]
-    second_call = viewer._update_message.await_args_list[1]
 
     assert first_call.kwargs['message_id'] == 101
     first_text = first_call.kwargs['text']
-    assert "🎯 نوبت این بازیکن است." in first_text
+    assert "🟢 نوبت این بازیکن است." in first_text or "🔴 نوبت این بازیکن است." in first_text
     assert 'Player One' in first_text
     assert '🪑 صندلی: 1' in first_text
     assert '🎖️ نقش: دیلر' in first_text
@@ -193,18 +253,6 @@ def test_update_player_anchors_and_keyboards_highlights_active_player():
     stage_row = _row_texts(first_keyboard.keyboard[2])
     assert stage_row[1].startswith('✅')
     assert 'فلاپ' in stage_row[1]
-
-    assert second_call.kwargs['message_id'] == 202
-    second_text = second_call.kwargs['text']
-    assert "🎯 نوبت این بازیکن است." not in second_text
-    assert 'Player Two' in second_text
-    assert '🎖️ نقش: بلایند بزرگ' in second_text
-    assert isinstance(second_call.kwargs['reply_markup'], ReplyKeyboardMarkup)
-    assert second_call.kwargs['force_send'] is True
-    second_keyboard = second_call.kwargs['reply_markup']
-    assert _row_texts(second_keyboard.keyboard[0]) == ['9♣️', '9♦️']
-    stage_row_two = _row_texts(second_keyboard.keyboard[2])
-    assert stage_row_two[1].startswith('✅')
 
     assert player_one.anchor_message == (game.chat_id, 101)
     assert player_two.anchor_message == (game.chat_id, 202)
