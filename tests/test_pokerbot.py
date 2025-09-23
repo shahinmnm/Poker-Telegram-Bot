@@ -11,6 +11,7 @@ from pokerapp.pokerbot import PokerBot
 def _create_bot(allow_polling_fallback: bool) -> PokerBot:
     bot = PokerBot.__new__(PokerBot)
     bot._cfg = SimpleNamespace(ALLOW_POLLING_FALLBACK=allow_polling_fallback)
+    bot._build_application = Mock()
     return bot
 
 
@@ -23,6 +24,7 @@ def test_run_falls_back_to_polling_when_enabled(caplog):
         bot.run()
 
     bot.run_polling.assert_called_once()
+    bot._build_application.assert_called_once()
     assert "falling back to polling mode" in caplog.text
 
 
@@ -35,6 +37,7 @@ def test_run_reraises_when_fallback_disabled():
         bot.run()
 
     bot.run_polling.assert_not_called()
+    bot._build_application.assert_not_called()
 
 
 def test_run_dns_failure_triggers_automatic_polling(caplog):
@@ -47,4 +50,5 @@ def test_run_dns_failure_triggers_automatic_polling(caplog):
         bot.run()
 
     bot.run_polling.assert_called_once()
+    bot._build_application.assert_called_once()
     assert "automatically falling back to polling mode" in caplog.text.lower()
