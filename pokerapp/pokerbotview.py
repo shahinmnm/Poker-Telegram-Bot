@@ -1966,38 +1966,10 @@ class PokerBotViewer:
                                         },
                                     )
                                     return
-                                anchor_record = (
-                                    self._anchor_registry.find_role_anchor_by_message(
-                                        chat_id, normalized_existing_message
-                                    )
-                                )
-                                if anchor_record is not None:
-                                    anchor_stage = self._resolve_anchor_stage(chat_id)
-                                    if anchor_stage in self._ACTIVE_ANCHOR_STATES or (
-                                        anchor_stage == GameState.INITIAL
-                                    ):
-                                        logger.info(
-                                            "[AnchorPersistence] Prevented deletion of role anchor message_id=%s at stage=%s",
-                                            normalized_existing_message,
-                                            getattr(anchor_stage, "name", anchor_stage),
-                                        )
-                                        self._log_anchor_preservation_skip(
-                                            chat_id=chat_id,
-                                            message_id=normalized_existing_message,
-                                            record=anchor_record,
-                                            extra_details={
-                                                "stage": getattr(
-                                                    anchor_stage, "name", None
-                                                ),
-                                                "reason": "active_replace_guard",
-                                            },
-                                        )
-                                        return
                                 if self._should_block_anchor_deletion(
                                     chat_id=chat_id,
                                     message_id=normalized_existing_message,
                                     allow_anchor_deletion=False,
-                                    anchor_deletion_reason=None,
                                 ):
                                     return
                                 try:
@@ -2258,34 +2230,6 @@ class PokerBotViewer:
                         new_record.seat_index = seat_index
                     await self._unmark_message_deleted(normalized_anchor)
                 else:
-                    try:
-                        updated_message_id = await self._update_message(
-                            chat_id=chat_id,
-                            message_id=normalized_anchor,
-                            text=text,
-                            reply_markup=keyboard,
-                            force_send=True,
-                            request_category=RequestCategory.ANCHOR,
-                        )
-                    except Exception as exc:
-                        logger.error(
-                            "Failed to refresh player anchor",
-                            extra={
-                                "chat_id": chat_id,
-                                "player_id": player_id,
-                                "message_id": normalized_anchor,
-                                "error_type": type(exc).__name__,
-                            },
-                        )
-                        continue
-
-                    if isinstance(updated_message_id, int):
-                        normalized_anchor = updated_message_id
-                    elif hasattr(updated_message_id, "message_id"):
-                        maybe_id = getattr(updated_message_id, "message_id", None)
-                        if isinstance(maybe_id, int):
-                            normalized_anchor = maybe_id
-
                     updated_record = self._anchor_registry.update_role(
                         chat_id,
                         player_id,
@@ -2386,17 +2330,6 @@ class PokerBotViewer:
         self._anchor_registry.set_stage(chat_id, resolved)
         return resolved
 
-    def _resolve_anchor_stage(
-        self, chat_id: ChatId, game: Optional[Game] = None
-    ) -> Optional[GameState]:
-        if game is not None:
-            state = getattr(game, "state", None)
-            resolved = self._resolve_game_state(state)
-            if resolved is not None:
-                return resolved
-        stage = self._anchor_registry.get_stage(chat_id)
-        return self._resolve_game_state(stage)
-
     def _log_anchor_preservation_skip(
         self,
         *,
@@ -2427,85 +2360,34 @@ class PokerBotViewer:
         chat_id: ChatId,
         message_id: Optional[int],
         allow_anchor_deletion: bool = False,
-        anchor_deletion_reason: Optional[str] = None,
-        game: Optional[Game] = None,
     ) -> bool:
         record = self._resolve_role_anchor_record(chat_id, message_id)
         if record is None:
             return False
 
-        normalized_message = self._safe_int(message_id)
-        resolved_stage = self._resolve_anchor_stage(chat_id, game)
-        stage_label = getattr(resolved_stage, "name", None) or str(resolved_stage)
-        if stage_label == "None":
-            stage_label = None
+        stage = self._anchor_registry.get_stage(chat_id)
+        resolved_stage = self._resolve_game_state(stage)
+        stage_label = getattr(resolved_stage, "name", None)
 
-        def _log_prevent(reason: str) -> bool:
-            logger.info(
-                "[AnchorPersistence] Prevented deletion of role anchor message_id=%s at stage=%s",
-                normalized_message,
-                stage_label,
-            )
+        if resolved_stage in self._ACTIVE_ANCHOR_STATES:
             self._log_anchor_preservation_skip(
                 chat_id=chat_id,
                 message_id=message_id,
                 record=record,
-                extra_details={"stage": stage_label, "reason": reason},
+                extra_details={"stage": stage_label, "reason": "active_stage"},
             )
             return True
 
-        # Player departures may explicitly remove anchors mid-hand.
-        if anchor_deletion_reason == "player_leave":
-            logger.info(
-                "[AnchorPersistence] Deleted anchor message_id=%s reason=%s",
-                normalized_message,
-                anchor_deletion_reason,
-            )
-            return False
-
-        if resolved_stage in self._ACTIVE_ANCHOR_STATES:
-            return _log_prevent("active_stage")
-
-        if resolved_stage == GameState.INITIAL and anchor_deletion_reason not in {
-            "hand_end",
-        }:
-            return _log_prevent("initial_stage")
-
         if not allow_anchor_deletion:
-            return _log_prevent("guarded")
-
-        showdown_state = getattr(GameState, "ROUND_SHOWDOWN", None)
-        if showdown_state is not None and resolved_stage == showdown_state:
-            logger.info(
-                "[AnchorPersistence] Deleted anchor message_id=%s reason=%s",
-                normalized_message,
-                anchor_deletion_reason or "showdown_cleanup",
+            self._log_anchor_preservation_skip(
+                chat_id=chat_id,
+                message_id=message_id,
+                record=record,
+                extra_details={"stage": stage_label, "reason": "guarded"},
             )
-            return False
+            return True
 
-        if (
-            resolved_stage == GameState.INITIAL
-            and anchor_deletion_reason == "hand_end"
-        ):
-            logger.info(
-                "[AnchorPersistence] Deleted anchor message_id=%s reason=%s",
-                normalized_message,
-                anchor_deletion_reason,
-            )
-            return False
-
-        if (
-            resolved_stage == GameState.FINISHED
-            and anchor_deletion_reason == "hand_end"
-        ):
-            logger.info(
-                "[AnchorPersistence] Deleted anchor message_id=%s reason=%s",
-                normalized_message,
-                anchor_deletion_reason,
-            )
-            return False
-
-        return _log_prevent("unsupported_stage")
+        return False
 
     async def sync_player_private_keyboards(
         self,
@@ -3207,8 +3089,6 @@ class PokerBotViewer:
                         chat_id=chat_id,
                         message_id=anchor_id,
                         allow_anchor_deletion=True,
-                        anchor_deletion_reason="hand_end",
-                        game=game,
                     )
                 except Exception as exc:
                     logger.debug(
@@ -3562,45 +3442,13 @@ class PokerBotViewer:
         message_id: MessageId,
         *,
         allow_anchor_deletion: bool = False,
-        anchor_deletion_reason: Optional[str] = None,
-        game: Optional[Game] = None,
     ) -> None:
         """Delete a message while keeping the cache in sync."""
         normalized_message = self._safe_int(message_id)
-        anchor_record = self._anchor_registry.find_role_anchor_by_message(
-            chat_id, normalized_message
-        )
-        if anchor_record is not None:
-            anchor_stage = self._resolve_anchor_stage(chat_id, game)
-            stage_name = getattr(anchor_stage, "name", None)
-            if (
-                anchor_stage in self._ACTIVE_ANCHOR_STATES
-                and anchor_deletion_reason != "player_leave"
-            ) or (
-                anchor_stage == GameState.INITIAL
-                and anchor_deletion_reason not in {"hand_end", "player_leave"}
-            ):
-                logger.info(
-                    "[AnchorPersistence] Prevented deletion of role anchor message_id=%s at stage=%s",
-                    normalized_message,
-                    stage_name or anchor_stage,
-                )
-                self._log_anchor_preservation_skip(
-                    chat_id=chat_id,
-                    message_id=normalized_message,
-                    record=anchor_record,
-                    extra_details={
-                        "stage": stage_name,
-                        "reason": "stage_guard",
-                    },
-                )
-                return
         if self._should_block_anchor_deletion(
             chat_id=chat_id,
             message_id=normalized_message,
             allow_anchor_deletion=allow_anchor_deletion,
-            anchor_deletion_reason=anchor_deletion_reason,
-            game=game,
         ):
             return
 
