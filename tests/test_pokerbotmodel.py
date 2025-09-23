@@ -317,7 +317,9 @@ async def test_request_stop_creates_vote_prompt():
 
     context = SimpleNamespace(chat_data={KEY_CHAT_DATA_GAME: game})
 
-    await model._request_stop(context, game, chat_id, requester_id=player_a.user_id)
+    await model._game_engine.request_stop(
+        context, game, chat_id, requester_id=player_a.user_id
+    )
 
     assert KEY_STOP_REQUEST in context.chat_data
     stop_request = context.chat_data[KEY_STOP_REQUEST]
@@ -372,9 +374,10 @@ async def test_confirm_stop_vote_triggers_cancel_on_majority():
 
     context = SimpleNamespace(chat_data={KEY_CHAT_DATA_GAME: game})
 
-    await model._request_stop(context, game, chat_id, requester_id=player_a.user_id)
-
-    model._cancel_hand = AsyncMock()
+    await model._game_engine.request_stop(
+        context, game, chat_id, requester_id=player_a.user_id
+    )
+    model._game_engine.cancel_hand = AsyncMock()
 
     update = SimpleNamespace(
         effective_chat=SimpleNamespace(id=chat_id),
@@ -386,8 +389,8 @@ async def test_confirm_stop_vote_triggers_cancel_on_majority():
 
     await model.confirm_stop_vote(update, context)
 
-    model._cancel_hand.assert_awaited_once()
-    args = model._cancel_hand.await_args.args
+    model._game_engine.cancel_hand.assert_awaited_once()
+    args = model._game_engine.cancel_hand.await_args.args
     assert args[0] is game
     assert args[1] == chat_id
 
@@ -438,7 +441,7 @@ async def test_cancel_hand_refunds_wallets_and_announces():
 
     original_game_id = game.id
 
-    await model._cancel_hand(game, chat_id, context, stop_request)
+    await model._game_engine.cancel_hand(game, chat_id, context, stop_request)
 
     wallet_a.cancel.assert_awaited_once_with(original_game_id)
     wallet_b.cancel.assert_awaited_once_with(original_game_id)
