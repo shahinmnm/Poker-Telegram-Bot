@@ -245,7 +245,7 @@ class GameEngine:
             cards = [game.remain_cards.pop(), game.remain_cards.pop()]
             player.cards = cards
 
-    def _hand_type_to_label(self, hand_type: Optional[HandsOfPoker]) -> Optional[str]:
+    def hand_type_to_label(self, hand_type: Optional[HandsOfPoker]) -> Optional[str]:
         if not hand_type:
             return None
         translation = HAND_NAMES_TRANSLATIONS.get(hand_type, {})
@@ -457,23 +457,14 @@ class GameEngine:
                     f"🏆 تمام بازیکنان دیگر فولد کردند! {winner.mention_markdown} برنده {amount}$ شد.",
                 )
         else:
-            determine_output = self._determine_winners(game, contenders)
-            if isinstance(determine_output, tuple):
-                winners_by_pot = list(determine_output[0] or [])
-                contender_details = (
-                    list(determine_output[1] or [])
-                    if len(determine_output) > 1
-                    else []
-                )
-            else:  # pragma: no cover - compatibility path
-                winners_by_pot = list(determine_output or [])
-                contender_details = []
+            contender_details = self._evaluate_contender_hands(game, contenders)
+            winners_by_pot = self._determine_winners(game, contender_details)
 
             for detail in contender_details:
                 player = detail.get("player")
                 if not player:
                     continue
-                label = self._hand_type_to_label(detail.get("hand_type"))
+                label = self.hand_type_to_label(detail.get("hand_type"))
                 if label:
                     hand_labels[self._safe_int(player.user_id)] = label
 
@@ -491,7 +482,7 @@ class GameEngine:
                             if win_amount > 0:
                                 await player.wallet.inc(win_amount)
                                 payouts[self._safe_int(player.user_id)] += win_amount
-                            winner_label = self._hand_type_to_label(
+                            winner_label = self.hand_type_to_label(
                                 winner.get("hand_type")
                             )
                             if (
@@ -526,6 +517,7 @@ class GameEngine:
             )
 
         game.pot = 0
+        game.state = GameState.FINISHED
 
         remaining_players = []
         for player in game.players:
@@ -545,18 +537,15 @@ class GameEngine:
         await _send_with_retry(self._view.send_new_hand_ready_message, chat_id)
         await self._send_join_prompt(game, chat_id)
 
-    def _determine_winners(
-        self, game: Game, contenders: List[Player]
-    ) -> Tuple[List[Dict[str, object]], List[Dict[str, object]]]:
-        if not contenders or game.pot == 0:
-            return [], []
-
-        contender_details: List[Dict[str, object]] = []
+    def _evaluate_contender_hands(
+        self, game: Game, contenders: Iterable[Player]
+    ) -> List[Dict[str, object]]:
+        details: List[Dict[str, object]] = []
         for player in contenders:
             hand_type, score, best_hand_cards = self._winner_determination.get_hand_value(
                 player.cards, game.cards_table
             )
-            contender_details.append(
+            details.append(
                 {
                     "player": player,
                     "total_bet": player.total_bet,
@@ -565,6 +554,13 @@ class GameEngine:
                     "hand_type": hand_type,
                 }
             )
+        return details
+
+    def _determine_winners(
+        self, game: Game, contender_details: List[Dict[str, object]]
+    ) -> List[Dict[str, object]]:
+        if not contender_details or game.pot == 0:
+            return []
 
         bet_tiers = sorted(
             list(
@@ -631,13 +627,14 @@ class GameEngine:
                 pass
 
         if len(bet_tiers) == 1 and len(winners_by_pot) > 1:
-            main_pot = {
-                "amount": game.pot,
-                "winners": winners_by_pot[0]["winners"],
-            }
-            return [main_pot], contender_details
+            return [
+                {
+                    "amount": game.pot,
+                    "winners": winners_by_pot[0]["winners"],
+                }
+            ]
 
-        return winners_by_pot, contender_details
+        return winners_by_pot
 
     def _build_hand_statistics_results(
         self,
