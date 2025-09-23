@@ -67,6 +67,7 @@ from pokerapp.stats import (
 from pokerapp.utils.cache import PlayerReportCache
 from pokerapp.utils.request_metrics import RequestCategory, RequestMetrics
 from pokerapp.utils.locks import ReentrantAsyncLock
+from pokerapp.player_manager import PlayerManager
 
 DICE_MULT = 10
 DICE_DELAY_SEC = 5
@@ -105,62 +106,6 @@ PRIVATE_MATCH_STATE_TTL = 3600  # seconds
 logger = logging.getLogger(__name__)
 
 
-ROLE_TRANSLATIONS = {
-    "dealer": "دیلر",
-    "small_blind": "بلایند کوچک",
-    "big_blind": "بلایند بزرگ",
-    "player": "بازیکن",
-}
-
-
-def assign_role_labels(game: Game) -> None:
-    """Assign localized role labels to players based on current blinds."""
-
-    players = list(getattr(game, "players", []))
-    if not players:
-        return
-
-    dealer_index = getattr(game, "dealer_index", -1)
-    small_blind_index = getattr(game, "small_blind_index", -1)
-    big_blind_index = getattr(game, "big_blind_index", -1)
-
-    for player in players:
-        seat_index = getattr(player, "seat_index", None)
-        is_valid_seat = isinstance(seat_index, int) and seat_index >= 0
-
-        is_dealer = is_valid_seat and seat_index == dealer_index
-        is_small_blind = is_valid_seat and seat_index == small_blind_index
-        is_big_blind = is_valid_seat and seat_index == big_blind_index
-
-        roles: List[str] = []
-        if is_dealer:
-            roles.append(ROLE_TRANSLATIONS["dealer"])
-        if is_small_blind:
-            roles.append(ROLE_TRANSLATIONS["small_blind"])
-        if is_big_blind:
-            roles.append(ROLE_TRANSLATIONS["big_blind"])
-        if not roles:
-            roles.append(ROLE_TRANSLATIONS["player"])
-
-        role_label = "، ".join(dict.fromkeys(roles))
-
-        player.role_label = role_label
-        player.anchor_role = role_label
-        player.is_dealer = is_dealer
-        player.is_small_blind = is_small_blind
-        player.is_big_blind = is_big_blind
-
-        seat_number = (seat_index + 1) if is_valid_seat else "?"
-        display_name = getattr(player, "display_name", None) or getattr(
-            player, "mention_markdown", getattr(player, "user_id", "?")
-        )
-
-        logger.debug(
-            "Assigned role_label: player=%s seat=%s role=%s",
-            display_name,
-            seat_number,
-            role_label,
-        )
 
 
 @dataclass(slots=True)
@@ -233,10 +178,16 @@ class PokerBotModel:
         self._winner_determine: WinnerDetermination = WinnerDetermination()
         self._round_rate = RoundRateModel(view=self._view, kv=self._kv, model=self)
         self._stats: BaseStatsService = stats_service or NullStatsService()
+        self._player_manager = PlayerManager(
+            table_manager=self._table_manager,
+            kv=self._kv,
+            stats_service=self._stats,
+            logger=logger.getChild("player_manager"),
+        )
+        self._private_chat_ids = self._player_manager.private_chat_ids
         self._player_report_cache = PlayerReportCache(
             logger_=logger.getChild("player_report_cache")
         )
-        self._private_chat_ids: Dict[int, int] = {}
         self._chat_locks: Dict[int, ReentrantAsyncLock] = {}
         self._countdown_cache: LRUCache[int, _CountdownCacheEntry] = LRUCache(
             maxsize=64, getsizeof=lambda entry: 1
@@ -284,6 +235,9 @@ class PokerBotModel:
         async with lock:
             yield
 
+    def assign_role_labels(self, game: Game) -> None:
+        self._player_manager.assign_role_labels(game)
+
     async def _register_player_identity(
         self,
         user: User,
@@ -291,79 +245,11 @@ class PokerBotModel:
         private_chat_id: Optional[int] = None,
         display_name: Optional[str] = None,
     ) -> None:
-        player_id = self._safe_int(user.id)
-        if private_chat_id:
-            self._private_chat_ids[player_id] = private_chat_id
-
-            table_manager = getattr(self, "_table_manager", None)
-            if table_manager is not None:
-                try:
-                    game = None
-                    chat_id: Optional[ChatId] = None
-
-                    tables = getattr(table_manager, "_tables", None)
-                    if isinstance(tables, dict):
-                        for candidate_chat_id, candidate_game in tables.items():
-                            if candidate_game is None:
-                                continue
-                            players = getattr(candidate_game, "players", [])
-                            for candidate_player in players:
-                                if getattr(candidate_player, "user_id", None) == player_id:
-                                    game = candidate_game
-                                    chat_id = candidate_chat_id
-                                    break
-                            if game is not None:
-                                break
-
-                    if game is None:
-                        finder = getattr(table_manager, "find_game_by_user", None)
-                        if finder is not None:
-                            try:
-                                result = finder(player_id)
-                                if inspect.isawaitable(result):
-                                    game, chat_id = await result
-                                elif result:
-                                    game, chat_id = result
-                            except LookupError:
-                                game = None
-                                chat_id = None
-
-                    if game is not None:
-                        updated = False
-                        for player in getattr(game, "players", []):
-                            if getattr(player, "user_id", None) == player_id:
-                                if getattr(player, "private_chat_id", None) != private_chat_id:
-                                    player.private_chat_id = private_chat_id
-                                    updated = True
-                                break
-
-                        if updated and chat_id is not None:
-                            saver = getattr(table_manager, "save_game", None)
-                            if saver is not None:
-                                try:
-                                    save_result = saver(chat_id, game)
-                                    if inspect.isawaitable(save_result):
-                                        await save_result
-                                except Exception:
-                                    logger.exception(
-                                        "Failed to persist game after updating private chat id",
-                                        extra={"chat_id": chat_id, "user_id": player_id},
-                                    )
-                except Exception:
-                    logger.exception(
-                        "Failed to update player private chat id in active game",
-                        extra={"user_id": player_id},
-                    )
-        if not self._stats_enabled():
-            return
-        identity = PlayerIdentity(
-            user_id=self._safe_int(user.id),
-            display_name=display_name or user.full_name or user.first_name or str(user.id),
-            username=user.username,
-            full_name=user.full_name,
+        await self._player_manager.register_player_identity(
+            user,
             private_chat_id=private_chat_id,
+            display_name=display_name,
         )
-        await self._stats.register_player_profile(identity)
 
     def _build_private_menu(self) -> ReplyKeyboardMarkup:
         return ReplyKeyboardMarkup(
@@ -418,17 +304,7 @@ class PokerBotModel:
         )
 
     def _build_identity_from_player(self, player: Player) -> PlayerIdentity:
-        display_name = getattr(player, "display_name", None) or player.mention_markdown
-        username = getattr(player, "username", None)
-        full_name = getattr(player, "full_name", None)
-        private_chat_id = getattr(player, "private_chat_id", None)
-        return PlayerIdentity(
-            user_id=self._safe_int(player.user_id),
-            display_name=display_name,
-            username=username,
-            full_name=full_name,
-            private_chat_id=private_chat_id,
-        )
+        return self._player_manager.build_identity_from_player(player)
 
     async def _send_statistics_report(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
@@ -658,7 +534,7 @@ class PokerBotModel:
             game.add_player(player, seat_index=index)
             game.ready_users.add(safe_user_id)
             if info.chat_id:
-                self._private_chat_ids[safe_user_id] = info.chat_id
+                self._player_manager.private_chat_ids[safe_user_id] = info.chat_id
         await self._table_manager.save_game(chat_id, game)
 
         started_at = datetime.datetime.now(datetime.timezone.utc)
@@ -1420,7 +1296,9 @@ class PokerBotModel:
             player.display_name = user.full_name or user.first_name or user.username
             player.username = user.username
             player.full_name = user.full_name
-            player.private_chat_id = self._private_chat_ids.get(self._safe_int(user.id))
+            player.private_chat_id = self._player_manager.private_chat_ids.get(
+                self._safe_int(user.id)
+            )
             game.ready_users.add(user.id)
             seat_assigned = game.add_player(player)
             if seat_assigned == -1:
@@ -1922,7 +1800,7 @@ class PokerBotModel:
             # این متد به تنهایی تمام کارهای لازم برای شروع راند را انجام می‌دهد.
             # از جمله تعیین بلایندها، تعیین نوبت اول و ارسال پیام نوبت.
             current_player = await self._round_rate.set_blinds(game, chat_id)
-            assign_role_labels(game)
+            self.assign_role_labels(game)
 
             game.chat_id = chat_id
 
