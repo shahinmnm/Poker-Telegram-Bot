@@ -532,7 +532,6 @@ class PokerBotViewer:
         self._stage_payload_hash_lock = asyncio.Lock()
         self._prestart_countdown_tasks: Dict[Tuple[int, str], asyncio.Task[None]] = {}
         self._prestart_countdown_lock = asyncio.Lock()
-        self._pending_anchor_toggles: Dict[Tuple[int, int], str] = {}
         self._pending_updates: Dict[
             Tuple[ChatId, Optional[MessageId]], Dict[str, Any]
         ] = {}
@@ -710,22 +709,6 @@ class PokerBotViewer:
             seconds,
             anchor_message_id,
         )
-
-    def _is_countdown_active(self, chat_id: ChatId) -> bool:
-        """Return True if a prestart countdown task is active for ``chat_id``."""
-
-        normalized_chat = self._safe_int(chat_id)
-        if normalized_chat == 0:
-            return False
-        tasks = list(self._prestart_countdown_tasks.items())
-        for (registered_chat, _), task in tasks:
-            if registered_chat != normalized_chat:
-                continue
-            if task is None:
-                continue
-            if not task.done():
-                return True
-        return False
 
     def _payload_hash(
         self,
@@ -1952,140 +1935,73 @@ class PokerBotViewer:
             callback_token_registered = False
             try:
                 if message_id is None or should_resend_reply_keyboard:
-                    fallback_to_send = True
-                    result: Any = None
-                    new_message_id: Optional[MessageId] = None
+                    result = await self._messenger.send_message(
+                        chat_id=chat_id,
+                        text=normalized_text,
+                        reply_markup=reply_markup,
+                        request_category=request_category,
+                        parse_mode=parse_mode,
+                        disable_web_page_preview=disable_web_page_preview,
+                        disable_notification=disable_notification,
+                    )
+                    new_message_id: Optional[MessageId] = getattr(
+                        result, "message_id", None
+                    )
                     if (
                         should_resend_reply_keyboard
-                        and message_id is not None
-                        and request_category == RequestCategory.ANCHOR
+                        and normalized_existing_message is not None
                     ):
-                        record: Optional[RoleAnchorRecord] = None
-                        if normalized_existing_message is not None:
-                            record = self._resolve_role_anchor_record(
-                                chat_id, normalized_existing_message
-                            )
-                        force_refresh_text, _, next_toggle = self._force_anchor_text_refresh(
-                            normalized_text,
-                            last_toggle=record.refresh_toggle if record else None,
+                        resolved_new_id = (
+                            self._safe_int(new_message_id)
+                            if new_message_id is not None
+                            else None
                         )
-                        try:
-                            forced_result = await self.edit_message_text(
-                                chat_id,
-                                message_id,
-                                force_refresh_text,
-                                reply_markup=reply_markup,
-                                request_category=request_category,
-                            )
-                        except Exception as exc:
-                            logger.debug(
-                                "Forced anchor refresh before resend failed",
-                                extra={
-                                    "chat_id": chat_id,
-                                    "message_id": message_id,
-                                    "error_type": type(exc).__name__,
-                                },
-                            )
-                        else:
-                            resolved_force_id = self._resolve_message_id(forced_result)
-                            if resolved_force_id is not None:
-                                logger.info(
-                                    "Anchor refresh recovered via forced edit",
-                                    extra={
-                                        "chat_id": chat_id,
-                                        "message_id": message_id,
-                                        "request_category": request_category.value,
-                                        "forced_toggle": next_toggle,
-                                    },
-                                )
-                                normalized_text = force_refresh_text
-                                payload_hash = self._payload_hash(
-                                    normalized_text, reply_markup
-                                )
-                                message_text_hash = hashlib.md5(
-                                    normalized_text.encode("utf-8")
-                                ).hexdigest()
-                                result = forced_result
-                                new_message_id = resolved_force_id
-                                if (
-                                    normalized_existing_message is not None
-                                    and next_toggle
-                                ):
-                                    key = (
-                                        normalized_chat,
-                                        normalized_existing_message,
-                                    )
-                                    self._pending_anchor_toggles[key] = next_toggle
-                                if record is not None:
-                                    record.refresh_toggle = next_toggle
-                                fallback_to_send = False
-                    if fallback_to_send:
-                        result = await self._messenger.send_message(
-                            chat_id=chat_id,
-                            text=normalized_text,
-                            reply_markup=reply_markup,
-                            request_category=request_category,
-                            parse_mode=parse_mode,
-                            disable_web_page_preview=disable_web_page_preview,
-                            disable_notification=disable_notification,
-                        )
-                        new_message_id = getattr(result, "message_id", None)
                         if (
-                            should_resend_reply_keyboard
-                            and normalized_existing_message is not None
+                            resolved_new_id is not None
+                            and resolved_new_id != normalized_existing_message
+                            and normalized_chat != 0
                         ):
-                            resolved_new_id = (
-                                self._safe_int(new_message_id)
-                                if new_message_id is not None
-                                else None
-                            )
-                            if (
-                                resolved_new_id is not None
-                                and resolved_new_id != normalized_existing_message
-                                and normalized_chat != 0
-                            ):
-
-                                async def _delete_replaced_message() -> None:
-                                    if request_category == RequestCategory.ANCHOR:
-                                        record = self._resolve_role_anchor_record(
-                                            chat_id, normalized_existing_message
-                                        )
-                                        stage = self._anchor_registry.get_stage(chat_id)
-                                        stage_name = getattr(
-                                            self._resolve_game_state(stage), "name", None
-                                        )
-                                        self._log_anchor_preservation_skip(
-                                            chat_id=chat_id,
-                                            message_id=normalized_existing_message,
-                                            record=record,
-                                            extra_details={
-                                                "stage": stage_name,
-                                                "reason": "anchor_category",
-                                            },
-                                        )
-                                        return
-                                    if self._should_block_anchor_deletion(
+                            async def _delete_replaced_message() -> None:
+                                if request_category == RequestCategory.ANCHOR:
+                                    record = self._resolve_role_anchor_record(
+                                        chat_id, normalized_existing_message
+                                    )
+                                    stage = self._anchor_registry.get_stage(chat_id)
+                                    stage_name = getattr(
+                                        self._resolve_game_state(stage), "name", None
+                                    )
+                                    self._log_anchor_preservation_skip(
                                         chat_id=chat_id,
                                         message_id=normalized_existing_message,
-                                        allow_anchor_deletion=False,
-                                    ):
-                                        return
-                                    try:
-                                        await self._messenger.delete_message(
-                                            chat_id=normalized_chat,
-                                            message_id=normalized_existing_message,
-                                            request_category=RequestCategory.DELETE,
-                                        )
-                                    except Exception:
-                                        logger.warning(
-                                            "Failed to delete replaced reply keyboard message",
-                                            extra={
-                                                "chat_id": chat_id,
-                                                "message_id": message_id,
-                                            },
-                                        )
+                                        record=record,
+                                        extra_details={
+                                            "stage": stage_name,
+                                            "reason": "anchor_category",
+                                        },
+                                    )
+                                    return
+                                if self._should_block_anchor_deletion(
+                                    chat_id=chat_id,
+                                    message_id=normalized_existing_message,
+                                    allow_anchor_deletion=False,
+                                ):
+                                    return
+                                try:
+                                    await self._messenger.delete_message(
+                                        chat_id=normalized_chat,
+                                        message_id=normalized_existing_message,
+                                        request_category=RequestCategory.DELETE,
+                                    )
+                                except Exception:
+                                    logger.warning(
+                                        "Failed to delete replaced reply keyboard message",
+                                        extra={
+                                            "chat_id": chat_id,
+                                            "message_id": message_id,
+                                        },
+                                    )
 
-                                asyncio.create_task(_delete_replaced_message())
+                            asyncio.create_task(_delete_replaced_message())
                 else:
                     if (
                         callback_id is not None
@@ -2449,58 +2365,11 @@ class PokerBotViewer:
         }
         if extra_details:
             extra.update(extra_details)
-        countdown_active = bool(extra.get("countdown_active"))
-        log_template = (
-            "[AnchorPersistence] Skipped deletion for role anchor message_id=%s during INITIAL countdown"
-            if countdown_active
-            else "[AnchorPersistence] Skipped deletion for role anchor message_id=%s mid-hand"
-        )
         logger.info(
-            log_template,
+            "[AnchorPersistence] Skipped deletion for role anchor message_id=%s mid-hand",
             normalized_message,
             extra=extra,
         )
-
-    def _is_anchor_guard_active(
-        self, chat_id: ChatId, stage: Optional[GameState]
-    ) -> bool:
-        resolved_stage = self._resolve_game_state(stage)
-        if resolved_stage in self._ACTIVE_ANCHOR_STATES:
-            return True
-        if resolved_stage == GameState.INITIAL and self._is_countdown_active(chat_id):
-            return True
-        return False
-
-    @staticmethod
-    def _classify_anchor_recreate_reason(
-        *,
-        fallback_reason: str,
-        payload_changed: bool,
-        guard_active: bool,
-        diagnostics: Optional[Dict[str, Any]] = None,
-    ) -> str:
-        deletion_reasons = {
-            "registry_marked_deleted",
-            "history_missing",
-            "deleted_flag",
-            "telegram_not_found",
-        }
-        last_error = ""
-        if diagnostics is not None:
-            last_error = str(diagnostics.get("last_error") or "").lower()
-        if guard_active and fallback_reason in deletion_reasons:
-            return "guard bypassed"
-        if fallback_reason in deletion_reasons:
-            return "message deleted"
-        if fallback_reason in {"telegram_not_editable", "retry_limit", "edit_failed"}:
-            return "edit failed"
-        if last_error and (
-            "cant" in last_error or "can't" in last_error or "not modified" in last_error
-        ):
-            return "edit failed"
-        if payload_changed:
-            return "hash change"
-        return "edit failed"
 
     def _should_block_anchor_deletion(
         self,
@@ -2527,11 +2396,6 @@ class PokerBotViewer:
         stage_label = getattr(resolved_stage, "name", None)
         normalized_reason = (reason or "").strip() or None
 
-        countdown_active = (
-            resolved_stage == GameState.INITIAL and self._is_countdown_active(chat_id)
-        )
-        guard_active = self._is_anchor_guard_active(chat_id, resolved_stage)
-
         if self._is_anchor_deletion_authorized(
             stage=resolved_stage,
             allow_anchor_deletion=allow_anchor_deletion,
@@ -2539,16 +2403,11 @@ class PokerBotViewer:
         ):
             return False
 
-        if not guard_active:
-            return False
-
         details: Dict[str, Any] = {"stage": stage_label}
         if normalized_reason:
             details["reason"] = normalized_reason
         else:
             details["reason"] = "guarded"
-        if countdown_active:
-            details["countdown_active"] = True
 
         self._log_anchor_preservation_skip(
             chat_id=chat_id,
@@ -2565,7 +2424,6 @@ class PokerBotViewer:
                 "chat_id": chat_id,
                 "player_id": getattr(record, "player_id", None),
                 "reason": normalized_reason or "guarded",
-                "countdown_active": countdown_active,
             },
         )
 
@@ -2857,7 +2715,6 @@ class PokerBotViewer:
         turn_light: str,
         previous_message_id: Optional[int],
         fallback_reason: str,
-        creation_reason: str,
     ) -> Optional[int]:
         try:
             if previous_message_id:
@@ -2938,14 +2795,13 @@ class PokerBotViewer:
 
         self._anchor_registry.increment_fallback(chat_id)
 
-        logger.info(
+        logger.debug(
             "Anchor fallback-new-msg",
             extra={
                 "chat_id": chat_id,
                 "player_id": getattr(player, "user_id", None),
                 "message_id": normalized_id,
-                "reason": creation_reason,
-                "fallback_reason": fallback_reason,
+                "reason": fallback_reason,
             },
         )
 
@@ -3230,55 +3086,22 @@ class PokerBotViewer:
                         }
                     )
                     if should_fallback:
-                        guard_active = self._is_anchor_guard_active(chat_id, stage)
-                        bypass_reasons = {
-                            "registry_marked_deleted",
-                            "history_missing",
-                            "deleted_flag",
-                            "telegram_not_found",
-                        }
-                        if guard_active and fallback_reason not in bypass_reasons:
-                            diagnostics.update(
-                                {
-                                    "guard_active": True,
-                                    "guard_blocked": True,
-                                }
-                            )
-                            logger.info(
-                                "Anchor fallback suppressed by guard",
-                                extra=diagnostics,
-                            )
-                        else:
-                            creation_reason = self._classify_anchor_recreate_reason(
-                                fallback_reason=fallback_reason,
-                                payload_changed=payload_changed,
-                                guard_active=guard_active,
-                                diagnostics=diagnostics,
-                            )
-                            diagnostics.update(
-                                {
-                                    "guard_active": guard_active,
-                                    "guard_blocked": False,
-                                    "creation_reason": creation_reason,
-                                }
-                            )
-                            logger.warning(
-                                "Anchor fallback triggered",
-                                extra=diagnostics,
-                            )
-                            new_message_id = await self._send_new_role_anchor(
-                                chat_id=chat_id,
-                                player=player,
-                                base_text=base_text,
-                                display_text=intended_display_text,
-                                keyboard=keyboard,
-                                payload_signature=intended_payload_signature,
-                                markup_signature=markup_signature,
-                                turn_light=next_light,
-                                previous_message_id=anchor_id,
-                                fallback_reason=fallback_reason,
-                                creation_reason=creation_reason,
-                            )
+                        logger.warning(
+                            "Anchor fallback triggered",
+                            extra=diagnostics,
+                        )
+                        new_message_id = await self._send_new_role_anchor(
+                            chat_id=chat_id,
+                            player=player,
+                            base_text=base_text,
+                            display_text=intended_display_text,
+                            keyboard=keyboard,
+                            payload_signature=intended_payload_signature,
+                            markup_signature=markup_signature,
+                            turn_light=next_light,
+                            previous_message_id=anchor_id,
+                            fallback_reason=fallback_reason,
+                        )
                     else:
                         logger.info(
                             "Fallback prevented – message still valid, retried edit successfully",
@@ -3298,15 +3121,6 @@ class PokerBotViewer:
                     )
 
                 if new_message_id is not None:
-                    pending_key = (
-                        self._safe_int(chat_id),
-                        self._safe_int(new_message_id),
-                    )
-                    pending_toggle = self._pending_anchor_toggles.pop(
-                        pending_key, None
-                    )
-                    if pending_toggle:
-                        applied_refresh_toggle = pending_toggle
                     applied_text = (
                         final_display_text if edit_success else intended_display_text
                     )
@@ -3344,15 +3158,10 @@ class PokerBotViewer:
         raw_stage = getattr(game, "state", GameState.INITIAL)
         stage = self._record_chat_stage(chat_id, raw_stage)
         stage_name = getattr(stage, "name", None)
-        if self._is_anchor_guard_active(chat_id, stage):
+        if stage in self._ACTIVE_ANCHOR_STATES:
             logger.info(
-                "[AnchorPersistence] Skipped anchor cleanup during guarded stage",
-                extra={
-                    "chat_id": chat_id,
-                    "stage": stage_name,
-                    "countdown_active": stage == GameState.INITIAL
-                    and self._is_countdown_active(chat_id),
-                },
+                "[AnchorPersistence] Skipped anchor cleanup during active stage",
+                extra={"chat_id": chat_id, "stage": stage_name},
             )
             return
 
