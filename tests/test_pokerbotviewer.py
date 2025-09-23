@@ -191,6 +191,8 @@ def test_update_player_anchors_and_keyboards_highlights_active_player():
         reply_markup=keyboard_one,
         stage_name=stage_name,
         community_cards=community_cards,
+        hole_cards=viewer._extract_player_hole_cards(player_one),
+        turn_indicator="",
     )
     viewer._anchor_registry.register_role(
         game.chat_id,
@@ -219,6 +221,8 @@ def test_update_player_anchors_and_keyboards_highlights_active_player():
         reply_markup=keyboard_two,
         stage_name=stage_name,
         community_cards=community_cards,
+        hole_cards=viewer._extract_player_hole_cards(player_two),
+        turn_indicator="",
     )
     viewer._anchor_registry.register_role(
         game.chat_id,

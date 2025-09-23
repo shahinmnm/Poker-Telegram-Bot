@@ -315,11 +315,18 @@ class PokerBotViewer:
         reply_markup: ReplyKeyboardMarkup,
         stage_name: str,
         community_cards: Sequence[str],
+        hole_cards: Optional[Sequence[str]] = None,
+        turn_indicator: str = "",
     ) -> str:
         markup_signature = self._serialize_markup(reply_markup) or ""
         stage_token = (stage_name or "").upper()
         board_token = "|".join(str(card) for card in (community_cards or []))
-        payload = f"{text}|{markup_signature}|stage={stage_token}|board={board_token}"
+        hole_token = "|".join(str(card) for card in (hole_cards or []))
+        indicator_token = turn_indicator or ""
+        payload = (
+            f"{text}|{markup_signature}|stage={stage_token}|board={board_token}"
+            f"|hole={hole_token}|indicator={indicator_token}"
+        )
         return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
     def _extract_community_cards(self, game: Game) -> List[str]:
@@ -933,6 +940,126 @@ class PokerBotViewer:
     async def _unmark_message_deleted(self, message_id: int) -> None:
         async with self._deleted_messages_lock:
             self._deleted_messages.discard(message_id)
+
+    async def _get_last_edit_error(
+        self, chat_id: ChatId, message_id: int
+    ) -> Optional[str]:
+        messenger = getattr(self, "_messenger", None)
+        if messenger is None:
+            return None
+        accessor = getattr(messenger, "get_last_edit_error", None)
+        if accessor is None:
+            return None
+        normalized_chat = self._safe_int(chat_id)
+        if normalized_chat is None:
+            return None
+        try:
+            result = accessor(normalized_chat, int(message_id))
+            if inspect.isawaitable(result):
+                result = await result
+        except Exception:
+            return None
+        if isinstance(result, str):
+            return result
+        return None
+
+    async def _probe_message_existence(
+        self, chat_id: ChatId, message_id: int
+    ) -> Optional[bool]:
+        bot = getattr(self, "_bot", None)
+        if bot is None:
+            return None
+        inspector = getattr(bot, "get_chat_history", None)
+        if inspector is None or not callable(inspector):
+            return None
+        try:
+            history = await inspector(
+                chat_id=chat_id,
+                offset=0,
+                limit=10,
+                offset_id=message_id,
+            )
+        except Exception:
+            return None
+        if isinstance(history, Sequence):
+            for item in history:
+                maybe_id = getattr(item, "message_id", None)
+                try:
+                    if int(maybe_id) == int(message_id):
+                        return True
+                except (TypeError, ValueError):
+                    continue
+            return False
+        return None
+
+    def _force_anchor_text_refresh(self, text: str) -> str:
+        stripped = text.rstrip("".join(self._INVISIBLE_CHARS))
+        if stripped.endswith(self._ZERO_WIDTH_SPACE):
+            return stripped + "\u200b"
+        return stripped + self._ZERO_WIDTH_SPACE
+
+    async def _should_create_anchor_fallback(
+        self,
+        *,
+        chat_id: ChatId,
+        message_id: int,
+        player_id: Any,
+        last_error: Optional[str],
+        forced_refresh: bool,
+    ) -> Tuple[bool, str, Dict[str, Any]]:
+        normalized_message = self._safe_int(message_id)
+        diagnostics: Dict[str, Any] = {
+            "chat_id": chat_id,
+            "player_id": player_id,
+            "message_id": message_id,
+            "forced_refresh": forced_refresh,
+        }
+        if normalized_message is None:
+            diagnostics["decision"] = "missing_message_id"
+            return True, "missing_message_id", diagnostics
+
+        deleted_flag = await self._is_message_deleted(normalized_message)
+        diagnostics["registry_deleted"] = deleted_flag
+
+        error_text = (last_error or "").lower()
+        if error_text:
+            diagnostics["last_error"] = error_text
+
+        if error_text and "too many requests" in error_text:
+            diagnostics["decision"] = "rate_limited"
+            return False, "rate_limited", diagnostics
+
+        if error_text and "retry later" in error_text:
+            diagnostics["decision"] = "retry_later"
+            return False, "retry_later", diagnostics
+
+        if error_text and "message is not modified" in error_text and not forced_refresh:
+            diagnostics["decision"] = "force_refresh"
+            return False, "force_refresh", diagnostics
+
+        fallback_reason: Optional[str] = None
+
+        if deleted_flag:
+            fallback_reason = "registry_marked_deleted"
+
+        if error_text:
+            if "message to edit not found" in error_text:
+                fallback_reason = "telegram_not_found"
+            elif "message can't be edited" in error_text:
+                fallback_reason = "telegram_not_editable"
+
+        history_probe = await self._probe_message_existence(chat_id, normalized_message)
+        diagnostics["history_probe"] = history_probe
+        if fallback_reason is None and history_probe is False:
+            fallback_reason = "history_missing"
+
+        if fallback_reason is None:
+            diagnostics["decision"] = "skip"
+            return False, "skip", diagnostics
+
+        diagnostics["decision"] = fallback_reason
+        await self._mark_message_deleted(normalized_message)
+        return True, fallback_reason, diagnostics
 
     async def _get_turn_cache_hash(
         self, key: Tuple[int, int]
@@ -1661,7 +1788,7 @@ class PokerBotViewer:
         role_lock = await self._get_anchor_lock(chat_id, "role_anchor_lock")
 
         async with role_lock:
-            self._anchor_registry.reset_roles(chat_id)
+            state = self._anchor_registry.get_chat_state(chat_id)
 
             for player in ordered_players:
                 seat_index = player.seat_index if player.seat_index is not None else -1
@@ -1709,53 +1836,87 @@ class PokerBotViewer:
                     reply_markup=keyboard,
                     stage_name=stage_name,
                     community_cards=community_cards,
+                    hole_cards=hole_cards,
+                    turn_indicator="",
                 )
                 markup_signature = self._serialize_markup(keyboard) or ""
+                player_id = getattr(player, "user_id", None)
+                record = state.role_anchors.get(player_id)
+                normalized_anchor: Optional[int] = None
+                if record is not None:
+                    record.seat_index = seat_index
+                    normalized_anchor = record.message_id
+                    if (
+                        normalized_anchor is not None
+                        and await self._is_message_deleted(normalized_anchor)
+                    ):
+                        normalized_anchor = None
 
-                try:
-                    message_id = await self.send_message_return_id(
-                        chat_id=chat_id,
-                        text=text,
-                        reply_markup=keyboard,
-                        request_category=RequestCategory.ANCHOR,
+                if normalized_anchor is None:
+                    try:
+                        message_id = await self.send_message_return_id(
+                            chat_id=chat_id,
+                            text=text,
+                            reply_markup=keyboard,
+                            request_category=RequestCategory.ANCHOR,
+                        )
+                    except Exception as exc:
+                        logger.error(
+                            "Failed to send player anchor",
+                            extra={
+                                "chat_id": chat_id,
+                                "player_id": player_id,
+                                "error_type": type(exc).__name__,
+                            },
+                        )
+                        continue
+
+                    if message_id is None:
+                        continue
+
+                    try:
+                        normalized_anchor = int(message_id)
+                    except (TypeError, ValueError):
+                        continue
+
+                    new_record = self._anchor_registry.register_role(
+                        chat_id,
+                        player_id=player_id,
+                        seat_index=seat_index,
+                        message_id=normalized_anchor,
+                        base_text=text,
+                        payload_signature=payload_signature,
+                        markup_signature=markup_signature,
                     )
-                except Exception as exc:
-                    logger.error(
-                        "Failed to send player anchor",
-                        extra={
-                            "chat_id": chat_id,
-                            "player_id": getattr(player, "user_id", None),
-                            "error_type": type(exc).__name__,
-                        },
+                    if new_record is not None:
+                        new_record.seat_index = seat_index
+                    await self._unmark_message_deleted(normalized_anchor)
+                else:
+                    updated_record = self._anchor_registry.update_role(
+                        chat_id,
+                        player_id,
+                        base_text=text,
+                        message_id=normalized_anchor,
+                        current_text=text,
+                        payload_signature=payload_signature,
+                        markup_signature=markup_signature,
+                        turn_light="",
                     )
-                    continue
+                    if updated_record is not None:
+                        updated_record.seat_index = seat_index
+                    await self._unmark_message_deleted(normalized_anchor)
 
-                if message_id is None:
+                if normalized_anchor is None:
                     continue
-
-                try:
-                    normalized_anchor = int(message_id)
-                except (TypeError, ValueError):
-                    continue
-
-                self._anchor_registry.register_role(
-                    chat_id,
-                    player_id=getattr(player, "user_id", None),
-                    seat_index=seat_index,
-                    message_id=normalized_anchor,
-                    base_text=text,
-                    payload_signature=payload_signature,
-                    markup_signature=markup_signature,
-                )
 
                 player.anchor_message = (chat_id, normalized_anchor)
                 player.anchor_role = role_label
                 player.role_label = role_label
                 player.anchor_keyboard_signature = payload_signature
+                player.private_keyboard_message = None
+                player.private_keyboard_signature = None
 
                 await asyncio.sleep(0.075)
-            player.private_keyboard_message = None
-            player.private_keyboard_signature = None
 
     @staticmethod
     def _describe_player_role(game: Game, player: Player) -> str:
@@ -1904,6 +2065,8 @@ class PokerBotViewer:
             reply_markup=keyboard,
             stage_name=stage_name,
             community_cards=community_cards,
+            hole_cards=hole_cards,
+            turn_indicator="",
         )
 
         previous_signature = getattr(player, "private_keyboard_signature", None)
@@ -2042,6 +2205,7 @@ class PokerBotViewer:
         markup_signature: str,
         turn_light: str,
         previous_message_id: Optional[int],
+        fallback_reason: str,
     ) -> Optional[int]:
         try:
             if previous_message_id:
@@ -2080,6 +2244,7 @@ class PokerBotViewer:
         normalized_id = self._safe_int(new_message_id)
         player.anchor_message = (chat_id, normalized_id)
         player.anchor_keyboard_signature = payload_signature
+        await self._unmark_message_deleted(normalized_id)
 
         self._anchor_registry.update_role(
             chat_id,
@@ -2100,6 +2265,7 @@ class PokerBotViewer:
                 "chat_id": chat_id,
                 "player_id": getattr(player, "user_id", None),
                 "message_id": normalized_id,
+                "reason": fallback_reason,
             },
         )
 
@@ -2216,6 +2382,8 @@ class PokerBotViewer:
                     reply_markup=keyboard,
                     stage_name=stage_name,
                     community_cards=community_cards,
+                    hole_cards=hole_cards,
+                    turn_indicator=next_light,
                 )
 
                 text_changed = display_text != previous_text
@@ -2264,51 +2432,26 @@ class PokerBotViewer:
 
                 new_message_id: Optional[int] = None
                 edit_success = False
+                intended_display_text = display_text
+                intended_payload_signature = payload_signature
+                attempt_text = intended_display_text
+                attempt_payload_signature = intended_payload_signature
+                final_display_text = intended_display_text
+                final_payload_signature = intended_payload_signature
+                forced_refresh_attempted = False
+                rate_retry_performed = False
+                last_edit_error: Optional[str] = None
 
-                if text_changed:
+                while True:
                     try:
                         result = await self._update_message(
                             chat_id=chat_id,
                             message_id=anchor_id,
-                            text=display_text,
+                            text=attempt_text,
                             reply_markup=keyboard,
                             force_send=True,
                             request_category=RequestCategory.ANCHOR,
                         )
-                    except (BadRequest, Forbidden) as exc:
-                        err = str(exc).lower()
-                        if "message to edit not found" in err or "message is not modified" in err:
-                            logger.warning(
-                                "Anchor text edit failed; creating replacement",
-                                extra={
-                                    "chat_id": chat_id,
-                                    "player_id": player_id,
-                                    "message_id": anchor_id,
-                                    "error_type": type(exc).__name__,
-                                },
-                            )
-                            new_message_id = await self._send_new_role_anchor(
-                                chat_id=chat_id,
-                                player=player,
-                                base_text=base_text,
-                                display_text=display_text,
-                                keyboard=keyboard,
-                                payload_signature=payload_signature,
-                                markup_signature=markup_signature,
-                                turn_light=next_light,
-                                previous_message_id=anchor_id,
-                            )
-                        else:
-                            logger.error(
-                                "Failed to edit anchor text",
-                                extra={
-                                    "chat_id": chat_id,
-                                    "player_id": player_id,
-                                    "message_id": anchor_id,
-                                    "error_type": type(exc).__name__,
-                                },
-                            )
-                        edit_success = new_message_id is not None
                     except Exception as exc:
                         logger.error(
                             "Unexpected error editing anchor text",
@@ -2319,86 +2462,133 @@ class PokerBotViewer:
                                 "error_type": type(exc).__name__,
                             },
                         )
-                    else:
-                        resolved_id = self._resolve_message_id(result)
-                        if resolved_id is not None:
-                            new_message_id = resolved_id
-                        edit_success = True
-                elif keyboard_changed:
-                    try:
-                        edit_success = await self.edit_message_reply_markup(
-                            chat_id=chat_id,
-                            message_id=anchor_id,
-                            reply_markup=keyboard,
-                        )
-                    except (BadRequest, Forbidden) as exc:
-                        err = str(exc).lower()
-                        if "message to edit not found" in err or "message is not modified" in err:
-                            logger.warning(
-                                "Anchor markup edit failed; forcing replacement",
-                                extra={
-                                    "chat_id": chat_id,
-                                    "player_id": player_id,
-                                    "message_id": anchor_id,
-                                    "error_type": type(exc).__name__,
-                                },
-                            )
-                            new_message_id = await self._send_new_role_anchor(
-                                chat_id=chat_id,
-                                player=player,
-                                base_text=base_text,
-                                display_text=display_text,
-                                keyboard=keyboard,
-                                payload_signature=payload_signature,
-                                markup_signature=markup_signature,
-                                turn_light=next_light,
-                                previous_message_id=anchor_id,
-                            )
-                            edit_success = new_message_id is not None
-                        else:
-                            logger.error(
-                                "Failed to edit anchor markup",
-                                extra={
-                                    "chat_id": chat_id,
-                                    "player_id": player_id,
-                                    "message_id": anchor_id,
-                                    "error_type": type(exc).__name__,
-                                },
-                            )
-                            edit_success = False
-                    except Exception as exc:
-                        logger.error(
-                            "Unexpected error editing anchor markup",
-                            extra={
-                                "chat_id": chat_id,
-                                "player_id": player_id,
-                                "message_id": anchor_id,
-                                "error_type": type(exc).__name__,
-                            },
-                        )
-                        edit_success = False
+                        break
 
-                if not edit_success and new_message_id is None and not text_changed:
-                    # nothing changed and no edit performed
-                    await asyncio.sleep(0.05)
-                    continue
+                    resolved_id = self._resolve_message_id(result)
+                    if resolved_id is not None:
+                        new_message_id = resolved_id
+                        edit_success = True
+                        final_display_text = attempt_text
+                        final_payload_signature = attempt_payload_signature
+                        break
+
+                    normalized_anchor = self._safe_int(anchor_id)
+                    last_edit_error = None
+                    if normalized_anchor is not None:
+                        last_edit_error = await self._get_last_edit_error(
+                            chat_id, normalized_anchor
+                        )
+
+                    error_text = (last_edit_error or "").lower()
+                    if (
+                        error_text
+                        and (
+                            "too many requests" in error_text
+                            or "retry later" in error_text
+                            or "flood control" in error_text
+                        )
+                        and not rate_retry_performed
+                    ):
+                        rate_retry_performed = True
+                        await asyncio.sleep(0.35)
+                        continue
+
+                    if not forced_refresh_attempted:
+                        forced_refresh_attempted = True
+                        attempt_text = self._force_anchor_text_refresh(
+                            intended_display_text
+                        )
+                        attempt_payload_signature = self._reply_keyboard_signature(
+                            text=attempt_text,
+                            reply_markup=keyboard,
+                            stage_name=stage_name,
+                            community_cards=community_cards,
+                            hole_cards=hole_cards,
+                            turn_indicator=next_light,
+                        )
+                        continue
+
+                    break
 
                 if edit_success and new_message_id is None:
                     new_message_id = anchor_id
 
+                if not edit_success and new_message_id is None:
+                    should_fallback, fallback_reason, diagnostics = (
+                        await self._should_create_anchor_fallback(
+                            chat_id=chat_id,
+                            message_id=anchor_id,
+                            player_id=player_id,
+                            last_error=last_edit_error,
+                            forced_refresh=forced_refresh_attempted,
+                        )
+                    )
+                    diagnostics.update(
+                        {
+                            "stage": stage_name,
+                            "hole_cards": hole_cards,
+                            "community_cards": community_cards,
+                            "text_changed": text_changed,
+                            "keyboard_changed": keyboard_changed,
+                            "payload_changed": payload_changed,
+                        }
+                    )
+                    if should_fallback:
+                        logger.warning(
+                            "Anchor fallback triggered",
+                            extra=diagnostics,
+                        )
+                        new_message_id = await self._send_new_role_anchor(
+                            chat_id=chat_id,
+                            player=player,
+                            base_text=base_text,
+                            display_text=intended_display_text,
+                            keyboard=keyboard,
+                            payload_signature=intended_payload_signature,
+                            markup_signature=markup_signature,
+                            turn_light=next_light,
+                            previous_message_id=anchor_id,
+                            fallback_reason=fallback_reason,
+                        )
+                    else:
+                        logger.info(
+                            "Fallback prevented – message still valid, retried edit successfully",
+                            extra=diagnostics,
+                        )
+                elif edit_success and (forced_refresh_attempted or rate_retry_performed):
+                    logger.info(
+                        "Fallback prevented – message still valid, retried edit successfully",
+                        extra={
+                            "chat_id": chat_id,
+                            "player_id": player_id,
+                            "message_id": anchor_id,
+                            "forced_refresh": forced_refresh_attempted,
+                            "rate_retry": rate_retry_performed,
+                            "stage": stage_name,
+                        },
+                    )
+
                 if new_message_id is not None:
+                    applied_text = (
+                        final_display_text if edit_success else intended_display_text
+                    )
+                    applied_signature = (
+                        final_payload_signature
+                        if edit_success
+                        else intended_payload_signature
+                    )
                     self._anchor_registry.update_role(
                         chat_id,
                         player_id,
                         base_text=base_text,
                         message_id=new_message_id,
-                        current_text=display_text,
-                        payload_signature=payload_signature,
+                        current_text=applied_text,
+                        payload_signature=applied_signature,
                         markup_signature=markup_signature,
                         turn_light=next_light,
                     )
                     player.anchor_message = (chat_id, new_message_id)
-                    player.anchor_keyboard_signature = payload_signature
+                    player.anchor_keyboard_signature = applied_signature
                     player.anchor_role = role_label
                     player.role_label = role_label
                     if edit_success:
