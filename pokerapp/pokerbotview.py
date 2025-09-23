@@ -1041,6 +1041,9 @@ class PokerBotViewer:
         turn_cache_key = message_key if request_category == RequestCategory.TURN else None
 
         is_reply_keyboard = isinstance(reply_markup, ReplyKeyboardMarkup)
+        should_resend_reply_keyboard = (
+            is_reply_keyboard and normalized_existing_message is not None
+        )
 
         if stage_key is not None and not force_send and not is_reply_keyboard:
             cached_stage_hash = await self._get_stage_payload_hash(stage_key)
@@ -1301,7 +1304,7 @@ class PokerBotViewer:
 
             callback_token_registered = False
             try:
-                if message_id is None:
+                if message_id is None or should_resend_reply_keyboard:
                     result = await self._messenger.send_message(
                         chat_id=chat_id,
                         text=normalized_text,
@@ -1314,6 +1317,37 @@ class PokerBotViewer:
                     new_message_id: Optional[MessageId] = getattr(
                         result, "message_id", None
                     )
+                    if (
+                        should_resend_reply_keyboard
+                        and normalized_existing_message is not None
+                    ):
+                        resolved_new_id = (
+                            self._safe_int(new_message_id)
+                            if new_message_id is not None
+                            else None
+                        )
+                        if (
+                            isinstance(chat_id, int)
+                            and resolved_new_id is not None
+                            and resolved_new_id != normalized_existing_message
+                        ):
+                            async def _delete_replaced_message() -> None:
+                                try:
+                                    await self._messenger.delete_message(
+                                        chat_id=int(chat_id),
+                                        message_id=normalized_existing_message,
+                                        request_category=RequestCategory.DELETE,
+                                    )
+                                except Exception:
+                                    logger.warning(
+                                        "Failed to delete replaced reply keyboard message",
+                                        extra={
+                                            "chat_id": chat_id,
+                                            "message_id": message_id,
+                                        },
+                                    )
+
+                            asyncio.create_task(_delete_replaced_message())
                 else:
                     if (
                         callback_id is not None

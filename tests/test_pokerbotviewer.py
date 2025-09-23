@@ -6,6 +6,7 @@ import pytest
 from telegram import InlineKeyboardMarkup, ReplyKeyboardMarkup
 from telegram.constants import ParseMode
 from telegram.error import BadRequest, Forbidden
+from types import SimpleNamespace
 
 from pokerapp.cards import Card
 
@@ -316,6 +317,43 @@ def test_build_player_cards_keyboard_layout():
     assert stage_row[1].startswith('✅')
     assert stage_row[2] == 'ترن'
     assert stage_row[3] == 'ریور'
+
+
+def test_update_message_resends_reply_keyboard_and_deletes_previous():
+    viewer = PokerBotViewer(bot=MagicMock())
+    messenger = MagicMock()
+    messenger.send_message = AsyncMock(
+        return_value=SimpleNamespace(message_id=777)
+    )
+    messenger.edit_message_text = AsyncMock()
+    messenger.delete_message = AsyncMock(return_value=True)
+    viewer._messenger = messenger
+
+    keyboard = build_player_cards_keyboard(
+        hole_cards=['A♠️', 'K♦️'],
+        community_cards=['Q♥️', 'J♣️', '9♠️'],
+        current_stage='ROUND_FLOP',
+    )
+
+    result = run(
+        viewer._update_message(
+            chat_id=-123,
+            message_id=555,
+            text='به‌روزرسانی',
+            reply_markup=keyboard,
+            force_send=True,
+            request_category=RequestCategory.ANCHOR,
+        )
+    )
+
+    assert result == 777
+    messenger.send_message.assert_awaited_once()
+    messenger.edit_message_text.assert_not_awaited()
+    messenger.delete_message.assert_awaited_once()
+    delete_call = messenger.delete_message.await_args
+    assert delete_call.kwargs['chat_id'] == -123
+    assert delete_call.kwargs['message_id'] == 555
+
 
 def test_update_turn_message_includes_stage_and_keyboard():
     viewer = PokerBotViewer(bot=MagicMock())
