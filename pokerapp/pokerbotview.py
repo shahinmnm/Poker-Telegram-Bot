@@ -3081,12 +3081,16 @@ class PokerBotViewer:
         countdown_transition_pending = self._is_countdown_transition_pending(
             normalized_chat
         )
+        countdown_active = (
+            countdown_task_active or countdown_transition_pending
+            if resolved_stage == GameState.INITIAL
+            else countdown_task_active
+        )
         countdown_guard_source = self._describe_countdown_guard_source(
             task_active=countdown_task_active,
             transition_pending=countdown_transition_pending,
         )
 
-        countdown_active = countdown_task_active
         countdown_guard_active = (
             resolved_stage in self._ACTIVE_ANCHOR_STATES
             or (
@@ -4032,14 +4036,19 @@ class PokerBotViewer:
             )
         stage_name = getattr(resolved_stage, "name", None)
 
-        countdown_active = False
+        countdown_task_active = False
         if resolved_stage == GameState.INITIAL:
-            countdown_active = await self._is_countdown_active(chat_id)
+            countdown_task_active = await self._is_countdown_active(chat_id)
         countdown_transition_pending = self._is_countdown_transition_pending(
             normalized_chat
         )
+        countdown_active = (
+            countdown_task_active or countdown_transition_pending
+            if resolved_stage == GameState.INITIAL
+            else countdown_task_active
+        )
         countdown_guard_source = self._describe_countdown_guard_source(
-            task_active=countdown_active,
+            task_active=countdown_task_active,
             transition_pending=countdown_transition_pending,
         )
 
@@ -4061,7 +4070,7 @@ class PokerBotViewer:
                     "stage": stage_name,
                     "reason": normalized_reason or "guarded",
                     "countdown_active": countdown_active,
-                    "countdown_guard_task_active": countdown_active,
+                    "countdown_guard_task_active": countdown_task_active,
                     "countdown_guard_transition_pending": countdown_transition_pending,
                     "countdown_guard_source": countdown_guard_source,
                 },
@@ -4074,7 +4083,7 @@ class PokerBotViewer:
                     "player_id": getattr(anchor_record, "player_id", None),
                     "stage": stage_name,
                     "countdown_active": countdown_active,
-                    "countdown_guard_task_active": countdown_active,
+                    "countdown_guard_task_active": countdown_task_active,
                     "countdown_guard_transition_pending": countdown_transition_pending,
                     "countdown_guard_source": countdown_guard_source,
                 },
