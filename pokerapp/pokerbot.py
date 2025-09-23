@@ -38,6 +38,7 @@ class PokerBot:
 
     def __init__(self, token: str, cfg: Config):
         self._cfg = cfg
+        self._token = token
         self._webhook_settings = WebhookSettings(
             secret_token=cfg.WEBHOOK_SECRET or None,
             max_connections=getattr(
@@ -48,27 +49,22 @@ class PokerBot:
             allowed_updates=cfg.ALLOWED_UPDATES,
             drop_pending_updates=True,
         )
-        self._job_queue = JobQueue()
-
-        builder = (
-            ApplicationBuilder()
-            .token(token)
-            .post_stop(self._cleanup_webhook)
-            .job_queue(self._job_queue)
-        )
-        self._application = builder.build()
-        self._application.add_error_handler(self._handle_error)
+        self._application: Optional["Application"] = None
+        self._job_queue: Optional[JobQueue] = None
+        self._view: Optional[PokerBotViewer] = None
+        self._model: Optional[PokerBotModel] = None
+        self._controller: Optional[PokerBotCotroller] = None
 
         # Shared async Redis client for both wallet operations and
         # asynchronous table persistence
-        kv_async = aioredis.Redis(
+        self._kv_async = aioredis.Redis(
             host=cfg.REDIS_HOST,
             port=cfg.REDIS_PORT,
             db=cfg.REDIS_DB,
             password=cfg.REDIS_PASS if cfg.REDIS_PASS != "" else None,
         )
 
-        table_manager = TableManager(kv_async)
+        self._table_manager = TableManager(self._kv_async)
         if cfg.DATABASE_URL:
             try:
                 stats_service = StatsService(
@@ -82,21 +78,7 @@ class PokerBot:
         else:
             stats_service = NullStatsService()
         self._stats_service = stats_service
-        view = PokerBotViewer(
-            bot=self._application.bot,
-            admin_chat_id=cfg.ADMIN_CHAT_ID,
-            rate_limit_per_minute=cfg.RATE_LIMIT_PER_MINUTE,
-            rate_limit_per_second=cfg.RATE_LIMIT_PER_SECOND,
-        )
-        model = PokerBotModel(
-            view=view,
-            bot=self._application.bot,
-            kv=kv_async,
-            cfg=cfg,
-            table_manager=table_manager,
-            stats_service=stats_service,
-        )
-        self._controller = PokerBotCotroller(model, self._application)
+        self._build_application()
 
     def run(self) -> None:
         """Start the bot using the webhook listener."""
@@ -111,6 +93,8 @@ class PokerBot:
 
     def run_webhook(self) -> None:
         """Start the bot using webhook delivery."""
+        if self._application is None:
+            self._build_application()
         logger.info(
             "Starting webhook listener on %s:%s%s targeting %s",
             self._cfg.WEBHOOK_LISTEN,
@@ -139,6 +123,8 @@ class PokerBot:
 
     def run_polling(self) -> None:
         """Start the bot using long polling."""
+        if self._application is None:
+            self._build_application()
         logger.info(
             "Starting polling mode for development; webhook configuration will be ignored."
         )
@@ -177,6 +163,7 @@ class PokerBot:
                 exc,
             )
             logger.warning("Using polling mode as a fallback.")
+            self._build_application()
             self.run_polling()
             return True
 
@@ -191,10 +178,57 @@ class PokerBot:
                 "be resolved. Verify the webhook configuration or provide a reachable "
                 "public URL to resume webhook delivery."
             )
+            self._build_application()
             self.run_polling()
             return True
 
         return False
+
+    def _build_application(self) -> None:
+        self._dispose_application()
+
+        self._job_queue = JobQueue()
+        builder = (
+            ApplicationBuilder()
+            .token(self._token)
+            .post_stop(self._cleanup_webhook)
+            .job_queue(self._job_queue)
+        )
+        self._application = builder.build()
+        self._application.add_error_handler(self._handle_error)
+
+        self._view = PokerBotViewer(
+            bot=self._application.bot,
+            admin_chat_id=self._cfg.ADMIN_CHAT_ID,
+            rate_limit_per_minute=self._cfg.RATE_LIMIT_PER_MINUTE,
+            rate_limit_per_second=self._cfg.RATE_LIMIT_PER_SECOND,
+        )
+        self._model = PokerBotModel(
+            view=self._view,
+            bot=self._application.bot,
+            kv=self._kv_async,
+            cfg=self._cfg,
+            table_manager=self._table_manager,
+            stats_service=self._stats_service,
+        )
+        self._controller = PokerBotCotroller(self._model, self._application)
+
+    def _dispose_application(self) -> None:
+        if self._application is None:
+            return
+
+        try:
+            stop_running = getattr(self._application, "stop_running", None)
+            if callable(stop_running):
+                stop_running()
+        except Exception:
+            logger.debug("Failed to stop running application cleanly.", exc_info=True)
+
+        self._application = None
+        self._job_queue = None
+        self._controller = None
+        self._model = None
+        self._view = None
 
     def _should_force_polling_due_to_webhook_failure(self, exc: Exception) -> bool:
         for error in self._iter_exception_chain(exc):
