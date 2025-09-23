@@ -570,6 +570,27 @@ class PokerBotViewer:
                     normalized_game,
                 )
 
+    def _is_countdown_active(self, chat_id: ChatId) -> bool:
+        """Return True when a prestart countdown task exists for the chat."""
+
+        normalized_chat = self._safe_int(chat_id)
+        if normalized_chat == 0:
+            return False
+
+        try:
+            pending_tasks = list(self._prestart_countdown_tasks.items())
+        except Exception:
+            return False
+
+        for (chat_key, _), task in pending_tasks:
+            if chat_key != normalized_chat:
+                continue
+            if task is None:
+                continue
+            if not task.done():
+                return True
+        return False
+
     def _create_countdown_task(
         self,
         normalized_chat: int,
@@ -1962,14 +1983,44 @@ class PokerBotViewer:
                             and normalized_chat != 0
                         ):
                             async def _delete_replaced_message() -> None:
+                                record = self._resolve_role_anchor_record(
+                                    chat_id, normalized_existing_message
+                                )
+                                stage = self._anchor_registry.get_stage(chat_id)
+                                resolved_stage = self._resolve_game_state(stage)
+                                stage_name = getattr(resolved_stage, "name", None)
+
+                                if (
+                                    record is not None
+                                    and (
+                                        resolved_stage in self._ACTIVE_ANCHOR_STATES
+                                        or (
+                                            resolved_stage == GameState.INITIAL
+                                            and self._is_countdown_active(chat_id)
+                                        )
+                                    )
+                                ):
+                                    self._log_anchor_preservation_skip(
+                                        chat_id=chat_id,
+                                        message_id=normalized_existing_message,
+                                        record=record,
+                                        extra_details={
+                                            "stage": stage_name,
+                                            "reason": "countdown_guard",
+                                        },
+                                    )
+                                    logger.info(
+                                        "[AnchorPersistence] Skipped deletion for role anchor during INITIAL countdown",
+                                        extra={
+                                            "chat_id": chat_id,
+                                            "message_id": normalized_existing_message,
+                                            "player_id": getattr(record, "player_id", None),
+                                            "stage": stage_name,
+                                        },
+                                    )
+                                    return
+
                                 if request_category == RequestCategory.ANCHOR:
-                                    record = self._resolve_role_anchor_record(
-                                        chat_id, normalized_existing_message
-                                    )
-                                    stage = self._anchor_registry.get_stage(chat_id)
-                                    stage_name = getattr(
-                                        self._resolve_game_state(stage), "name", None
-                                    )
                                     self._log_anchor_preservation_skip(
                                         chat_id=chat_id,
                                         message_id=normalized_existing_message,
@@ -1980,6 +2031,7 @@ class PokerBotViewer:
                                         },
                                     )
                                     return
+
                                 if self._should_block_anchor_deletion(
                                     chat_id=chat_id,
                                     message_id=normalized_existing_message,
@@ -2716,6 +2768,60 @@ class PokerBotViewer:
         previous_message_id: Optional[int],
         fallback_reason: str,
     ) -> Optional[int]:
+        player_id = getattr(player, "user_id", None)
+        stage_value = self._anchor_registry.get_stage(chat_id)
+        resolved_stage = self._resolve_game_state(stage_value)
+        stage_name = getattr(resolved_stage, "name", None)
+        normalized_previous: Optional[int] = None
+        if previous_message_id is not None:
+            normalized_previous = self._safe_int(previous_message_id)
+
+        countdown_guard_active = (
+            resolved_stage in self._ACTIVE_ANCHOR_STATES
+            or (
+                resolved_stage == GameState.INITIAL
+                and self._is_countdown_active(chat_id)
+            )
+        )
+        if countdown_guard_active:
+            logger.info(
+                "[AnchorPersistence] Skipped deletion for role anchor during INITIAL countdown",
+                extra={
+                    "chat_id": chat_id,
+                    "message_id": normalized_previous,
+                    "player_id": player_id,
+                    "stage": stage_name,
+                },
+            )
+            if previous_message_id is not None:
+                try:
+                    result = await self._update_message(
+                        chat_id=chat_id,
+                        message_id=previous_message_id,
+                        text=display_text,
+                        reply_markup=keyboard,
+                        force_send=True,
+                        request_category=RequestCategory.ANCHOR,
+                    )
+                except Exception as exc:
+                    logger.debug(
+                        "Failed to refresh existing role anchor during countdown",
+                        extra={
+                            "chat_id": chat_id,
+                            "player_id": player_id,
+                            "message_id": normalized_previous,
+                            "error_type": type(exc).__name__,
+                            "reason": fallback_reason,
+                        },
+                    )
+                    return normalized_previous
+
+                resolved_id = self._resolve_message_id(result)
+                if resolved_id is None:
+                    return normalized_previous
+                return resolved_id
+            return None
+
         try:
             if previous_message_id:
                 await self.delete_message(
@@ -2739,7 +2845,7 @@ class PokerBotViewer:
                         "[AnchorPersistence] Fallback skipped because anchor deletion was prevented",
                         extra={
                             "chat_id": chat_id,
-                            "player_id": getattr(player, "user_id", None),
+                            "player_id": player_id,
                             "message_id": previous_message_id,
                             "reason": fallback_reason,
                         },
@@ -2750,7 +2856,7 @@ class PokerBotViewer:
                 "Failed to delete stale role anchor",
                 extra={
                     "chat_id": chat_id,
-                    "player_id": getattr(player, "user_id", None),
+                    "player_id": player_id,
                     "message_id": previous_message_id,
                 },
             )
@@ -2767,7 +2873,7 @@ class PokerBotViewer:
                 "Failed to create replacement role anchor",
                 extra={
                     "chat_id": chat_id,
-                    "player_id": getattr(player, "user_id", None),
+                    "player_id": player_id,
                     "error_type": type(exc).__name__,
                 },
             )
@@ -2783,7 +2889,7 @@ class PokerBotViewer:
 
         self._anchor_registry.update_role(
             chat_id,
-            getattr(player, "user_id", None),
+            player_id,
             base_text=base_text,
             message_id=normalized_id,
             current_text=display_text,
@@ -2799,7 +2905,7 @@ class PokerBotViewer:
             "Anchor fallback-new-msg",
             extra={
                 "chat_id": chat_id,
-                "player_id": getattr(player, "user_id", None),
+                "player_id": player_id,
                 "message_id": normalized_id,
                 "reason": fallback_reason,
             },
@@ -3564,6 +3670,46 @@ class PokerBotViewer:
         normalized_message = self._safe_int(message_id)
         normalized_chat = self._safe_int(chat_id)
 
+        anchor_record = self._resolve_role_anchor_record(chat_id, normalized_message)
+        resolved_stage = None
+        if game is not None:
+            resolved_stage = self._resolve_game_state(getattr(game, "state", None))
+        if resolved_stage is None:
+            resolved_stage = self._resolve_game_state(
+                self._anchor_registry.get_stage(chat_id)
+            )
+        stage_name = getattr(resolved_stage, "name", None)
+
+        if (
+            anchor_record is not None
+            and (
+                resolved_stage in self._ACTIVE_ANCHOR_STATES
+                or (
+                    resolved_stage == GameState.INITIAL
+                    and self._is_countdown_active(chat_id)
+                )
+            )
+        ):
+            self._log_anchor_preservation_skip(
+                chat_id=chat_id,
+                message_id=normalized_message,
+                record=anchor_record,
+                extra_details={
+                    "stage": stage_name,
+                    "reason": "countdown_guard",
+                },
+            )
+            logger.info(
+                "[AnchorPersistence] Skipped deletion for role anchor during INITIAL countdown",
+                extra={
+                    "chat_id": chat_id,
+                    "message_id": normalized_message,
+                    "player_id": getattr(anchor_record, "player_id", None),
+                    "stage": stage_name,
+                },
+            )
+            return
+
         if self._should_block_anchor_deletion(
             chat_id=chat_id,
             message_id=normalized_message,
@@ -3573,14 +3719,6 @@ class PokerBotViewer:
         ):
             return
 
-        anchor_record = self._resolve_role_anchor_record(chat_id, normalized_message)
-        resolved_stage = None
-        if game is not None:
-            resolved_stage = self._resolve_game_state(getattr(game, "state", None))
-        if resolved_stage is None:
-            resolved_stage = self._resolve_game_state(
-                self._anchor_registry.get_stage(chat_id)
-            )
         normalized_reason = (anchor_reason or "").strip() or None
 
         lock = await self._acquire_message_lock(chat_id, message_id)
@@ -3604,7 +3742,7 @@ class PokerBotViewer:
                         extra={
                             "chat_id": chat_id,
                             "player_id": getattr(anchor_record, "player_id", None),
-                            "stage": getattr(resolved_stage, "name", None),
+                            "stage": stage_name,
                         },
                     )
             except (BadRequest, Forbidden) as e:
