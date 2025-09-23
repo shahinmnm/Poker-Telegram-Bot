@@ -294,6 +294,7 @@ def test_clear_all_player_anchors_deletes_messages():
 
     game = Game()
     game.chat_id = -321
+    game.state = GameState.FINISHED
 
     player = Player(
         user_id=9,
@@ -316,6 +317,41 @@ def test_clear_all_player_anchors_deletes_messages():
     assert 404 not in game.message_ids_to_delete
 
 
+def test_clear_all_player_anchors_skips_during_active_stage():
+    viewer = PokerBotViewer(bot=MagicMock())
+    viewer.delete_message = AsyncMock()
+
+    game = Game()
+    game.chat_id = -654
+    game.state = GameState.ROUND_TURN
+
+    player = Player(
+        user_id=33,
+        mention_markdown='@player33',
+        wallet=MagicMock(),
+        ready_message_id='ready-33',
+    )
+    game.add_player(player, seat_index=0)
+    player.anchor_message = (game.chat_id, 505)
+    game.message_ids_to_delete.append(505)
+
+    viewer._anchor_registry.register_role(
+        chat_id=game.chat_id,
+        player_id=player.user_id,
+        seat_index=0,
+        message_id=505,
+        base_text='anchor',
+        payload_signature='sig',
+        markup_signature='markup',
+    )
+
+    run(viewer.clear_all_player_anchors(game))
+
+    viewer.delete_message.assert_not_awaited()
+    assert player.anchor_message == (game.chat_id, 505)
+    assert 505 in game.message_ids_to_delete
+
+
 def test_delete_message_skips_role_anchor_mid_hand(caplog):
     viewer = PokerBotViewer(bot=MagicMock())
     viewer._messenger.delete_message = AsyncMock()
@@ -332,6 +368,7 @@ def test_delete_message_skips_role_anchor_mid_hand(caplog):
         payload_signature="sig",
         markup_signature="markup",
     )
+    viewer._anchor_registry.set_stage(chat_id, GameState.ROUND_FLOP)
 
     with caplog.at_level(logging.INFO):
         run(
@@ -347,6 +384,70 @@ def test_delete_message_skips_role_anchor_mid_hand(caplog):
         "[AnchorPersistence] Skipped deletion for role anchor message_id=" in record.message
         for record in caplog.records
     )
+
+
+def test_delete_message_skips_anchor_even_with_allow_flag_mid_hand():
+    viewer = PokerBotViewer(bot=MagicMock())
+    viewer._messenger.delete_message = AsyncMock()
+    viewer._mark_message_deleted = AsyncMock()
+
+    chat_id = -999
+    message_id = 6789
+    viewer._anchor_registry.register_role(
+        chat_id=chat_id,
+        player_id=7,
+        seat_index=1,
+        message_id=message_id,
+        base_text="anchor",
+        payload_signature="sig",
+        markup_signature="markup",
+    )
+    viewer._anchor_registry.set_stage(chat_id, GameState.ROUND_TURN)
+
+    run(
+        viewer.delete_message(
+            chat_id=chat_id,
+            message_id=message_id,
+            allow_anchor_deletion=True,
+        )
+    )
+
+    viewer._messenger.delete_message.assert_not_awaited()
+    viewer._mark_message_deleted.assert_not_awaited()
+
+
+def test_delete_message_allows_anchor_cleanup_after_hand():
+    viewer = PokerBotViewer(bot=MagicMock())
+    viewer._messenger.delete_message = AsyncMock()
+    viewer._mark_message_deleted = AsyncMock()
+
+    chat_id = -314
+    message_id = 2718
+    viewer._anchor_registry.register_role(
+        chat_id=chat_id,
+        player_id=11,
+        seat_index=2,
+        message_id=message_id,
+        base_text="anchor",
+        payload_signature="sig",
+        markup_signature="markup",
+    )
+    viewer._anchor_registry.set_stage(chat_id, GameState.FINISHED)
+
+    run(
+        viewer.delete_message(
+            chat_id=chat_id,
+            message_id=message_id,
+            allow_anchor_deletion=True,
+        )
+    )
+
+    viewer._messenger.delete_message.assert_awaited_once_with(
+        chat_id=chat_id,
+        message_id=message_id,
+        request_category=RequestCategory.DELETE,
+    )
+    viewer._mark_message_deleted.assert_awaited_once_with(message_id)
 
 
 def test_send_player_role_anchors_attaches_group_keyboard():

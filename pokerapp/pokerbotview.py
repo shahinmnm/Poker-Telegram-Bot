@@ -134,6 +134,7 @@ class ChatAnchorState:
     edit_count: int = 0
     fallback_count: int = 0
     role_retry_count: int = 0
+    current_stage: Optional[GameState] = None
 
 
 class AnchorRegistry:
@@ -157,6 +158,17 @@ class AnchorRegistry:
         state.fallback_count = 0
         state.role_retry_count = 0
         return state
+
+    def set_stage(
+        self, chat_id: ChatId, stage: Optional[GameState]
+    ) -> ChatAnchorState:
+        state = self.get_chat_state(chat_id)
+        state.current_stage = stage
+        return state
+
+    def get_stage(self, chat_id: ChatId) -> Optional[GameState]:
+        state = self.get_chat_state(chat_id)
+        return state.current_stage
 
     def get_chat_state(self, chat_id: ChatId) -> ChatAnchorState:
         normalized = self._normalize_chat(chat_id)
@@ -1940,21 +1952,25 @@ class PokerBotViewer:
                                     record = self._resolve_role_anchor_record(
                                         chat_id, normalized_existing_message
                                     )
+                                    stage = self._anchor_registry.get_stage(chat_id)
+                                    stage_name = getattr(
+                                        self._resolve_game_state(stage), "name", None
+                                    )
                                     self._log_anchor_preservation_skip(
                                         chat_id=chat_id,
                                         message_id=normalized_existing_message,
                                         record=record,
+                                        extra_details={
+                                            "stage": stage_name,
+                                            "reason": "anchor_category",
+                                        },
                                     )
                                     return
-                                record = self._resolve_role_anchor_record(
-                                    chat_id, normalized_existing_message
-                                )
-                                if record is not None:
-                                    self._log_anchor_preservation_skip(
-                                        chat_id=chat_id,
-                                        message_id=normalized_existing_message,
-                                        record=record,
-                                    )
+                                if self._should_block_anchor_deletion(
+                                    chat_id=chat_id,
+                                    message_id=normalized_existing_message,
+                                    allow_anchor_deletion=False,
+                                ):
                                     return
                                 try:
                                     await self._messenger.delete_message(
@@ -2092,12 +2108,8 @@ class PokerBotViewer:
         if chat_id is None:
             return
 
-        stage = getattr(game, "state", GameState.INITIAL)
-        if not isinstance(stage, GameState):
-            try:
-                stage = GameState(stage)
-            except Exception:
-                stage = GameState.INITIAL
+        raw_stage = getattr(game, "state", GameState.INITIAL)
+        stage = self._record_chat_stage(chat_id, raw_stage) or GameState.INITIAL
         stage_name = stage.name
 
         if self._is_private_chat(chat_id):
@@ -2291,6 +2303,33 @@ class PokerBotViewer:
         except Exception:
             return None
 
+    @staticmethod
+    def _resolve_game_state(state: Any) -> Optional[GameState]:
+        if isinstance(state, GameState):
+            return state
+        if state is None:
+            return None
+        if isinstance(state, str):
+            candidate = state.strip()
+            if not candidate:
+                return None
+            normalized = candidate.upper().replace("-", "_").replace(" ", "_")
+            try:
+                return GameState[normalized]
+            except KeyError:
+                pass
+        try:
+            return GameState(state)
+        except Exception:
+            return None
+
+    def _record_chat_stage(
+        self, chat_id: ChatId, state: Any
+    ) -> Optional[GameState]:
+        resolved = self._resolve_game_state(state)
+        self._anchor_registry.set_stage(chat_id, resolved)
+        return resolved
+
     def _log_anchor_preservation_skip(
         self,
         *,
@@ -2315,6 +2354,41 @@ class PokerBotViewer:
             extra=extra,
         )
 
+    def _should_block_anchor_deletion(
+        self,
+        *,
+        chat_id: ChatId,
+        message_id: Optional[int],
+        allow_anchor_deletion: bool = False,
+    ) -> bool:
+        record = self._resolve_role_anchor_record(chat_id, message_id)
+        if record is None:
+            return False
+
+        stage = self._anchor_registry.get_stage(chat_id)
+        resolved_stage = self._resolve_game_state(stage)
+        stage_label = getattr(resolved_stage, "name", None)
+
+        if resolved_stage in self._ACTIVE_ANCHOR_STATES:
+            self._log_anchor_preservation_skip(
+                chat_id=chat_id,
+                message_id=message_id,
+                record=record,
+                extra_details={"stage": stage_label, "reason": "active_stage"},
+            )
+            return True
+
+        if not allow_anchor_deletion:
+            self._log_anchor_preservation_skip(
+                chat_id=chat_id,
+                message_id=message_id,
+                record=record,
+                extra_details={"stage": stage_label, "reason": "guarded"},
+            )
+            return True
+
+        return False
+
     async def sync_player_private_keyboards(
         self,
         game: Game,
@@ -2324,13 +2398,15 @@ class PokerBotViewer:
         players: Optional[Sequence[Player]] = None,
     ) -> None:
         stage = getattr(game, "state", GameState.INITIAL)
+        chat_id_for_stage = getattr(game, "chat_id", None)
+        resolved_stage: Optional[GameState]
+        if chat_id_for_stage is not None:
+            resolved_stage = self._record_chat_stage(chat_id_for_stage, stage)
+        else:
+            resolved_stage = self._resolve_game_state(stage)
         if stage_name is None:
-            if not isinstance(stage, GameState):
-                try:
-                    stage = GameState(stage)
-                except Exception:
-                    stage = GameState.INITIAL
-            stage_name = stage.name
+            resolved = resolved_stage or GameState.INITIAL
+            stage_name = resolved.name
 
         if community_cards is None:
             community_cards_source: Optional[Sequence[Card]] = getattr(
@@ -2647,12 +2723,8 @@ class PokerBotViewer:
             )
             return
 
-        stage = getattr(game, "state", GameState.INITIAL)
-        if not isinstance(stage, GameState):
-            try:
-                stage = GameState(stage)
-            except Exception:
-                stage = GameState.INITIAL
+        raw_stage = getattr(game, "state", GameState.INITIAL)
+        stage = self._record_chat_stage(chat_id, raw_stage) or GameState.INITIAL
         stage_name = stage.name
 
         community_cards = self._extract_community_cards(game)
@@ -2988,6 +3060,16 @@ class PokerBotViewer:
     async def clear_all_player_anchors(self, game: Game) -> None:
         chat_id = getattr(game, "chat_id", None)
         if chat_id is None or self._is_private_chat(chat_id):
+            return
+
+        raw_stage = getattr(game, "state", GameState.INITIAL)
+        stage = self._record_chat_stage(chat_id, raw_stage)
+        stage_name = getattr(stage, "name", None)
+        if stage in self._ACTIVE_ANCHOR_STATES:
+            logger.info(
+                "[AnchorPersistence] Skipped anchor cleanup during active stage",
+                extra={"chat_id": chat_id, "stage": stage_name},
+            )
             return
 
         message_ids_to_delete = getattr(game, "message_ids_to_delete", [])
@@ -3363,15 +3445,12 @@ class PokerBotViewer:
     ) -> None:
         """Delete a message while keeping the cache in sync."""
         normalized_message = self._safe_int(message_id)
-        if not allow_anchor_deletion:
-            record = self._resolve_role_anchor_record(chat_id, normalized_message)
-            if record is not None:
-                self._log_anchor_preservation_skip(
-                    chat_id=chat_id,
-                    message_id=normalized_message,
-                    record=record,
-                )
-                return
+        if self._should_block_anchor_deletion(
+            chat_id=chat_id,
+            message_id=normalized_message,
+            allow_anchor_deletion=allow_anchor_deletion,
+        ):
+            return
 
         normalized_chat = self._safe_int(chat_id)
         lock = await self._acquire_message_lock(chat_id, message_id)
