@@ -75,13 +75,15 @@ DICE_DELAY_SEC = 5
 BONUSES = (5, 20, 40, 80, 160, 320)
 DICES = "⚀⚁⚂⚃⚄⚅"
 
-AUTO_START_MAX_UPDATES_PER_MINUTE = 20
-AUTO_START_MIN_UPDATE_INTERVAL = datetime.timedelta(
-    seconds=60 / AUTO_START_MAX_UPDATES_PER_MINUTE
+AUTO_START_MAX_UPDATES_PER_MINUTE = (
+    GameEngine.AUTO_START_MAX_UPDATES_PER_MINUTE
 )
-KEY_START_COUNTDOWN_LAST_TEXT = "start_countdown_last_text"
-KEY_START_COUNTDOWN_LAST_TIMESTAMP = "start_countdown_last_timestamp"
-KEY_START_COUNTDOWN_CONTEXT = "start_countdown_context"
+AUTO_START_MIN_UPDATE_INTERVAL = GameEngine.AUTO_START_MIN_UPDATE_INTERVAL
+KEY_START_COUNTDOWN_LAST_TEXT = GameEngine.KEY_START_COUNTDOWN_LAST_TEXT
+KEY_START_COUNTDOWN_LAST_TIMESTAMP = (
+    GameEngine.KEY_START_COUNTDOWN_LAST_TIMESTAMP
+)
+KEY_START_COUNTDOWN_CONTEXT = GameEngine.KEY_START_COUNTDOWN_CONTEXT
 
 # legacy keys kept for backward compatibility but unused
 KEY_OLD_PLAYERS = "old_players"
@@ -169,7 +171,6 @@ class PokerBotModel:
         self._player_report_cache = PlayerReportCache(
             logger_=logger.getChild("player_report_cache")
         )
-        self._game_engine: GameEngine = GameEngine()
         self._stats: BaseStatsService = stats_service or NullStatsService()
         self._player_manager = PlayerManager(
             table_manager=self._table_manager,
@@ -195,6 +196,22 @@ class PokerBotModel:
             )
             setattr(self._view, "request_metrics", metrics_candidate)
         self._request_metrics = metrics_candidate
+        self._game_engine = GameEngine(
+            table_manager=self._table_manager,
+            view=self._view,
+            winner_determination=self._winner_determine,
+            request_metrics=self._request_metrics,
+            round_rate=self._round_rate,
+            stats_service=self._stats,
+            assign_role_labels=self.assign_role_labels,
+            clear_player_anchors=self._clear_player_anchors,
+            send_turn_message=self._send_turn_message,
+            get_stage_lock=self._get_stage_lock,
+            build_identity_from_player=self._build_identity_from_player,
+            safe_int=self._safe_int,
+            old_players_key=KEY_OLD_PLAYERS,
+            logger=logger.getChild("game_engine"),
+        )
 
     @property
     def _min_players(self):
@@ -1658,125 +1675,10 @@ class PokerBotModel:
         self, context: CallbackContext, game: Game, chat_id: ChatId
     ) -> None:
         """مراحل شروع یک دست جدید بازی را انجام می‌دهد."""
+
         async with self._chat_guard(chat_id):
             await self._cancel_auto_start(context, chat_id, game)
-            logger.info(
-                "[Game] start_hand invoked",
-                extra={
-                    "chat_id": chat_id,
-                    "game_id": getattr(game, "id", None),
-                },
-            )
-            if game.ready_message_main_id:
-                deleted_ready_message = False
-                try:
-                    await self._view.delete_message(chat_id, game.ready_message_main_id)
-                    deleted_ready_message = True
-                except Exception as e:
-                    logger.warning(
-                        "Failed to delete ready message",
-                        extra={
-                            "chat_id": chat_id,
-                            "message_id": game.ready_message_main_id,
-                            "error_type": type(e).__name__,
-                        },
-                    )
-                if deleted_ready_message:
-                    game.ready_message_main_id = None
-                game.ready_message_main_text = ""
-
-            # Ensure dealer_index is initialized before use
-            if not hasattr(game, "dealer_index"):
-                game.dealer_index = -1
-
-            new_dealer_index = game.advance_dealer()
-            if new_dealer_index == -1:
-                new_dealer_index = game.next_occupied_seat(-1)
-                game.dealer_index = new_dealer_index
-
-            if game.dealer_index == -1:
-                logger.warning("Cannot start game without an occupied dealer seat")
-                return
-
-            if self._stats_enabled():
-                identities = [
-                    self._build_identity_from_player(player)
-                    for player in game.seated_players()
-                ]
-                await self._stats.start_hand(
-                    hand_id=game.id,
-                    chat_id=self._safe_int(chat_id),
-                    players=identities,
-                )
-
-            game.state = GameState.ROUND_PRE_FLOP
-            await self._request_metrics.start_cycle(
-                self._safe_int(chat_id), game.id
-            )
-
-            if game.seat_announcement_message_id:
-                try:
-                    await self._view.delete_message(
-                        chat_id, game.seat_announcement_message_id
-                    )
-                except Exception as exc:
-                    logger.debug(
-                        "Failed to delete seat announcement",
-                        extra={
-                            "chat_id": chat_id,
-                            "message_id": game.seat_announcement_message_id,
-                            "error_type": type(exc).__name__,
-                        },
-                    )
-                game.seat_announcement_message_id = None
-
-            await self._clear_player_anchors(game)
-
-            await self._divide_cards(game, chat_id)
-
-            # این متد به تنهایی تمام کارهای لازم برای شروع راند را انجام می‌دهد.
-            # از جمله تعیین بلایندها، تعیین نوبت اول و ارسال پیام نوبت.
-            current_player = await self._round_rate.set_blinds(game, chat_id)
-            self.assign_role_labels(game)
-
-            game.chat_id = chat_id
-
-            stage_lock = await self._get_stage_lock(chat_id)
-            async with stage_lock:
-                await self._view.send_player_role_anchors(game=game, chat_id=chat_id)
-
-            action_str = "بازی شروع شد"
-            game.last_actions.append(action_str)
-            if len(game.last_actions) > 5:
-                game.last_actions.pop(0)
-            if current_player:
-                await self._send_turn_message(
-                    game,
-                    current_player,
-                    chat_id,
-                )
-
-            # نیازی به هیچ کد دیگری در اینجا نیست.
-            # کدهای اضافی حذف شدند.
-
-            # ذخیره بازیکنان برای دست بعدی (این خط می‌تواند بماند)
-            context.chat_data[KEY_OLD_PLAYERS] = [p.user_id for p in game.players]
-
-    async def _divide_cards(self, game: Game, chat_id: ChatId):
-        """کارت‌ها را فقط در گروه همراه با کیبورد انتخابی توزیع می‌کند."""
-        for player in game.seated_players():
-            if len(game.remain_cards) < 2:
-                await self._view.send_message(
-                    chat_id, "کارت‌های کافی در دسته وجود ندارد! بازی ریست می‌شود."
-                )
-                await self._request_metrics.end_cycle(
-                    self._safe_int(chat_id), cycle_token=game.id
-                )
-                game.reset()
-                return
-
-            cards = [game.remain_cards.pop(), game.remain_cards.pop()]
-            player.cards = cards
+            await self._game_engine.start_game(context, game, chat_id)
 
     def _is_betting_round_over(self, game: Game) -> bool:
         """
