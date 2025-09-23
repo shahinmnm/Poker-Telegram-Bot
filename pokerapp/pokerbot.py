@@ -215,6 +215,7 @@ class PokerBot:
             kv=self._kv_async,
             table_manager=self._table_manager,
             logger=logger.getChild("private_match"),
+            constants=self._cfg.constants,
             redis_ops=self._redis_ops,
         )
         self._model = PokerBotModel(

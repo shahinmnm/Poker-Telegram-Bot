@@ -5,11 +5,25 @@ import enum
 import datetime
 from typing import Tuple, List, Optional
 from uuid import uuid4
+
 from pokerapp.cards import get_cards
-MAX_PLAYERS = 8
-MIN_PLAYERS = 2
-SMALL_BLIND = 5
-DEFAULT_MONEY = 1000
+from pokerapp.config import get_game_constants
+
+
+_GAME_CONSTANTS = get_game_constants().game
+
+
+def _coerce_int(value, default: int) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
+MAX_PLAYERS = _coerce_int(_GAME_CONSTANTS.get("max_players", 8), 8)
+MIN_PLAYERS = _coerce_int(_GAME_CONSTANTS.get("min_players", 2), 2)
+SMALL_BLIND = _coerce_int(_GAME_CONSTANTS.get("small_blind", 5), 5)
+DEFAULT_MONEY = _coerce_int(_GAME_CONSTANTS.get("default_money", 1000), 1000)
 
 MessageId = str
 ChatId = str

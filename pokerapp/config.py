@@ -1,24 +1,233 @@
+import json
 import logging
 import os
+from copy import deepcopy
 from pathlib import Path
-from typing import List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import urljoin
+
+import yaml
 
 
 logger = logging.getLogger(__name__)
 
 
-DEFAULT_WEBHOOK_LISTEN = "127.0.0.1"
-DEFAULT_WEBHOOK_PORT = 3000
-DEFAULT_WEBHOOK_PATH = "/telegram/webhook-poker2025"
+_BASE_DIR = Path(__file__).resolve().parent.parent
+_DEFAULT_CONFIG_DIR = _BASE_DIR / "config"
+_DEFAULT_GAME_CONSTANTS_PATH = _DEFAULT_CONFIG_DIR / "game_constants.yaml"
+_DEFAULT_SYSTEM_CONSTANTS_PATH = _DEFAULT_CONFIG_DIR / "system_constants.json"
+
+_DEFAULT_GAME_CONSTANTS_DATA: Dict[str, Any] = {
+    "game": {
+        "dice_mult": 10,
+        "dice_delay_sec": 5,
+        "bonuses": [5, 20, 40, 80, 160, 320],
+        "dices": "⚀⚁⚂⚃⚄⚅",
+        "min_players": 2,
+        "max_players": 8,
+        "small_blind": 5,
+        "default_money": 1000,
+        "max_time_for_turn_seconds": 120,
+        "auto_start": {
+            "max_updates_per_minute": 20,
+            "min_update_interval_seconds": 3,
+        },
+    },
+    "ui": {
+        "description_file": "assets/description_bot.md",
+        "stages_persian": ["پری فلاپ", "فلاپ", "ترن", "ریور"],
+        "stage_map": {
+            "ROUND_PRE_FLOP": "پری فلاپ",
+            "PRE_FLOP": "پری فلاپ",
+            "PRE-FLOP": "پری فلاپ",
+            "ROUND_FLOP": "فلاپ",
+            "FLOP": "فلاپ",
+            "ROUND_TURN": "ترن",
+            "TURN": "ترن",
+            "ROUND_RIVER": "ریور",
+            "RIVER": "ریور",
+        },
+    },
+    "redis": {
+        "private_match_queue_key": "pokerbot:private_matchmaking:queue",
+        "private_match_user_key_prefix": "pokerbot:private_matchmaking:user:",
+        "private_match_record_key_prefix": "pokerbot:private_matchmaking:match:",
+        "private_match_queue_ttl": 180,
+        "private_match_state_ttl": 3600,
+    },
+    "engine": {
+        "key_old_players": "old_players",
+        "key_chat_data_game": "game",
+        "key_stop_request": "stop_request",
+        "key_start_countdown_last_text": "start_countdown_last_text",
+        "key_start_countdown_last_timestamp": "start_countdown_last_timestamp",
+        "key_start_countdown_context": "start_countdown_context",
+        "stop_confirm_callback": "stop:confirm",
+        "stop_resume_callback": "stop:resume",
+    },
+}
+
+_DEFAULT_SYSTEM_CONSTANTS_DATA: Dict[str, Any] = {
+    "default_webhook_listen": "127.0.0.1",
+    "default_webhook_port": 3000,
+    "default_webhook_path": "/telegram/webhook-poker2025",
+    "default_rate_limit_per_second": 1,
+    "default_rate_limit_per_minute": 20,
+}
+
+
+def _resolve_config_path(candidate: Optional[str], default: Path) -> Path:
+    if not candidate:
+        return default
+    path = Path(candidate)
+    if not path.is_absolute():
+        path = _BASE_DIR / path
+    return path
+
+
+def _deep_merge(base: Dict[str, Any], overrides: Dict[str, Any]) -> Dict[str, Any]:
+    for key, value in overrides.items():
+        if (
+            isinstance(value, dict)
+            and isinstance(base.get(key), dict)
+        ):
+            base[key] = _deep_merge(dict(base[key]), value)
+        else:
+            base[key] = value
+    return base
+
+
+class GameConstants:
+    def __init__(
+        self,
+        path: Optional[str] = None,
+        *,
+        defaults: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        resolved_path = _resolve_config_path(
+            path or os.getenv("POKERBOT_GAME_CONSTANTS_FILE"),
+            _DEFAULT_GAME_CONSTANTS_PATH,
+        )
+        self._path: Path = resolved_path
+        self._defaults: Dict[str, Any] = deepcopy(defaults or _DEFAULT_GAME_CONSTANTS_DATA)
+        self._data: Dict[str, Any] = {}
+        self.reload()
+
+    @property
+    def path(self) -> Path:
+        return self._path
+
+    def reload(self) -> None:
+        raw_data: Dict[str, Any] = {}
+        try:
+            with self._path.open("r", encoding="utf-8") as handle:
+                loaded = yaml.safe_load(handle) or {}
+                if not isinstance(loaded, dict):
+                    logger.warning(
+                        "Game constants file %s did not contain a mapping; using defaults.",
+                        self._path,
+                    )
+                else:
+                    raw_data = loaded
+        except FileNotFoundError:
+            logger.warning(
+                "Game constants file %s not found; using default values.",
+                self._path,
+            )
+        except yaml.YAMLError as exc:
+            logger.warning(
+                "Failed to parse game constants file %s: %s; using defaults.",
+                self._path,
+                exc,
+            )
+
+        merged = deepcopy(self._defaults)
+        if raw_data:
+            merged = _deep_merge(merged, raw_data)
+        self._data = merged
+
+    def get(self, key: str, default: Any = None) -> Any:
+        value = self._data.get(key, default)
+        return deepcopy(value)
+
+    def section(self, key: str) -> Dict[str, Any]:
+        section = self._data.get(key, {})
+        if isinstance(section, dict):
+            return deepcopy(section)
+        return {}
+
+    @property
+    def game(self) -> Dict[str, Any]:
+        return self.section("game")
+
+    @property
+    def ui(self) -> Dict[str, Any]:
+        return self.section("ui")
+
+    @property
+    def redis(self) -> Dict[str, Any]:
+        return self.section("redis")
+
+    @property
+    def engine(self) -> Dict[str, Any]:
+        return self.section("engine")
+
+
+def _load_system_constants() -> Dict[str, Any]:
+    resolved_path = _resolve_config_path(
+        os.getenv("POKERBOT_SYSTEM_CONSTANTS_FILE"),
+        _DEFAULT_SYSTEM_CONSTANTS_PATH,
+    )
+    loaded: Dict[str, Any] = {}
+    try:
+        with resolved_path.open("r", encoding="utf-8") as handle:
+            parsed = json.load(handle)
+            if isinstance(parsed, dict):
+                loaded = parsed
+            else:
+                logger.warning(
+                    "System constants file %s did not contain a JSON object; ignoring it.",
+                    resolved_path,
+                )
+    except FileNotFoundError:
+        logger.warning(
+            "System constants file %s not found; using built-in defaults.",
+            resolved_path,
+        )
+    except json.JSONDecodeError as exc:
+        logger.warning(
+            "Failed to parse system constants file %s: %s; using defaults.",
+            resolved_path,
+            exc,
+        )
+    merged = deepcopy(_DEFAULT_SYSTEM_CONSTANTS_DATA)
+    for key, value in loaded.items():
+        if key in merged:
+            merged[key] = value
+    return merged
+
+
+_SYSTEM_CONSTANTS = _load_system_constants()
+
+DEFAULT_WEBHOOK_LISTEN = _SYSTEM_CONSTANTS["default_webhook_listen"]
+DEFAULT_WEBHOOK_PORT = _SYSTEM_CONSTANTS["default_webhook_port"]
+DEFAULT_WEBHOOK_PATH = _SYSTEM_CONSTANTS["default_webhook_path"]
 # Telegram Bot API documentation recommends avoiding more than one message per
 # second in a chat and limits groups to 20 messages per minute.
-DEFAULT_RATE_LIMIT_PER_SECOND = 1
-DEFAULT_RATE_LIMIT_PER_MINUTE = 20
+DEFAULT_RATE_LIMIT_PER_SECOND = _SYSTEM_CONSTANTS["default_rate_limit_per_second"]
+DEFAULT_RATE_LIMIT_PER_MINUTE = _SYSTEM_CONSTANTS["default_rate_limit_per_minute"]
+
+
+GAME_CONSTANTS = GameConstants()
+
+
+def get_game_constants() -> GameConstants:
+    return GAME_CONSTANTS
 
 
 class Config:
     def __init__(self):
+        self.constants: GameConstants = GAME_CONSTANTS
         self.REDIS_HOST: str = os.getenv(
             "POKERBOT_REDIS_HOST",
             default="localhost",

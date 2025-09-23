@@ -32,7 +32,11 @@ import logging
 import json
 import threading
 from cachetools import FIFOCache, LRUCache
-from pokerapp.config import DEFAULT_RATE_LIMIT_PER_MINUTE, DEFAULT_RATE_LIMIT_PER_SECOND
+from pokerapp.config import (
+    DEFAULT_RATE_LIMIT_PER_MINUTE,
+    DEFAULT_RATE_LIMIT_PER_SECOND,
+    get_game_constants,
+)
 from pokerapp.winnerdetermination import HAND_NAMES_TRANSLATIONS
 from pokerapp.desk import DeskImageGenerator
 from pokerapp.cards import Cards, Card
@@ -59,6 +63,39 @@ debug_trace_logger = logging.getLogger("pokerbot.debug_trace")
 _CARD_SPACER = "     "
 
 
+def _load_stage_constants():
+    ui_constants = get_game_constants().ui
+    stages = ui_constants.get(
+        "stages_persian",
+        ["پری فلاپ", "فلاپ", "ترن", "ریور"],
+    )
+    if not isinstance(stages, (list, tuple)):
+        stages = ["پری فلاپ", "فلاپ", "ترن", "ریور"]
+    stage_map = ui_constants.get("stage_map", {})
+    if not isinstance(stage_map, dict):
+        stage_map = {}
+    default_stage_map = {
+        "ROUND_PRE_FLOP": "پری فلاپ",
+        "PRE_FLOP": "پری فلاپ",
+        "PRE-FLOP": "پری فلاپ",
+        "ROUND_FLOP": "فلاپ",
+        "FLOP": "فلاپ",
+        "ROUND_TURN": "ترن",
+        "TURN": "ترن",
+        "ROUND_RIVER": "ریور",
+        "RIVER": "ریور",
+    }
+    merged_stage_map = {**default_stage_map, **stage_map}
+    normalized_map = {
+        str(key): str(value)
+        for key, value in merged_stage_map.items()
+    }
+    return list(stages), normalized_map
+
+
+_STAGES_PERSIAN, _STAGE_MAP = _load_stage_constants()
+
+
 def build_player_cards_keyboard(
     hole_cards: Sequence[str],
     community_cards: Sequence[str],
@@ -73,18 +110,8 @@ def build_player_cards_keyboard(
     row2 = list(community_cards) or ["⬜️"]
 
     # Row 3: Game stages, with the current stage highlighted by a '✅' emoji.
-    stages_persian = ["پری فلاپ", "فلاپ", "ترن", "ریور"]
-    stage_map = {
-        "ROUND_PRE_FLOP": "پری فلاپ",
-        "PRE_FLOP": "پری فلاپ",
-        "PRE-FLOP": "پری فلاپ",
-        "ROUND_FLOP": "فلاپ",
-        "FLOP": "فلاپ",
-        "ROUND_TURN": "ترن",
-        "TURN": "ترن",
-        "ROUND_RIVER": "ریور",
-        "RIVER": "ریور",
-    }
+    stages_persian = list(_STAGES_PERSIAN)
+    stage_map = _STAGE_MAP
 
     current_stage_label = stage_map.get(current_stage.upper(), "")
 

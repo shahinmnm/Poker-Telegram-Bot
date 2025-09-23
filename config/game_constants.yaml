@@ -1,0 +1,44 @@
+game:
+  dice_mult: 10
+  dice_delay_sec: 5
+  bonuses: [5, 20, 40, 80, 160, 320]
+  dices: "⚀⚁⚂⚃⚄⚅"
+  min_players: 2
+  max_players: 8
+  small_blind: 5
+  default_money: 1000
+  max_time_for_turn_seconds: 120
+  auto_start:
+    max_updates_per_minute: 20
+    min_update_interval_seconds: 3
+
+ui:
+  description_file: "assets/description_bot.md"
+  stages_persian: ["پری فلاپ", "فلاپ", "ترن", "ریور"]
+  stage_map:
+    ROUND_PRE_FLOP: "پری فلاپ"
+    PRE_FLOP: "پری فلاپ"
+    PRE-FLOP: "پری فلاپ"
+    ROUND_FLOP: "فلاپ"
+    FLOP: "فلاپ"
+    ROUND_TURN: "ترن"
+    TURN: "ترن"
+    ROUND_RIVER: "ریور"
+    RIVER: "ریور"
+
+redis:
+  private_match_queue_key: "pokerbot:private_matchmaking:queue"
+  private_match_user_key_prefix: "pokerbot:private_matchmaking:user:"
+  private_match_record_key_prefix: "pokerbot:private_matchmaking:match:"
+  private_match_queue_ttl: 180
+  private_match_state_ttl: 3600
+
+engine:
+  key_old_players: "old_players"
+  key_chat_data_game: "game"
+  key_stop_request: "stop_request"
+  key_start_countdown_last_text: "start_countdown_last_text"
+  key_start_countdown_last_timestamp: "start_countdown_last_timestamp"
+  key_start_countdown_context: "start_countdown_context"
+  stop_confirm_callback: "stop:confirm"
+  stop_resume_callback: "stop:resume"
