@@ -29,6 +29,7 @@ from sqlalchemy.ext.asyncio import (
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 from sqlalchemy.pool import StaticPool
 
+from pokerapp.utils.datetime_utils import ensure_utc, utc_now
 from pokerapp.utils.markdown import escape_markdown_v1
 
 if TYPE_CHECKING:
@@ -311,7 +312,7 @@ class StatsService(BaseStatsService):
 
     @staticmethod
     def _utcnow() -> dt.datetime:
-        return dt.datetime.now(dt.timezone.utc)
+        return utc_now()
 
     @staticmethod
     def _coerce_int(value: Optional[int | str]) -> int:
@@ -442,7 +443,7 @@ class StatsService(BaseStatsService):
             return
         await self._ensure_schema()
         normalized = self._normalize_identity(identity)
-        now = timestamp or self._utcnow()
+        now = ensure_utc(timestamp) if timestamp else self._utcnow()
         async with self._sessionmaker() as session:
             async with session.begin():
                 stats = await session.get(PlayerStats, normalized.user_id)
@@ -477,7 +478,7 @@ class StatsService(BaseStatsService):
         if not self._enabled or self._sessionmaker is None:
             return
         await self._ensure_schema()
-        started_at = start_time or self._utcnow()
+        started_at = ensure_utc(start_time) if start_time else self._utcnow()
         player_list = [self._normalize_identity(player) for player in players]
         self._active_hands[hand_id] = _HandContext(
             hand_id=hand_id,
@@ -566,7 +567,7 @@ class StatsService(BaseStatsService):
         if not self._enabled or self._sessionmaker is None:
             return
         await self._ensure_schema()
-        ended_at = end_time or self._utcnow()
+        ended_at = ensure_utc(end_time) if end_time else self._utcnow()
         context = self._active_hands.pop(hand_id, None)
         started_at = context.started_at if context else ended_at
         duration_seconds = int(
@@ -791,7 +792,7 @@ class StatsService(BaseStatsService):
         if not self._enabled or self._sessionmaker is None:
             return
         await self._ensure_schema()
-        now = timestamp or self._utcnow()
+        now = ensure_utc(timestamp) if timestamp else self._utcnow()
         async with self._sessionmaker() as session:
             async with session.begin():
                 stats = await session.get(PlayerStats, self._coerce_int(user_id))
