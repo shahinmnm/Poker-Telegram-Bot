@@ -1,14 +1,12 @@
 from __future__ import annotations
 
-import asyncio
 import datetime
 import logging
 import uuid
 from dataclasses import dataclass
-from typing import Awaitable, Callable, Dict, List, Optional, Tuple, TypeVar
+from typing import Awaitable, Callable, Dict, List, Optional, Tuple
 
 import redis.asyncio as aioredis
-from redis.exceptions import ConnectionError as RedisConnectionError, NoScriptError
 from telegram import ReplyKeyboardMarkup, User
 from telegram.helpers import mention_markdown as format_mention_markdown
 
@@ -19,9 +17,7 @@ from pokerapp.stats import BaseStatsService, PlayerIdentity
 from pokerapp.table_manager import TableManager
 from pokerapp.utils.markdown import escape_markdown_v1
 from pokerapp.utils.request_metrics import RequestMetrics
-
-T = TypeVar("T")
-
+from pokerapp.utils.redis_safeops import RedisSafeOps
 
 @dataclass(slots=True)
 class PrivateMatchPlayerInfo:
@@ -38,20 +34,19 @@ class PrivateMatchService:
     PRIVATE_MATCH_QUEUE_TTL = 180  # seconds
     PRIVATE_MATCH_STATE_TTL = 3600  # seconds
 
-    DEFAULT_MAX_ATTEMPTS = 3
-    DEFAULT_BACKOFF_SECONDS = 0.2
-
     def __init__(
         self,
         kv: aioredis.Redis,
         table_manager: TableManager,
         logger: logging.Logger,
+        *,
+        redis_ops: Optional[RedisSafeOps] = None,
     ) -> None:
-        self._kv = kv
         self._table_manager = table_manager
         self._logger = logger
-        self._max_attempts = self.DEFAULT_MAX_ATTEMPTS
-        self._base_backoff = self.DEFAULT_BACKOFF_SECONDS
+        self._redis_ops = redis_ops or RedisSafeOps(
+            kv, logger=logger.getChild("redis_safeops")
+        )
         self._safe_int_fn: Optional[Callable[[UserId], int]] = None
         self._build_private_menu: Optional[Callable[[], ReplyKeyboardMarkup]] = None
         self._view: Optional[PokerBotViewer] = None
@@ -90,7 +85,8 @@ class PrivateMatchService:
 
     async def get_private_match_state(self, user_id: UserId) -> Dict[str, str]:
         key = self.private_user_key(user_id)
-        data = await self._execute_with_retry(lambda: self._kv.hgetall(key))
+        extra = {"user_id": self._safe_int(user_id)}
+        data = await self._redis_ops.safe_hgetall(key, log_extra=extra)
         if not data:
             return {}
         return self._decode_hash(data)
@@ -98,10 +94,11 @@ class PrivateMatchService:
     async def cleanup_private_queue(self) -> None:
         now = datetime.datetime.now(datetime.timezone.utc)
         cutoff_ts = int(now.timestamp()) - self.PRIVATE_MATCH_QUEUE_TTL
-        expired = await self._execute_with_retry(
-            lambda: self._kv.zrangebyscore(
-                self.PRIVATE_MATCH_QUEUE_KEY, "-inf", cutoff_ts
-            )
+        expired = await self._redis_ops.safe_zrangebyscore(
+            self.PRIVATE_MATCH_QUEUE_KEY,
+            "-inf",
+            cutoff_ts,
+            log_extra={"queue": self.PRIVATE_MATCH_QUEUE_KEY},
         )
         if not expired:
             return
@@ -110,14 +107,15 @@ class PrivateMatchService:
                 user_id_str = raw_user_id.decode()
             else:
                 user_id_str = str(raw_user_id)
-            await self._execute_with_retry(
-                lambda member=raw_user_id: self._kv.zrem(
-                    self.PRIVATE_MATCH_QUEUE_KEY, member
-                )
+            user_extra = {"user_id": self._safe_int(user_id_str)}
+            await self._redis_ops.safe_zrem(
+                self.PRIVATE_MATCH_QUEUE_KEY,
+                raw_user_id,
+                log_extra=user_extra,
             )
             state = await self.get_private_match_state(user_id_str)
             key = self.private_user_key(user_id_str)
-            await self._execute_with_retry(lambda key=key: self._kv.delete(key))
+            await self._redis_ops.safe_delete(key, log_extra=user_extra)
             chat_id = (
                 self._coerce_optional_int(state.get("chat_id")) if state else None
             )
@@ -131,17 +129,19 @@ class PrivateMatchService:
                 )
 
     async def try_pop_match(self) -> Optional[List[PrivateMatchPlayerInfo]]:
-        popped = await self._execute_with_retry(
-            lambda: self._kv.zpopmin(self.PRIVATE_MATCH_QUEUE_KEY, 2)
+        popped = await self._redis_ops.safe_zpopmin(
+            self.PRIVATE_MATCH_QUEUE_KEY,
+            2,
+            log_extra={"queue": self.PRIVATE_MATCH_QUEUE_KEY},
         )
         if not popped:
             return None
         if len(popped) < 2:
             member, score = popped[0]
-            await self._execute_with_retry(
-                lambda member=member, score=score: self._kv.zadd(
-                    self.PRIVATE_MATCH_QUEUE_KEY, {member: score}
-                )
+            await self._redis_ops.safe_zadd(
+                self.PRIVATE_MATCH_QUEUE_KEY,
+                {member: score},
+                log_extra={"queue": self.PRIVATE_MATCH_QUEUE_KEY},
             )
             return None
         states: List[Tuple[str, Dict[str, str], float]] = []
@@ -154,10 +154,10 @@ class PrivateMatchService:
             for user_id_str, state, score in states:
                 timestamp = state.get("timestamp") if state else None
                 score_value = int(timestamp) if timestamp else score
-                await self._execute_with_retry(
-                    lambda user_id_str=user_id_str, score_value=score_value: self._kv.zadd(
-                        self.PRIVATE_MATCH_QUEUE_KEY, {user_id_str: score_value}
-                    )
+                await self._redis_ops.safe_zadd(
+                    self.PRIVATE_MATCH_QUEUE_KEY,
+                    {user_id_str: score_value},
+                    log_extra={"user_id": self._safe_int(user_id_str)},
                 )
             return None
         players = [
@@ -168,23 +168,21 @@ class PrivateMatchService:
         for idx, (user_id_str, state, _) in enumerate(valid[:2]):
             opponent = players[1 - idx]
             state_key = self.private_user_key(user_id_str)
-            await self._execute_with_retry(
-                lambda state_key=state_key, state=state, opponent=opponent: self._kv.hset(
-                    state_key,
-                    mapping={
-                        "status": "matched",
-                        "opponent": str(opponent.user_id),
-                        "matched_at": str(now_ts),
-                        "chat_id": state.get("chat_id", ""),
-                        "display_name": state.get("display_name", ""),
-                        "username": state.get("username", ""),
-                    },
-                )
+            user_extra = {"user_id": self._safe_int(user_id_str)}
+            await self._redis_ops.safe_hset(
+                state_key,
+                {
+                    "status": "matched",
+                    "opponent": str(opponent.user_id),
+                    "matched_at": str(now_ts),
+                    "chat_id": state.get("chat_id", ""),
+                    "display_name": state.get("display_name", ""),
+                    "username": state.get("username", ""),
+                },
+                log_extra=user_extra,
             )
-            await self._execute_with_retry(
-                lambda state_key=state_key: self._kv.expire(
-                    state_key, self.PRIVATE_MATCH_STATE_TTL
-                )
+            await self._redis_ops.safe_expire(
+                state_key, self.PRIVATE_MATCH_STATE_TTL, log_extra=user_extra
             )
         return players
 
@@ -211,28 +209,28 @@ class PrivateMatchService:
         )
         username = user.username or ""
         state_key = self.private_user_key(user.id)
-        await self._execute_with_retry(
-            lambda state_key=state_key: self._kv.hset(
-                state_key,
-                mapping={
-                    "status": "queued",
-                    "timestamp": str(timestamp),
-                    "chat_id": str(chat_id),
-                    "display_name": display_name,
-                    "username": username,
-                },
-            )
+        user_extra = {
+            "user_id": self._safe_int(user.id),
+            "chat_id": chat_id,
+        }
+        await self._redis_ops.safe_hset(
+            state_key,
+            {
+                "status": "queued",
+                "timestamp": str(timestamp),
+                "chat_id": str(chat_id),
+                "display_name": display_name,
+                "username": username,
+            },
+            log_extra=user_extra,
         )
-        await self._execute_with_retry(
-            lambda state_key=state_key: self._kv.expire(
-                state_key, self.PRIVATE_MATCH_STATE_TTL
-            )
+        await self._redis_ops.safe_expire(
+            state_key, self.PRIVATE_MATCH_STATE_TTL, log_extra=user_extra
         )
-        await self._execute_with_retry(
-            lambda user=user, timestamp=timestamp: self._kv.zadd(
-                self.PRIVATE_MATCH_QUEUE_KEY,
-                {str(self._safe_int(user.id)): timestamp},
-            )
+        await self._redis_ops.safe_zadd(
+            self.PRIVATE_MATCH_QUEUE_KEY,
+            {str(self._safe_int(user.id)): timestamp},
+            log_extra=user_extra,
         )
 
         players = await self.try_pop_match()
@@ -278,26 +276,24 @@ class PrivateMatchService:
 
         started_at = datetime.datetime.now(datetime.timezone.utc)
         match_key = self.private_match_key(match_id)
-        await self._execute_with_retry(
-            lambda match_key=match_key: self._kv.hset(
-                match_key,
-                mapping={
-                    "status": "active",
-                    "chat_id": chat_id,
-                    "player_one": str(self._safe_int(players[0].user_id)),
-                    "player_two": str(self._safe_int(players[1].user_id)),
-                    "player_one_name": players[0].display_name,
-                    "player_two_name": players[1].display_name,
-                    "player_one_chat": str(players[0].chat_id or ""),
-                    "player_two_chat": str(players[1].chat_id or ""),
-                    "started_at": str(started_at.timestamp()),
-                },
-            )
+        match_extra = {"match_id": match_id, "chat_id": chat_id}
+        await self._redis_ops.safe_hset(
+            match_key,
+            {
+                "status": "active",
+                "chat_id": chat_id,
+                "player_one": str(self._safe_int(players[0].user_id)),
+                "player_two": str(self._safe_int(players[1].user_id)),
+                "player_one_name": players[0].display_name,
+                "player_two_name": players[1].display_name,
+                "player_one_chat": str(players[0].chat_id or ""),
+                "player_two_chat": str(players[1].chat_id or ""),
+                "started_at": str(started_at.timestamp()),
+            },
+            log_extra=match_extra,
         )
-        await self._execute_with_retry(
-            lambda match_key=match_key: self._kv.expire(
-                match_key, self.PRIVATE_MATCH_STATE_TTL
-            )
+        await self._redis_ops.safe_expire(
+            match_key, self.PRIVATE_MATCH_STATE_TTL, log_extra=match_extra
         )
 
         if self._require_stats_enabled()():
@@ -311,24 +307,26 @@ class PrivateMatchService:
         for idx, info in enumerate(players):
             opponent = players[1 - idx]
             state_key = self.private_user_key(info.user_id)
-            await self._execute_with_retry(
-                lambda state_key=state_key, info=info, opponent=opponent: self._kv.hset(
-                    state_key,
-                    mapping={
-                        "status": "playing",
-                        "match_id": match_id,
-                        "opponent": str(self._safe_int(opponent.user_id)),
-                        "opponent_name": opponent.display_name,
-                        "chat_id": str(info.chat_id or ""),
-                        "display_name": info.display_name,
-                        "username": info.username or "",
-                    },
-                )
+            state_extra = {
+                "user_id": self._safe_int(info.user_id),
+                "match_id": match_id,
+                "chat_id": chat_id,
+            }
+            await self._redis_ops.safe_hset(
+                state_key,
+                {
+                    "status": "playing",
+                    "match_id": match_id,
+                    "opponent": str(self._safe_int(opponent.user_id)),
+                    "opponent_name": opponent.display_name,
+                    "chat_id": str(info.chat_id or ""),
+                    "display_name": info.display_name,
+                    "username": info.username or "",
+                },
+                log_extra=state_extra,
             )
-            await self._execute_with_retry(
-                lambda state_key=state_key: self._kv.expire(
-                    state_key, self.PRIVATE_MATCH_STATE_TTL
-                )
+            await self._redis_ops.safe_expire(
+                state_key, self.PRIVATE_MATCH_STATE_TTL, log_extra=state_extra
             )
             if info.chat_id:
                 opponent_name_raw = (
@@ -390,28 +388,6 @@ class PrivateMatchService:
             return int(value)
         except (TypeError, ValueError):
             return None
-
-    async def _execute_with_retry(self, operation: Callable[[], Awaitable[T]]) -> T:
-        attempt = 0
-        delay = self._base_backoff
-        while True:
-            try:
-                return await operation()
-            except (NoScriptError, RedisConnectionError) as exc:
-                attempt += 1
-                if attempt >= self._max_attempts:
-                    self._logger.exception(
-                        "Redis operation failed after %s attempts", attempt
-                    )
-                    raise
-                self._logger.warning(
-                    "Redis operation failed (attempt %s/%s): %s",
-                    attempt,
-                    self._max_attempts,
-                    exc,
-                )
-                await asyncio.sleep(delay)
-                delay *= 2
 
     def _safe_int(self, value: UserId) -> int:
         if self._safe_int_fn is None:

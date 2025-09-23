@@ -61,6 +61,7 @@ from pokerapp.stats import (
 from pokerapp.private_match_service import PrivateMatchService
 from pokerapp.utils.cache import PlayerReportCache
 from pokerapp.utils.request_metrics import RequestCategory, RequestMetrics
+from pokerapp.utils.redis_safeops import RedisSafeOps
 from pokerapp.lock_manager import LockManager
 from pokerapp.player_manager import PlayerManager
 from pokerapp.game_engine import GameEngine
@@ -130,17 +131,23 @@ class PokerBotModel:
         table_manager: TableManager,
         private_match_service: PrivateMatchService,
         stats_service: Optional[BaseStatsService] = None,
+        *,
+        redis_ops: Optional[RedisSafeOps] = None,
     ):
         self._view: PokerBotViewer = view
         self._bot: Bot = bot
         self._cfg: Config = cfg
         self._kv = kv
+        self._redis_ops = redis_ops or RedisSafeOps(
+            kv, logger=logger.getChild("redis_safeops")
+        )
         self._table_manager = table_manager
         self._private_match_service = private_match_service
         self._winner_determine: WinnerDetermination = WinnerDetermination()
         self._round_rate = RoundRateModel(view=self._view, kv=self._kv, model=self)
         self._player_report_cache = PlayerReportCache(
-            logger_=logger.getChild("player_report_cache")
+            logger_=logger.getChild("player_report_cache"),
+            redis_ops=self._redis_ops,
         )
         self._stats: BaseStatsService = stats_service or NullStatsService()
         self._lock_manager = LockManager(logger=logger.getChild("lock_manager"))
@@ -279,11 +286,13 @@ class PokerBotModel:
         if state.get("status") != "queued":
             return False
         user_key = self._private_match_service.private_user_key(user_id)
-        removed = await self._kv.zrem(
+        extra = {"user_id": self._safe_int(user_id)}
+        removed = await self._redis_ops.safe_zrem(
             PrivateMatchService.PRIVATE_MATCH_QUEUE_KEY,
             str(self._safe_int(user_id)),
+            log_extra=extra,
         )
-        await self._kv.delete(user_key)
+        await self._redis_ops.safe_delete(user_key, log_extra=extra)
         return bool(removed)
 
     async def handle_private_matchmaking_request(
@@ -365,7 +374,10 @@ class PokerBotModel:
         self, match_id: str, winner_user_id: UserId
     ) -> None:
         match_key = self._private_match_service.private_match_key(match_id)
-        match_data_raw = await self._kv.hgetall(match_key)
+        match_extra = {"match_id": match_id}
+        match_data_raw = await self._redis_ops.safe_hgetall(
+            match_key, log_extra=match_extra
+        )
         if not match_data_raw:
             raise UserException("بازی خصوصی مورد نظر یافت نشد.")
         match_data = self._decode_hash(match_data_raw)
@@ -440,12 +452,14 @@ class PokerBotModel:
                 reply_markup=self._build_private_menu(),
             )
 
-        await self._kv.delete(match_key)
-        await self._kv.delete(
-            self._private_match_service.private_user_key(player_one_id)
+        await self._redis_ops.safe_delete(match_key, log_extra=match_extra)
+        await self._redis_ops.safe_delete(
+            self._private_match_service.private_user_key(player_one_id),
+            log_extra={"user_id": player_one_id, "match_id": match_id},
         )
-        await self._kv.delete(
-            self._private_match_service.private_user_key(player_two_id)
+        await self._redis_ops.safe_delete(
+            self._private_match_service.private_user_key(player_two_id),
+            log_extra={"user_id": player_two_id, "match_id": match_id},
         )
 
     async def _get_game(

@@ -16,6 +16,7 @@ from pokerapp.table_manager import TableManager
 from pokerapp.stats import NullStatsService, StatsService
 from pokerapp.logging_config import setup_logging
 from pokerapp.private_match_service import PrivateMatchService
+from pokerapp.utils.redis_safeops import RedisSafeOps
 
 setup_logging(logging.INFO)
 
@@ -65,7 +66,13 @@ class PokerBot:
             password=cfg.REDIS_PASS if cfg.REDIS_PASS != "" else None,
         )
 
-        self._table_manager = TableManager(self._kv_async)
+        self._redis_ops = RedisSafeOps(
+            self._kv_async, logger=logger.getChild("redis_safeops")
+        )
+        self._table_manager = TableManager(
+            self._kv_async,
+            redis_ops=self._redis_ops,
+        )
         if cfg.DATABASE_URL:
             try:
                 stats_service = StatsService(
@@ -208,6 +215,7 @@ class PokerBot:
             kv=self._kv_async,
             table_manager=self._table_manager,
             logger=logger.getChild("private_match"),
+            redis_ops=self._redis_ops,
         )
         self._model = PokerBotModel(
             view=self._view,
@@ -217,6 +225,7 @@ class PokerBot:
             table_manager=self._table_manager,
             private_match_service=private_match_service,
             stats_service=self._stats_service,
+            redis_ops=self._redis_ops,
         )
         self._controller = PokerBotCotroller(self._model, self._application)
 
