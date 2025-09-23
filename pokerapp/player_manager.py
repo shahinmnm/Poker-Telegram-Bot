@@ -4,15 +4,18 @@ from __future__ import annotations
 
 import inspect
 import logging
-from typing import Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
-from telegram import User
+from telegram import Update, User
+from telegram.ext import ContextTypes
 
 import redis.asyncio as aioredis
 
 from pokerapp.entities import ChatId, Game, Player
+from pokerapp.pokerbotview import PokerBotViewer
 from pokerapp.stats import BaseStatsService, NullStatsService, PlayerIdentity
 from pokerapp.table_manager import TableManager
+from pokerapp.utils.cache import PlayerReportCache
 
 
 class PlayerManager:
@@ -31,11 +34,17 @@ class PlayerManager:
         table_manager: TableManager,
         kv: aioredis.Redis,
         stats_service: BaseStatsService,
+        player_report_cache: PlayerReportCache,
+        view: PokerBotViewer,
+        build_private_menu: Callable[[], object],
         logger: logging.Logger,
     ) -> None:
         self._table_manager = table_manager
         self._kv = kv
         self._stats_service = stats_service
+        self._player_report_cache = player_report_cache
+        self._view = view
+        self._build_private_menu = build_private_menu
         self._logger = logger
         self._private_chat_ids: Dict[int, int] = {}
 
@@ -52,6 +61,74 @@ class PlayerManager:
 
     def _stats_enabled(self) -> bool:
         return not isinstance(self._stats_service, NullStatsService)
+
+    async def send_statistics_report(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        chat = update.effective_chat
+        user = update.effective_user
+        if chat.type != chat.PRIVATE:
+            await self._view.send_message(
+                chat.id,
+                "ℹ️ برای مشاهده آمار دقیق، لطفاً در چت خصوصی ربات از دکمه «📊 آمار بازی» استفاده کنید.",
+            )
+            return
+
+        await self.register_player_identity(user, private_chat_id=chat.id)
+
+        if not self._stats_enabled():
+            await self._view.send_message(
+                chat.id,
+                "⚙️ سیستم آمار در حال حاضر غیرفعال است. لطفاً بعداً دوباره تلاش کنید.",
+                reply_markup=self._build_private_menu(),
+            )
+            return
+
+        user_id_int = self._safe_int(user.id)
+
+        async def _load_report() -> Optional[Any]:
+            return await self._stats_service.build_player_report(user_id_int)
+
+        report = await self._player_report_cache.get(user_id_int, _load_report)
+        if report is None or (
+            report.stats.total_games <= 0 and not report.recent_games
+        ):
+            await self._view.send_message(
+                chat.id,
+                "ℹ️ هنوز داده‌ای برای نمایش وجود ندارد. پس از شرکت در چند دست بازی دوباره تلاش کنید.",
+                reply_markup=self._build_private_menu(),
+            )
+            return
+
+        formatted = self._stats_service.format_report(report)
+        await self._view.send_message(
+            chat.id,
+            formatted,
+            reply_markup=self._build_private_menu(),
+        )
+
+    async def send_wallet_balance(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        chat = update.effective_chat
+        user = update.effective_user
+
+        if chat.type == chat.PRIVATE:
+            await self.register_player_identity(user, private_chat_id=chat.id)
+        else:
+            await self.register_player_identity(user)
+
+        from pokerapp.pokerbotmodel import WalletManagerModel
+
+        wallet = WalletManagerModel(user.id, self._kv)
+        balance = await wallet.value()
+
+        reply_markup = self._build_private_menu() if chat.type == chat.PRIVATE else None
+        await self._view.send_message(
+            chat.id,
+            f"💰 موجودی فعلی شما: {balance}$",
+            reply_markup=reply_markup,
+        )
 
     def assign_role_labels(self, game: Game) -> None:
         """Assign localized role labels to players based on current blinds."""
