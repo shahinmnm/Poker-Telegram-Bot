@@ -2102,44 +2102,60 @@ class PokerBotViewer:
                                             transition_pending=countdown_transition_pending,
                                         )
                                     )
+                                    countdown_guard_triggered = (
+                                        resolved_stage == GameState.INITIAL
+                                        and countdown_guard_source != "none"
+                                    )
+                                    protected_stage = (
+                                        resolved_stage in self._ACTIVE_ANCHOR_STATES
+                                        or countdown_guard_triggered
+                                    )
                                     if (
                                         anchor_record is not None
-                                        and (
-                                            resolved_stage in self._ACTIVE_ANCHOR_STATES
-                                            or (
-                                                resolved_stage == GameState.INITIAL
-                                                and countdown_active
-                                            )
-                                        )
+                                        and protected_stage
                                     ):
+                                        guard_reason = (
+                                            "countdown_guard"
+                                            if countdown_guard_triggered
+                                            else "active_stage_guard"
+                                        )
                                         self._log_anchor_preservation_skip(
                                             chat_id=chat_id,
                                             message_id=normalized_existing_message,
                                             record=anchor_record,
                                             extra_details={
                                                 "stage": stage_name,
-                                                "reason": "countdown_guard",
+                                                "reason": guard_reason,
                                                 "countdown_active": countdown_active,
                                                 "countdown_guard_task_active": countdown_active,
                                                 "countdown_guard_transition_pending": countdown_transition_pending,
                                                 "countdown_guard_source": countdown_guard_source,
                                             },
                                         )
-                                        logger.info(
-                                            "[AnchorPersistence] Skipped deletion for role anchor during INITIAL countdown",
-                                            extra={
-                                                "chat_id": chat_id,
-                                                "message_id": normalized_existing_message,
-                                                "player_id": getattr(
-                                                    anchor_record, "player_id", None
-                                                ),
-                                                "stage": stage_name,
-                                                "countdown_active": countdown_active,
-                                                "countdown_guard_task_active": countdown_active,
-                                                "countdown_guard_transition_pending": countdown_transition_pending,
-                                                "countdown_guard_source": countdown_guard_source,
-                                            },
-                                        )
+                                        log_extra = {
+                                            "chat_id": chat_id,
+                                            "message_id": normalized_existing_message,
+                                            "player_id": getattr(
+                                                anchor_record, "player_id", None
+                                            ),
+                                            "stage": stage_name,
+                                            "reason": guard_reason,
+                                            "countdown_active": countdown_active,
+                                            "countdown_guard_task_active": countdown_active,
+                                            "countdown_guard_transition_pending": countdown_transition_pending,
+                                            "countdown_guard_source": countdown_guard_source,
+                                        }
+                                        if countdown_guard_triggered:
+                                            logger.info(
+                                                "[AnchorPersistence] Skipped deletion for role anchor during INITIAL countdown (%s)",
+                                                countdown_guard_source,
+                                                extra=log_extra,
+                                            )
+                                        else:
+                                            logger.info(
+                                                "[AnchorPersistence] Skipped deletion for role anchor during protected stage",
+                                                extra=log_extra,
+                                            )
                                         return
                                     try:
                                         await self.delete_message(
