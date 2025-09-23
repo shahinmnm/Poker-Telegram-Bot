@@ -13,7 +13,7 @@ import fakeredis.aioredis
 import pytest
 
 from pokerapp.cards import Cards, Card
-from pokerapp.config import Config
+from pokerapp.config import Config, get_game_constants
 from pokerapp.entities import Money, Player, Game, PlayerState, GameState, PlayerAction
 from pokerapp.pokerbotmodel import (
     PokerBotModel,
@@ -55,6 +55,7 @@ def _make_private_match_service(kv, table_manager) -> PrivateMatchService:
         kv=kv,
         table_manager=table_manager,
         logger=logging.getLogger("test.private_match"),
+        constants=get_game_constants(),
     )
 
 
@@ -233,6 +234,7 @@ def _build_model_with_game():
     view.send_message = AsyncMock()
     bot = MagicMock()
     cfg = MagicMock(DEBUG=False)
+    cfg.constants = get_game_constants()
     kv = MagicMock()
     table_manager = MagicMock()
     private_match_service = _make_private_match_service(kv, table_manager)
@@ -280,6 +282,7 @@ async def test_register_player_identity_updates_active_game_private_chat():
     table_manager.save_game = AsyncMock()
 
     cfg = MagicMock(DEBUG=False)
+    cfg.constants = get_game_constants()
     private_match_service = _make_private_match_service(kv, table_manager)
     model = PokerBotModel(
         view=view,
@@ -315,6 +318,7 @@ async def test_request_stop_creates_vote_prompt():
     view.send_message = AsyncMock()
     bot = MagicMock()
     cfg = MagicMock(DEBUG=False)
+    cfg.constants = get_game_constants()
     kv = MagicMock()
     table_manager = MagicMock()
     table_manager.save_game = AsyncMock()
@@ -381,6 +385,7 @@ async def test_confirm_stop_vote_triggers_cancel_on_majority():
     view.send_message = AsyncMock()
     bot = MagicMock()
     cfg = MagicMock(DEBUG=False)
+    cfg.constants = get_game_constants()
     kv = MagicMock()
     table_manager = MagicMock()
     table_manager.save_game = AsyncMock()
@@ -446,6 +451,7 @@ async def test_cancel_hand_refunds_wallets_and_announces():
     view.send_message = AsyncMock()
     bot = MagicMock()
     cfg = MagicMock(DEBUG=False)
+    cfg.constants = get_game_constants()
     kv = MagicMock()
     table_manager = MagicMock()
     table_manager.save_game = AsyncMock()
@@ -607,6 +613,7 @@ async def test_auto_start_tick_starts_prestart_countdown_and_updates_state():
     view = _prepare_view_mock(MagicMock())
     bot = MagicMock()
     cfg = MagicMock(DEBUG=False)
+    cfg.constants = get_game_constants()
     kv = MagicMock()
     table_manager = MagicMock()
     game = Game()
@@ -664,6 +671,7 @@ async def test_auto_start_tick_does_not_restart_on_regular_tick():
     view = _prepare_view_mock(MagicMock())
     bot = MagicMock()
     cfg = MagicMock(DEBUG=False)
+    cfg.constants = get_game_constants()
     kv = MagicMock()
     table_manager = MagicMock()
     game = Game()
@@ -707,6 +715,7 @@ async def test_auto_start_tick_restarts_when_countdown_increases():
     view = _prepare_view_mock(MagicMock())
     bot = MagicMock()
     cfg = MagicMock(DEBUG=False)
+    cfg.constants = get_game_constants()
     kv = MagicMock()
     table_manager = MagicMock()
     game = Game()
@@ -753,6 +762,7 @@ async def test_auto_start_tick_triggers_game_start_when_zero():
     view = _prepare_view_mock(MagicMock())
     bot = MagicMock()
     cfg = MagicMock(DEBUG=False)
+    cfg.constants = get_game_constants()
     kv = MagicMock()
     table_manager = MagicMock()
     game = Game()
@@ -803,6 +813,7 @@ async def test_auto_start_tick_creates_message_when_missing():
     view.send_message_return_id = AsyncMock(return_value=999)
     bot = MagicMock()
     cfg = MagicMock(DEBUG=False)
+    cfg.constants = get_game_constants()
     kv = MagicMock()
     table_manager = MagicMock()
     game = Game()
@@ -850,6 +861,7 @@ async def test_auto_start_tick_does_not_start_when_message_creation_fails():
     view.send_message_return_id = AsyncMock(return_value=None)
     bot = MagicMock()
     cfg = MagicMock(DEBUG=False)
+    cfg.constants = get_game_constants()
     kv = MagicMock()
     table_manager = MagicMock()
     game = Game()
@@ -898,6 +910,7 @@ async def test_safe_edit_message_text_logs_bad_request(caplog):
     view.send_message_return_id = AsyncMock(return_value=999)
     bot = MagicMock()
     cfg = MagicMock(DEBUG=False)
+    cfg.constants = get_game_constants()
     kv = MagicMock()
     table_manager = MagicMock()
 
@@ -958,6 +971,7 @@ async def test_showdown_sends_new_hand_message_before_join_prompt():
     )
     bot = MagicMock()
     cfg = MagicMock(DEBUG=False)
+    cfg.constants = get_game_constants()
     kv = MagicMock()
     table_manager = MagicMock()
     table_manager.save_game = AsyncMock()
@@ -1009,6 +1023,7 @@ async def test_start_game_assigns_blinds_to_occupied_seats():
     view.delete_message = AsyncMock()
     bot = MagicMock()
     cfg = MagicMock(DEBUG=False)
+    cfg.constants = get_game_constants()
     kv = MagicMock()
     table_manager = MagicMock()
 
@@ -1085,6 +1100,7 @@ async def test_start_game_keeps_ready_message_id_when_deletion_fails():
     view.delete_message = AsyncMock(side_effect=BadRequest("not found"))
     bot = MagicMock()
     cfg = MagicMock(DEBUG=False)
+    cfg.constants = get_game_constants()
     kv = MagicMock()
     table_manager = MagicMock()
 

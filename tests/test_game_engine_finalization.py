@@ -12,6 +12,7 @@ from pokerapp.pokerbotmodel import KEY_OLD_PLAYERS, PokerBotModel
 from pokerapp.stats import BaseStatsService
 from pokerapp.winnerdetermination import HandsOfPoker
 from pokerapp.private_match_service import PrivateMatchService
+from pokerapp.config import get_game_constants
 
 
 def _make_wallet_mock(value: Optional[int] = None) -> MagicMock:
@@ -33,6 +34,7 @@ def _make_private_match_service(kv, table_manager) -> PrivateMatchService:
         kv=kv,
         table_manager=table_manager,
         logger=logging.getLogger("test.private_match"),
+        constants=get_game_constants(),
     )
 
 
@@ -72,6 +74,8 @@ async def test_hand_type_label_includes_translation_and_emoji():
     view = _build_view_mock()
     bot = MagicMock()
     cfg = MagicMock(DEBUG=False)
+    cfg.constants = get_game_constants()
+    cfg.constants = get_game_constants()
     kv = fakeredis.aioredis.FakeRedis()
     table_manager = MagicMock()
     stats = _build_stats_service()
@@ -98,6 +102,7 @@ async def test_finalize_game_single_winner_distributes_pot_and_updates_stats():
     view = _build_view_mock()
     bot = MagicMock()
     cfg = MagicMock(DEBUG=False)
+    cfg.constants = get_game_constants()
     kv = fakeredis.aioredis.FakeRedis()
     table_manager = MagicMock()
     table_manager.save_game = AsyncMock()

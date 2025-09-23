@@ -18,6 +18,20 @@ from pokerapp.table_manager import TableManager
 from pokerapp.utils.markdown import escape_markdown_v1
 from pokerapp.utils.request_metrics import RequestMetrics
 from pokerapp.utils.redis_safeops import RedisSafeOps
+from pokerapp.config import GameConstants, get_game_constants
+
+
+_DEFAULT_REDIS_CONSTANTS = get_game_constants().redis
+
+
+def _positive_int(value: Optional[int], default: int) -> int:
+    try:
+        parsed = int(value) if value is not None else default
+    except (TypeError, ValueError):
+        return default
+    if parsed <= 0:
+        return default
+    return parsed
 
 @dataclass(slots=True)
 class PrivateMatchPlayerInfo:
@@ -28,11 +42,21 @@ class PrivateMatchPlayerInfo:
 
 
 class PrivateMatchService:
-    PRIVATE_MATCH_QUEUE_KEY = "pokerbot:private_matchmaking:queue"
-    PRIVATE_MATCH_USER_KEY_PREFIX = "pokerbot:private_matchmaking:user:"
-    PRIVATE_MATCH_RECORD_KEY_PREFIX = "pokerbot:private_matchmaking:match:"
-    PRIVATE_MATCH_QUEUE_TTL = 180  # seconds
-    PRIVATE_MATCH_STATE_TTL = 3600  # seconds
+    PRIVATE_MATCH_QUEUE_KEY = _DEFAULT_REDIS_CONSTANTS.get(
+        "private_match_queue_key", "pokerbot:private_matchmaking:queue"
+    )
+    PRIVATE_MATCH_USER_KEY_PREFIX = _DEFAULT_REDIS_CONSTANTS.get(
+        "private_match_user_key_prefix", "pokerbot:private_matchmaking:user:"
+    )
+    PRIVATE_MATCH_RECORD_KEY_PREFIX = _DEFAULT_REDIS_CONSTANTS.get(
+        "private_match_record_key_prefix", "pokerbot:private_matchmaking:match:"
+    )
+    PRIVATE_MATCH_QUEUE_TTL = _positive_int(
+        _DEFAULT_REDIS_CONSTANTS.get("private_match_queue_ttl"), 180
+    )
+    PRIVATE_MATCH_STATE_TTL = _positive_int(
+        _DEFAULT_REDIS_CONSTANTS.get("private_match_state_ttl"), 3600
+    )
 
     def __init__(
         self,
@@ -40,12 +64,38 @@ class PrivateMatchService:
         table_manager: TableManager,
         logger: logging.Logger,
         *,
+        constants: Optional[GameConstants] = None,
         redis_ops: Optional[RedisSafeOps] = None,
     ) -> None:
         self._table_manager = table_manager
         self._logger = logger
         self._redis_ops = redis_ops or RedisSafeOps(
             kv, logger=logger.getChild("redis_safeops")
+        )
+        self._constants = constants or get_game_constants()
+        redis_constants = self._constants.redis or {}
+        self._queue_key = str(
+            redis_constants.get("private_match_queue_key", self.PRIVATE_MATCH_QUEUE_KEY)
+        )
+        self._user_key_prefix = str(
+            redis_constants.get(
+                "private_match_user_key_prefix",
+                self.PRIVATE_MATCH_USER_KEY_PREFIX,
+            )
+        )
+        self._record_key_prefix = str(
+            redis_constants.get(
+                "private_match_record_key_prefix",
+                self.PRIVATE_MATCH_RECORD_KEY_PREFIX,
+            )
+        )
+        self._queue_ttl = _positive_int(
+            redis_constants.get("private_match_queue_ttl"),
+            self.PRIVATE_MATCH_QUEUE_TTL,
+        )
+        self._state_ttl = _positive_int(
+            redis_constants.get("private_match_state_ttl"),
+            self.PRIVATE_MATCH_STATE_TTL,
         )
         self._safe_int_fn: Optional[Callable[[UserId], int]] = None
         self._build_private_menu: Optional[Callable[[], ReplyKeyboardMarkup]] = None
@@ -93,12 +143,12 @@ class PrivateMatchService:
 
     async def cleanup_private_queue(self) -> None:
         now = datetime.datetime.now(datetime.timezone.utc)
-        cutoff_ts = int(now.timestamp()) - self.PRIVATE_MATCH_QUEUE_TTL
+        cutoff_ts = int(now.timestamp()) - self._queue_ttl
         expired = await self._redis_ops.safe_zrangebyscore(
-            self.PRIVATE_MATCH_QUEUE_KEY,
+            self._queue_key,
             "-inf",
             cutoff_ts,
-            log_extra={"queue": self.PRIVATE_MATCH_QUEUE_KEY},
+            log_extra={"queue": self._queue_key},
         )
         if not expired:
             return
@@ -109,7 +159,7 @@ class PrivateMatchService:
                 user_id_str = str(raw_user_id)
             user_extra = {"user_id": self._safe_int(user_id_str)}
             await self._redis_ops.safe_zrem(
-                self.PRIVATE_MATCH_QUEUE_KEY,
+                self._queue_key,
                 raw_user_id,
                 log_extra=user_extra,
             )
@@ -130,18 +180,18 @@ class PrivateMatchService:
 
     async def try_pop_match(self) -> Optional[List[PrivateMatchPlayerInfo]]:
         popped = await self._redis_ops.safe_zpopmin(
-            self.PRIVATE_MATCH_QUEUE_KEY,
+            self._queue_key,
             2,
-            log_extra={"queue": self.PRIVATE_MATCH_QUEUE_KEY},
+            log_extra={"queue": self._queue_key},
         )
         if not popped:
             return None
         if len(popped) < 2:
             member, score = popped[0]
             await self._redis_ops.safe_zadd(
-                self.PRIVATE_MATCH_QUEUE_KEY,
+                self._queue_key,
                 {member: score},
-                log_extra={"queue": self.PRIVATE_MATCH_QUEUE_KEY},
+                log_extra={"queue": self._queue_key},
             )
             return None
         states: List[Tuple[str, Dict[str, str], float]] = []
@@ -155,7 +205,7 @@ class PrivateMatchService:
                 timestamp = state.get("timestamp") if state else None
                 score_value = int(timestamp) if timestamp else score
                 await self._redis_ops.safe_zadd(
-                    self.PRIVATE_MATCH_QUEUE_KEY,
+                    self._queue_key,
                     {user_id_str: score_value},
                     log_extra={"user_id": self._safe_int(user_id_str)},
                 )
@@ -182,7 +232,7 @@ class PrivateMatchService:
                 log_extra=user_extra,
             )
             await self._redis_ops.safe_expire(
-                state_key, self.PRIVATE_MATCH_STATE_TTL, log_extra=user_extra
+                state_key, self._state_ttl, log_extra=user_extra
             )
         return players
 
@@ -225,10 +275,10 @@ class PrivateMatchService:
             log_extra=user_extra,
         )
         await self._redis_ops.safe_expire(
-            state_key, self.PRIVATE_MATCH_STATE_TTL, log_extra=user_extra
+            state_key, self._state_ttl, log_extra=user_extra
         )
         await self._redis_ops.safe_zadd(
-            self.PRIVATE_MATCH_QUEUE_KEY,
+            self._queue_key,
             {str(self._safe_int(user.id)): timestamp},
             log_extra=user_extra,
         )
@@ -293,7 +343,7 @@ class PrivateMatchService:
             log_extra=match_extra,
         )
         await self._redis_ops.safe_expire(
-            match_key, self.PRIVATE_MATCH_STATE_TTL, log_extra=match_extra
+            match_key, self._state_ttl, log_extra=match_extra
         )
 
         if self._require_stats_enabled()():
@@ -326,7 +376,7 @@ class PrivateMatchService:
                 log_extra=state_extra,
             )
             await self._redis_ops.safe_expire(
-                state_key, self.PRIVATE_MATCH_STATE_TTL, log_extra=state_extra
+                state_key, self._state_ttl, log_extra=state_extra
             )
             if info.chat_id:
                 opponent_name_raw = (
@@ -348,11 +398,10 @@ class PrivateMatchService:
         return match_id
 
     def private_user_key(self, user_id: UserId) -> str:
-        return f"{self.PRIVATE_MATCH_USER_KEY_PREFIX}{self._safe_int(user_id)}"
+        return f"{self._user_key_prefix}{self._safe_int(user_id)}"
 
-    @staticmethod
-    def private_match_key(match_id: str) -> str:
-        return f"{PrivateMatchService.PRIVATE_MATCH_RECORD_KEY_PREFIX}{match_id}"
+    def private_match_key(self, match_id: str) -> str:
+        return f"{self._record_key_prefix}{match_id}"
 
     def _build_player_info_from_state(
         self, user_id: str, state: Dict[str, str]
@@ -452,4 +501,16 @@ class PrivateMatchService:
                 "PrivateMatchService wallet_factory dependency not configured"
             )
         return self._wallet_factory
+
+    @property
+    def queue_key(self) -> str:
+        return self._queue_key
+
+    @property
+    def queue_ttl(self) -> int:
+        return self._queue_ttl
+
+    @property
+    def state_ttl(self) -> int:
+        return self._state_ttl
 

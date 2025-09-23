@@ -23,6 +23,7 @@ from pokerapp.entities import (
     UserException,
     UserId,
 )
+from pokerapp.config import get_game_constants
 from pokerapp.pokerbotview import PokerBotViewer
 from pokerapp.lock_manager import LockManager
 from pokerapp.stats import (
@@ -40,6 +41,32 @@ from pokerapp.winnerdetermination import (
 )
 
 
+_CONSTANTS = get_game_constants()
+_GAME_CONSTANTS = _CONSTANTS.game
+_ENGINE_CONSTANTS = _CONSTANTS.engine
+_AUTO_START_DEFAULTS = _GAME_CONSTANTS.get("auto_start", {})
+
+
+def _positive_int(value: Any, default: int) -> int:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return default
+    if parsed <= 0:
+        return default
+    return parsed
+
+
+def _non_negative_float(value: Any, default: float) -> float:
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return default
+    if parsed <= 0:
+        return default
+    return parsed
+
+
 class GameEngine:
     """Coordinates game-level constants and helpers."""
 
@@ -50,17 +77,44 @@ class GameEngine:
         GameState.ROUND_RIVER,
     }
 
-    MAX_TIME_FOR_TURN = datetime.timedelta(minutes=2)
-    AUTO_START_MAX_UPDATES_PER_MINUTE = 20
-    AUTO_START_MIN_UPDATE_INTERVAL = datetime.timedelta(
-        seconds=60 / AUTO_START_MAX_UPDATES_PER_MINUTE
+    _MAX_TIME_FOR_TURN_SECONDS = _non_negative_float(
+        _GAME_CONSTANTS.get("max_time_for_turn_seconds"),
+        120.0,
     )
-    KEY_START_COUNTDOWN_LAST_TEXT = "start_countdown_last_text"
-    KEY_START_COUNTDOWN_LAST_TIMESTAMP = "start_countdown_last_timestamp"
-    KEY_START_COUNTDOWN_CONTEXT = "start_countdown_context"
-    KEY_STOP_REQUEST = "stop_request"
-    STOP_CONFIRM_CALLBACK = "stop:confirm"
-    STOP_RESUME_CALLBACK = "stop:resume"
+    MAX_TIME_FOR_TURN = datetime.timedelta(seconds=_MAX_TIME_FOR_TURN_SECONDS)
+
+    AUTO_START_MAX_UPDATES_PER_MINUTE = _positive_int(
+        _AUTO_START_DEFAULTS.get("max_updates_per_minute"),
+        20,
+    )
+    _AUTO_START_INTERVAL_DEFAULT = 60 / AUTO_START_MAX_UPDATES_PER_MINUTE
+    AUTO_START_MIN_UPDATE_INTERVAL = datetime.timedelta(
+        seconds=_non_negative_float(
+            _AUTO_START_DEFAULTS.get("min_update_interval_seconds"),
+            _AUTO_START_INTERVAL_DEFAULT,
+        )
+    )
+    KEY_START_COUNTDOWN_LAST_TEXT = _ENGINE_CONSTANTS.get(
+        "key_start_countdown_last_text",
+        "start_countdown_last_text",
+    )
+    KEY_START_COUNTDOWN_LAST_TIMESTAMP = _ENGINE_CONSTANTS.get(
+        "key_start_countdown_last_timestamp",
+        "start_countdown_last_timestamp",
+    )
+    KEY_START_COUNTDOWN_CONTEXT = _ENGINE_CONSTANTS.get(
+        "key_start_countdown_context",
+        "start_countdown_context",
+    )
+    KEY_STOP_REQUEST = _ENGINE_CONSTANTS.get("key_stop_request", "stop_request")
+    STOP_CONFIRM_CALLBACK = _ENGINE_CONSTANTS.get(
+        "stop_confirm_callback",
+        "stop:confirm",
+    )
+    STOP_RESUME_CALLBACK = _ENGINE_CONSTANTS.get(
+        "stop_resume_callback",
+        "stop:resume",
+    )
 
     def __init__(
         self,

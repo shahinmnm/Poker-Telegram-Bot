@@ -27,7 +27,7 @@ from telegram.helpers import mention_markdown as format_mention_markdown
 
 import logging
 
-from pokerapp.config import Config
+from pokerapp.config import Config, get_game_constants
 from pokerapp.winnerdetermination import WinnerDetermination
 from pokerapp.cards import Cards
 from pokerapp.entities import (
@@ -66,10 +66,15 @@ from pokerapp.lock_manager import LockManager
 from pokerapp.player_manager import PlayerManager
 from pokerapp.game_engine import GameEngine
 
-DICE_MULT = 10
-DICE_DELAY_SEC = 5
-BONUSES = (5, 20, 40, 80, 160, 320)
-DICES = "⚀⚁⚂⚃⚄⚅"
+_GAME_CONSTANTS = get_game_constants()
+_GAME_SECTION = _GAME_CONSTANTS.game
+_UI_SECTION = _GAME_CONSTANTS.ui
+_ENGINE_SECTION = _GAME_CONSTANTS.engine
+
+DICE_MULT = int(_GAME_SECTION.get("dice_mult", 10))
+DICE_DELAY_SEC = int(_GAME_SECTION.get("dice_delay_sec", 5))
+BONUSES = tuple(_GAME_SECTION.get("bonuses", (5, 20, 40, 80, 160, 320)))
+DICES = _GAME_SECTION.get("dices", "⚀⚁⚂⚃⚄⚅")
 
 AUTO_START_MAX_UPDATES_PER_MINUTE = (
     GameEngine.AUTO_START_MAX_UPDATES_PER_MINUTE
@@ -82,8 +87,8 @@ KEY_START_COUNTDOWN_LAST_TIMESTAMP = (
 KEY_START_COUNTDOWN_CONTEXT = GameEngine.KEY_START_COUNTDOWN_CONTEXT
 
 # legacy keys kept for backward compatibility but unused
-KEY_OLD_PLAYERS = "old_players"
-KEY_CHAT_DATA_GAME = "game"
+KEY_OLD_PLAYERS = _ENGINE_SECTION.get("key_old_players", "old_players")
+KEY_CHAT_DATA_GAME = _ENGINE_SECTION.get("key_chat_data_game", "game")
 KEY_STOP_REQUEST = GameEngine.KEY_STOP_REQUEST
 
 STOP_CONFIRM_CALLBACK = GameEngine.STOP_CONFIRM_CALLBACK
@@ -94,7 +99,7 @@ STOP_RESUME_CALLBACK = GameEngine.STOP_RESUME_CALLBACK
 # SMALL_BLIND = 5 (Defined in entities)
 # DEFAULT_MONEY = 1000 (Defined in entities)
 MAX_TIME_FOR_TURN = GameEngine.MAX_TIME_FOR_TURN
-DESCRIPTION_FILE = "assets/description_bot.md"
+DESCRIPTION_FILE = _UI_SECTION.get("description_file", "assets/description_bot.md")
 
 logger = logging.getLogger(__name__)
 
@@ -137,6 +142,7 @@ class PokerBotModel:
         self._view: PokerBotViewer = view
         self._bot: Bot = bot
         self._cfg: Config = cfg
+        self._constants = cfg.constants
         self._kv = kv
         self._redis_ops = redis_ops or RedisSafeOps(
             kv, logger=logger.getChild("redis_safeops")
@@ -291,7 +297,7 @@ class PokerBotModel:
         user_key = self._private_match_service.private_user_key(user_id)
         extra = {"user_id": self._safe_int(user_id)}
         removed = await self._redis_ops.safe_zrem(
-            PrivateMatchService.PRIVATE_MATCH_QUEUE_KEY,
+            self._private_match_service.queue_key,
             str(self._safe_int(user_id)),
             log_extra=extra,
         )

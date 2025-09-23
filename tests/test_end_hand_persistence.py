@@ -23,15 +23,17 @@ async def test_end_hand_persists_game_and_reuses_instance():
         send_message=AsyncMock(),
         send_message_return_id=AsyncMock(return_value=1),
     )
+    cfg = Config()
     private_match_service = PrivateMatchService(
         kv=redis_sync,
         table_manager=table_manager,
         logger=logging.getLogger("test.private_match"),
+        constants=cfg.constants,
     )
     model = PokerBotModel(
         view,
         bot,
-        Config(),
+        cfg,
         redis_sync,
         table_manager,
         private_match_service=private_match_service,

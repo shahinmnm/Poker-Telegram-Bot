@@ -11,6 +11,7 @@ from telegram.error import BadRequest
 from pokerapp.pokerbotmodel import PokerBotModel
 from pokerapp.stats import PlayerHandResult, PlayerIdentity, StatsService
 from pokerapp.private_match_service import PrivateMatchService
+from pokerapp.config import get_game_constants
 
 
 def _build_model(stats_service: StatsService):
@@ -26,13 +27,14 @@ def _build_model(stats_service: StatsService):
         send_message=send_message,
     )
     bot = SimpleNamespace()
-    cfg = SimpleNamespace(DEBUG=False)
+    cfg = SimpleNamespace(DEBUG=False, constants=get_game_constants())
     kv = fakeredis.aioredis.FakeRedis()
     table_manager = MagicMock()
     private_match_service = PrivateMatchService(
         kv=kv,
         table_manager=table_manager,
         logger=logging.getLogger("test.private_match"),
+        constants=cfg.constants,
     )
     model = PokerBotModel(
         view,
