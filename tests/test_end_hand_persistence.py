@@ -1,4 +1,5 @@
 import pytest
+import logging
 import fakeredis
 import fakeredis.aioredis
 from types import SimpleNamespace
@@ -7,6 +8,7 @@ from unittest.mock import AsyncMock, MagicMock
 from pokerapp.config import Config
 from pokerapp.table_manager import TableManager
 from pokerapp.pokerbotmodel import PokerBotModel, KEY_CHAT_DATA_GAME
+from pokerapp.private_match_service import PrivateMatchService
 
 
 @pytest.mark.asyncio
@@ -21,7 +23,19 @@ async def test_end_hand_persists_game_and_reuses_instance():
         send_message=AsyncMock(),
         send_message_return_id=AsyncMock(return_value=1),
     )
-    model = PokerBotModel(view, bot, Config(), redis_sync, table_manager)
+    private_match_service = PrivateMatchService(
+        kv=redis_sync,
+        table_manager=table_manager,
+        logger=logging.getLogger("test.private_match"),
+    )
+    model = PokerBotModel(
+        view,
+        bot,
+        Config(),
+        redis_sync,
+        table_manager,
+        private_match_service=private_match_service,
+    )
 
     chat_id = 123
     game = await table_manager.create_game(chat_id)

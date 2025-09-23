@@ -2,6 +2,7 @@
 
 import asyncio
 import logging
+import logging
 import unittest
 from types import SimpleNamespace
 from typing import List, Tuple, Optional
@@ -26,6 +27,7 @@ from pokerapp.pokerbotmodel import (
     STOP_RESUME_CALLBACK,
 )
 from pokerapp.pokerbotview import TurnMessageUpdate, PokerBotViewer
+from pokerapp.private_match_service import PrivateMatchService
 from telegram.error import BadRequest
 from telegram import InlineKeyboardMarkup
 
@@ -46,6 +48,14 @@ def make_wallet_mock(value: Optional[int] = None):
     wallet.approve = AsyncMock()
     wallet.authorized_money = AsyncMock()
     return wallet
+
+
+def _make_private_match_service(kv, table_manager) -> PrivateMatchService:
+    return PrivateMatchService(
+        kv=kv,
+        table_manager=table_manager,
+        logger=logging.getLogger("test.private_match"),
+    )
 
 
 def _prepare_view_mock(view: MagicMock) -> MagicMock:
@@ -225,7 +235,15 @@ def _build_model_with_game():
     cfg = MagicMock(DEBUG=False)
     kv = MagicMock()
     table_manager = MagicMock()
-    model = PokerBotModel(view=view, bot=bot, cfg=cfg, kv=kv, table_manager=table_manager)
+    private_match_service = _make_private_match_service(kv, table_manager)
+    model = PokerBotModel(
+        view=view,
+        bot=bot,
+        cfg=cfg,
+        kv=kv,
+        table_manager=table_manager,
+        private_match_service=private_match_service,
+    )
     game = Game()
     wallet = make_wallet_mock()
     player = Player(
@@ -262,7 +280,15 @@ async def test_register_player_identity_updates_active_game_private_chat():
     table_manager.save_game = AsyncMock()
 
     cfg = MagicMock(DEBUG=False)
-    model = PokerBotModel(view=view, bot=bot, cfg=cfg, kv=kv, table_manager=table_manager)
+    private_match_service = _make_private_match_service(kv, table_manager)
+    model = PokerBotModel(
+        view=view,
+        bot=bot,
+        cfg=cfg,
+        kv=kv,
+        table_manager=table_manager,
+        private_match_service=private_match_service,
+    )
 
     user = SimpleNamespace(
         id=player.user_id,
@@ -293,7 +319,15 @@ async def test_request_stop_creates_vote_prompt():
     table_manager = MagicMock()
     table_manager.save_game = AsyncMock()
 
-    model = PokerBotModel(view=view, bot=bot, cfg=cfg, kv=kv, table_manager=table_manager)
+    private_match_service = _make_private_match_service(kv, table_manager)
+    model = PokerBotModel(
+        view=view,
+        bot=bot,
+        cfg=cfg,
+        kv=kv,
+        table_manager=table_manager,
+        private_match_service=private_match_service,
+    )
 
     game = Game()
     wallet_a = make_wallet_mock()
@@ -351,7 +385,15 @@ async def test_confirm_stop_vote_triggers_cancel_on_majority():
     table_manager = MagicMock()
     table_manager.save_game = AsyncMock()
 
-    model = PokerBotModel(view=view, bot=bot, cfg=cfg, kv=kv, table_manager=table_manager)
+    private_match_service = _make_private_match_service(kv, table_manager)
+    model = PokerBotModel(
+        view=view,
+        bot=bot,
+        cfg=cfg,
+        kv=kv,
+        table_manager=table_manager,
+        private_match_service=private_match_service,
+    )
 
     game = Game()
     wallet_a = make_wallet_mock()
@@ -408,7 +450,15 @@ async def test_cancel_hand_refunds_wallets_and_announces():
     table_manager = MagicMock()
     table_manager.save_game = AsyncMock()
 
-    model = PokerBotModel(view=view, bot=bot, cfg=cfg, kv=kv, table_manager=table_manager)
+    private_match_service = _make_private_match_service(kv, table_manager)
+    model = PokerBotModel(
+        view=view,
+        bot=bot,
+        cfg=cfg,
+        kv=kv,
+        table_manager=table_manager,
+        private_match_service=private_match_service,
+    )
 
     game = Game()
     wallet_a = make_wallet_mock()
@@ -566,7 +616,15 @@ async def test_auto_start_tick_starts_prestart_countdown_and_updates_state():
     table_manager.get_game = AsyncMock(return_value=game)
     table_manager.save_game = AsyncMock()
 
-    model = PokerBotModel(view=view, bot=bot, cfg=cfg, kv=kv, table_manager=table_manager)
+    private_match_service = _make_private_match_service(kv, table_manager)
+    model = PokerBotModel(
+        view=view,
+        bot=bot,
+        cfg=cfg,
+        kv=kv,
+        table_manager=table_manager,
+        private_match_service=private_match_service,
+    )
 
     job = SimpleNamespace(chat_id=chat_id)
     job.schedule_removal = MagicMock()
@@ -614,7 +672,15 @@ async def test_auto_start_tick_does_not_restart_on_regular_tick():
     table_manager.get_game = AsyncMock(return_value=game)
     table_manager.save_game = AsyncMock()
 
-    model = PokerBotModel(view=view, bot=bot, cfg=cfg, kv=kv, table_manager=table_manager)
+    private_match_service = _make_private_match_service(kv, table_manager)
+    model = PokerBotModel(
+        view=view,
+        bot=bot,
+        cfg=cfg,
+        kv=kv,
+        table_manager=table_manager,
+        private_match_service=private_match_service,
+    )
 
     job = SimpleNamespace(chat_id=chat_id)
     job.schedule_removal = MagicMock()
@@ -649,7 +715,15 @@ async def test_auto_start_tick_restarts_when_countdown_increases():
     table_manager.get_game = AsyncMock(return_value=game)
     table_manager.save_game = AsyncMock()
 
-    model = PokerBotModel(view=view, bot=bot, cfg=cfg, kv=kv, table_manager=table_manager)
+    private_match_service = _make_private_match_service(kv, table_manager)
+    model = PokerBotModel(
+        view=view,
+        bot=bot,
+        cfg=cfg,
+        kv=kv,
+        table_manager=table_manager,
+        private_match_service=private_match_service,
+    )
 
     job = SimpleNamespace(chat_id=chat_id)
     job.schedule_removal = MagicMock()
@@ -686,7 +760,15 @@ async def test_auto_start_tick_triggers_game_start_when_zero():
     table_manager.get_game = AsyncMock(return_value=game)
     table_manager.save_game = AsyncMock()
 
-    model = PokerBotModel(view=view, bot=bot, cfg=cfg, kv=kv, table_manager=table_manager)
+    private_match_service = _make_private_match_service(kv, table_manager)
+    model = PokerBotModel(
+        view=view,
+        bot=bot,
+        cfg=cfg,
+        kv=kv,
+        table_manager=table_manager,
+        private_match_service=private_match_service,
+    )
     model._start_game = AsyncMock()
 
     job = SimpleNamespace(chat_id=chat_id)
@@ -730,7 +812,15 @@ async def test_auto_start_tick_creates_message_when_missing():
     table_manager.get_game = AsyncMock(return_value=game)
     table_manager.save_game = AsyncMock()
 
-    model = PokerBotModel(view=view, bot=bot, cfg=cfg, kv=kv, table_manager=table_manager)
+    private_match_service = _make_private_match_service(kv, table_manager)
+    model = PokerBotModel(
+        view=view,
+        bot=bot,
+        cfg=cfg,
+        kv=kv,
+        table_manager=table_manager,
+        private_match_service=private_match_service,
+    )
 
     job = SimpleNamespace(chat_id=chat_id)
     job.schedule_removal = MagicMock()
@@ -768,7 +858,15 @@ async def test_auto_start_tick_does_not_start_when_message_creation_fails():
     table_manager.get_game = AsyncMock(return_value=game)
     table_manager.save_game = AsyncMock()
 
-    model = PokerBotModel(view=view, bot=bot, cfg=cfg, kv=kv, table_manager=table_manager)
+    private_match_service = _make_private_match_service(kv, table_manager)
+    model = PokerBotModel(
+        view=view,
+        bot=bot,
+        cfg=cfg,
+        kv=kv,
+        table_manager=table_manager,
+        private_match_service=private_match_service,
+    )
 
     job = SimpleNamespace(chat_id=chat_id)
     job.schedule_removal = MagicMock()
@@ -803,7 +901,15 @@ async def test_safe_edit_message_text_logs_bad_request(caplog):
     kv = MagicMock()
     table_manager = MagicMock()
 
-    model = PokerBotModel(view=view, bot=bot, cfg=cfg, kv=kv, table_manager=table_manager)
+    private_match_service = _make_private_match_service(kv, table_manager)
+    model = PokerBotModel(
+        view=view,
+        bot=bot,
+        cfg=cfg,
+        kv=kv,
+        table_manager=table_manager,
+        private_match_service=private_match_service,
+    )
 
     caplog.set_level(logging.WARNING)
 
@@ -856,7 +962,15 @@ async def test_showdown_sends_new_hand_message_before_join_prompt():
     table_manager = MagicMock()
     table_manager.save_game = AsyncMock()
 
-    model = PokerBotModel(view=view, bot=bot, cfg=cfg, kv=kv, table_manager=table_manager)
+    private_match_service = _make_private_match_service(kv, table_manager)
+    model = PokerBotModel(
+        view=view,
+        bot=bot,
+        cfg=cfg,
+        kv=kv,
+        table_manager=table_manager,
+        private_match_service=private_match_service,
+    )
     model._game_engine._clear_game_messages = AsyncMock()
     model._game_engine._send_join_prompt = AsyncMock(side_effect=record_join_prompt)
     model._game_engine._evaluate_contender_hands = MagicMock(return_value=[])
@@ -898,7 +1012,15 @@ async def test_start_game_assigns_blinds_to_occupied_seats():
     kv = MagicMock()
     table_manager = MagicMock()
 
-    model = PokerBotModel(view=view, bot=bot, cfg=cfg, kv=kv, table_manager=table_manager)
+    private_match_service = _make_private_match_service(kv, table_manager)
+    model = PokerBotModel(
+        view=view,
+        bot=bot,
+        cfg=cfg,
+        kv=kv,
+        table_manager=table_manager,
+        private_match_service=private_match_service,
+    )
     model._game_engine._divide_cards = AsyncMock()
     model._game_engine._send_turn_message = AsyncMock()
     model._round_rate._set_player_blind = AsyncMock()
@@ -966,7 +1088,15 @@ async def test_start_game_keeps_ready_message_id_when_deletion_fails():
     kv = MagicMock()
     table_manager = MagicMock()
 
-    model = PokerBotModel(view=view, bot=bot, cfg=cfg, kv=kv, table_manager=table_manager)
+    private_match_service = _make_private_match_service(kv, table_manager)
+    model = PokerBotModel(
+        view=view,
+        bot=bot,
+        cfg=cfg,
+        kv=kv,
+        table_manager=table_manager,
+        private_match_service=private_match_service,
+    )
     model._game_engine._divide_cards = AsyncMock()
     model._round_rate.set_blinds = AsyncMock(return_value=None)
 
