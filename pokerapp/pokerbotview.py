@@ -3172,13 +3172,14 @@ class PokerBotViewer:
         active_players: List[Player] = [
             player for player in getattr(game, "players", []) if player is not None
         ]
-        active_ids: Set[Any] = {
-            getattr(player, "user_id", None) for player in active_players if player is not None
-        }
+        active_ids: Set[int] = set()
+        for player in active_players:
+            normalized_id = self._safe_int(getattr(player, "user_id", None))
+            active_ids.add(normalized_id)
 
         # Remove anchors for players who are no longer seated.
         for player_id, record in list(state.role_anchors.items()):
-            if player_id in active_ids:
+            if self._safe_int(player_id) in active_ids:
                 continue
             message_id = getattr(record, "message_id", None)
             if message_id:

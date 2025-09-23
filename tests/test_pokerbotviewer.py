@@ -135,6 +135,40 @@ def test_notify_admin_failure_logs_error(caplog):
 
 
 
+def test_clear_all_player_anchors_preserves_anchor_for_string_registry_id():
+    viewer = PokerBotViewer(bot=MagicMock())
+    viewer.delete_message = AsyncMock()
+    viewer.update_player_anchors_and_keyboards = AsyncMock()
+
+    game = Game()
+    game.chat_id = -1234
+    game.state = GameState.INITIAL
+
+    player = Player(
+        user_id=123,
+        mention_markdown="@player",
+        wallet=MagicMock(),
+        ready_message_id="ready-msg",
+    )
+    game.add_player(player, seat_index=0)
+
+    viewer._anchor_registry.register_role(
+        game.chat_id,
+        player_id="123",
+        seat_index=0,
+        message_id=999,
+        base_text="anchor",
+        payload_signature="payload",
+        markup_signature="markup",
+    )
+
+    run(viewer.clear_all_player_anchors(game))
+
+    viewer.delete_message.assert_not_awaited()
+    state = viewer._anchor_registry.get_chat_state(game.chat_id)
+    assert "123" in state.role_anchors
+
+
 def test_update_player_anchors_and_keyboards_highlights_active_player():
     viewer = PokerBotViewer(bot=MagicMock())
     viewer._update_message = AsyncMock(return_value=101)
