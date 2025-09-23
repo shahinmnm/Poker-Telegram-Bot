@@ -177,17 +177,20 @@ class PokerBotModel:
         self._table_manager = table_manager
         self._winner_determine: WinnerDetermination = WinnerDetermination()
         self._round_rate = RoundRateModel(view=self._view, kv=self._kv, model=self)
+        self._player_report_cache = PlayerReportCache(
+            logger_=logger.getChild("player_report_cache")
+        )
         self._stats: BaseStatsService = stats_service or NullStatsService()
         self._player_manager = PlayerManager(
             table_manager=self._table_manager,
             kv=self._kv,
             stats_service=self._stats,
+            player_report_cache=self._player_report_cache,
+            view=self._view,
+            build_private_menu=self._build_private_menu,
             logger=logger.getChild("player_manager"),
         )
         self._private_chat_ids = self._player_manager.private_chat_ids
-        self._player_report_cache = PlayerReportCache(
-            logger_=logger.getChild("player_report_cache")
-        )
         self._chat_locks: Dict[int, ReentrantAsyncLock] = {}
         self._countdown_cache: LRUCache[int, _CountdownCacheEntry] = LRUCache(
             maxsize=64, getsizeof=lambda entry: 1
@@ -309,68 +312,12 @@ class PokerBotModel:
     async def _send_statistics_report(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
     ) -> None:
-        chat = update.effective_chat
-        user = update.effective_user
-        if chat.type != chat.PRIVATE:
-            await self._view.send_message(
-                chat.id,
-                "ℹ️ برای مشاهده آمار دقیق، لطفاً در چت خصوصی ربات از دکمه «📊 آمار بازی» استفاده کنید.",
-            )
-            return
-
-        await self._register_player_identity(user, private_chat_id=chat.id)
-
-        if not self._stats_enabled():
-            await self._view.send_message(
-                chat.id,
-                "⚙️ سیستم آمار در حال حاضر غیرفعال است. لطفاً بعداً دوباره تلاش کنید.",
-                reply_markup=self._build_private_menu(),
-            )
-            return
-
-        user_id_int = self._safe_int(user.id)
-
-        async def _load_report() -> Optional[Any]:
-            return await self._stats.build_player_report(user_id_int)
-
-        report = await self._player_report_cache.get(user_id_int, _load_report)
-        if report is None or (
-            report.stats.total_games <= 0 and not report.recent_games
-        ):
-            await self._view.send_message(
-                chat.id,
-                "ℹ️ هنوز داده‌ای برای نمایش وجود ندارد. پس از شرکت در چند دست بازی دوباره تلاش کنید.",
-                reply_markup=self._build_private_menu(),
-            )
-            return
-
-        formatted = self._stats.format_report(report)
-        await self._view.send_message(
-            chat.id,
-            formatted,
-            reply_markup=self._build_private_menu(),
-        )
+        return await self._player_manager.send_statistics_report(update, context)
 
     async def _send_wallet_balance(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
     ) -> None:
-        chat = update.effective_chat
-        user = update.effective_user
-
-        if chat.type == chat.PRIVATE:
-            await self._register_player_identity(user, private_chat_id=chat.id)
-        else:
-            await self._register_player_identity(user)
-
-        wallet = WalletManagerModel(user.id, self._kv)
-        balance = await wallet.value()
-
-        reply_markup = self._build_private_menu() if chat.type == chat.PRIVATE else None
-        await self._view.send_message(
-            chat.id,
-            f"💰 موجودی فعلی شما: {balance}$",
-            reply_markup=reply_markup,
-        )
+        return await self._player_manager.send_wallet_balance(update, context)
 
     async def _get_private_match_state(self, user_id: UserId) -> Dict[str, str]:
         key = self._private_user_key(user_id)
