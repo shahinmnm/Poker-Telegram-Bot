@@ -13,6 +13,7 @@ from pokerapp.stats import BaseStatsService
 from pokerapp.winnerdetermination import HandsOfPoker
 from pokerapp.private_match_service import PrivateMatchService
 from pokerapp.config import get_game_constants
+from pokerapp.utils.request_metrics import RequestMetrics
 
 
 def _make_wallet_mock(value: Optional[int] = None) -> MagicMock:
@@ -54,6 +55,9 @@ def _build_view_mock() -> MagicMock:
     view.update_turn_message = AsyncMock()
     view.send_showdown_results = AsyncMock()
     view.send_new_hand_ready_message = AsyncMock()
+    view.request_metrics = RequestMetrics(
+        logger_=logging.getLogger("test.game_engine.request_metrics")
+    )
     return view
 
 

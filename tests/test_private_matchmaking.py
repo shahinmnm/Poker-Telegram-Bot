@@ -13,6 +13,7 @@ from pokerapp.pokerbotmodel import PokerBotModel
 from pokerapp.stats import BaseStatsService
 from pokerapp.table_manager import TableManager
 from pokerapp.private_match_service import PrivateMatchService
+from pokerapp.utils.request_metrics import RequestMetrics
 
 
 def _build_update(
@@ -44,6 +45,9 @@ async def _build_model():
     view.send_message_return_id = AsyncMock(return_value=None)
     view.update_player_anchors_and_keyboards = AsyncMock()
     view.clear_all_player_anchors = AsyncMock(return_value=None)
+    view.request_metrics = RequestMetrics(
+        logger_=logging.getLogger("test.private_matchmaking.request_metrics")
+    )
     bot = MagicMock()
     cfg = Config()
     table_manager = TableManager(kv)

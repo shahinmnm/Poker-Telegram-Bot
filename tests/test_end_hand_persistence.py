@@ -9,6 +9,7 @@ from pokerapp.config import Config
 from pokerapp.table_manager import TableManager
 from pokerapp.pokerbotmodel import PokerBotModel, KEY_CHAT_DATA_GAME
 from pokerapp.private_match_service import PrivateMatchService
+from pokerapp.utils.request_metrics import RequestMetrics
 
 
 @pytest.mark.asyncio
@@ -22,6 +23,9 @@ async def test_end_hand_persists_game_and_reuses_instance():
     view = SimpleNamespace(
         send_message=AsyncMock(),
         send_message_return_id=AsyncMock(return_value=1),
+        request_metrics=RequestMetrics(
+            logger_=logging.getLogger("test.end_hand.request_metrics")
+        ),
     )
     cfg = Config()
     private_match_service = PrivateMatchService(

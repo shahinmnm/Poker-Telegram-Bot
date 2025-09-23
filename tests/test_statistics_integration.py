@@ -12,6 +12,7 @@ from pokerapp.pokerbotmodel import PokerBotModel
 from pokerapp.stats import PlayerHandResult, PlayerIdentity, StatsService
 from pokerapp.private_match_service import PrivateMatchService
 from pokerapp.config import get_game_constants
+from pokerapp.utils.request_metrics import RequestMetrics
 
 
 def _build_model(stats_service: StatsService):
@@ -25,6 +26,9 @@ def _build_model(stats_service: StatsService):
     send_message.side_effect = safe_send_message
     view = SimpleNamespace(
         send_message=send_message,
+        request_metrics=RequestMetrics(
+            logger_=logging.getLogger("test.statistics.request_metrics")
+        ),
     )
     bot = SimpleNamespace()
     cfg = SimpleNamespace(DEBUG=False, constants=get_game_constants())

@@ -7,7 +7,7 @@ import pytest
 
 from pokerapp.logging_config import ContextJsonFormatter
 from pokerapp.utils.messaging_service import MessagingService
-from pokerapp.utils.request_metrics import RequestCategory
+from pokerapp.utils.request_metrics import RequestCategory, RequestMetrics
 
 
 class _DummyBot:
@@ -52,7 +52,12 @@ def test_context_json_formatter_includes_common_fields():
 @pytest.mark.asyncio
 async def test_messaging_service_logs_include_context(caplog):
     logger = logging.getLogger("test.messaging.service")
-    service = MessagingService(_DummyBot(), logger_=logger)
+    metrics = RequestMetrics(logger_=logger)
+    service = MessagingService(
+        _DummyBot(),
+        logger_=logger,
+        request_metrics=metrics,
+    )
 
     context = {"game_id": "game-123", "stage": "TURN"}
 
@@ -77,7 +82,12 @@ async def test_messaging_service_logs_include_context(caplog):
 @pytest.mark.asyncio
 async def test_messaging_service_logs_errors_with_context(caplog):
     logger = logging.getLogger("test.messaging.service.error")
-    service = MessagingService(_FailingBot(), logger_=logger)
+    metrics = RequestMetrics(logger_=logger)
+    service = MessagingService(
+        _FailingBot(),
+        logger_=logger,
+        request_metrics=metrics,
+    )
 
     with pytest.raises(ValueError):
         with caplog.at_level(logging.ERROR, logger="test.messaging.service.error"):
