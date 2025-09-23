@@ -319,7 +319,8 @@ def test_build_player_cards_keyboard_layout():
     assert stage_row[3] == 'ریور'
 
 
-def test_update_message_resends_reply_keyboard_and_deletes_previous():
+@pytest.mark.parametrize("chat_id", (-123, "-123"))
+def test_update_message_resends_reply_keyboard_and_deletes_previous(chat_id):
     viewer = PokerBotViewer(bot=MagicMock())
     messenger = MagicMock()
     messenger.send_message = AsyncMock(
@@ -337,7 +338,7 @@ def test_update_message_resends_reply_keyboard_and_deletes_previous():
 
     result = run(
         viewer._update_message(
-            chat_id=-123,
+            chat_id=chat_id,
             message_id=555,
             text='به‌روزرسانی',
             reply_markup=keyboard,
@@ -351,7 +352,7 @@ def test_update_message_resends_reply_keyboard_and_deletes_previous():
     messenger.edit_message_text.assert_not_awaited()
     messenger.delete_message.assert_awaited_once()
     delete_call = messenger.delete_message.await_args
-    assert delete_call.kwargs['chat_id'] == -123
+    assert delete_call.kwargs['chat_id'] == int(chat_id)
     assert delete_call.kwargs['message_id'] == 555
 
 

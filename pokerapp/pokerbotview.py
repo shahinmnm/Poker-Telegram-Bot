@@ -1327,14 +1327,14 @@ class PokerBotViewer:
                             else None
                         )
                         if (
-                            isinstance(chat_id, int)
-                            and resolved_new_id is not None
+                            resolved_new_id is not None
                             and resolved_new_id != normalized_existing_message
+                            and normalized_chat != 0
                         ):
                             async def _delete_replaced_message() -> None:
                                 try:
                                     await self._messenger.delete_message(
-                                        chat_id=int(chat_id),
+                                        chat_id=normalized_chat,
                                         message_id=normalized_existing_message,
                                         request_category=RequestCategory.DELETE,
                                     )
