@@ -5,9 +5,11 @@ from __future__ import annotations
 import asyncio
 import datetime
 import logging
-from typing import Any, Awaitable, Callable, Dict, Optional, Set
+from collections import defaultdict
+from typing import Any, Awaitable, Callable, Dict, Iterable, List, Optional, Set, Tuple
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.error import RetryAfter
 from telegram.ext import ContextTypes
 from telegram.helpers import mention_markdown as format_mention_markdown
 
@@ -22,10 +24,19 @@ from pokerapp.entities import (
     UserId,
 )
 from pokerapp.pokerbotview import PokerBotViewer
-from pokerapp.stats import BaseStatsService, NullStatsService, PlayerIdentity
+from pokerapp.stats import (
+    BaseStatsService,
+    NullStatsService,
+    PlayerHandResult,
+    PlayerIdentity,
+)
 from pokerapp.table_manager import TableManager
 from pokerapp.utils.request_metrics import RequestCategory, RequestMetrics
-from pokerapp.winnerdetermination import WinnerDetermination
+from pokerapp.winnerdetermination import (
+    HAND_NAMES_TRANSLATIONS,
+    HandsOfPoker,
+    WinnerDetermination,
+)
 
 
 class GameEngine:
@@ -62,11 +73,14 @@ class GameEngine:
         assign_role_labels: Callable[[Game], None],
         clear_player_anchors: Callable[[Game], Awaitable[None]],
         send_turn_message: Callable[[Game, Player, ChatId], Awaitable[None]],
+        clear_game_messages: Callable[[Game, ChatId], Awaitable[None]],
+        send_join_prompt: Callable[[Game, ChatId], Awaitable[None]],
         get_stage_lock: Callable[[ChatId], Awaitable[asyncio.Lock]],
         build_identity_from_player: Callable[[Player], PlayerIdentity],
         safe_int: Callable[[ChatId], int],
         old_players_key: str,
         safe_edit_message_text: Callable[..., Awaitable[Optional[MessageId]]],
+        invalidate_player_reports: Callable[[Iterable[int]], None],
         logger: logging.Logger,
     ) -> None:
         self._table_manager = table_manager
@@ -78,11 +92,14 @@ class GameEngine:
         self._assign_role_labels = assign_role_labels
         self._clear_player_anchors = clear_player_anchors
         self._send_turn_message = send_turn_message
+        self._clear_game_messages = clear_game_messages
+        self._send_join_prompt = send_join_prompt
         self._get_stage_lock = get_stage_lock
         self._build_identity_from_player = build_identity_from_player
         self._safe_int = safe_int
         self._old_players_key = old_players_key
         self._safe_edit_message_text = safe_edit_message_text
+        self._invalidate_player_reports = invalidate_player_reports
         self._logger = logger
 
     @staticmethod
@@ -227,6 +244,435 @@ class GameEngine:
 
             cards = [game.remain_cards.pop(), game.remain_cards.pop()]
             player.cards = cards
+
+    def _hand_type_to_label(self, hand_type: Optional[HandsOfPoker]) -> Optional[str]:
+        if not hand_type:
+            return None
+        translation = HAND_NAMES_TRANSLATIONS.get(hand_type, {})
+        label = translation.get("fa") or translation.get("en")
+        if not label:
+            label = hand_type.name.replace("_", " ").title()
+        emoji = translation.get("emoji")
+        if emoji:
+            return f"{emoji} {label}"
+        return label
+
+    async def add_cards_to_table(
+        self,
+        count: int,
+        game: Game,
+        chat_id: ChatId,
+        street_name: str,
+        send_message: bool = True,
+    ) -> None:
+        stage_lock = await self._get_stage_lock(chat_id)
+        async with stage_lock:
+            await self._add_cards_to_table(
+                count=count,
+                game=game,
+                chat_id=chat_id,
+                street_name=street_name,
+                send_message=send_message,
+            )
+
+    async def _add_cards_to_table(
+        self,
+        *,
+        count: int,
+        game: Game,
+        chat_id: ChatId,
+        street_name: str,
+        send_message: bool,
+    ) -> None:
+        game.chat_id = chat_id
+        should_refresh_anchors = count > 0
+        if count > 0:
+            for _ in range(count):
+                if game.remain_cards:
+                    game.cards_table.append(game.remain_cards.pop())
+
+        if should_refresh_anchors:
+            await self._view.update_player_anchors_and_keyboards(game)
+
+        if not send_message:
+            return
+
+        if game.board_message_id:
+            await self._view.delete_message(chat_id, game.board_message_id)
+            if game.board_message_id in game.message_ids_to_delete:
+                game.message_ids_to_delete.remove(game.board_message_id)
+            game.board_message_id = None
+
+    def _get_first_player_index(self, game: Game) -> int:
+        return self._round_rate._find_next_active_player_index(game, game.dealer_index)
+
+    async def progress_stage(
+        self,
+        context: ContextTypes.DEFAULT_TYPE,
+        chat_id: ChatId,
+        game: Game,
+    ) -> bool:
+        stage_lock = await self._get_stage_lock(chat_id)
+        async with stage_lock:
+            return await self._progress_stage_locked(
+                context=context,
+                chat_id=chat_id,
+                game=game,
+            )
+
+    async def _progress_stage_locked(
+        self,
+        *,
+        context: ContextTypes.DEFAULT_TYPE,
+        chat_id: ChatId,
+        game: Game,
+    ) -> bool:
+        game.chat_id = chat_id
+
+        contenders = game.players_by(states=(PlayerState.ACTIVE, PlayerState.ALL_IN))
+        if len(contenders) <= 1:
+            await self.finalize_game(context=context, game=game, chat_id=chat_id)
+            game.current_player_index = -1
+            return False
+
+        stage_transitions: Dict[GameState, Tuple[GameState, int, str]] = {
+            GameState.ROUND_PRE_FLOP: (GameState.ROUND_FLOP, 3, "🃏 فلاپ"),
+            GameState.ROUND_FLOP: (GameState.ROUND_TURN, 1, "🃏 ترن"),
+            GameState.ROUND_TURN: (GameState.ROUND_RIVER, 1, "🃏 ریور"),
+        }
+
+        while True:
+            self._round_rate.collect_bets_for_pot(game)
+            for player in game.players:
+                player.has_acted = False
+
+            transition = stage_transitions.get(game.state)
+            if transition:
+                next_state, card_count, stage_label = transition
+                self._logger.debug(
+                    "Advancing game %s to %s",
+                    game.id,
+                    self.state_token(next_state),
+                )
+                game.state = next_state
+                await self._add_cards_to_table(
+                    count=card_count,
+                    game=game,
+                    chat_id=chat_id,
+                    street_name=stage_label,
+                    send_message=True,
+                )
+            elif game.state == GameState.ROUND_RIVER:
+                await self.finalize_game(
+                    context=context,
+                    game=game,
+                    chat_id=chat_id,
+                )
+                game.current_player_index = -1
+                return False
+            else:
+                self._logger.warning(
+                    "Unexpected state %s during stage progression", game.state
+                )
+                game.current_player_index = -1
+                return False
+
+            active_players = game.players_by(states=(PlayerState.ACTIVE,))
+            if not active_players:
+                if game.state == GameState.ROUND_RIVER:
+                    await self.finalize_game(
+                        context=context,
+                        game=game,
+                        chat_id=chat_id,
+                    )
+                    game.current_player_index = -1
+                    return False
+                continue
+
+            first_player_index = self._get_first_player_index(game)
+            game.current_player_index = first_player_index
+            if first_player_index == -1:
+                if game.state == GameState.ROUND_RIVER:
+                    await self.finalize_game(
+                        context=context,
+                        game=game,
+                        chat_id=chat_id,
+                    )
+                    game.current_player_index = -1
+                    return False
+                continue
+
+            return True
+
+    async def finalize_game(
+        self,
+        *,
+        context: ContextTypes.DEFAULT_TYPE,
+        game: Game,
+        chat_id: ChatId,
+    ) -> None:
+        async def _send_with_retry(
+            func: Callable[..., Awaitable[None]],
+            *args: object,
+            retries: int = 3,
+        ) -> None:
+            for attempt in range(retries):
+                try:
+                    await func(*args)
+                    return
+                except RetryAfter as exc:
+                    await asyncio.sleep(exc.retry_after)
+                except Exception as exc:  # pragma: no cover - defensive logging
+                    self._logger.error(
+                        "Error sending message attempt",
+                        extra={
+                            "error_type": type(exc).__name__,
+                            "request_params": {"attempt": attempt + 1, "args": args},
+                        },
+                    )
+                    if attempt + 1 >= retries:
+                        return
+
+        contenders = game.players_by(states=(PlayerState.ACTIVE, PlayerState.ALL_IN))
+        game.chat_id = chat_id
+
+        await self._clear_game_messages(game, chat_id)
+
+        hand_id = game.id
+        pot_total = game.pot
+        payouts: Dict[int, int] = defaultdict(int)
+        hand_labels: Dict[int, Optional[str]] = {}
+
+        if not contenders:
+            active_players = game.players_by(states=(PlayerState.ACTIVE,))
+            if len(active_players) == 1:
+                winner = active_players[0]
+                amount = pot_total
+                if amount > 0:
+                    await winner.wallet.inc(amount)
+                    payouts[self._safe_int(winner.user_id)] += amount
+                hand_labels[self._safe_int(winner.user_id)] = "پیروزی با فولد رقبا"
+                await self._view.send_message(
+                    chat_id,
+                    f"🏆 تمام بازیکنان دیگر فولد کردند! {winner.mention_markdown} برنده {amount}$ شد.",
+                )
+        else:
+            determine_output = self._determine_winners(game, contenders)
+            if isinstance(determine_output, tuple):
+                winners_by_pot = list(determine_output[0] or [])
+                contender_details = (
+                    list(determine_output[1] or [])
+                    if len(determine_output) > 1
+                    else []
+                )
+            else:  # pragma: no cover - compatibility path
+                winners_by_pot = list(determine_output or [])
+                contender_details = []
+
+            for detail in contender_details:
+                player = detail.get("player")
+                if not player:
+                    continue
+                label = self._hand_type_to_label(detail.get("hand_type"))
+                if label:
+                    hand_labels[self._safe_int(player.user_id)] = label
+
+            if winners_by_pot:
+                for pot in winners_by_pot:
+                    pot_amount = pot.get("amount", 0)
+                    winners_info = pot.get("winners", [])
+                    if pot_amount > 0 and winners_info:
+                        base_share, remainder = divmod(pot_amount, len(winners_info))
+                        for index, winner in enumerate(winners_info):
+                            player = winner.get("player")
+                            if not player:
+                                continue
+                            win_amount = base_share + (1 if index < remainder else 0)
+                            if win_amount > 0:
+                                await player.wallet.inc(win_amount)
+                                payouts[self._safe_int(player.user_id)] += win_amount
+                            winner_label = self._hand_type_to_label(
+                                winner.get("hand_type")
+                            )
+                            if (
+                                winner_label
+                                and self._safe_int(player.user_id) not in hand_labels
+                            ):
+                                hand_labels[self._safe_int(player.user_id)] = winner_label
+            else:
+                await self._view.send_message(
+                    chat_id,
+                    "ℹ️ هیچ برنده‌ای در این دست مشخص نشد. مشکلی در منطق بازی رخ داده است.",
+                )
+
+            await _send_with_retry(
+                self._view.send_showdown_results, chat_id, game, winners_by_pot
+            )
+
+        if self._stats_enabled():
+            stats_results = self._build_hand_statistics_results(
+                game,
+                dict(payouts),
+                hand_labels,
+            )
+            await self._stats.finish_hand(
+                hand_id=hand_id,
+                chat_id=self._safe_int(chat_id),
+                results=stats_results,
+                pot_total=pot_total,
+            )
+            self._invalidate_player_reports(
+                self._safe_int(player.user_id) for player in game.players
+            )
+
+        game.pot = 0
+
+        remaining_players = []
+        for player in game.players:
+            if await player.wallet.value() > 0:
+                remaining_players.append(player)
+        context.chat_data[self._old_players_key] = [
+            player.user_id for player in remaining_players
+        ]
+
+        await self._request_metrics.end_cycle(
+            self._safe_int(chat_id), cycle_token=game.id
+        )
+        await self._clear_player_anchors(game)
+        game.reset()
+        await self._table_manager.save_game(chat_id, game)
+
+        await _send_with_retry(self._view.send_new_hand_ready_message, chat_id)
+        await self._send_join_prompt(game, chat_id)
+
+    def _determine_winners(
+        self, game: Game, contenders: List[Player]
+    ) -> Tuple[List[Dict[str, object]], List[Dict[str, object]]]:
+        if not contenders or game.pot == 0:
+            return [], []
+
+        contender_details: List[Dict[str, object]] = []
+        for player in contenders:
+            hand_type, score, best_hand_cards = self._winner_determination.get_hand_value(
+                player.cards, game.cards_table
+            )
+            contender_details.append(
+                {
+                    "player": player,
+                    "total_bet": player.total_bet,
+                    "score": score,
+                    "hand_cards": best_hand_cards,
+                    "hand_type": hand_type,
+                }
+            )
+
+        bet_tiers = sorted(
+            list(
+                set(detail["total_bet"] for detail in contender_details if detail["total_bet"] > 0)
+            )
+        )
+
+        winners_by_pot: List[Dict[str, object]] = []
+        last_bet_tier = 0
+        calculated_pot_total = 0
+
+        for tier in bet_tiers:
+            tier_contribution = tier - last_bet_tier
+            eligible_for_this_pot = [
+                detail for detail in contender_details if detail["total_bet"] >= tier
+            ]
+
+            pot_size = tier_contribution * len(eligible_for_this_pot)
+            calculated_pot_total += pot_size
+
+            if pot_size > 0:
+                best_score_in_pot = max(detail["score"] for detail in eligible_for_this_pot)
+
+                pot_winners_info = [
+                    {
+                        "player": detail["player"],
+                        "hand_cards": detail["hand_cards"],
+                        "hand_type": detail["hand_type"],
+                    }
+                    for detail in eligible_for_this_pot
+                    if detail["score"] == best_score_in_pot
+                ]
+
+                winners_by_pot.append({"amount": pot_size, "winners": pot_winners_info})
+
+            last_bet_tier = tier
+
+        discrepancy = game.pot - calculated_pot_total
+        if discrepancy > 0 and winners_by_pot:
+            winners_by_pot[0]["amount"] += discrepancy
+        elif discrepancy < 0:
+            self._logger.error(
+                "Pot calculation mismatch",
+                extra={
+                    "chat_id": getattr(game, "chat_id", None),
+                    "request_params": {
+                        "game_pot": game.pot,
+                        "calculated": calculated_pot_total,
+                    },
+                    "error_type": "PotMismatch",
+                },
+            )
+            try:
+                asyncio.create_task(
+                    self._view.notify_admin(
+                        {
+                            "event": "pot_mismatch",
+                            "game_pot": game.pot,
+                            "calculated": calculated_pot_total,
+                        }
+                    )
+                )
+            except Exception:  # pragma: no cover - notify best effort
+                pass
+
+        if len(bet_tiers) == 1 and len(winners_by_pot) > 1:
+            main_pot = {
+                "amount": game.pot,
+                "winners": winners_by_pot[0]["winners"],
+            }
+            return [main_pot], contender_details
+
+        return winners_by_pot, contender_details
+
+    def _build_hand_statistics_results(
+        self,
+        game: Game,
+        payouts: Dict[int, int],
+        hand_labels: Dict[int, Optional[str]],
+    ) -> List[PlayerHandResult]:
+        results: List[PlayerHandResult] = []
+        for player in game.seated_players():
+            user_id = self._safe_int(player.user_id)
+            total_bet = int(getattr(player, "total_bet", 0))
+            payout = int(payouts.get(user_id, 0))
+            net_profit = payout - total_bet
+            if net_profit > 0 or (payout > 0 and total_bet == 0):
+                result_flag = "win"
+            elif net_profit < 0:
+                result_flag = "loss"
+            else:
+                result_flag = "push"
+            label = hand_labels.get(user_id)
+            if not label and result_flag == "win" and player.state == PlayerState.ALL_IN:
+                label = "پیروزی با آل-این"
+            results.append(
+                PlayerHandResult(
+                    user_id=user_id,
+                    display_name=player.mention_markdown,
+                    total_bet=total_bet,
+                    payout=payout,
+                    net_profit=net_profit,
+                    hand_type=label,
+                    was_all_in=player.state == PlayerState.ALL_IN,
+                    result=result_flag,
+                )
+            )
+        return results
 
     async def stop_game(
         self,

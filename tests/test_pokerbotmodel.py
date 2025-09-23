@@ -857,9 +857,9 @@ async def test_showdown_sends_new_hand_message_before_join_prompt():
     table_manager.save_game = AsyncMock()
 
     model = PokerBotModel(view=view, bot=bot, cfg=cfg, kv=kv, table_manager=table_manager)
-    model._clear_game_messages = AsyncMock()
-    model._send_join_prompt = AsyncMock(side_effect=record_join_prompt)
-    model._determine_winners = MagicMock(return_value=[])
+    model._game_engine._clear_game_messages = AsyncMock()
+    model._game_engine._send_join_prompt = AsyncMock(side_effect=record_join_prompt)
+    model._game_engine._determine_winners = MagicMock(return_value=[])
 
     game = Game()
     wallet = make_wallet_mock(100)
@@ -874,11 +874,15 @@ async def test_showdown_sends_new_hand_message_before_join_prompt():
     game.players_by = MagicMock(return_value=[player])
     context = SimpleNamespace(chat_data={})
 
-    await model._showdown(game, chat_id, context)
+    await model._game_engine.finalize_game(
+        context=context,
+        game=game,
+        chat_id=chat_id,
+    )
 
     assert call_order == ["clear_anchors", "new_hand", "join_prompt"]
     table_manager.save_game.assert_awaited()
-    model._clear_game_messages.assert_awaited_once()
+    model._game_engine._clear_game_messages.assert_awaited_once()
     view.send_showdown_results.assert_awaited_once()
     view.clear_all_player_anchors.assert_awaited_once_with(game)
 
