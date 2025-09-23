@@ -1392,48 +1392,13 @@ class PokerBotModel:
         """Handle a confirmation vote for stopping the current hand."""
 
         game, chat_id = await self._get_game(update, context)
-        stop_request = context.chat_data.get(KEY_STOP_REQUEST)
-        if not stop_request or stop_request.get("game_id") != game.id:
-            raise UserException("درخواست توقف فعالی وجود ندارد.")
-
-        user_id = update.callback_query.from_user.id
-        manager_id = context.chat_data.get("game_manager_id")
-
-        active_ids = set(stop_request.get("active_players", []))
-        votes = set(stop_request.get("votes", set()))
-
-        if user_id not in active_ids and user_id != manager_id:
-            raise UserException("تنها بازیکنان فعال یا مدیر می‌توانند رأی دهند.")
-
-        votes.add(user_id)
-        stop_request["votes"] = votes
-        stop_request["manager_override"] = bool(manager_id and user_id == manager_id)
-
-        message_text = self._game_engine.render_stop_request_message(
-            game=game,
-            stop_request=stop_request,
+        voter_id = update.callback_query.from_user.id
+        await self._game_engine.confirm_stop_vote(
             context=context,
+            game=game,
+            chat_id=chat_id,
+            voter_id=voter_id,
         )
-
-        message_id = await self._safe_edit_message_text(
-            chat_id,
-            stop_request.get("message_id"),
-            message_text,
-            reply_markup=self._game_engine.build_stop_request_markup(),
-            request_category=RequestCategory.GENERAL,
-        )
-        stop_request["message_id"] = message_id
-        context.chat_data[KEY_STOP_REQUEST] = stop_request
-
-        active_votes = len(votes & active_ids)
-        required_votes = (len(active_ids) // 2) + 1 if active_ids else 0
-
-        if stop_request.get("manager_override"):
-            await self._game_engine.cancel_hand(game, chat_id, context, stop_request)
-            return
-
-        if active_ids and active_votes >= required_votes:
-            await self._game_engine.cancel_hand(game, chat_id, context, stop_request)
 
     async def resume_stop_vote(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
@@ -1441,20 +1406,10 @@ class PokerBotModel:
         """Cancel the stop request and keep the current game running."""
 
         game, chat_id = await self._get_game(update, context)
-        stop_request = context.chat_data.get(KEY_STOP_REQUEST)
-        if not stop_request or stop_request.get("game_id") != game.id:
-            raise UserException("درخواست توقفی برای لغو وجود ندارد.")
-
-        message_id = stop_request.get("message_id")
-        context.chat_data.pop(KEY_STOP_REQUEST, None)
-
-        resume_text = "✅ رأی به ادامه‌ی بازی داده شد. بازی ادامه می‌یابد."
-        await self._safe_edit_message_text(
-            chat_id,
-            message_id,
-            resume_text,
-            reply_markup=None,
-            request_category=RequestCategory.GENERAL,
+        await self._game_engine.resume_stop_vote(
+            context=context,
+            game=game,
+            chat_id=chat_id,
         )
 
     async def _start_game(
