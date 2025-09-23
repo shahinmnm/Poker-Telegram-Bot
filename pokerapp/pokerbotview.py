@@ -23,7 +23,7 @@ from typing import (
     Callable,
     Awaitable,
 )
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import asyncio
 import datetime
 import hashlib
@@ -107,6 +107,148 @@ class TurnMessageUpdate:
     call_label: str
     call_action: PlayerAction
     board_line: str
+
+@dataclass(slots=True)
+class RoleAnchorRecord:
+    player_id: Any
+    seat_index: int
+    message_id: int
+    base_text: str
+    current_text: str
+    payload_signature: str
+    markup_signature: str
+    turn_light: str = ""
+
+
+@dataclass(slots=True)
+class TurnAnchorRecord:
+    message_id: Optional[int] = None
+    payload_hash: str = ""
+
+
+@dataclass(slots=True)
+class ChatAnchorState:
+    role_anchors: Dict[Any, RoleAnchorRecord] = field(default_factory=dict)
+    turn_anchor: TurnAnchorRecord = field(default_factory=TurnAnchorRecord)
+    edit_count: int = 0
+    fallback_count: int = 0
+
+
+class AnchorRegistry:
+    """Track role/turn anchors per chat to keep updates stable."""
+
+    def __init__(self) -> None:
+        self._registry: Dict[int, ChatAnchorState] = {}
+
+    @staticmethod
+    def _normalize_chat(chat_id: ChatId) -> int:
+        try:
+            return int(chat_id)  # type: ignore[arg-type]
+        except (TypeError, ValueError):
+            return 0
+
+    def reset_roles(self, chat_id: ChatId) -> ChatAnchorState:
+        normalized = self._normalize_chat(chat_id)
+        state = self._registry.setdefault(normalized, ChatAnchorState())
+        state.role_anchors.clear()
+        state.edit_count = 0
+        state.fallback_count = 0
+        return state
+
+    def get_chat_state(self, chat_id: ChatId) -> ChatAnchorState:
+        normalized = self._normalize_chat(chat_id)
+        return self._registry.setdefault(normalized, ChatAnchorState())
+
+    def register_role(
+        self,
+        chat_id: ChatId,
+        *,
+        player_id: Any,
+        seat_index: int,
+        message_id: int,
+        base_text: str,
+        payload_signature: str,
+        markup_signature: str,
+    ) -> RoleAnchorRecord:
+        state = self.get_chat_state(chat_id)
+        record = RoleAnchorRecord(
+            player_id=player_id,
+            seat_index=seat_index,
+            message_id=message_id,
+            base_text=base_text,
+            current_text=base_text,
+            payload_signature=payload_signature,
+            markup_signature=markup_signature,
+        )
+        state.role_anchors[player_id] = record
+        return record
+
+    def update_role(
+        self,
+        chat_id: ChatId,
+        player_id: Any,
+        *,
+        base_text: Optional[str] = None,
+        message_id: Optional[int] = None,
+        current_text: Optional[str] = None,
+        payload_signature: Optional[str] = None,
+        markup_signature: Optional[str] = None,
+        turn_light: Optional[str] = None,
+    ) -> Optional[RoleAnchorRecord]:
+        record = self.get_chat_state(chat_id).role_anchors.get(player_id)
+        if record is None:
+            return None
+        if base_text is not None:
+            record.base_text = base_text
+        if message_id is not None:
+            record.message_id = message_id
+        if current_text is not None:
+            record.current_text = current_text
+        if payload_signature is not None:
+            record.payload_signature = payload_signature
+        if markup_signature is not None:
+            record.markup_signature = markup_signature
+        if turn_light is not None:
+            record.turn_light = turn_light
+        return record
+
+    def get_role(self, chat_id: ChatId, player_id: Any) -> Optional[RoleAnchorRecord]:
+        return self.get_chat_state(chat_id).role_anchors.get(player_id)
+
+    def remove_role(self, chat_id: ChatId, player_id: Any) -> None:
+        state = self.get_chat_state(chat_id)
+        state.role_anchors.pop(player_id, None)
+
+    def set_turn_anchor(
+        self, chat_id: ChatId, *, message_id: Optional[int], payload_hash: Optional[str] = None
+    ) -> TurnAnchorRecord:
+        state = self.get_chat_state(chat_id)
+        anchor = state.turn_anchor
+        anchor.message_id = message_id
+        if payload_hash is not None:
+            anchor.payload_hash = payload_hash
+        return anchor
+
+    def get_turn_anchor(self, chat_id: ChatId) -> TurnAnchorRecord:
+        state = self.get_chat_state(chat_id)
+        return state.turn_anchor
+
+    def clear_chat(self, chat_id: ChatId) -> None:
+        normalized = self._normalize_chat(chat_id)
+        self._registry.pop(normalized, None)
+
+    def increment_edit(self, chat_id: ChatId) -> None:
+        state = self.get_chat_state(chat_id)
+        state.edit_count += 1
+
+    def increment_fallback(self, chat_id: ChatId) -> None:
+        state = self.get_chat_state(chat_id)
+        state.fallback_count += 1
+
+    def get_counters(self, chat_id: ChatId) -> tuple[int, int]:
+        state = self.get_chat_state(chat_id)
+        return state.edit_count, state.fallback_count
+
 
 class PokerBotViewer:
     _ZERO_WIDTH_SPACE = "\u2063"
@@ -219,6 +361,21 @@ class PokerBotViewer:
             chat_id,
             message_id,
         )
+
+    @staticmethod
+    def _resolve_message_id(result: Any) -> Optional[int]:
+        if isinstance(result, Message):
+            maybe_id = getattr(result, "message_id", None)
+            if isinstance(maybe_id, int):
+                return maybe_id
+        if isinstance(result, int):
+            return result
+        if isinstance(result, str):
+            try:
+                return int(result)
+            except (TypeError, ValueError):
+                return None
+        return None
 
     @staticmethod
     def _is_private_chat(chat_id: ChatId) -> bool:
@@ -334,6 +491,10 @@ class PokerBotViewer:
             Tuple[ChatId, Optional[MessageId]], asyncio.Task[Optional[MessageId]]
         ] = {}
         self._pending_updates_lock = asyncio.Lock()
+
+        self._anchor_registry = AnchorRegistry()
+        self._anchor_locks: Dict[Tuple[int, str], asyncio.Lock] = {}
+        self._anchor_lock_guard = asyncio.Lock()
 
         self._messenger = MessagingService(
             bot,
@@ -525,6 +686,16 @@ class PokerBotViewer:
             return int(value)  # type: ignore[arg-type]
         except (TypeError, ValueError):
             return 0
+
+    async def _get_anchor_lock(self, chat_id: ChatId, kind: str) -> asyncio.Lock:
+        normalized_chat = self._safe_int(chat_id)
+        key = (normalized_chat, kind)
+        async with self._anchor_lock_guard:
+            lock = self._anchor_locks.get(key)
+            if lock is None:
+                lock = asyncio.Lock()
+                self._anchor_locks[key] = lock
+            return lock
 
     async def schedule_message_update(
         self,
@@ -1487,83 +1658,102 @@ class PokerBotViewer:
 
         community_cards = self._extract_community_cards(game)
 
-        for player in ordered_players:
-            seat_index = player.seat_index if player.seat_index is not None else -1
-            seat_number: int | str = seat_index + 1 if seat_index >= 0 else "?"
+        role_lock = await self._get_anchor_lock(chat_id, "role_anchor_lock")
 
-            role_label = getattr(player, "role_label", None) or self._describe_player_role(
-                game, player
-            )
+        async with role_lock:
+            self._anchor_registry.reset_roles(chat_id)
 
-            display_name = str(
-                getattr(player, "display_name", None)
-                or getattr(player, "full_name", None)
-                or getattr(player, "username", None)
-                or getattr(player, "mention_markdown", "بازیکن")
-            )
+            for player in ordered_players:
+                seat_index = player.seat_index if player.seat_index is not None else -1
+                seat_number: int | str = seat_index + 1 if seat_index >= 0 else "?"
 
-            hole_cards = self._extract_player_hole_cards(player)
-            keyboard = self._compose_anchor_keyboard(
-                stage_name=stage_name,
-                hole_cards=hole_cards,
-                community_cards=community_cards,
-            )
-
-            logger.info(
-                "Dispatching anchor keyboard",
-                extra={
-                    "chat_id": chat_id,
-                    "player_id": getattr(player, "user_id", None),
-                    "stage": stage_name,
-                    "hole_cards": hole_cards,
-                    "community_cards": community_cards,
-                },
-            )
-
-            text = self._build_anchor_text(
-                display_name=display_name,
-                mention_markdown=getattr(player, "mention_markdown", None),
-                seat_number=seat_number,
-                role_label=role_label,
-            )
-
-            signature_payload = self._reply_keyboard_signature(
-                text=text,
-                reply_markup=keyboard,
-                stage_name=stage_name,
-                community_cards=community_cards,
-            )
-
-            try:
-                message_id = await self.send_message_return_id(
-                    chat_id=chat_id,
-                    text=text,
-                    reply_markup=keyboard,
-                    request_category=RequestCategory.ANCHOR,
+                role_label = (
+                    getattr(player, "role_label", None)
+                    or self._describe_player_role(game, player)
                 )
-            except Exception as exc:
-                logger.error(
-                    "Failed to send player anchor",
+
+                display_name = str(
+                    getattr(player, "display_name", None)
+                    or getattr(player, "full_name", None)
+                    or getattr(player, "username", None)
+                    or getattr(player, "mention_markdown", "بازیکن")
+                )
+
+                hole_cards = self._extract_player_hole_cards(player)
+                keyboard = self._compose_anchor_keyboard(
+                    stage_name=stage_name,
+                    hole_cards=hole_cards,
+                    community_cards=community_cards,
+                )
+
+                logger.info(
+                    "Dispatching anchor keyboard",
                     extra={
                         "chat_id": chat_id,
                         "player_id": getattr(player, "user_id", None),
-                        "error_type": type(exc).__name__,
+                        "stage": stage_name,
+                        "hole_cards": hole_cards,
+                        "community_cards": community_cards,
                     },
                 )
-                continue
 
-            if message_id is None:
-                continue
+                text = self._build_anchor_text(
+                    display_name=display_name,
+                    mention_markdown=getattr(player, "mention_markdown", None),
+                    seat_number=seat_number,
+                    role_label=role_label,
+                )
 
-            try:
-                normalized_anchor = int(message_id)
-            except (TypeError, ValueError):
-                continue
+                payload_signature = self._reply_keyboard_signature(
+                    text=text,
+                    reply_markup=keyboard,
+                    stage_name=stage_name,
+                    community_cards=community_cards,
+                )
+                markup_signature = self._serialize_markup(keyboard) or ""
 
-            player.anchor_message = (chat_id, normalized_anchor)
-            player.anchor_role = role_label
-            player.role_label = role_label
-            player.anchor_keyboard_signature = signature_payload
+                try:
+                    message_id = await self.send_message_return_id(
+                        chat_id=chat_id,
+                        text=text,
+                        reply_markup=keyboard,
+                        request_category=RequestCategory.ANCHOR,
+                    )
+                except Exception as exc:
+                    logger.error(
+                        "Failed to send player anchor",
+                        extra={
+                            "chat_id": chat_id,
+                            "player_id": getattr(player, "user_id", None),
+                            "error_type": type(exc).__name__,
+                        },
+                    )
+                    continue
+
+                if message_id is None:
+                    continue
+
+                try:
+                    normalized_anchor = int(message_id)
+                except (TypeError, ValueError):
+                    continue
+
+                self._anchor_registry.register_role(
+                    chat_id,
+                    player_id=getattr(player, "user_id", None),
+                    seat_index=seat_index,
+                    message_id=normalized_anchor,
+                    base_text=text,
+                    payload_signature=payload_signature,
+                    markup_signature=markup_signature,
+                )
+
+                player.anchor_message = (chat_id, normalized_anchor)
+                player.anchor_role = role_label
+                player.role_label = role_label
+                player.anchor_keyboard_signature = payload_signature
+
+                await asyncio.sleep(0.075)
             player.private_keyboard_message = None
             player.private_keyboard_signature = None
 
@@ -1840,6 +2030,81 @@ class PokerBotViewer:
             },
         )
 
+    async def _send_new_role_anchor(
+        self,
+        *,
+        chat_id: ChatId,
+        player: Player,
+        base_text: str,
+        display_text: str,
+        keyboard: ReplyKeyboardMarkup,
+        payload_signature: str,
+        markup_signature: str,
+        turn_light: str,
+        previous_message_id: Optional[int],
+    ) -> Optional[int]:
+        try:
+            if previous_message_id:
+                await self.delete_message(chat_id=chat_id, message_id=previous_message_id)
+        except Exception:
+            logger.debug(
+                "Failed to delete stale role anchor",
+                extra={
+                    "chat_id": chat_id,
+                    "player_id": getattr(player, "user_id", None),
+                    "message_id": previous_message_id,
+                },
+            )
+
+        try:
+            new_message_id = await self.send_message_return_id(
+                chat_id=chat_id,
+                text=display_text,
+                reply_markup=keyboard,
+                request_category=RequestCategory.ANCHOR,
+            )
+        except Exception as exc:
+            logger.error(
+                "Failed to create replacement role anchor",
+                extra={
+                    "chat_id": chat_id,
+                    "player_id": getattr(player, "user_id", None),
+                    "error_type": type(exc).__name__,
+                },
+            )
+            return None
+
+        if new_message_id is None:
+            return None
+
+        normalized_id = self._safe_int(new_message_id)
+        player.anchor_message = (chat_id, normalized_id)
+        player.anchor_keyboard_signature = payload_signature
+
+        self._anchor_registry.update_role(
+            chat_id,
+            getattr(player, "user_id", None),
+            base_text=base_text,
+            message_id=normalized_id,
+            current_text=display_text,
+            payload_signature=payload_signature,
+            markup_signature=markup_signature,
+            turn_light=turn_light,
+        )
+
+        self._anchor_registry.increment_fallback(chat_id)
+
+        logger.debug(
+            "Anchor fallback-new-msg",
+            extra={
+                "chat_id": chat_id,
+                "player_id": getattr(player, "user_id", None),
+                "message_id": normalized_id,
+            },
+        )
+
+        return normalized_id
+
     async def update_player_anchors_and_keyboards(self, game: Game) -> None:
         chat_id = getattr(game, "chat_id", None)
         if chat_id is None:
@@ -1874,134 +2139,272 @@ class PokerBotViewer:
             except Exception:
                 current_player = None
 
-        for player in list(getattr(game, "players", [])):
-            if player is None:
-                continue
-            is_active = getattr(player, "is_active", None)
-            if callable(is_active):
-                try:
-                    if not player.is_active():
-                        continue
-                except Exception:
+        role_lock = await self._get_anchor_lock(chat_id, "role_anchor_lock")
+
+        async with role_lock:
+            for player in list(getattr(game, "players", [])):
+                if player is None:
                     continue
-            elif getattr(player, "state", None) not in (
-                PlayerState.ACTIVE,
-                PlayerState.ALL_IN,
-            ):
-                continue
+                is_active = getattr(player, "is_active", None)
+                if callable(is_active):
+                    try:
+                        if not player.is_active():
+                            continue
+                    except Exception:
+                        continue
+                elif getattr(player, "state", None) not in (
+                    PlayerState.ACTIVE,
+                    PlayerState.ALL_IN,
+                ):
+                    continue
 
-            anchor_id = self._get_player_anchor_message_id(chat_id, player)
-            if not anchor_id:
-                continue
+                anchor_id = self._get_player_anchor_message_id(chat_id, player)
+                if not anchor_id:
+                    continue
 
-            hole_cards = self._extract_player_hole_cards(player)
+                player_id = getattr(player, "user_id", None)
+                record = self._anchor_registry.get_role(chat_id, player_id)
+                if record is None:
+                    logger.debug(
+                        "Anchor record missing for player %s in chat %s", player_id, chat_id
+                    )
+                    continue
 
-            keyboard = self._compose_anchor_keyboard(
-                stage_name=stage_name,
-                hole_cards=hole_cards,
-                community_cards=community_cards,
-            )
+                hole_cards = self._extract_player_hole_cards(player)
 
-            seat_index = player.seat_index if player.seat_index is not None else -1
-            seat_number = seat_index + 1 if seat_index >= 0 else "?"
-            role_label = getattr(player, "role_label", None) or getattr(
-                player, "anchor_role", "بازیکن"
-            )
-            display_name = (
-                getattr(player, "display_name", None)
-                or getattr(player, "full_name", None)
-                or getattr(player, "username", None)
-                or player.mention_markdown
-            )
-            display_name = str(display_name)
-
-            text = self._build_anchor_text(
-                display_name=display_name,
-                mention_markdown=getattr(player, "mention_markdown", None),
-                seat_number=seat_number,
-                role_label=role_label,
-            )
-            is_current_turn = current_player is player
-            if is_current_turn:
-                text = "\n".join([text, "", "🎯 نوبت این بازیکن است."])
-
-            signature_payload = self._reply_keyboard_signature(
-                text=text,
-                reply_markup=keyboard,
-                stage_name=stage_name,
-                community_cards=community_cards,
-            )
-
-            previous_signature = getattr(player, "anchor_keyboard_signature", None)
-            keyboard_changed = previous_signature != signature_payload
-
-            logger.debug(
-                "Anchor update: player=%s | seat=%s | role=%s | hole_cards=%s | "
-                "community_cards=%s | is_turn=%s | chat_id=%s | anchor_id=%s | "
-                "keyboard_changed=%s",
-                display_name,
-                seat_number,
-                role_label,
-                hole_cards,
-                community_cards,
-                is_current_turn,
-                chat_id,
-                anchor_id,
-                keyboard_changed,
-            )
-
-            logger.info(
-                "Updating anchor keyboard",
-                extra={
-                    "chat_id": chat_id,
-                    "player_id": getattr(player, "user_id", None),
-                    "message_id": anchor_id,
-                    "stage": stage_name,
-                    "hole_cards": hole_cards,
-                    "community_cards": community_cards,
-                    "keyboard_changed": keyboard_changed,
-                },
-            )
-
-            try:
-                await self._purge_pending_updates(chat_id, anchor_id)
-                result = await self._update_message(
-                    chat_id=chat_id,
-                    message_id=anchor_id,
-                    text=text,
-                    reply_markup=keyboard,
-                    force_send=keyboard_changed,
-                    request_category=RequestCategory.ANCHOR,
+                keyboard = self._compose_anchor_keyboard(
+                    stage_name=stage_name,
+                    hole_cards=hole_cards,
+                    community_cards=community_cards,
                 )
-            except Exception as exc:
-                logger.error(
-                    "Failed to refresh anchor",
+
+                seat_index = player.seat_index if player.seat_index is not None else -1
+                seat_number = seat_index + 1 if seat_index >= 0 else "?"
+                role_label = getattr(player, "role_label", None) or getattr(
+                    player, "anchor_role", "بازیکن"
+                )
+                display_name = (
+                    getattr(player, "display_name", None)
+                    or getattr(player, "full_name", None)
+                    or getattr(player, "username", None)
+                    or player.mention_markdown
+                )
+                display_name = str(display_name)
+
+                base_text = self._build_anchor_text(
+                    display_name=display_name,
+                    mention_markdown=getattr(player, "mention_markdown", None),
+                    seat_number=seat_number,
+                    role_label=role_label,
+                )
+
+                previous_text = record.current_text
+                previous_markup = record.markup_signature
+                previous_payload = record.payload_signature
+                previous_light = record.turn_light or ""
+
+                next_light = ""
+                indicator_line = ""
+                if current_player is player:
+                    next_light = "🟢" if previous_light != "🟢" else "🔴"
+                    indicator_line = f"\n\n{next_light} نوبت این بازیکن است."
+
+                display_text = base_text + indicator_line
+                markup_signature = self._serialize_markup(keyboard) or ""
+                payload_signature = self._reply_keyboard_signature(
+                    text=display_text,
+                    reply_markup=keyboard,
+                    stage_name=stage_name,
+                    community_cards=community_cards,
+                )
+
+                text_changed = display_text != previous_text
+                keyboard_changed = markup_signature != previous_markup
+                payload_changed = payload_signature != previous_payload
+                reason_label = "forced" if text_changed and not keyboard_changed else "normal"
+
+                if not (text_changed or keyboard_changed or payload_changed):
+                    logger.debug(
+                        "Anchor update skipped (unchanged) for player=%s chat=%s",
+                        player_id,
+                        chat_id,
+                    )
+                    continue
+
+                logger.debug(
+                    "Anchor update: player=%s | seat=%s | role=%s | hole_cards=%s | "
+                    "community_cards=%s | is_turn=%s | chat_id=%s | anchor_id=%s | "
+                    "reason=%s",
+                    display_name,
+                    seat_number,
+                    role_label,
+                    hole_cards,
+                    community_cards,
+                    current_player is player,
+                    chat_id,
+                    anchor_id,
+                    reason_label,
+                )
+
+                logger.info(
+                    "Updating anchor",
                     extra={
                         "chat_id": chat_id,
-                        "player_id": getattr(player, "user_id", None),
-                        "error_type": type(exc).__name__,
+                        "player_id": player_id,
+                        "message_id": anchor_id,
+                        "stage": stage_name,
+                        "hole_cards": hole_cards,
+                        "community_cards": community_cards,
+                        "text_changed": text_changed,
+                        "keyboard_changed": keyboard_changed,
                     },
                 )
-                continue
 
-            resolved_anchor_id: Optional[int] = None
-            if isinstance(result, Message):
-                resolved_anchor_id = getattr(result, "message_id", None)
-            elif isinstance(result, int):
-                resolved_anchor_id = result
-            elif isinstance(result, str):
-                try:
-                    resolved_anchor_id = int(result)
-                except (TypeError, ValueError):
-                    resolved_anchor_id = None
+                await self._purge_pending_updates(chat_id, anchor_id)
 
-            final_anchor_id = resolved_anchor_id or anchor_id
-            try:
-                normalized_anchor = int(final_anchor_id)
-            except (TypeError, ValueError):
-                continue
-            player.anchor_message = (chat_id, normalized_anchor)
-            player.anchor_keyboard_signature = signature_payload
+                new_message_id: Optional[int] = None
+                edit_success = False
+
+                if text_changed:
+                    try:
+                        result = await self._update_message(
+                            chat_id=chat_id,
+                            message_id=anchor_id,
+                            text=display_text,
+                            reply_markup=keyboard,
+                            force_send=True,
+                            request_category=RequestCategory.ANCHOR,
+                        )
+                    except (BadRequest, Forbidden) as exc:
+                        err = str(exc).lower()
+                        if "message to edit not found" in err or "message is not modified" in err:
+                            logger.warning(
+                                "Anchor text edit failed; creating replacement",
+                                extra={
+                                    "chat_id": chat_id,
+                                    "player_id": player_id,
+                                    "message_id": anchor_id,
+                                    "error_type": type(exc).__name__,
+                                },
+                            )
+                            new_message_id = await self._send_new_role_anchor(
+                                chat_id=chat_id,
+                                player=player,
+                                base_text=base_text,
+                                display_text=display_text,
+                                keyboard=keyboard,
+                                payload_signature=payload_signature,
+                                markup_signature=markup_signature,
+                                turn_light=next_light,
+                                previous_message_id=anchor_id,
+                            )
+                        else:
+                            logger.error(
+                                "Failed to edit anchor text",
+                                extra={
+                                    "chat_id": chat_id,
+                                    "player_id": player_id,
+                                    "message_id": anchor_id,
+                                    "error_type": type(exc).__name__,
+                                },
+                            )
+                        edit_success = new_message_id is not None
+                    except Exception as exc:
+                        logger.error(
+                            "Unexpected error editing anchor text",
+                            extra={
+                                "chat_id": chat_id,
+                                "player_id": player_id,
+                                "message_id": anchor_id,
+                                "error_type": type(exc).__name__,
+                            },
+                        )
+                    else:
+                        resolved_id = self._resolve_message_id(result)
+                        if resolved_id is not None:
+                            new_message_id = resolved_id
+                        edit_success = True
+                elif keyboard_changed:
+                    try:
+                        edit_success = await self.edit_message_reply_markup(
+                            chat_id=chat_id,
+                            message_id=anchor_id,
+                            reply_markup=keyboard,
+                        )
+                    except (BadRequest, Forbidden) as exc:
+                        err = str(exc).lower()
+                        if "message to edit not found" in err or "message is not modified" in err:
+                            logger.warning(
+                                "Anchor markup edit failed; forcing replacement",
+                                extra={
+                                    "chat_id": chat_id,
+                                    "player_id": player_id,
+                                    "message_id": anchor_id,
+                                    "error_type": type(exc).__name__,
+                                },
+                            )
+                            new_message_id = await self._send_new_role_anchor(
+                                chat_id=chat_id,
+                                player=player,
+                                base_text=base_text,
+                                display_text=display_text,
+                                keyboard=keyboard,
+                                payload_signature=payload_signature,
+                                markup_signature=markup_signature,
+                                turn_light=next_light,
+                                previous_message_id=anchor_id,
+                            )
+                            edit_success = new_message_id is not None
+                        else:
+                            logger.error(
+                                "Failed to edit anchor markup",
+                                extra={
+                                    "chat_id": chat_id,
+                                    "player_id": player_id,
+                                    "message_id": anchor_id,
+                                    "error_type": type(exc).__name__,
+                                },
+                            )
+                            edit_success = False
+                    except Exception as exc:
+                        logger.error(
+                            "Unexpected error editing anchor markup",
+                            extra={
+                                "chat_id": chat_id,
+                                "player_id": player_id,
+                                "message_id": anchor_id,
+                                "error_type": type(exc).__name__,
+                            },
+                        )
+                        edit_success = False
+
+                if not edit_success and new_message_id is None and not text_changed:
+                    # nothing changed and no edit performed
+                    await asyncio.sleep(0.05)
+                    continue
+
+                if edit_success and new_message_id is None:
+                    new_message_id = anchor_id
+
+                if new_message_id is not None:
+                    self._anchor_registry.update_role(
+                        chat_id,
+                        player_id,
+                        base_text=base_text,
+                        message_id=new_message_id,
+                        current_text=display_text,
+                        payload_signature=payload_signature,
+                        markup_signature=markup_signature,
+                        turn_light=next_light,
+                    )
+                    player.anchor_message = (chat_id, new_message_id)
+                    player.anchor_keyboard_signature = payload_signature
+                    player.anchor_role = role_label
+                    player.role_label = role_label
+                    if edit_success:
+                        self._anchor_registry.increment_edit(chat_id)
+
+                await asyncio.sleep(0.05)
 
     async def clear_all_player_anchors(self, game: Game) -> None:
         chat_id = getattr(game, "chat_id", None)
@@ -2009,6 +2412,9 @@ class PokerBotViewer:
             return
 
         message_ids_to_delete = getattr(game, "message_ids_to_delete", [])
+
+        self._anchor_registry.reset_roles(chat_id)
+        self._anchor_registry.set_turn_anchor(chat_id, message_id=None, payload_hash="")
 
         for player in list(getattr(game, "players", [])):
             if player is None:
@@ -2038,6 +2444,7 @@ class PokerBotViewer:
             player.anchor_role = "بازیکن"
             player.role_label = "بازیکن"
             player.anchor_keyboard_signature = None
+            self._anchor_registry.remove_role(chat_id, getattr(player, "user_id", None))
 
     async def announce_player_seats(
         self,
@@ -2595,67 +3002,89 @@ class PokerBotViewer:
     ) -> TurnMessageUpdate:
         """Send or edit the persistent turn message for the active player."""
 
-        call_amount = max(game.max_round_rate - player.round_rate, 0)
-        call_action = self.define_check_call_action(game, player)
-        call_text = (
-            f"{call_action.value} ({call_amount}$)"
-            if call_action == PlayerAction.CALL and call_amount > 0
-            else call_action.value
-        )
+        turn_lock = await self._get_anchor_lock(chat_id, "turn_anchor_lock")
 
-        seat_number = (player.seat_index or 0) + 1
-        board_line = self._format_card_line("🃏 Board", game.cards_table)
+        async with turn_lock:
+            call_amount = max(game.max_round_rate - player.round_rate, 0)
+            call_action = self.define_check_call_action(game, player)
+            call_text = (
+                f"{call_action.value} ({call_amount}$)"
+                if call_action == PlayerAction.CALL and call_amount > 0
+                else call_action.value
+            )
 
-        stage_labels = {
-            GameState.ROUND_PRE_FLOP: "Pre-Flop",
-            GameState.ROUND_FLOP: "Flop",
-            GameState.ROUND_TURN: "Turn",
-            GameState.ROUND_RIVER: "River",
-        }
-        stage_name = stage_labels.get(game.state, "Pre-Flop")
+            seat_number = (player.seat_index or 0) + 1
+            board_line = self._format_card_line("🃏 Board", game.cards_table)
 
-        info_lines = [
-            f"🎯 **نوبت:** {player.mention_markdown} (صندلی {seat_number})",
-            f"🎰 **مرحله بازی:** {stage_name}",
-            "",
-            board_line,
-            f"💰 **پات فعلی:** `{game.pot}$`",
-            f"💵 **موجودی شما:** `{money}$`",
-            f"🎲 **بِت فعلی شما:** `{player.round_rate}$`",
-            f"📈 **حداکثر شرط این دور:** `{game.max_round_rate}$`",
-            "",
-            "⬇️ **از دکمه‌های زیر برای اقدام استفاده کنید.**",
-        ]
+            stage_labels = {
+                GameState.ROUND_PRE_FLOP: "Pre-Flop",
+                GameState.ROUND_FLOP: "Flop",
+                GameState.ROUND_TURN: "Turn",
+                GameState.ROUND_RIVER: "River",
+            }
+            stage_name = stage_labels.get(game.state, "Pre-Flop")
 
-        history = list(
-            (recent_actions if recent_actions is not None else game.last_actions)[-5:]
-        )
-        if history:
-            info_lines.append("")
-            info_lines.append("🎬 **اکشن‌های اخیر:**")
-            info_lines.extend(f"• {action}" for action in history)
+            info_lines = [
+                f"🎯 **نوبت:** {player.mention_markdown} (صندلی {seat_number})",
+                f"🎰 **مرحله بازی:** {stage_name}",
+                "",
+                board_line,
+                f"💰 **پات فعلی:** `{game.pot}$`",
+                f"💵 **موجودی شما:** `{money}$`",
+                f"🎲 **بِت فعلی شما:** `{player.round_rate}$`",
+                f"📈 **حداکثر شرط این دور:** `{game.max_round_rate}$`",
+                "",
+                "⬇️ **از دکمه‌های زیر برای اقدام استفاده کنید.**",
+            ]
 
-        text = "\n".join(info_lines)
+            history = list(
+                (recent_actions if recent_actions is not None else game.last_actions)[-5:]
+            )
+            if history:
+                info_lines.append("")
+                info_lines.append("🎬 **اکشن‌های اخیر:**")
+                info_lines.extend(f"• {action}" for action in history)
 
-        reply_markup = await self._build_turn_keyboard(call_text, call_action)
+            text = "\n".join(info_lines)
 
-        new_message_id = await self.schedule_message_update(
-            chat_id=chat_id,
-            message_id=message_id,
-            text=text,
-            reply_markup=reply_markup,
-            parse_mode=ParseMode.MARKDOWN,
-            disable_web_page_preview=True,
-            disable_notification=message_id is not None,
-            request_category=RequestCategory.TURN,
-        )
+            reply_markup = await self._build_turn_keyboard(call_text, call_action)
 
-        return TurnMessageUpdate(
-            message_id=new_message_id,
-            call_label=call_text,
-            call_action=call_action,
-            board_line=board_line,
-        )
+            turn_anchor = self._anchor_registry.get_turn_anchor(chat_id)
+            anchor_message_id = message_id or turn_anchor.message_id
+
+            new_message_id = await self.schedule_message_update(
+                chat_id=chat_id,
+                message_id=anchor_message_id,
+                text=text,
+                reply_markup=reply_markup,
+                parse_mode=ParseMode.MARKDOWN,
+                disable_web_page_preview=True,
+                disable_notification=anchor_message_id is not None,
+                request_category=RequestCategory.TURN,
+            )
+
+            resolved_message_id = self._resolve_message_id(new_message_id)
+            final_message_id = resolved_message_id or anchor_message_id
+            normalized_final_id: Optional[int] = None
+            if final_message_id is not None:
+                try:
+                    normalized_final_id = int(final_message_id)
+                except (TypeError, ValueError):
+                    normalized_final_id = self._safe_int(final_message_id)
+
+            payload_hash = self._payload_hash(text, reply_markup)
+            self._anchor_registry.set_turn_anchor(
+                chat_id,
+                message_id=normalized_final_id,
+                payload_hash=payload_hash,
+            )
+
+            return TurnMessageUpdate(
+                message_id=normalized_final_id,
+                call_label=call_text,
+                call_action=call_action,
+                board_line=board_line,
+            )
 
     async def _build_turn_keyboard(
         self, call_text: str, call_action: PlayerAction
