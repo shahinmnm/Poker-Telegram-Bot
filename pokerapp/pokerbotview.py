@@ -570,25 +570,21 @@ class PokerBotViewer:
                     normalized_game,
                 )
 
-    def _is_countdown_active(self, chat_id: ChatId) -> bool:
+    async def _is_countdown_active(self, chat_id: ChatId) -> bool:
         """Return True when a prestart countdown task exists for the chat."""
 
         normalized_chat = self._safe_int(chat_id)
         if normalized_chat == 0:
             return False
 
-        try:
-            pending_tasks = list(self._prestart_countdown_tasks.items())
-        except Exception:
-            return False
-
-        for (chat_key, _), task in pending_tasks:
-            if chat_key != normalized_chat:
-                continue
-            if task is None:
-                continue
-            if not task.done():
-                return True
+        async with self._prestart_countdown_lock:
+            for (chat_key, _), task in self._prestart_countdown_tasks.items():
+                if chat_key != normalized_chat:
+                    continue
+                if task is None:
+                    continue
+                if not task.done():
+                    return True
         return False
 
     def _create_countdown_task(
@@ -1990,13 +1986,19 @@ class PokerBotViewer:
                                 resolved_stage = self._resolve_game_state(stage)
                                 stage_name = getattr(resolved_stage, "name", None)
 
+                                countdown_active = False
+                                if resolved_stage == GameState.INITIAL:
+                                    countdown_active = await self._is_countdown_active(
+                                        chat_id
+                                    )
+
                                 if (
                                     record is not None
                                     and (
                                         resolved_stage in self._ACTIVE_ANCHOR_STATES
                                         or (
                                             resolved_stage == GameState.INITIAL
-                                            and self._is_countdown_active(chat_id)
+                                            and countdown_active
                                         )
                                     )
                                 ):
@@ -2916,11 +2918,14 @@ class PokerBotViewer:
         if previous_message_id is not None:
             normalized_previous = self._safe_int(previous_message_id)
 
+        countdown_active = False
+        if resolved_stage == GameState.INITIAL:
+            countdown_active = await self._is_countdown_active(chat_id)
+
         countdown_guard_active = (
             resolved_stage in self._ACTIVE_ANCHOR_STATES
             or (
-                resolved_stage == GameState.INITIAL
-                and self._is_countdown_active(chat_id)
+                resolved_stage == GameState.INITIAL and countdown_active
             )
         )
         if countdown_guard_active:
@@ -3827,13 +3832,17 @@ class PokerBotViewer:
             )
         stage_name = getattr(resolved_stage, "name", None)
 
+        countdown_active = False
+        if resolved_stage == GameState.INITIAL:
+            countdown_active = await self._is_countdown_active(chat_id)
+
         if (
             anchor_record is not None
             and (
                 resolved_stage in self._ACTIVE_ANCHOR_STATES
                 or (
                     resolved_stage == GameState.INITIAL
-                    and self._is_countdown_active(chat_id)
+                    and countdown_active
                 )
             )
         ):
