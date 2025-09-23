@@ -36,7 +36,15 @@ MessagingServiceFactory = Callable[..., MessagingService]
 
 
 class PokerBot:
-    """Telegram bot wrapper using PTB v20 async Application."""
+    """Telegram bot wrapper using PTB v20 async Application.
+
+    The bootstrap layer (`main.py`) injects infrastructure singletons such as
+    the logger, Redis pool, metrics collector, and stats service. ``PokerBot``
+    remains responsible for wiring the Presentation (``PokerBotViewer``) and
+    domain model (``PokerBotModel``) around the shared ``Application`` instance.
+    See ``docs/game_flow.md`` for the architecture and sequence diagrams that
+    map these responsibilities.
+    """
 
     def __init__(
         self,
@@ -197,6 +205,9 @@ class PokerBot:
         self._application = builder.build()
         self._application.add_error_handler(self._handle_error)
 
+        # Viewer and model are created here so that both receive the injected
+        # infrastructure dependencies (Redis, stats, metrics, messaging). The
+        # controller then binds Telegram handlers to delegate into the model.
         self._view = PokerBotViewer(
             bot=self._application.bot,
             admin_chat_id=self._cfg.ADMIN_CHAT_ID,

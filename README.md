@@ -12,6 +12,33 @@ The bot plays role "our admin": he divides cards, adds cards, controlls whose tu
 
 All things that we need to do is adding bot to your group chat on telegram and every member needs to press the join button at the beginning of round. Then the game will be started. Rules of the texas poker you can read briefly below:
 
+## Architecture overview
+
+The production bot is split into three cooperating layers:
+
+- **Infrastructure glue** — [`pokerapp/pokerbot.py`](pokerapp/pokerbot.py) wires the
+  Telegram `Application`, injects shared dependencies (logger, Redis, stats,
+  metrics), and exposes `run_webhook` / `run_polling` entry points.
+- **Game rules** — [`pokerapp/game_engine.py`](pokerapp/game_engine.py) implements
+  the Texas Hold'em state machine, balancing the pot, advancing stages, and
+  finalising results through injected services.
+- **User interface** — [`pokerapp/pokerbotview.py`](pokerapp/pokerbotview.py)
+  renders keyboards, anchors, and throttled Telegram updates through the
+  `MessagingService` facade.
+
+The new dependency-injection centric architecture is documented in depth inside
+[`docs/game_flow.md`](docs/game_flow.md), including ASCII and PlantUML diagrams
+that illustrate how bootstrap code constructs the bot.
+
+## Game flow reference
+
+For a detailed walkthrough of the startup sequence, per-stage lifecycle, and the
+`GameState` transitions (`ROUND_PRE_FLOP` → `ROUND_FLOP` → `ROUND_TURN` →
+`ROUND_RIVER` → `FINISHED`), consult the [Game Flow & Architecture guide](docs/game_flow.md).
+The document expands on the high-level rules below by mapping them back to the
+actual async functions that drive table updates, statistics, and message
+rendering.
+
 **Here is the brief instruction of Texas Poker**\
 Every player has two private cards and on the table has five community cards which are dealt face up in the three stages.
 On the beginning of game, two people which are selected for big and small blinds. This means the blinds are forced to bet, the small blind bet 5\$ and the big blind bet 10\$.
