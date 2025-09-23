@@ -307,11 +307,46 @@ def test_clear_all_player_anchors_deletes_messages():
 
     run(viewer.clear_all_player_anchors(game))
 
-    viewer.delete_message.assert_awaited_once_with(chat_id=game.chat_id, message_id=404)
+    viewer.delete_message.assert_awaited_once_with(
+        chat_id=game.chat_id, message_id=404, allow_anchor_deletion=True
+    )
     assert player.anchor_message is None
     assert player.anchor_role == 'بازیکن'
     assert player.role_label == 'بازیکن'
     assert 404 not in game.message_ids_to_delete
+
+
+def test_delete_message_skips_role_anchor_mid_hand(caplog):
+    viewer = PokerBotViewer(bot=MagicMock())
+    viewer._messenger.delete_message = AsyncMock()
+    viewer._mark_message_deleted = AsyncMock()
+
+    chat_id = -777
+    message_id = 12345
+    viewer._anchor_registry.register_role(
+        chat_id=chat_id,
+        player_id=42,
+        seat_index=0,
+        message_id=message_id,
+        base_text="anchor",
+        payload_signature="sig",
+        markup_signature="markup",
+    )
+
+    with caplog.at_level(logging.INFO):
+        run(
+            viewer.delete_message(
+                chat_id=chat_id,
+                message_id=message_id,
+            )
+        )
+
+    viewer._messenger.delete_message.assert_not_awaited()
+    viewer._mark_message_deleted.assert_not_awaited()
+    assert any(
+        "[AnchorPersistence] Skipped deletion for role anchor message_id=" in record.message
+        for record in caplog.records
+    )
 
 
 def test_send_player_role_anchors_attaches_group_keyboard():
@@ -372,7 +407,7 @@ def test_build_player_cards_keyboard_layout():
 
 
 @pytest.mark.parametrize("chat_id", (-123, "-123"))
-def test_update_message_resends_reply_keyboard_and_deletes_previous(chat_id):
+def test_update_message_resends_reply_keyboard_without_deleting_anchor(chat_id):
     viewer = PokerBotViewer(bot=MagicMock())
     messenger = MagicMock()
     messenger.send_message = AsyncMock(
@@ -402,10 +437,7 @@ def test_update_message_resends_reply_keyboard_and_deletes_previous(chat_id):
     assert result == 777
     messenger.send_message.assert_awaited_once()
     messenger.edit_message_text.assert_not_awaited()
-    messenger.delete_message.assert_awaited_once()
-    delete_call = messenger.delete_message.await_args
-    assert delete_call.kwargs['chat_id'] == int(chat_id)
-    assert delete_call.kwargs['message_id'] == 555
+    messenger.delete_message.assert_not_awaited()
 
 
 def test_update_turn_message_includes_stage_and_keyboard():

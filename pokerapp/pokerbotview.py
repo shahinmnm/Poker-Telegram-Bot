@@ -229,6 +229,17 @@ class AnchorRegistry:
     def get_role(self, chat_id: ChatId, player_id: Any) -> Optional[RoleAnchorRecord]:
         return self.get_chat_state(chat_id).role_anchors.get(player_id)
 
+    def find_role_anchor_by_message(
+        self, chat_id: ChatId, message_id: int
+    ) -> Optional[RoleAnchorRecord]:
+        """Return the role anchor record associated with ``message_id`` if any."""
+
+        state = self.get_chat_state(chat_id)
+        for record in state.role_anchors.values():
+            if record.message_id == message_id:
+                return record
+        return None
+
     def remove_role(self, chat_id: ChatId, player_id: Any) -> None:
         state = self.get_chat_state(chat_id)
         state.role_anchors.pop(player_id, None)
@@ -1343,7 +1354,18 @@ class PokerBotViewer:
                 "fallback_reason": fallback_reason,
             },
         )
-        await self._mark_message_deleted(normalized_message)
+        record = None
+        if request_category == RequestCategory.ANCHOR:
+            record = self._resolve_role_anchor_record(chat_id, normalized_message)
+        if record is None:
+            await self._mark_message_deleted(normalized_message)
+        else:
+            self._log_anchor_preservation_skip(
+                chat_id=chat_id,
+                message_id=normalized_message,
+                record=record,
+                extra_details={"decision": diagnostics.get("decision")},
+            )
         return True, fallback_reason, diagnostics
     async def _get_turn_cache_hash(
         self, key: Tuple[int, int]
@@ -1914,6 +1936,26 @@ class PokerBotViewer:
                             and normalized_chat != 0
                         ):
                             async def _delete_replaced_message() -> None:
+                                if request_category == RequestCategory.ANCHOR:
+                                    record = self._resolve_role_anchor_record(
+                                        chat_id, normalized_existing_message
+                                    )
+                                    self._log_anchor_preservation_skip(
+                                        chat_id=chat_id,
+                                        message_id=normalized_existing_message,
+                                        record=record,
+                                    )
+                                    return
+                                record = self._resolve_role_anchor_record(
+                                    chat_id, normalized_existing_message
+                                )
+                                if record is not None:
+                                    self._log_anchor_preservation_skip(
+                                        chat_id=chat_id,
+                                        message_id=normalized_existing_message,
+                                        record=record,
+                                    )
+                                    return
                                 try:
                                     await self._messenger.delete_message(
                                         chat_id=normalized_chat,
@@ -2233,6 +2275,45 @@ class PokerBotViewer:
             except (TypeError, ValueError):
                 return None
         return None
+
+    def _resolve_role_anchor_record(
+        self, chat_id: ChatId, message_id: Optional[int]
+    ) -> Optional[RoleAnchorRecord]:
+        if message_id is None:
+            return None
+        normalized_message = self._safe_int(message_id)
+        if normalized_message <= 0:
+            return None
+        try:
+            return self._anchor_registry.find_role_anchor_by_message(
+                chat_id, normalized_message
+            )
+        except Exception:
+            return None
+
+    def _log_anchor_preservation_skip(
+        self,
+        *,
+        chat_id: ChatId,
+        message_id: Optional[int],
+        record: Optional[RoleAnchorRecord],
+        extra_details: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        if message_id is None:
+            return
+        normalized_message = self._safe_int(message_id)
+        extra: Dict[str, Any] = {
+            "chat_id": chat_id,
+            "player_id": getattr(record, "player_id", None),
+            "seat_index": getattr(record, "seat_index", None),
+        }
+        if extra_details:
+            extra.update(extra_details)
+        logger.info(
+            "[AnchorPersistence] Skipped deletion for role anchor message_id=%s mid-hand",
+            normalized_message,
+            extra=extra,
+        )
 
     async def sync_player_private_keyboards(
         self,
@@ -2922,7 +3003,11 @@ class PokerBotViewer:
             if anchor_id:
                 try:
                     await self._purge_pending_updates(chat_id, anchor_id)
-                    await self.delete_message(chat_id=chat_id, message_id=anchor_id)
+                    await self.delete_message(
+                        chat_id=chat_id,
+                        message_id=anchor_id,
+                        allow_anchor_deletion=True,
+                    )
                 except Exception as exc:
                     logger.debug(
                         "Failed to delete player anchor",
@@ -3270,11 +3355,25 @@ class PokerBotViewer:
             return None
 
     async def delete_message(
-        self, chat_id: ChatId, message_id: MessageId
+        self,
+        chat_id: ChatId,
+        message_id: MessageId,
+        *,
+        allow_anchor_deletion: bool = False,
     ) -> None:
         """Delete a message while keeping the cache in sync."""
-        normalized_chat = self._safe_int(chat_id)
         normalized_message = self._safe_int(message_id)
+        if not allow_anchor_deletion:
+            record = self._resolve_role_anchor_record(chat_id, normalized_message)
+            if record is not None:
+                self._log_anchor_preservation_skip(
+                    chat_id=chat_id,
+                    message_id=normalized_message,
+                    record=record,
+                )
+                return
+
+        normalized_chat = self._safe_int(chat_id)
         lock = await self._acquire_message_lock(chat_id, message_id)
         async with lock:
             try:
