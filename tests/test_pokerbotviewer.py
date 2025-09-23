@@ -495,12 +495,16 @@ async def test_should_create_anchor_fallback_recovers_when_history_probe_missing
         player_id=7,
         last_error=None,
         forced_refresh=False,
+        request_category=RequestCategory.ANCHOR,
+        current_text="anchor",
     )
 
     assert not should_fallback
     assert reason == "edit_recovered"
     assert diagnostics["retry_attempted"] is True
     assert diagnostics["retry_success"] is True
+    assert diagnostics["anchor_no_fallback"] is True
+    assert viewer._anchor_registry.get_role_retry_count(99) == 1
     viewer._update_message.assert_awaited_once()
     viewer._mark_message_deleted.assert_not_awaited()
 
@@ -532,14 +536,17 @@ async def test_should_create_anchor_fallback_triggers_fallback_after_retry_failu
         player_id=9,
         last_error=None,
         forced_refresh=False,
+        request_category=RequestCategory.ANCHOR,
+        current_text="anchor",
     )
 
-    assert should_fallback
-    assert reason == "history_missing"
+    assert not should_fallback
+    assert reason == "anchor_no_fallback"
     assert diagnostics["retry_attempted"] is True
     assert diagnostics["retry_success"] is False
+    assert diagnostics["anchor_no_fallback"] is True
     viewer._update_message.assert_awaited_once()
-    viewer._mark_message_deleted.assert_awaited_once_with(555)
+    viewer._mark_message_deleted.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -567,12 +574,15 @@ async def test_should_create_anchor_fallback_retries_on_not_modified_error():
         player_id=11,
         last_error="Message is not modified",
         forced_refresh=True,
+        request_category=RequestCategory.ANCHOR,
+        current_text="anchor",
     )
 
     assert not should_fallback
     assert reason == "edit_recovered"
     assert diagnostics["retry_attempted"] is True
     assert diagnostics["retry_success"] is True
+    assert diagnostics["anchor_no_fallback"] is True
     viewer._update_message.assert_awaited_once()
     viewer._mark_message_deleted.assert_not_awaited()
 
