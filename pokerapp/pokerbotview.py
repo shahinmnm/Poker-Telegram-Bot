@@ -516,6 +516,8 @@ class PokerBotViewer:
         self._last_message_hash_lock = asyncio.Lock()
         self._deleted_messages: Set[int] = set()
         self._deleted_messages_lock = asyncio.Lock()
+        self._role_anchor_deletions: Dict[int, str] = {}
+        self._role_anchor_deletions_lock = asyncio.Lock()
         self._turn_message_cache: LRUCache[Tuple[int, int], str] = LRUCache(
             maxsize=256
         )
@@ -979,6 +981,18 @@ class PokerBotViewer:
     async def _unmark_message_deleted(self, message_id: int) -> None:
         async with self._deleted_messages_lock:
             self._deleted_messages.discard(message_id)
+
+    async def _record_role_anchor_deletion(self, message_id: int, reason: str) -> None:
+        async with self._role_anchor_deletions_lock:
+            self._role_anchor_deletions[message_id] = reason
+
+    async def _consume_role_anchor_deletion(self, message_id: int) -> Optional[str]:
+        async with self._role_anchor_deletions_lock:
+            return self._role_anchor_deletions.pop(message_id, None)
+
+    async def _peek_role_anchor_deletion(self, message_id: int) -> Optional[str]:
+        async with self._role_anchor_deletions_lock:
+            return self._role_anchor_deletions.get(message_id)
 
     async def _get_last_edit_error(
         self, chat_id: ChatId, message_id: int
@@ -2184,11 +2198,14 @@ class PokerBotViewer:
                 if record is not None:
                     record.seat_index = seat_index
                     normalized_anchor = record.message_id
-                    if (
-                        normalized_anchor is not None
-                        and await self._is_message_deleted(normalized_anchor)
-                    ):
-                        normalized_anchor = None
+                    if normalized_anchor is not None:
+                        deletion_reason = await self._consume_role_anchor_deletion(
+                            normalized_anchor
+                        )
+                        if deletion_reason is not None:
+                            normalized_anchor = None
+                        elif await self._is_message_deleted(normalized_anchor):
+                            await self._unmark_message_deleted(normalized_anchor)
 
                 if normalized_anchor is None:
                     try:
@@ -2360,32 +2377,82 @@ class PokerBotViewer:
         chat_id: ChatId,
         message_id: Optional[int],
         allow_anchor_deletion: bool = False,
+        game: Optional[Game] = None,
+        reason: Optional[str] = None,
     ) -> bool:
         record = self._resolve_role_anchor_record(chat_id, message_id)
         if record is None:
             return False
 
-        stage = self._anchor_registry.get_stage(chat_id)
-        resolved_stage = self._resolve_game_state(stage)
+        normalized_message = self._safe_int(message_id)
+
+        resolved_stage = None
+        if game is not None:
+            resolved_stage = self._resolve_game_state(getattr(game, "state", None))
+        if resolved_stage is None:
+            stage = self._anchor_registry.get_stage(chat_id)
+            resolved_stage = self._resolve_game_state(stage)
+
         stage_label = getattr(resolved_stage, "name", None)
+        normalized_reason = (reason or "").strip() or None
 
-        if resolved_stage in self._ACTIVE_ANCHOR_STATES:
-            self._log_anchor_preservation_skip(
-                chat_id=chat_id,
-                message_id=message_id,
-                record=record,
-                extra_details={"stage": stage_label, "reason": "active_stage"},
-            )
-            return True
+        if self._is_anchor_deletion_authorized(
+            stage=resolved_stage,
+            allow_anchor_deletion=allow_anchor_deletion,
+            reason=normalized_reason,
+        ):
+            return False
 
+        details: Dict[str, Any] = {"stage": stage_label}
+        if normalized_reason:
+            details["reason"] = normalized_reason
+        else:
+            details["reason"] = "guarded"
+
+        self._log_anchor_preservation_skip(
+            chat_id=chat_id,
+            message_id=normalized_message,
+            record=record,
+            extra_details=details,
+        )
+
+        logger.info(
+            "[AnchorPersistence] Prevented deletion of role anchor message_id=%s at stage=%s",
+            normalized_message,
+            stage_label,
+            extra={
+                "chat_id": chat_id,
+                "player_id": getattr(record, "player_id", None),
+                "reason": normalized_reason or "guarded",
+            },
+        )
+
+        return True
+
+    def _is_anchor_deletion_authorized(
+        self,
+        *,
+        stage: Optional[GameState],
+        allow_anchor_deletion: bool,
+        reason: Optional[str],
+    ) -> bool:
         if not allow_anchor_deletion:
-            self._log_anchor_preservation_skip(
-                chat_id=chat_id,
-                message_id=message_id,
-                record=record,
-                extra_details={"stage": stage_label, "reason": "guarded"},
-            )
+            return False
+
+        normalized_reason = (reason or "").strip().lower()
+
+        if normalized_reason == "player_leave":
             return True
+
+        if normalized_reason == "hand_end":
+            allowed_states: Set[GameState] = {GameState.INITIAL}
+            showdown_state = getattr(GameState, "ROUND_SHOWDOWN", None)
+            if isinstance(showdown_state, GameState):
+                allowed_states.add(showdown_state)
+            finished_state = getattr(GameState, "FINISHED", None)
+            if isinstance(finished_state, GameState):
+                allowed_states.add(finished_state)
+            return stage in allowed_states
 
         return False
 
@@ -2651,7 +2718,33 @@ class PokerBotViewer:
     ) -> Optional[int]:
         try:
             if previous_message_id:
-                await self.delete_message(chat_id=chat_id, message_id=previous_message_id)
+                await self.delete_message(
+                    chat_id=chat_id,
+                    message_id=previous_message_id,
+                )
+                deletion_reason = await self._peek_role_anchor_deletion(
+                    self._safe_int(previous_message_id)
+                )
+                message_exists = await self._probe_message_existence(
+                    chat_id, self._safe_int(previous_message_id)
+                )
+                if (
+                    deletion_reason is None
+                    and message_exists is not False
+                    and not await self._is_message_deleted(
+                        self._safe_int(previous_message_id)
+                    )
+                ):
+                    logger.info(
+                        "[AnchorPersistence] Fallback skipped because anchor deletion was prevented",
+                        extra={
+                            "chat_id": chat_id,
+                            "player_id": getattr(player, "user_id", None),
+                            "message_id": previous_message_id,
+                            "reason": fallback_reason,
+                        },
+                    )
+                    return None
         except Exception:
             logger.debug(
                 "Failed to delete stale role anchor",
@@ -3073,43 +3166,64 @@ class PokerBotViewer:
             return
 
         message_ids_to_delete = getattr(game, "message_ids_to_delete", [])
-
-        self._anchor_registry.reset_roles(chat_id)
+        state = self._anchor_registry.get_chat_state(chat_id)
         self._anchor_registry.set_turn_anchor(chat_id, message_id=None, payload_hash="")
 
-        for player in list(getattr(game, "players", [])):
-            if player is None:
-                continue
+        active_players: List[Player] = [
+            player for player in getattr(game, "players", []) if player is not None
+        ]
+        active_ids: Set[Any] = {
+            getattr(player, "user_id", None) for player in active_players if player is not None
+        }
 
-            anchor_id = self._get_player_anchor_message_id(chat_id, player)
-            if anchor_id:
+        # Remove anchors for players who are no longer seated.
+        for player_id, record in list(state.role_anchors.items()):
+            if player_id in active_ids:
+                continue
+            message_id = getattr(record, "message_id", None)
+            if message_id:
                 try:
-                    await self._purge_pending_updates(chat_id, anchor_id)
+                    await self._purge_pending_updates(chat_id, message_id)
                     await self.delete_message(
                         chat_id=chat_id,
-                        message_id=anchor_id,
+                        message_id=message_id,
                         allow_anchor_deletion=True,
+                        anchor_reason="player_leave",
+                        game=game,
                     )
                 except Exception as exc:
                     logger.debug(
                         "Failed to delete player anchor",
                         extra={
                             "chat_id": chat_id,
-                            "player_id": getattr(player, "user_id", None),
-                            "message_id": anchor_id,
+                            "player_id": player_id,
+                            "message_id": message_id,
                             "error_type": type(exc).__name__,
                         },
                     )
                 try:
-                    message_ids_to_delete.remove(anchor_id)
+                    message_ids_to_delete.remove(message_id)
                 except (ValueError, AttributeError):
                     pass
+            state.role_anchors.pop(player_id, None)
 
-            player.anchor_message = None
-            player.anchor_role = "بازیکن"
-            player.role_label = "بازیکن"
-            player.anchor_keyboard_signature = None
-            self._anchor_registry.remove_role(chat_id, getattr(player, "user_id", None))
+        # Preserve anchors for active players and ensure their messages stay tracked.
+        for player in active_players:
+            anchor_id = self._get_player_anchor_message_id(chat_id, player)
+            if not anchor_id:
+                continue
+            await self._unmark_message_deleted(anchor_id)
+            try:
+                message_ids_to_delete.remove(anchor_id)
+            except (ValueError, AttributeError):
+                pass
+            record = state.role_anchors.get(getattr(player, "user_id", None))
+            if record is not None:
+                record.turn_light = ""
+                record.refresh_toggle = ""
+
+        if active_players:
+            await self.update_player_anchors_and_keyboards(game)
 
     async def announce_player_seats(
         self,
@@ -3442,17 +3556,32 @@ class PokerBotViewer:
         message_id: MessageId,
         *,
         allow_anchor_deletion: bool = False,
+        anchor_reason: Optional[str] = None,
+        game: Optional[Game] = None,
     ) -> None:
         """Delete a message while keeping the cache in sync."""
         normalized_message = self._safe_int(message_id)
+        normalized_chat = self._safe_int(chat_id)
+
         if self._should_block_anchor_deletion(
             chat_id=chat_id,
             message_id=normalized_message,
             allow_anchor_deletion=allow_anchor_deletion,
+            game=game,
+            reason=anchor_reason,
         ):
             return
 
-        normalized_chat = self._safe_int(chat_id)
+        anchor_record = self._resolve_role_anchor_record(chat_id, normalized_message)
+        resolved_stage = None
+        if game is not None:
+            resolved_stage = self._resolve_game_state(getattr(game, "state", None))
+        if resolved_stage is None:
+            resolved_stage = self._resolve_game_state(
+                self._anchor_registry.get_stage(chat_id)
+            )
+        normalized_reason = (anchor_reason or "").strip() or None
+
         lock = await self._acquire_message_lock(chat_id, message_id)
         async with lock:
             try:
@@ -3462,6 +3591,21 @@ class PokerBotViewer:
                     request_category=RequestCategory.DELETE,
                 )
                 await self._mark_message_deleted(normalized_message)
+                if anchor_record is not None:
+                    reason_label = normalized_reason or "unspecified"
+                    await self._record_role_anchor_deletion(
+                        normalized_message, reason_label
+                    )
+                    logger.info(
+                        "[AnchorPersistence] Deleted anchor message_id=%s reason=%s",
+                        normalized_message,
+                        reason_label,
+                        extra={
+                            "chat_id": chat_id,
+                            "player_id": getattr(anchor_record, "player_id", None),
+                            "stage": getattr(resolved_stage, "name", None),
+                        },
+                    )
             except (BadRequest, Forbidden) as e:
                 error_message = getattr(e, "message", None) or str(e) or ""
                 normalized_error = error_message.lower()
