@@ -413,6 +413,85 @@ class GameEngine:
 
         return "\n".join(lines)
 
+    async def confirm_stop_vote(
+        self,
+        *,
+        context: ContextTypes.DEFAULT_TYPE,
+        game: Game,
+        chat_id: ChatId,
+        voter_id: UserId,
+    ) -> None:
+        """Register a confirmation vote and cancel the hand if approved."""
+
+        stop_request = context.chat_data.get(self.KEY_STOP_REQUEST)
+        if not stop_request or stop_request.get("game_id") != game.id:
+            raise UserException("درخواست توف فعالی وجود ندارد.")
+
+        manager_id = context.chat_data.get("game_manager_id")
+
+        active_ids = set(stop_request.get("active_players", []))
+        votes: Set[UserId] = set(stop_request.get("votes", set()))
+
+        if voter_id not in active_ids and voter_id != manager_id:
+            raise UserException("تنها بازیکنان فعال یا مدیر می‌توانند رأی دهند.")
+
+        votes.add(voter_id)
+        stop_request["votes"] = votes
+        stop_request["manager_override"] = bool(
+            manager_id and voter_id == manager_id
+        )
+
+        message_text = self.render_stop_request_message(
+            game=game,
+            stop_request=stop_request,
+            context=context,
+        )
+
+        message_id = await self._safe_edit_message_text(
+            chat_id,
+            stop_request.get("message_id"),
+            message_text,
+            reply_markup=self.build_stop_request_markup(),
+            request_category=RequestCategory.GENERAL,
+        )
+        stop_request["message_id"] = message_id
+        context.chat_data[self.KEY_STOP_REQUEST] = stop_request
+
+        active_votes = len(votes & active_ids)
+        required_votes = (len(active_ids) // 2) + 1 if active_ids else 0
+
+        if stop_request.get("manager_override"):
+            await self.cancel_hand(game, chat_id, context, stop_request)
+            return
+
+        if active_ids and active_votes >= required_votes:
+            await self.cancel_hand(game, chat_id, context, stop_request)
+
+    async def resume_stop_vote(
+        self,
+        *,
+        context: ContextTypes.DEFAULT_TYPE,
+        game: Game,
+        chat_id: ChatId,
+    ) -> None:
+        """Cancel a pending stop request and resume play."""
+
+        stop_request = context.chat_data.get(self.KEY_STOP_REQUEST)
+        if not stop_request or stop_request.get("game_id") != game.id:
+            raise UserException("درخواست توقفی برای لغو وجود ندارد.")
+
+        message_id = stop_request.get("message_id")
+        context.chat_data.pop(self.KEY_STOP_REQUEST, None)
+
+        resume_text = "✅ رأی به ادامه‌ی بازی داده شد. بازی ادامه می‌یابد."
+        await self._safe_edit_message_text(
+            chat_id,
+            message_id,
+            resume_text,
+            reply_markup=None,
+            request_category=RequestCategory.GENERAL,
+        )
+
     async def cancel_hand(
         self,
         game: Game,
