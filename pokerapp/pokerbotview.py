@@ -2038,49 +2038,6 @@ class PokerBotViewer:
                             and normalized_chat != 0
                         ):
                             async def _delete_replaced_message() -> None:
-                                record = self._resolve_role_anchor_record(
-                                    chat_id, normalized_existing_message
-                                )
-                                stage = self._anchor_registry.get_stage(chat_id)
-                                resolved_stage = self._resolve_game_state(stage)
-                                stage_name = getattr(resolved_stage, "name", None)
-
-                                countdown_active = False
-                                if resolved_stage == GameState.INITIAL:
-                                    countdown_active = await self._is_countdown_active(
-                                        chat_id
-                                    )
-
-                                if (
-                                    record is not None
-                                    and (
-                                        resolved_stage in self._ACTIVE_ANCHOR_STATES
-                                        or (
-                                            resolved_stage == GameState.INITIAL
-                                            and countdown_active
-                                        )
-                                    )
-                                ):
-                                    self._log_anchor_preservation_skip(
-                                        chat_id=chat_id,
-                                        message_id=normalized_existing_message,
-                                        record=record,
-                                        extra_details={
-                                            "stage": stage_name,
-                                            "reason": "countdown_guard",
-                                        },
-                                    )
-                                    logger.info(
-                                        "[AnchorPersistence] Skipped deletion for role anchor during INITIAL countdown",
-                                        extra={
-                                            "chat_id": chat_id,
-                                            "message_id": normalized_existing_message,
-                                            "player_id": getattr(record, "player_id", None),
-                                            "stage": stage_name,
-                                        },
-                                    )
-                                    return
-
                                 if request_category == RequestCategory.ANCHOR:
                                     try:
                                         await self.delete_message(
@@ -2099,17 +2056,10 @@ class PokerBotViewer:
                                         )
                                     return
 
-                                if self._should_block_anchor_deletion(
-                                    chat_id=chat_id,
-                                    message_id=normalized_existing_message,
-                                    allow_anchor_deletion=False,
-                                ):
-                                    return
                                 try:
-                                    await self._messenger.delete_message(
-                                        chat_id=normalized_chat,
+                                    await self.delete_message(
+                                        chat_id=chat_id,
                                         message_id=normalized_existing_message,
-                                        request_category=RequestCategory.DELETE,
                                     )
                                 except Exception:
                                     logger.warning(
@@ -3974,14 +3924,8 @@ class PokerBotViewer:
 
         if (
             anchor_record is not None
-            and (
-                resolved_stage in self._ACTIVE_ANCHOR_STATES
-                or (
-                    resolved_stage == GameState.INITIAL
-                    and countdown_active
-                )
-            )
-            and normalized_reason not in {"anchor_refresh", "anchor_resend"}
+            and resolved_stage == GameState.INITIAL
+            and countdown_active
         ):
             self._log_anchor_preservation_skip(
                 chat_id=chat_id,
@@ -3990,6 +3934,7 @@ class PokerBotViewer:
                 extra_details={
                     "stage": stage_name,
                     "reason": "countdown_guard",
+                    "countdown_active": countdown_active,
                 },
             )
             logger.info(
@@ -3999,6 +3944,34 @@ class PokerBotViewer:
                     "message_id": normalized_message,
                     "player_id": getattr(anchor_record, "player_id", None),
                     "stage": stage_name,
+                    "countdown_active": countdown_active,
+                },
+            )
+            return
+
+        if (
+            anchor_record is not None
+            and resolved_stage in self._ACTIVE_ANCHOR_STATES
+            and normalized_reason not in {"anchor_refresh", "anchor_resend"}
+        ):
+            self._log_anchor_preservation_skip(
+                chat_id=chat_id,
+                message_id=normalized_message,
+                record=anchor_record,
+                extra_details={
+                    "stage": stage_name,
+                    "reason": normalized_reason or "guarded",
+                    "countdown_active": countdown_active,
+                },
+            )
+            logger.info(
+                "[AnchorPersistence] Skipped deletion for role anchor during INITIAL countdown",
+                extra={
+                    "chat_id": chat_id,
+                    "message_id": normalized_message,
+                    "player_id": getattr(anchor_record, "player_id", None),
+                    "stage": stage_name,
+                    "countdown_active": countdown_active,
                 },
             )
             return
