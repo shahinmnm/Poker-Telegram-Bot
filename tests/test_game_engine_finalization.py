@@ -1,3 +1,4 @@
+import logging
 from types import SimpleNamespace
 from typing import Optional
 from unittest.mock import AsyncMock, MagicMock
@@ -10,6 +11,7 @@ from pokerapp.entities import Game, GameState, Player, PlayerState
 from pokerapp.pokerbotmodel import KEY_OLD_PLAYERS, PokerBotModel
 from pokerapp.stats import BaseStatsService
 from pokerapp.winnerdetermination import HandsOfPoker
+from pokerapp.private_match_service import PrivateMatchService
 
 
 def _make_wallet_mock(value: Optional[int] = None) -> MagicMock:
@@ -24,6 +26,14 @@ def _make_wallet_mock(value: Optional[int] = None) -> MagicMock:
     wallet.add_daily = AsyncMock()
     wallet.has_daily_bonus = AsyncMock(return_value=False)
     return wallet
+
+
+def _make_private_match_service(kv, table_manager) -> PrivateMatchService:
+    return PrivateMatchService(
+        kv=kv,
+        table_manager=table_manager,
+        logger=logging.getLogger("test.private_match"),
+    )
 
 
 def _build_view_mock() -> MagicMock:
@@ -66,7 +76,16 @@ async def test_hand_type_label_includes_translation_and_emoji():
     table_manager = MagicMock()
     stats = _build_stats_service()
 
-    model = PokerBotModel(view=view, bot=bot, cfg=cfg, kv=kv, table_manager=table_manager, stats_service=stats)
+    private_match_service = _make_private_match_service(kv, table_manager)
+    model = PokerBotModel(
+        view=view,
+        bot=bot,
+        cfg=cfg,
+        kv=kv,
+        table_manager=table_manager,
+        private_match_service=private_match_service,
+        stats_service=stats,
+    )
 
     label = model._game_engine.hand_type_to_label(HandsOfPoker.FULL_HOUSE)
     assert label is not None
@@ -84,7 +103,16 @@ async def test_finalize_game_single_winner_distributes_pot_and_updates_stats():
     table_manager.save_game = AsyncMock()
     stats = _build_stats_service()
 
-    model = PokerBotModel(view=view, bot=bot, cfg=cfg, kv=kv, table_manager=table_manager, stats_service=stats)
+    private_match_service = _make_private_match_service(kv, table_manager)
+    model = PokerBotModel(
+        view=view,
+        bot=bot,
+        cfg=cfg,
+        kv=kv,
+        table_manager=table_manager,
+        private_match_service=private_match_service,
+        stats_service=stats,
+    )
     model._game_engine._clear_game_messages = AsyncMock()
     model._game_engine._clear_player_anchors = AsyncMock()
     model._game_engine._send_join_prompt = AsyncMock()
@@ -145,7 +173,16 @@ async def test_finalize_game_split_pot_between_tied_winners():
     table_manager.save_game = AsyncMock()
     stats = _build_stats_service()
 
-    model = PokerBotModel(view=view, bot=bot, cfg=cfg, kv=kv, table_manager=table_manager, stats_service=stats)
+    private_match_service = _make_private_match_service(kv, table_manager)
+    model = PokerBotModel(
+        view=view,
+        bot=bot,
+        cfg=cfg,
+        kv=kv,
+        table_manager=table_manager,
+        private_match_service=private_match_service,
+        stats_service=stats,
+    )
     model._game_engine._clear_game_messages = AsyncMock()
     model._game_engine._clear_player_anchors = AsyncMock()
     model._game_engine._send_join_prompt = AsyncMock()

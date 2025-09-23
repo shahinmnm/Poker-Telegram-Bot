@@ -1,5 +1,6 @@
 import datetime as dt
 from types import SimpleNamespace
+import logging
 from unittest.mock import AsyncMock, MagicMock
 from types import SimpleNamespace
 
@@ -9,6 +10,7 @@ from telegram.error import BadRequest
 
 from pokerapp.pokerbotmodel import PokerBotModel
 from pokerapp.stats import PlayerHandResult, PlayerIdentity, StatsService
+from pokerapp.private_match_service import PrivateMatchService
 
 
 def _build_model(stats_service: StatsService):
@@ -27,12 +29,18 @@ def _build_model(stats_service: StatsService):
     cfg = SimpleNamespace(DEBUG=False)
     kv = fakeredis.aioredis.FakeRedis()
     table_manager = MagicMock()
+    private_match_service = PrivateMatchService(
+        kv=kv,
+        table_manager=table_manager,
+        logger=logging.getLogger("test.private_match"),
+    )
     model = PokerBotModel(
         view,
         bot,
         cfg,
         kv,
         table_manager,
+        private_match_service=private_match_service,
         stats_service=stats_service,
     )
     return model, view

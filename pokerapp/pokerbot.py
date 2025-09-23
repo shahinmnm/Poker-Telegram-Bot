@@ -15,6 +15,7 @@ from pokerapp.pokerbotview import PokerBotViewer
 from pokerapp.table_manager import TableManager
 from pokerapp.stats import NullStatsService, StatsService
 from pokerapp.logging_config import setup_logging
+from pokerapp.private_match_service import PrivateMatchService
 
 setup_logging(logging.INFO)
 
@@ -203,12 +204,18 @@ class PokerBot:
             rate_limit_per_minute=self._cfg.RATE_LIMIT_PER_MINUTE,
             rate_limit_per_second=self._cfg.RATE_LIMIT_PER_SECOND,
         )
+        private_match_service = PrivateMatchService(
+            kv=self._kv_async,
+            table_manager=self._table_manager,
+            logger=logger.getChild("private_match"),
+        )
         self._model = PokerBotModel(
             view=self._view,
             bot=self._application.bot,
             kv=self._kv_async,
             cfg=self._cfg,
             table_manager=self._table_manager,
+            private_match_service=private_match_service,
             stats_service=self._stats_service,
         )
         self._controller = PokerBotCotroller(self._model, self._application)

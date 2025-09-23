@@ -2,18 +2,17 @@ import datetime
 from types import SimpleNamespace
 from typing import Tuple
 from unittest.mock import AsyncMock, MagicMock
+import logging
 
 import fakeredis.aioredis
 import pytest
 from telegram.error import BadRequest
 
 from pokerapp.config import Config
-from pokerapp.pokerbotmodel import (
-    PokerBotModel,
-    PRIVATE_MATCH_QUEUE_KEY,
-)
+from pokerapp.pokerbotmodel import PokerBotModel
 from pokerapp.stats import BaseStatsService
 from pokerapp.table_manager import TableManager
+from pokerapp.private_match_service import PrivateMatchService
 
 
 def _build_update(
@@ -54,12 +53,18 @@ async def _build_model():
     stats.register_player_profile = AsyncMock()
     stats.build_player_report = AsyncMock()
     stats.format_report = MagicMock()
+    private_match_service = PrivateMatchService(
+        kv=kv,
+        table_manager=table_manager,
+        logger=logging.getLogger("test.private_match"),
+    )
     model = PokerBotModel(
         view=view,
         bot=bot,
         cfg=cfg,
         kv=kv,
         table_manager=table_manager,
+        private_match_service=private_match_service,
         stats_service=stats,
     )
     return model, kv, view, stats
@@ -108,7 +113,9 @@ async def test_private_matchmaking_cancellation_removes_user_from_queue():
     assert view.send_message.await_count == 1
     cancel_call = view.send_message.await_args_list[0]
     assert "از صف" in cancel_call.args[1]
-    queue_members = await kv.zrange(PRIVATE_MATCH_QUEUE_KEY, 0, -1)
+    queue_members = await kv.zrange(
+        PrivateMatchService.PRIVATE_MATCH_QUEUE_KEY, 0, -1
+    )
     assert queue_members == []
 
     await kv.flushall()
@@ -123,17 +130,19 @@ async def test_private_matchmaking_timeout_notifies_user():
     await model.handle_private_matchmaking_request(update, context)
 
     await kv.zadd(
-        PRIVATE_MATCH_QUEUE_KEY,
+        PrivateMatchService.PRIVATE_MATCH_QUEUE_KEY,
         {str(404): int(datetime.datetime.now().timestamp()) - 1000},
     )
 
     view.send_message.reset_mock()
-    await model._cleanup_private_queue()
+    await model._private_match_service.cleanup_private_queue()
 
     assert view.send_message.await_count == 1
     timeout_call = view.send_message.await_args_list[0]
     assert "زمان انتظار" in timeout_call.args[1]
-    queue_members = await kv.zrange(PRIVATE_MATCH_QUEUE_KEY, 0, -1)
+    queue_members = await kv.zrange(
+        PrivateMatchService.PRIVATE_MATCH_QUEUE_KEY, 0, -1
+    )
     assert queue_members == []
 
     await kv.flushall()
