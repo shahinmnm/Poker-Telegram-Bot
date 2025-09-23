@@ -24,6 +24,7 @@ from pokerapp.entities import (
     UserId,
 )
 from pokerapp.pokerbotview import PokerBotViewer
+from pokerapp.lock_manager import LockManager
 from pokerapp.stats import (
     BaseStatsService,
     NullStatsService,
@@ -75,12 +76,12 @@ class GameEngine:
         send_turn_message: Callable[[Game, Player, ChatId], Awaitable[None]],
         clear_game_messages: Callable[[Game, ChatId], Awaitable[None]],
         send_join_prompt: Callable[[Game, ChatId], Awaitable[None]],
-        get_stage_lock: Callable[[ChatId], Awaitable[asyncio.Lock]],
         build_identity_from_player: Callable[[Player], PlayerIdentity],
         safe_int: Callable[[ChatId], int],
         old_players_key: str,
         safe_edit_message_text: Callable[..., Awaitable[Optional[MessageId]]],
         invalidate_player_reports: Callable[[Iterable[int]], None],
+        lock_manager: LockManager,
         logger: logging.Logger,
     ) -> None:
         self._table_manager = table_manager
@@ -94,12 +95,12 @@ class GameEngine:
         self._send_turn_message = send_turn_message
         self._clear_game_messages = clear_game_messages
         self._send_join_prompt = send_join_prompt
-        self._get_stage_lock = get_stage_lock
         self._build_identity_from_player = build_identity_from_player
         self._safe_int = safe_int
         self._old_players_key = old_players_key
         self._safe_edit_message_text = safe_edit_message_text
         self._invalidate_player_reports = invalidate_player_reports
+        self._lock_manager = lock_manager
         self._logger = logger
 
     @staticmethod
@@ -116,6 +117,9 @@ class GameEngine:
 
     def _stats_enabled(self) -> bool:
         return not isinstance(self._stats, NullStatsService)
+
+    def _stage_lock_key(self, chat_id: ChatId) -> str:
+        return f"stage:{self._safe_int(chat_id)}"
 
     async def start_game(
         self, context: ContextTypes.DEFAULT_TYPE, game: Game, chat_id: ChatId
@@ -178,8 +182,9 @@ class GameEngine:
 
         game.chat_id = chat_id
 
-        stage_lock = await self._get_stage_lock(chat_id)
-        async with stage_lock:
+        async with self._lock_manager.guard(
+            self._stage_lock_key(chat_id), timeout=10
+        ):
             await self._view.send_player_role_anchors(game=game, chat_id=chat_id)
 
         action_str = "بازی شروع شد"
@@ -265,8 +270,9 @@ class GameEngine:
         street_name: str,
         send_message: bool = True,
     ) -> None:
-        stage_lock = await self._get_stage_lock(chat_id)
-        async with stage_lock:
+        async with self._lock_manager.guard(
+            self._stage_lock_key(chat_id), timeout=10
+        ):
             await self._add_cards_to_table(
                 count=count,
                 game=game,
@@ -312,8 +318,9 @@ class GameEngine:
         chat_id: ChatId,
         game: Game,
     ) -> bool:
-        stage_lock = await self._get_stage_lock(chat_id)
-        async with stage_lock:
+        async with self._lock_manager.guard(
+            self._stage_lock_key(chat_id), timeout=10
+        ):
             return await self._progress_stage_locked(
                 context=context,
                 chat_id=chat_id,
@@ -411,131 +418,134 @@ class GameEngine:
         game: Game,
         chat_id: ChatId,
     ) -> None:
-        async def _send_with_retry(
-            func: Callable[..., Awaitable[None]],
-            *args: object,
-            retries: int = 3,
-        ) -> None:
-            for attempt in range(retries):
-                try:
-                    await func(*args)
-                    return
-                except RetryAfter as exc:
-                    await asyncio.sleep(exc.retry_after)
-                except Exception as exc:  # pragma: no cover - defensive logging
-                    self._logger.error(
-                        "Error sending message attempt",
-                        extra={
-                            "error_type": type(exc).__name__,
-                            "request_params": {"attempt": attempt + 1, "args": args},
-                        },
-                    )
-                    if attempt + 1 >= retries:
+        async with self._lock_manager.guard(
+            self._stage_lock_key(chat_id), timeout=10
+        ):
+            async def _send_with_retry(
+                func: Callable[..., Awaitable[None]],
+                *args: object,
+                retries: int = 3,
+            ) -> None:
+                for attempt in range(retries):
+                    try:
+                        await func(*args)
                         return
+                    except RetryAfter as exc:
+                        await asyncio.sleep(exc.retry_after)
+                    except Exception as exc:  # pragma: no cover - defensive logging
+                        self._logger.error(
+                            "Error sending message attempt",
+                            extra={
+                                "error_type": type(exc).__name__,
+                                "request_params": {"attempt": attempt + 1, "args": args},
+                            },
+                        )
+                        if attempt + 1 >= retries:
+                            return
 
-        contenders = game.players_by(states=(PlayerState.ACTIVE, PlayerState.ALL_IN))
-        game.chat_id = chat_id
+            contenders = game.players_by(states=(PlayerState.ACTIVE, PlayerState.ALL_IN))
+            game.chat_id = chat_id
 
-        await self._clear_game_messages(game, chat_id)
+            await self._clear_game_messages(game, chat_id)
 
-        hand_id = game.id
-        pot_total = game.pot
-        payouts: Dict[int, int] = defaultdict(int)
-        hand_labels: Dict[int, Optional[str]] = {}
+            hand_id = game.id
+            pot_total = game.pot
+            payouts: Dict[int, int] = defaultdict(int)
+            hand_labels: Dict[int, Optional[str]] = {}
 
-        if not contenders:
-            active_players = game.players_by(states=(PlayerState.ACTIVE,))
-            if len(active_players) == 1:
-                winner = active_players[0]
-                amount = pot_total
-                if amount > 0:
-                    await winner.wallet.inc(amount)
-                    payouts[self._safe_int(winner.user_id)] += amount
-                hand_labels[self._safe_int(winner.user_id)] = "پیروزی با فولد رقبا"
-                await self._view.send_message(
-                    chat_id,
-                    f"🏆 تمام بازیکنان دیگر فولد کردند! {winner.mention_markdown} برنده {amount}$ شد.",
-                )
-        else:
-            contender_details = self._evaluate_contender_hands(game, contenders)
-            winners_by_pot = self._determine_winners(game, contender_details)
-
-            for detail in contender_details:
-                player = detail.get("player")
-                if not player:
-                    continue
-                label = self.hand_type_to_label(detail.get("hand_type"))
-                if label:
-                    hand_labels[self._safe_int(player.user_id)] = label
-
-            if winners_by_pot:
-                for pot in winners_by_pot:
-                    pot_amount = pot.get("amount", 0)
-                    winners_info = pot.get("winners", [])
-                    if pot_amount > 0 and winners_info:
-                        base_share, remainder = divmod(pot_amount, len(winners_info))
-                        for index, winner in enumerate(winners_info):
-                            player = winner.get("player")
-                            if not player:
-                                continue
-                            win_amount = base_share + (1 if index < remainder else 0)
-                            if win_amount > 0:
-                                await player.wallet.inc(win_amount)
-                                payouts[self._safe_int(player.user_id)] += win_amount
-                            winner_label = self.hand_type_to_label(
-                                winner.get("hand_type")
-                            )
-                            if (
-                                winner_label
-                                and self._safe_int(player.user_id) not in hand_labels
-                            ):
-                                hand_labels[self._safe_int(player.user_id)] = winner_label
+            if not contenders:
+                active_players = game.players_by(states=(PlayerState.ACTIVE,))
+                if len(active_players) == 1:
+                    winner = active_players[0]
+                    amount = pot_total
+                    if amount > 0:
+                        await winner.wallet.inc(amount)
+                        payouts[self._safe_int(winner.user_id)] += amount
+                    hand_labels[self._safe_int(winner.user_id)] = "پیروزی با فولد رقبا"
+                    await self._view.send_message(
+                        chat_id,
+                        f"🏆 تمام بازیکنان دیگر فولد کردند! {winner.mention_markdown} برنده {amount}$ شد.",
+                    )
             else:
-                await self._view.send_message(
-                    chat_id,
-                    "ℹ️ هیچ برنده‌ای در این دست مشخص نشد. مشکلی در منطق بازی رخ داده است.",
+                contender_details = self._evaluate_contender_hands(game, contenders)
+                winners_by_pot = self._determine_winners(game, contender_details)
+
+                for detail in contender_details:
+                    player = detail.get("player")
+                    if not player:
+                        continue
+                    label = self.hand_type_to_label(detail.get("hand_type"))
+                    if label:
+                        hand_labels[self._safe_int(player.user_id)] = label
+
+                if winners_by_pot:
+                    for pot in winners_by_pot:
+                        pot_amount = pot.get("amount", 0)
+                        winners_info = pot.get("winners", [])
+                        if pot_amount > 0 and winners_info:
+                            base_share, remainder = divmod(pot_amount, len(winners_info))
+                            for index, winner in enumerate(winners_info):
+                                player = winner.get("player")
+                                if not player:
+                                    continue
+                                win_amount = base_share + (1 if index < remainder else 0)
+                                if win_amount > 0:
+                                    await player.wallet.inc(win_amount)
+                                    payouts[self._safe_int(player.user_id)] += win_amount
+                                winner_label = self.hand_type_to_label(
+                                    winner.get("hand_type")
+                                )
+                                if (
+                                    winner_label
+                                    and self._safe_int(player.user_id) not in hand_labels
+                                ):
+                                    hand_labels[self._safe_int(player.user_id)] = winner_label
+                else:
+                    await self._view.send_message(
+                        chat_id,
+                        "ℹ️ هیچ برنده‌ای در این دست مشخص نشد. مشکلی در منطق بازی رخ داده است.",
+                    )
+
+                await _send_with_retry(
+                    self._view.send_showdown_results, chat_id, game, winners_by_pot
                 )
 
-            await _send_with_retry(
-                self._view.send_showdown_results, chat_id, game, winners_by_pot
+            if self._stats_enabled():
+                stats_results = self._build_hand_statistics_results(
+                    game,
+                    dict(payouts),
+                    hand_labels,
+                )
+                await self._stats.finish_hand(
+                    hand_id=hand_id,
+                    chat_id=self._safe_int(chat_id),
+                    results=stats_results,
+                    pot_total=pot_total,
+                )
+                self._invalidate_player_reports(
+                    self._safe_int(player.user_id) for player in game.players
+                )
+
+            game.pot = 0
+            game.state = GameState.FINISHED
+
+            remaining_players = []
+            for player in game.players:
+                if await player.wallet.value() > 0:
+                    remaining_players.append(player)
+            context.chat_data[self._old_players_key] = [
+                player.user_id for player in remaining_players
+            ]
+
+            await self._request_metrics.end_cycle(
+                self._safe_int(chat_id), cycle_token=game.id
             )
+            await self._clear_player_anchors(game)
+            game.reset()
+            await self._table_manager.save_game(chat_id, game)
 
-        if self._stats_enabled():
-            stats_results = self._build_hand_statistics_results(
-                game,
-                dict(payouts),
-                hand_labels,
-            )
-            await self._stats.finish_hand(
-                hand_id=hand_id,
-                chat_id=self._safe_int(chat_id),
-                results=stats_results,
-                pot_total=pot_total,
-            )
-            self._invalidate_player_reports(
-                self._safe_int(player.user_id) for player in game.players
-            )
-
-        game.pot = 0
-        game.state = GameState.FINISHED
-
-        remaining_players = []
-        for player in game.players:
-            if await player.wallet.value() > 0:
-                remaining_players.append(player)
-        context.chat_data[self._old_players_key] = [
-            player.user_id for player in remaining_players
-        ]
-
-        await self._request_metrics.end_cycle(
-            self._safe_int(chat_id), cycle_token=game.id
-        )
-        await self._clear_player_anchors(game)
-        game.reset()
-        await self._table_manager.save_game(chat_id, game)
-
-        await _send_with_retry(self._view.send_new_hand_ready_message, chat_id)
-        await self._send_join_prompt(game, chat_id)
+            await _send_with_retry(self._view.send_new_hand_ready_message, chat_id)
+            await self._send_join_prompt(game, chat_id)
 
     def _evaluate_contender_hands(
         self, game: Game, contenders: Iterable[Player]

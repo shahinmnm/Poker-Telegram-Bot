@@ -61,7 +61,7 @@ from pokerapp.stats import (
 from pokerapp.private_match_service import PrivateMatchService
 from pokerapp.utils.cache import PlayerReportCache
 from pokerapp.utils.request_metrics import RequestCategory, RequestMetrics
-from pokerapp.utils.locks import ReentrantAsyncLock
+from pokerapp.lock_manager import LockManager
 from pokerapp.player_manager import PlayerManager
 from pokerapp.game_engine import GameEngine
 
@@ -143,6 +143,7 @@ class PokerBotModel:
             logger_=logger.getChild("player_report_cache")
         )
         self._stats: BaseStatsService = stats_service or NullStatsService()
+        self._lock_manager = LockManager(logger=logger.getChild("lock_manager"))
         self._player_manager = PlayerManager(
             table_manager=self._table_manager,
             kv=self._kv,
@@ -153,13 +154,10 @@ class PokerBotModel:
             logger=logger.getChild("player_manager"),
         )
         self._private_chat_ids = self._player_manager.private_chat_ids
-        self._chat_locks: Dict[int, ReentrantAsyncLock] = {}
         self._countdown_cache: LRUCache[int, _CountdownCacheEntry] = LRUCache(
             maxsize=64, getsizeof=lambda entry: 1
         )
         self._countdown_cache_lock = asyncio.Lock()
-        self._stage_batch_locks: Dict[int, asyncio.Lock] = {}
-        self._stage_batch_guard = asyncio.Lock()
         metrics_candidate = getattr(self._view, "request_metrics", None)
         if not isinstance(metrics_candidate, RequestMetrics):
             metrics_candidate = RequestMetrics(
@@ -191,12 +189,12 @@ class PokerBotModel:
             send_turn_message=self._send_turn_message,
             clear_game_messages=self._clear_game_messages,
             send_join_prompt=self._send_join_prompt,
-            get_stage_lock=self._get_stage_lock,
             build_identity_from_player=self._build_identity_from_player,
             safe_int=self._safe_int,
             old_players_key=KEY_OLD_PLAYERS,
             safe_edit_message_text=self._safe_edit_message_text,
             invalidate_player_reports=self._player_report_cache.invalidate_many,
+            lock_manager=self._lock_manager,
             logger=logger.getChild("game_engine"),
         )
 
@@ -207,29 +205,12 @@ class PokerBotModel:
     def _stats_enabled(self) -> bool:
         return not isinstance(self._stats, NullStatsService)
 
-    def _get_chat_lock(self, chat_id: ChatId) -> ReentrantAsyncLock:
-        normalized = self._safe_int(chat_id)
-        lock = self._chat_locks.get(normalized)
-        if lock is None:
-            lock = ReentrantAsyncLock()
-            self._chat_locks[normalized] = lock
-        return lock
-
-    async def _get_stage_lock(self, chat_id: ChatId) -> asyncio.Lock:
-        normalized = self._safe_int(chat_id)
-        async with self._stage_batch_guard:
-            lock = self._stage_batch_locks.get(normalized)
-            if lock is None:
-                lock = asyncio.Lock()
-                self._stage_batch_locks[normalized] = lock
-            return lock
-
     @asynccontextmanager
     async def _chat_guard(self, chat_id: ChatId):
         """Serialize stateful operations for a chat while allowing nesting."""
 
-        lock = self._get_chat_lock(chat_id)
-        async with lock:
+        key = f"chat:{self._safe_int(chat_id)}"
+        async with self._lock_manager.guard(key, timeout=10):
             yield
 
     def assign_role_labels(self, game: Game) -> None:
@@ -1276,8 +1257,9 @@ class PokerBotModel:
     ):
         """پیام نوبت را ارسال کرده و شناسه آن را برای حذف در آینده ذخیره می‌کند."""
         async with self._chat_guard(chat_id):
-            stage_lock = await self._get_stage_lock(chat_id)
-            async with stage_lock:
+            async with self._lock_manager.guard(
+                f"stage:{self._safe_int(chat_id)}", timeout=10
+            ):
                 game.chat_id = chat_id
                 await self._view.update_player_anchors_and_keyboards(game)
 
