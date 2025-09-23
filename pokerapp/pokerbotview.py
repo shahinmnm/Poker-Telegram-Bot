@@ -595,37 +595,32 @@ class PokerBotViewer:
         with self._countdown_transition_lock:
             return normalized_chat in self._countdown_transition_pending
 
-    async def _is_countdown_active(
-        self, chat_id: ChatId, *, details: Optional[Dict[str, bool]] = None
-    ) -> bool:
+    async def _is_countdown_active(self, chat_id: ChatId) -> bool:
         """Return True when a prestart countdown task exists for the chat."""
 
         normalized_chat = self._safe_int(chat_id)
-        task_active = False
-        if normalized_chat != 0:
-            async with self._prestart_countdown_lock:
-                for (chat_key, _), task in self._prestart_countdown_tasks.items():
-                    if chat_key != normalized_chat:
-                        continue
-                    if task is None:
-                        continue
-                    if not task.done():
-                        task_active = True
-                        break
+        if normalized_chat == 0:
+            return False
 
-        transition_pending = self._is_countdown_transition_pending(normalized_chat)
-        if details is not None:
-            details["task_active"] = task_active
-            details["transition_pending"] = transition_pending
+        async with self._prestart_countdown_lock:
+            for (chat_key, _), task in self._prestart_countdown_tasks.items():
+                if chat_key != normalized_chat:
+                    continue
+                if task is None:
+                    continue
+                if not task.done():
+                    return True
 
-        return task_active or transition_pending
+        return False
 
     @staticmethod
-    def _describe_countdown_guard_source(details: Dict[str, bool]) -> str:
+    def _describe_countdown_guard_source(
+        *, task_active: bool, transition_pending: bool
+    ) -> str:
         sources: List[str] = []
-        if details.get("task_active"):
+        if task_active:
             sources.append("task")
-        if details.get("transition_pending"):
+        if transition_pending:
             sources.append("transition")
         return ",".join(sources) if sources else "none"
 
@@ -2085,6 +2080,67 @@ class PokerBotViewer:
                         ):
                             async def _delete_replaced_message() -> None:
                                 if request_category == RequestCategory.ANCHOR:
+                                    anchor_record = self._resolve_role_anchor_record(
+                                        chat_id, normalized_existing_message
+                                    )
+                                    stage_value = self._anchor_registry.get_stage(chat_id)
+                                    resolved_stage = self._resolve_game_state(stage_value)
+                                    stage_name = getattr(resolved_stage, "name", None)
+                                    countdown_active = False
+                                    if resolved_stage == GameState.INITIAL:
+                                        countdown_active = await self._is_countdown_active(
+                                            chat_id
+                                        )
+                                    countdown_transition_pending = (
+                                        self._is_countdown_transition_pending(
+                                            self._safe_int(chat_id)
+                                        )
+                                    )
+                                    countdown_guard_source = (
+                                        self._describe_countdown_guard_source(
+                                            task_active=countdown_active,
+                                            transition_pending=countdown_transition_pending,
+                                        )
+                                    )
+                                    if (
+                                        anchor_record is not None
+                                        and (
+                                            resolved_stage in self._ACTIVE_ANCHOR_STATES
+                                            or (
+                                                resolved_stage == GameState.INITIAL
+                                                and countdown_active
+                                            )
+                                        )
+                                    ):
+                                        self._log_anchor_preservation_skip(
+                                            chat_id=chat_id,
+                                            message_id=normalized_existing_message,
+                                            record=anchor_record,
+                                            extra_details={
+                                                "stage": stage_name,
+                                                "reason": "countdown_guard",
+                                                "countdown_active": countdown_active,
+                                                "countdown_guard_task_active": countdown_active,
+                                                "countdown_guard_transition_pending": countdown_transition_pending,
+                                                "countdown_guard_source": countdown_guard_source,
+                                            },
+                                        )
+                                        logger.info(
+                                            "[AnchorPersistence] Skipped deletion for role anchor during INITIAL countdown",
+                                            extra={
+                                                "chat_id": chat_id,
+                                                "message_id": normalized_existing_message,
+                                                "player_id": getattr(
+                                                    anchor_record, "player_id", None
+                                                ),
+                                                "stage": stage_name,
+                                                "countdown_active": countdown_active,
+                                                "countdown_guard_task_active": countdown_active,
+                                                "countdown_guard_transition_pending": countdown_transition_pending,
+                                                "countdown_guard_source": countdown_guard_source,
+                                            },
+                                        )
+                                        return
                                     try:
                                         await self.delete_message(
                                             chat_id=chat_id,
@@ -3018,17 +3074,19 @@ class PokerBotViewer:
         if previous_message_id is not None:
             normalized_previous = self._safe_int(previous_message_id)
 
-        countdown_details: Dict[str, bool] = {
-            "task_active": False,
-            "transition_pending": False,
-        }
-        countdown_active = False
+        normalized_chat = self._safe_int(chat_id)
+        countdown_task_active = False
         if resolved_stage == GameState.INITIAL:
-            countdown_active = await self._is_countdown_active(
-                chat_id, details=countdown_details
-            )
-        countdown_guard_source = self._describe_countdown_guard_source(countdown_details)
+            countdown_task_active = await self._is_countdown_active(chat_id)
+        countdown_transition_pending = self._is_countdown_transition_pending(
+            normalized_chat
+        )
+        countdown_guard_source = self._describe_countdown_guard_source(
+            task_active=countdown_task_active,
+            transition_pending=countdown_transition_pending,
+        )
 
+        countdown_active = countdown_task_active
         countdown_guard_active = (
             resolved_stage in self._ACTIVE_ANCHOR_STATES
             or (
@@ -3042,12 +3100,8 @@ class PokerBotViewer:
                 "player_id": player_id,
                 "stage": stage_name,
                 "countdown_active": countdown_active,
-                "countdown_guard_task_active": countdown_details.get(
-                    "task_active", False
-                ),
-                "countdown_guard_transition_pending": countdown_details.get(
-                    "transition_pending", False
-                ),
+                "countdown_guard_task_active": countdown_task_active,
+                "countdown_guard_transition_pending": countdown_transition_pending,
                 "countdown_guard_source": countdown_guard_source,
             }
             if previous_message_id is not None:
@@ -3969,7 +4023,6 @@ class PokerBotViewer:
         normalized_message = self._safe_int(message_id)
         normalized_chat = self._safe_int(chat_id)
 
-        anchor_record = self._resolve_role_anchor_record(chat_id, normalized_message)
         resolved_stage = None
         if game is not None:
             resolved_stage = self._resolve_game_state(getattr(game, "state", None))
@@ -3979,64 +4032,26 @@ class PokerBotViewer:
             )
         stage_name = getattr(resolved_stage, "name", None)
 
-        countdown_details: Dict[str, bool] = {
-            "task_active": False,
-            "transition_pending": False,
-        }
         countdown_active = False
         if resolved_stage == GameState.INITIAL:
-            countdown_active = await self._is_countdown_active(
-                chat_id, details=countdown_details
-            )
-        countdown_guard_source = self._describe_countdown_guard_source(countdown_details)
+            countdown_active = await self._is_countdown_active(chat_id)
+        countdown_transition_pending = self._is_countdown_transition_pending(
+            normalized_chat
+        )
+        countdown_guard_source = self._describe_countdown_guard_source(
+            task_active=countdown_active,
+            transition_pending=countdown_transition_pending,
+        )
 
+        anchor_record = self._resolve_role_anchor_record(chat_id, normalized_message)
         normalized_reason = (anchor_reason or "").strip().lower()
 
         if (
             anchor_record is not None
-            and resolved_stage == GameState.INITIAL
-            and countdown_active
-        ):
-            self._log_anchor_preservation_skip(
-                chat_id=chat_id,
-                message_id=normalized_message,
-                record=anchor_record,
-                extra_details={
-                    "stage": stage_name,
-                    "reason": "countdown_guard",
-                    "countdown_active": countdown_active,
-                    "countdown_guard_task_active": countdown_details.get(
-                        "task_active", False
-                    ),
-                    "countdown_guard_transition_pending": countdown_details.get(
-                        "transition_pending", False
-                    ),
-                    "countdown_guard_source": countdown_guard_source,
-                },
+            and (
+                resolved_stage in self._ACTIVE_ANCHOR_STATES
+                or (resolved_stage == GameState.INITIAL and countdown_active)
             )
-            logger.info(
-                "[AnchorPersistence] Skipped deletion for role anchor during INITIAL countdown",
-                extra={
-                    "chat_id": chat_id,
-                    "message_id": normalized_message,
-                    "player_id": getattr(anchor_record, "player_id", None),
-                    "stage": stage_name,
-                    "countdown_active": countdown_active,
-                    "countdown_guard_task_active": countdown_details.get(
-                        "task_active", False
-                    ),
-                    "countdown_guard_transition_pending": countdown_details.get(
-                        "transition_pending", False
-                    ),
-                    "countdown_guard_source": countdown_guard_source,
-                },
-            )
-            return
-
-        if (
-            anchor_record is not None
-            and resolved_stage in self._ACTIVE_ANCHOR_STATES
-            and normalized_reason not in {"anchor_refresh", "anchor_resend"}
         ):
             self._log_anchor_preservation_skip(
                 chat_id=chat_id,
@@ -4046,12 +4061,8 @@ class PokerBotViewer:
                     "stage": stage_name,
                     "reason": normalized_reason or "guarded",
                     "countdown_active": countdown_active,
-                    "countdown_guard_task_active": countdown_details.get(
-                        "task_active", False
-                    ),
-                    "countdown_guard_transition_pending": countdown_details.get(
-                        "transition_pending", False
-                    ),
+                    "countdown_guard_task_active": countdown_active,
+                    "countdown_guard_transition_pending": countdown_transition_pending,
                     "countdown_guard_source": countdown_guard_source,
                 },
             )
@@ -4063,12 +4074,8 @@ class PokerBotViewer:
                     "player_id": getattr(anchor_record, "player_id", None),
                     "stage": stage_name,
                     "countdown_active": countdown_active,
-                    "countdown_guard_task_active": countdown_details.get(
-                        "task_active", False
-                    ),
-                    "countdown_guard_transition_pending": countdown_details.get(
-                        "transition_pending", False
-                    ),
+                    "countdown_guard_task_active": countdown_active,
+                    "countdown_guard_transition_pending": countdown_transition_pending,
                     "countdown_guard_source": countdown_guard_source,
                 },
             )
