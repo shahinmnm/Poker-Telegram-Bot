@@ -617,7 +617,9 @@ def test_update_message_resends_reply_keyboard_without_deleting_anchor(chat_id):
 
     assert result == 777
     messenger.send_message.assert_awaited_once()
-    messenger.edit_message_text.assert_not_awaited()
+    messenger.edit_message_text.assert_awaited_once()
+    forced_kwargs = messenger.edit_message_text.await_args.kwargs
+    assert forced_kwargs["text"].endswith(PokerBotViewer._FORCE_REFRESH_CHARS[0])
     messenger.delete_message.assert_not_awaited()
 
 
