@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 
 import logging
+import os
 import sys
 
 from dotenv import load_dotenv
@@ -9,22 +10,23 @@ from pokerapp.config import Config
 from pokerapp.pokerbot import PokerBot
 from pokerapp.logging_config import setup_logging
 
-setup_logging(logging.DEBUG)
+_DEBUG_ENV = os.getenv("POKERBOT_DEBUG", "0").strip().lower() in {"1", "true", "yes", "on"}
+setup_logging(logging.INFO, debug_mode=_DEBUG_ENV)
 logger = logging.getLogger(__name__)
 
 
 def main() -> None:
     load_dotenv()
     cfg: Config = Config()
+    setup_logging(logging.INFO, debug_mode=cfg.DEBUG)
 
     logger.info(
-        "Ensure that POKERBOT_TOKEN, POKERBOT_WEBHOOK_PATH, POKERBOT_WEBHOOK_PUBLIC_URL "
-        "(or POKERBOT_WEBHOOK_DOMAIN together with the path), and POKERBOT_WEBHOOK_SECRET are "
-        "defined in your environment or .env file."
+        "Ensure required configuration values are provided via environment or .env file.",
+        extra={"category": "startup", "stage": "bootstrap"},
     )
     logger.info(
-        "Set POKERBOT_ALLOW_POLLING_FALLBACK=1 to enable development polling when webhook "
-        "settings are unavailable."
+        "Set POKERBOT_ALLOW_POLLING_FALLBACK=1 to enable development polling when webhook settings are unavailable.",
+        extra={"category": "startup", "stage": "bootstrap"},
     )
 
     missing_required_settings = []
@@ -40,7 +42,14 @@ def main() -> None:
 
     if missing_required_settings:
         for error_type, message in missing_required_settings:
-            logger.error(message, extra={"error_type": error_type})
+            logger.error(
+                message,
+                extra={
+                    "error_type": error_type,
+                    "category": "configuration",
+                    "stage": "validation",
+                },
+            )
         sys.exit(1)
 
     webhook_missing_settings = []
@@ -82,15 +91,29 @@ def main() -> None:
                     "This fallback is intended for development only."
                 )
             for error_type, message in webhook_missing_settings:
-                logger.warning(message, extra={"error_type": error_type})
+                logger.warning(
+                    message,
+                    extra={
+                        "error_type": error_type,
+                        "category": "configuration",
+                        "stage": "validation",
+                    },
+                )
             logger.info(
-                "Webhook configuration missing; falling back to long polling as requested by "
-                "POKERBOT_ALLOW_POLLING_FALLBACK."
+                "Webhook configuration missing; falling back to long polling as requested by POKERBOT_ALLOW_POLLING_FALLBACK.",
+                extra={"category": "configuration", "stage": "fallback", "debug_mode": cfg.DEBUG},
             )
             use_polling = True
         else:
             for error_type, message in webhook_missing_settings:
-                logger.error(message, extra={"error_type": error_type})
+                logger.error(
+                    message,
+                    extra={
+                        "error_type": error_type,
+                        "category": "configuration",
+                        "stage": "validation",
+                    },
+                )
             sys.exit(1)
 
     bot = PokerBot(token=cfg.TOKEN, cfg=cfg)

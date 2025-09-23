@@ -124,21 +124,36 @@ class GameConstants:
                 loaded = yaml.safe_load(handle) or {}
                 if not isinstance(loaded, dict):
                     logger.warning(
-                        "Game constants file %s did not contain a mapping; using defaults.",
-                        self._path,
+                        "Game constants file did not contain a mapping; using defaults.",
+                        extra={
+                            "category": "config",
+                            "config_path": str(self._path),
+                            "stage": "game_constants_load",
+                            "error_type": "InvalidMapping",
+                        },
                     )
                 else:
                     raw_data = loaded
         except FileNotFoundError:
             logger.warning(
-                "Game constants file %s not found; using default values.",
-                self._path,
+                "Game constants file not found; using default values.",
+                extra={
+                    "category": "config",
+                    "config_path": str(self._path),
+                    "stage": "game_constants_load",
+                    "error_type": "FileNotFoundError",
+                },
             )
         except yaml.YAMLError as exc:
             logger.warning(
-                "Failed to parse game constants file %s: %s; using defaults.",
-                self._path,
-                exc,
+                "Failed to parse game constants file; using defaults.",
+                extra={
+                    "category": "config",
+                    "config_path": str(self._path),
+                    "stage": "game_constants_load",
+                    "error_type": type(exc).__name__,
+                },
+                exc_info=True,
             )
 
         merged = deepcopy(self._defaults)
@@ -186,19 +201,34 @@ def _load_system_constants() -> Dict[str, Any]:
                 loaded = parsed
             else:
                 logger.warning(
-                    "System constants file %s did not contain a JSON object; ignoring it.",
-                    resolved_path,
+                    "System constants file did not contain a JSON object; ignoring it.",
+                    extra={
+                        "category": "config",
+                        "config_path": str(resolved_path),
+                        "stage": "system_constants_load",
+                        "error_type": "InvalidMapping",
+                    },
                 )
     except FileNotFoundError:
         logger.warning(
-            "System constants file %s not found; using built-in defaults.",
-            resolved_path,
+            "System constants file not found; using built-in defaults.",
+            extra={
+                "category": "config",
+                "config_path": str(resolved_path),
+                "stage": "system_constants_load",
+                "error_type": "FileNotFoundError",
+            },
         )
     except json.JSONDecodeError as exc:
         logger.warning(
-            "Failed to parse system constants file %s: %s; using defaults.",
-            resolved_path,
-            exc,
+            "Failed to parse system constants file; using defaults.",
+            extra={
+                "category": "config",
+                "config_path": str(resolved_path),
+                "stage": "system_constants_load",
+                "error_type": type(exc).__name__,
+            },
+            exc_info=True,
         )
     merged = deepcopy(_DEFAULT_SYSTEM_CONSTANTS_DATA)
     for key, value in loaded.items():
@@ -260,9 +290,14 @@ class Config:
                 sqlite_path.parent.mkdir(parents=True, exist_ok=True)
             except OSError as exc:
                 logger.warning(
-                    "Unable to create directory for SQLite database '%s': %s",
-                    sqlite_path.parent,
-                    exc,
+                    "Unable to create directory for SQLite database; using fallback path.",
+                    extra={
+                        "category": "config",
+                        "config_path": str(sqlite_path.parent),
+                        "stage": "database_path_resolve",
+                        "error_type": type(exc).__name__,
+                    },
+                    exc_info=True,
                 )
             resolved_sqlite_path = sqlite_path.resolve()
             self.DATABASE_URL = f"sqlite+aiosqlite:///{resolved_sqlite_path.as_posix()}"
@@ -309,8 +344,14 @@ class Config:
         )
         if not self.WEBHOOK_PUBLIC_URL:
             logger.warning(
-                "Webhook public URL is not set; define POKERBOT_WEBHOOK_DOMAIN together with "
-                "POKERBOT_WEBHOOK_PATH or provide POKERBOT_WEBHOOK_PUBLIC_URL."
+                "Webhook public URL is not configured; falling back to webhook path/domain defaults.",
+                extra={
+                    "category": "config",
+                    "stage": "webhook_configuration",
+                    "error_type": "MissingWebhookPublicUrl",
+                    "webhook_domain": self.WEBHOOK_DOMAIN,
+                    "webhook_path": self.WEBHOOK_PATH,
+                },
             )
         self.WEBHOOK_SECRET: str = os.getenv(
             "POKERBOT_WEBHOOK_SECRET",
