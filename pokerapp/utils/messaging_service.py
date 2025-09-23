@@ -153,6 +153,8 @@ class MessagingService:
             lambda: deque(maxlen=10)
         )
         self._global_last_send_time = 0.0
+        self._last_edit_failures: Dict[CacheKey, str] = {}
+        self._last_edit_failure_lock = asyncio.Lock()
 
     async def _throttle_send(self, chat_id: int) -> None:
         """Apply per-chat and global throttling before contacting Telegram."""
@@ -652,6 +654,7 @@ class MessagingService:
                     throttle=lambda: self._throttle_send(chat_id),
                 )
                 self._register_send_time(chat_id)
+                await self._clear_edit_failure(chat_id, message_id)
             except Exception as exc:  # pragma: no cover - exception path
                 handled = await self._handle_bad_request(
                     exc,
@@ -731,6 +734,7 @@ class MessagingService:
                     reply_markup=reply_markup,
                     **params,
                 )
+                await self._clear_edit_failure(chat_id, message_id)
             except Exception as exc:  # pragma: no cover - exception path
                 handled = await self._handle_bad_request(
                     exc,
@@ -836,6 +840,7 @@ class MessagingService:
             content_hash="-",
         )
 
+        await self._clear_edit_failure(chat_id, message_id)
         return bool(result)
 
     async def last_edit_timestamp(
@@ -891,6 +896,7 @@ class MessagingService:
             return None
 
         message = self._normalise_exception_message(exc)
+        await self._record_edit_failure(chat_id, message_id, message)
         if "message is not modified" in message:
             await self._remember_content(chat_id, message_id, content_hash)
             await self._log_skip(
@@ -903,6 +909,7 @@ class MessagingService:
 
         if "message to edit not found" in message or "message can't be edited" in message:
             await self._forget_content(chat_id, message_id)
+            await self._mark_message_deleted(message_id)
             self._logger.warning(
                 "EDIT FAILED: message missing or not editable for chat %s, msg %s",
                 chat_id,
@@ -1103,6 +1110,23 @@ class MessagingService:
                 "content_hash": content_hash,
             },
         )
+
+    async def _record_edit_failure(
+        self, chat_id: int, message_id: int, message: str
+    ) -> None:
+        key = (int(chat_id), int(message_id))
+        async with self._last_edit_failure_lock:
+            self._last_edit_failures[key] = message
+
+    async def _clear_edit_failure(self, chat_id: int, message_id: int) -> None:
+        key = (int(chat_id), int(message_id))
+        async with self._last_edit_failure_lock:
+            self._last_edit_failures.pop(key, None)
+
+    async def get_last_edit_error(self, chat_id: int, message_id: int) -> Optional[str]:
+        key = (int(chat_id), int(message_id))
+        async with self._last_edit_failure_lock:
+            return self._last_edit_failures.get(key)
 
     async def _consume_budget(
         self,
