@@ -2754,6 +2754,146 @@ class PokerBotViewer:
             },
         )
 
+    async def _refresh_role_anchor_in_place(
+        self,
+        *,
+        chat_id: ChatId,
+        player: Player,
+        message_id: MessageId,
+        base_text: str,
+        display_text: str,
+        keyboard: ReplyKeyboardMarkup,
+        payload_signature: str,
+        markup_signature: str,
+        turn_light: str,
+        stage_name: Optional[str],
+    ) -> bool:
+        player_id = getattr(player, "user_id", None)
+        normalized_chat = self._safe_int(chat_id)
+        normalized_message = self._safe_int(message_id)
+        record = self._anchor_registry.get_role(chat_id, player_id)
+
+        refreshed_text, base_plain, refresh_toggle = self._force_anchor_text_refresh(
+            display_text,
+            last_toggle=record.refresh_toggle if record else None,
+        )
+        context = self._build_context(
+            "refresh_role_anchor",
+            chat_id=chat_id,
+            message_id=message_id,
+            player_id=player_id,
+        )
+        normalized_text = self._validator.normalize_text(
+            refreshed_text,
+            parse_mode=ParseMode.MARKDOWN,
+            context=context,
+        )
+        if normalized_text is None:
+            logger.debug(
+                "Skipping role anchor refresh due to invalid payload",
+                extra={"chat_id": chat_id, "message_id": message_id},
+            )
+            return False
+        if not self._has_visible_text(normalized_text):
+            self._log_skip_empty(chat_id, message_id)
+            return False
+
+        stage_token = self._normalize_stage_name(stage_name)
+        payload_hash = self._payload_hash(normalized_text, keyboard)
+        message_text_hash = hashlib.md5(normalized_text.encode("utf-8")).hexdigest()
+        message_key = (normalized_chat, normalized_message)
+
+        lock = await self._acquire_message_lock(chat_id, message_id)
+        async with lock:
+            if await self._is_message_deleted(normalized_message):
+                logger.debug(
+                    "Role anchor refresh skipped because message is marked deleted",
+                    extra={
+                        "chat_id": chat_id,
+                        "message_id": message_id,
+                        "player_id": player_id,
+                    },
+                )
+                return False
+            try:
+                result = await self._messenger.edit_message_text(
+                    chat_id=chat_id,
+                    message_id=message_id,
+                    text=normalized_text,
+                    reply_markup=keyboard,
+                    force=True,
+                    request_category=RequestCategory.ANCHOR,
+                    parse_mode=ParseMode.MARKDOWN,
+                    disable_web_page_preview=True,
+                )
+            except (BadRequest, Forbidden, RetryAfter, TelegramError) as exc:
+                logger.debug(
+                    "Role anchor refresh failed",
+                    extra={
+                        "chat_id": chat_id,
+                        "message_id": message_id,
+                        "player_id": player_id,
+                        "error_type": type(exc).__name__,
+                    },
+                )
+                return False
+
+            resolved_id = self._resolve_message_id(result)
+            normalized_new_message = (
+                self._safe_int(resolved_id)
+                if resolved_id is not None
+                else normalized_message
+            )
+            new_message_key = (normalized_chat, normalized_new_message)
+
+            await self._set_payload_hash(new_message_key, payload_hash)
+            await self._set_last_text_hash(normalized_new_message, message_text_hash)
+            await self._unmark_message_deleted(normalized_new_message)
+            new_stage_key = (
+                normalized_chat,
+                normalized_new_message,
+                stage_token,
+            )
+            await self._set_stage_payload_hash(new_stage_key, payload_hash)
+
+            if normalized_new_message != normalized_message:
+                await self._pop_payload_hash(message_key)
+                await self._clear_callback_tokens_for_message(
+                    message_key[0],
+                    message_key[1],
+                )
+                normalized_message = normalized_new_message
+                message_key = new_message_key
+
+        stripped_display_text, _ = self._strip_invisible_suffix(base_plain)
+        self._anchor_registry.update_role(
+            chat_id,
+            player_id,
+            base_text=base_text,
+            message_id=normalized_message,
+            current_text=stripped_display_text,
+            payload_signature=payload_signature,
+            markup_signature=markup_signature,
+            turn_light=turn_light,
+            refresh_toggle=refresh_toggle,
+        )
+        player.anchor_message = (chat_id, normalized_message)
+        player.anchor_keyboard_signature = payload_signature
+        self._anchor_registry.increment_edit(chat_id)
+
+        logger.debug(
+            "Role anchor refreshed in place",
+            extra={
+                "chat_id": chat_id,
+                "player_id": player_id,
+                "message_id": normalized_message,
+                "stage": stage_name,
+                "toggle": refresh_toggle,
+            },
+        )
+
+        return True
+
     async def _send_new_role_anchor(
         self,
         *,
@@ -2795,13 +2935,17 @@ class PokerBotViewer:
             )
             if previous_message_id is not None:
                 try:
-                    result = await self._update_message(
+                    await self._refresh_role_anchor_in_place(
                         chat_id=chat_id,
+                        player=player,
                         message_id=previous_message_id,
-                        text=display_text,
-                        reply_markup=keyboard,
-                        force_send=True,
-                        request_category=RequestCategory.ANCHOR,
+                        base_text=base_text,
+                        display_text=display_text,
+                        keyboard=keyboard,
+                        payload_signature=payload_signature,
+                        markup_signature=markup_signature,
+                        turn_light=turn_light,
+                        stage_name=stage_name,
                     )
                 except Exception as exc:
                     logger.debug(
@@ -2814,12 +2958,7 @@ class PokerBotViewer:
                             "reason": fallback_reason,
                         },
                     )
-                    return normalized_previous
-
-                resolved_id = self._resolve_message_id(result)
-                if resolved_id is None:
-                    return normalized_previous
-                return resolved_id
+                return normalized_previous
             return None
 
         try:
@@ -3208,6 +3347,14 @@ class PokerBotViewer:
                             previous_message_id=anchor_id,
                             fallback_reason=fallback_reason,
                         )
+                        refreshed_record = self._anchor_registry.get_role(
+                            chat_id, player_id
+                        )
+                        if refreshed_record is not None:
+                            applied_refresh_toggle = (
+                                refreshed_record.refresh_toggle
+                                or applied_refresh_toggle
+                            )
                     else:
                         logger.info(
                             "Fallback prevented – message still valid, retried edit successfully",
