@@ -30,6 +30,7 @@ import hashlib
 import inspect
 import logging
 import json
+import threading
 from cachetools import FIFOCache, LRUCache
 from pokerapp.config import DEFAULT_RATE_LIMIT_PER_MINUTE, DEFAULT_RATE_LIMIT_PER_SECOND
 from pokerapp.winnerdetermination import HAND_NAMES_TRANSLATIONS
@@ -532,6 +533,8 @@ class PokerBotViewer:
         self._stage_payload_hash_lock = asyncio.Lock()
         self._prestart_countdown_tasks: Dict[Tuple[int, str], asyncio.Task[None]] = {}
         self._prestart_countdown_lock = asyncio.Lock()
+        self._countdown_transition_pending: Set[int] = set()
+        self._countdown_transition_lock = threading.Lock()
         self._pending_updates: Dict[
             Tuple[ChatId, Optional[MessageId]], Dict[str, Any]
         ] = {}
@@ -560,6 +563,7 @@ class PokerBotViewer:
         normalized_chat = self._safe_int(chat_id)
         normalized_game = str(game_id) if game_id is not None else "0"
         key = (normalized_chat, normalized_game)
+        task: Optional[asyncio.Task[None]] = None
         async with self._prestart_countdown_lock:
             task = self._prestart_countdown_tasks.pop(key, None)
             if task is not None:
@@ -569,23 +573,61 @@ class PokerBotViewer:
                     normalized_chat,
                     normalized_game,
                 )
+        if task is not None:
+            self._mark_countdown_transition_pending(normalized_chat)
 
-    async def _is_countdown_active(self, chat_id: ChatId) -> bool:
+    def _mark_countdown_transition_pending(self, normalized_chat: int) -> None:
+        if normalized_chat == 0:
+            return
+        with self._countdown_transition_lock:
+            self._countdown_transition_pending.add(normalized_chat)
+
+    def _clear_countdown_transition_pending(self, chat_id: ChatId) -> None:
+        normalized_chat = self._safe_int(chat_id)
+        if normalized_chat == 0:
+            return
+        with self._countdown_transition_lock:
+            self._countdown_transition_pending.discard(normalized_chat)
+
+    def _is_countdown_transition_pending(self, normalized_chat: int) -> bool:
+        if normalized_chat == 0:
+            return False
+        with self._countdown_transition_lock:
+            return normalized_chat in self._countdown_transition_pending
+
+    async def _is_countdown_active(
+        self, chat_id: ChatId, *, details: Optional[Dict[str, bool]] = None
+    ) -> bool:
         """Return True when a prestart countdown task exists for the chat."""
 
         normalized_chat = self._safe_int(chat_id)
-        if normalized_chat == 0:
-            return False
+        task_active = False
+        if normalized_chat != 0:
+            async with self._prestart_countdown_lock:
+                for (chat_key, _), task in self._prestart_countdown_tasks.items():
+                    if chat_key != normalized_chat:
+                        continue
+                    if task is None:
+                        continue
+                    if not task.done():
+                        task_active = True
+                        break
 
-        async with self._prestart_countdown_lock:
-            for (chat_key, _), task in self._prestart_countdown_tasks.items():
-                if chat_key != normalized_chat:
-                    continue
-                if task is None:
-                    continue
-                if not task.done():
-                    return True
-        return False
+        transition_pending = self._is_countdown_transition_pending(normalized_chat)
+        if details is not None:
+            details["task_active"] = task_active
+            details["transition_pending"] = transition_pending
+
+        return task_active or transition_pending
+
+    @staticmethod
+    def _describe_countdown_guard_source(details: Dict[str, bool]) -> str:
+        sources: List[str] = []
+        if details.get("task_active"):
+            sources.append("task")
+        if details.get("transition_pending"):
+            sources.append("transition")
+        return ",".join(sources) if sources else "none"
 
     def _create_countdown_task(
         self,
@@ -664,10 +706,14 @@ class PokerBotViewer:
                 )
                 raise
             finally:
+                mark_transition_pending = False
                 async with self._prestart_countdown_lock:
                     existing = self._prestart_countdown_tasks.get((normalized_chat, normalized_game))
                     if existing is asyncio.current_task():
                         self._prestart_countdown_tasks.pop((normalized_chat, normalized_game), None)
+                        mark_transition_pending = True
+                if mark_transition_pending:
+                    self._mark_countdown_transition_pending(normalized_chat)
                 logger.info(
                     "[Countdown] Prestart countdown finished for chat %s game %s",
                     normalized_chat,
@@ -2448,6 +2494,8 @@ class PokerBotViewer:
     ) -> Optional[GameState]:
         resolved = self._resolve_game_state(state)
         self._anchor_registry.set_stage(chat_id, resolved)
+        if resolved is not None and resolved != GameState.INITIAL:
+            self._clear_countdown_transition_pending(chat_id)
         return resolved
 
     def _log_anchor_preservation_skip(
@@ -2970,9 +3018,16 @@ class PokerBotViewer:
         if previous_message_id is not None:
             normalized_previous = self._safe_int(previous_message_id)
 
+        countdown_details: Dict[str, bool] = {
+            "task_active": False,
+            "transition_pending": False,
+        }
         countdown_active = False
         if resolved_stage == GameState.INITIAL:
-            countdown_active = await self._is_countdown_active(chat_id)
+            countdown_active = await self._is_countdown_active(
+                chat_id, details=countdown_details
+            )
+        countdown_guard_source = self._describe_countdown_guard_source(countdown_details)
 
         countdown_guard_active = (
             resolved_stage in self._ACTIVE_ANCHOR_STATES
@@ -2986,6 +3041,14 @@ class PokerBotViewer:
                 "message_id": normalized_previous,
                 "player_id": player_id,
                 "stage": stage_name,
+                "countdown_active": countdown_active,
+                "countdown_guard_task_active": countdown_details.get(
+                    "task_active", False
+                ),
+                "countdown_guard_transition_pending": countdown_details.get(
+                    "transition_pending", False
+                ),
+                "countdown_guard_source": countdown_guard_source,
             }
             if previous_message_id is not None:
                 refresh_success = False
@@ -3916,9 +3979,16 @@ class PokerBotViewer:
             )
         stage_name = getattr(resolved_stage, "name", None)
 
+        countdown_details: Dict[str, bool] = {
+            "task_active": False,
+            "transition_pending": False,
+        }
         countdown_active = False
         if resolved_stage == GameState.INITIAL:
-            countdown_active = await self._is_countdown_active(chat_id)
+            countdown_active = await self._is_countdown_active(
+                chat_id, details=countdown_details
+            )
+        countdown_guard_source = self._describe_countdown_guard_source(countdown_details)
 
         normalized_reason = (anchor_reason or "").strip().lower()
 
@@ -3935,6 +4005,13 @@ class PokerBotViewer:
                     "stage": stage_name,
                     "reason": "countdown_guard",
                     "countdown_active": countdown_active,
+                    "countdown_guard_task_active": countdown_details.get(
+                        "task_active", False
+                    ),
+                    "countdown_guard_transition_pending": countdown_details.get(
+                        "transition_pending", False
+                    ),
+                    "countdown_guard_source": countdown_guard_source,
                 },
             )
             logger.info(
@@ -3945,6 +4022,13 @@ class PokerBotViewer:
                     "player_id": getattr(anchor_record, "player_id", None),
                     "stage": stage_name,
                     "countdown_active": countdown_active,
+                    "countdown_guard_task_active": countdown_details.get(
+                        "task_active", False
+                    ),
+                    "countdown_guard_transition_pending": countdown_details.get(
+                        "transition_pending", False
+                    ),
+                    "countdown_guard_source": countdown_guard_source,
                 },
             )
             return
@@ -3962,6 +4046,13 @@ class PokerBotViewer:
                     "stage": stage_name,
                     "reason": normalized_reason or "guarded",
                     "countdown_active": countdown_active,
+                    "countdown_guard_task_active": countdown_details.get(
+                        "task_active", False
+                    ),
+                    "countdown_guard_transition_pending": countdown_details.get(
+                        "transition_pending", False
+                    ),
+                    "countdown_guard_source": countdown_guard_source,
                 },
             )
             logger.info(
@@ -3972,6 +4063,13 @@ class PokerBotViewer:
                     "player_id": getattr(anchor_record, "player_id", None),
                     "stage": stage_name,
                     "countdown_active": countdown_active,
+                    "countdown_guard_task_active": countdown_details.get(
+                        "task_active", False
+                    ),
+                    "countdown_guard_transition_pending": countdown_details.get(
+                        "transition_pending", False
+                    ),
+                    "countdown_guard_source": countdown_guard_source,
                 },
             )
             return
