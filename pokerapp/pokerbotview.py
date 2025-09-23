@@ -1,4 +1,11 @@
 #!/usr/bin/env python3
+"""Telegram-facing presentation helpers for PokerBot.
+
+The viewer composes inline keyboards, manages anchor caches, and delegates to
+``MessagingService`` for send/edit/delete operations. Architectural diagrams and
+sequence flows that place this module alongside ``PokerBot`` and ``GameEngine``
+are available in ``docs/game_flow.md``.
+"""
 
 from telegram import (
     Message,

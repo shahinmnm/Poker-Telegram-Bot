@@ -1,4 +1,15 @@
-"""Core game engine utilities for PokerBot."""
+"""Core game engine utilities for PokerBot.
+
+State machine overview (mirrors :func:`_progress_stage_locked`):
+
+    WAITING ──start_game()──▶ ROUND_PRE_FLOP ─┬─▶ ROUND_FLOP ─┬─▶ ROUND_TURN ─┬─▶ ROUND_RIVER
+      ▲                                       │               │               │
+      └──────── finalize_game() ◀─────────────┴───────────────┴───────────────┘
+
+`finalize_game` also handles early exits when fewer than two contenders remain
+or a table is stopped. A more detailed, annotated diagram lives in
+``docs/game_flow.md`` for onboarding and design reference.
+"""
 
 from __future__ import annotations
 
