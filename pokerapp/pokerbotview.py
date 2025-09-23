@@ -1067,6 +1067,15 @@ class PokerBotViewer:
         suffix = text[len(stripped) :]
         return stripped, suffix
 
+    @staticmethod
+    def _detect_anchor_turn_light(text: str) -> str:
+        normalized_text = text or ""
+        turn_phrase = "نوبت این بازیکن است"
+        for indicator in ("🟢", "🔴"):
+            if f"{indicator} {turn_phrase}" in normalized_text:
+                return indicator
+        return ""
+
     def _force_anchor_text_refresh(
         self, text: str, *, last_toggle: Optional[str] = None
     ) -> Tuple[str, str, str]:
@@ -1585,11 +1594,18 @@ class PokerBotViewer:
             if normalized_existing_message is not None
             else None
         )
+        stripped_anchor_text: Optional[str] = None
+        anchor_refresh_suffix: str = ""
+        anchor_refresh_plan: Optional[Dict[str, Any]] = None
         callback_id: Optional[str] = None
         callback_stage_name = self._normalize_stage_name(request_category.value)
         callback_user_id: Optional[int] = None
         callback_token_key: Optional[Tuple[int, int, str, int]] = None
         callback_throttle_key: Optional[Tuple[int, str]] = None
+        if request_category == RequestCategory.ANCHOR:
+            stripped_anchor_text, anchor_refresh_suffix = self._strip_invisible_suffix(
+                normalized_text
+            )
         if normalized_existing_message is not None:
             callback_id, detected_stage, detected_user_id = (
                 self._detect_callback_context()
@@ -1691,6 +1707,49 @@ class PokerBotViewer:
         should_resend_reply_keyboard = (
             is_reply_keyboard and normalized_existing_message is not None
         )
+
+        if (
+            request_category == RequestCategory.ANCHOR
+            and is_reply_keyboard
+            and normalized_existing_message is not None
+        ):
+            anchor_record = self._resolve_role_anchor_record(
+                chat_id, normalized_existing_message
+            )
+            stripped_text = stripped_anchor_text or normalized_text
+            markup_signature = self._serialize_markup(reply_markup) or ""
+            refresh_toggle = getattr(anchor_record, "refresh_toggle", None)
+            if anchor_refresh_suffix:
+                for char in reversed(anchor_refresh_suffix):
+                    if char in self._FORCE_REFRESH_CHARS:
+                        refresh_toggle = char
+                        break
+            if refresh_toggle is None:
+                refresh_toggle = getattr(anchor_record, "refresh_toggle", "") or ""
+            keyboard_changed = True
+            text_changed = True
+            if anchor_record is not None:
+                cached_markup = getattr(anchor_record, "markup_signature", "") or ""
+                keyboard_changed = cached_markup != markup_signature
+                cached_text = (
+                    getattr(anchor_record, "current_text", None)
+                    or getattr(anchor_record, "base_text", "")
+                    or ""
+                )
+                text_changed = stripped_text != cached_text
+                if not keyboard_changed:
+                    should_resend_reply_keyboard = False
+            else:
+                should_resend_reply_keyboard = True
+            anchor_refresh_plan = {
+                "record": anchor_record,
+                "markup_signature": markup_signature,
+                "stripped_text": stripped_text,
+                "keyboard_changed": keyboard_changed,
+                "text_changed": text_changed,
+                "refresh_toggle": refresh_toggle,
+                "turn_light": self._detect_anchor_turn_light(stripped_text),
+            }
 
         if stage_key is not None and not force_send and not is_reply_keyboard:
             cached_stage_hash = await self._get_stage_payload_hash(stage_key)
@@ -2023,15 +2082,21 @@ class PokerBotViewer:
                                     return
 
                                 if request_category == RequestCategory.ANCHOR:
-                                    self._log_anchor_preservation_skip(
-                                        chat_id=chat_id,
-                                        message_id=normalized_existing_message,
-                                        record=record,
-                                        extra_details={
-                                            "stage": stage_name,
-                                            "reason": "anchor_category",
-                                        },
-                                    )
+                                    try:
+                                        await self.delete_message(
+                                            chat_id=chat_id,
+                                            message_id=normalized_existing_message,
+                                            allow_anchor_deletion=True,
+                                            anchor_reason="anchor_refresh",
+                                        )
+                                    except Exception:
+                                        logger.warning(
+                                            "Failed to delete replaced anchor message",
+                                            extra={
+                                                "chat_id": chat_id,
+                                                "message_id": normalized_existing_message,
+                                            },
+                                        )
                                     return
 
                                 if self._should_block_anchor_deletion(
@@ -2124,6 +2189,40 @@ class PokerBotViewer:
                 self._last_callback_edit[
                     (normalized_new_message, callback_stage_name)
                 ] = callback_id
+            if (
+                anchor_refresh_plan is not None
+                and anchor_refresh_plan.get("record") is not None
+                and not anchor_refresh_plan.get("keyboard_changed", True)
+                and normalized_existing_message is not None
+                and normalized_new_message == normalized_existing_message
+            ):
+                record = anchor_refresh_plan["record"]
+                player_id = getattr(record, "player_id", None)
+                if player_id is not None:
+                    stripped_text = (
+                        anchor_refresh_plan.get("stripped_text") or normalized_text
+                    )
+                    markup_signature = (
+                        anchor_refresh_plan.get("markup_signature") or ""
+                    )
+                    refresh_toggle = anchor_refresh_plan.get("refresh_toggle")
+                    if refresh_toggle is None:
+                        refresh_toggle = getattr(record, "refresh_toggle", "") or ""
+                    turn_light = anchor_refresh_plan.get("turn_light") or self._detect_anchor_turn_light(
+                        stripped_text
+                    )
+                    payload_signature = (
+                        getattr(record, "payload_signature", "") or ""
+                    )
+                    self._anchor_registry.update_role(
+                        chat_id,
+                        player_id,
+                        current_text=stripped_text,
+                        markup_signature=markup_signature,
+                        payload_signature=payload_signature,
+                        turn_light=turn_light,
+                        refresh_toggle=refresh_toggle,
+                    )
             if (
                 message_key is not None
                 and new_message_key != message_key
@@ -2507,6 +2606,9 @@ class PokerBotViewer:
             if isinstance(finished_state, GameState):
                 allowed_states.add(finished_state)
             return stage in allowed_states
+
+        if normalized_reason in {"anchor_refresh", "anchor_resend"}:
+            return True
 
         return False
 
@@ -3868,6 +3970,8 @@ class PokerBotViewer:
         if resolved_stage == GameState.INITIAL:
             countdown_active = await self._is_countdown_active(chat_id)
 
+        normalized_reason = (anchor_reason or "").strip().lower()
+
         if (
             anchor_record is not None
             and (
@@ -3877,6 +3981,7 @@ class PokerBotViewer:
                     and countdown_active
                 )
             )
+            and normalized_reason not in {"anchor_refresh", "anchor_resend"}
         ):
             self._log_anchor_preservation_skip(
                 chat_id=chat_id,
@@ -3907,7 +4012,7 @@ class PokerBotViewer:
         ):
             return
 
-        normalized_reason = (anchor_reason or "").strip() or None
+        normalized_reason = normalized_reason or None
 
         lock = await self._acquire_message_lock(chat_id, message_id)
         async with lock:

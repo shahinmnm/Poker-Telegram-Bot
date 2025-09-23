@@ -618,7 +618,7 @@ def test_update_message_resends_reply_keyboard_without_deleting_anchor(chat_id):
     assert result == 777
     messenger.send_message.assert_awaited_once()
     messenger.edit_message_text.assert_not_awaited()
-    messenger.delete_message.assert_not_awaited()
+    messenger.delete_message.assert_awaited_once()
 
 
 def test_update_turn_message_includes_stage_and_keyboard():
