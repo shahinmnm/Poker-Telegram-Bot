@@ -2929,18 +2929,16 @@ class PokerBotViewer:
             )
         )
         if countdown_guard_active:
-            logger.info(
-                "[AnchorPersistence] Skipped deletion for role anchor during INITIAL countdown",
-                extra={
-                    "chat_id": chat_id,
-                    "message_id": normalized_previous,
-                    "player_id": player_id,
-                    "stage": stage_name,
-                },
-            )
+            countdown_log_extra = {
+                "chat_id": chat_id,
+                "message_id": normalized_previous,
+                "player_id": player_id,
+                "stage": stage_name,
+            }
             if previous_message_id is not None:
+                refresh_success = False
                 try:
-                    await self._refresh_role_anchor_in_place(
+                    refresh_success = await self._refresh_role_anchor_in_place(
                         chat_id=chat_id,
                         player=player,
                         message_id=previous_message_id,
@@ -2956,15 +2954,49 @@ class PokerBotViewer:
                     logger.debug(
                         "Failed to refresh existing role anchor during countdown",
                         extra={
-                            "chat_id": chat_id,
-                            "player_id": player_id,
-                            "message_id": normalized_previous,
+                            **countdown_log_extra,
                             "error_type": type(exc).__name__,
                             "reason": fallback_reason,
                         },
                     )
-                return normalized_previous
-            return None
+                if refresh_success:
+                    logger.info(
+                        "[AnchorPersistence] Skipped deletion for role anchor during INITIAL countdown",
+                        extra=countdown_log_extra,
+                    )
+                    return normalized_previous
+
+                logger.info(
+                    "[AnchorPersistence] Countdown refresh failed; proceeding with fallback",
+                    extra={
+                        **countdown_log_extra,
+                        "reason": fallback_reason,
+                    },
+                )
+
+                if normalized_previous is not None:
+                    message_exists: Optional[bool] = None
+                    try:
+                        message_exists = await self._probe_message_existence(
+                            chat_id, normalized_previous
+                        )
+                    except Exception as probe_exc:
+                        logger.debug(
+                            "Failed to probe role anchor existence after refresh failure",
+                            extra={
+                                **countdown_log_extra,
+                                "error_type": type(probe_exc).__name__,
+                                "reason": fallback_reason,
+                            },
+                        )
+                    if message_exists is False:
+                        await self._mark_message_deleted(normalized_previous)
+            else:
+                logger.info(
+                    "[AnchorPersistence] Skipped deletion for role anchor during INITIAL countdown",
+                    extra=countdown_log_extra,
+                )
+                return None
 
         try:
             if previous_message_id:
