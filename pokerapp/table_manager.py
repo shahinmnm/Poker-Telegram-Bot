@@ -1,17 +1,37 @@
+import logging
 import pickle
-from typing import Dict, Optional
+from typing import Dict, Optional, Union
 
 import redis.asyncio as aioredis
 
 from pokerapp.entities import Game, ChatId
+from pokerapp.utils.redis_safeops import RedisSafeOps
 
 
 class TableManager:
     """Manage a single poker game per chat and persist it in Redis."""
 
-    def __init__(self, redis: aioredis.Redis, wallet_redis: Optional[aioredis.Redis] = None):
+    def __init__(
+        self,
+        redis: aioredis.Redis,
+        wallet_redis: Optional[aioredis.Redis] = None,
+        *,
+        redis_ops: Optional[RedisSafeOps] = None,
+        wallet_redis_ops: Optional[RedisSafeOps] = None,
+    ):
         self._redis = redis
         self._wallet_redis = wallet_redis or redis
+        base_logger = logging.getLogger(__name__)
+        self._redis_ops = redis_ops or RedisSafeOps(
+            redis, logger=base_logger.getChild("redis_safeops")
+        )
+        if wallet_redis is None or wallet_redis is redis:
+            self._wallet_ops = wallet_redis_ops or self._redis_ops
+        else:
+            self._wallet_ops = wallet_redis_ops or RedisSafeOps(
+                self._wallet_redis,
+                logger=base_logger.getChild("wallet_redis_safeops"),
+            )
         # Keep games cached in memory keyed only by chat_id
         self._tables: Dict[ChatId, Game] = {}
 
@@ -41,7 +61,10 @@ class TableManager:
         if chat_id in self._tables:
             return self._tables[chat_id]
 
-        data = await self._redis.get(self._game_key(chat_id))
+        extra = {"chat_id": chat_id}
+        data = await self._redis_ops.safe_get(
+            self._game_key(chat_id), log_extra=extra
+        )
         if data:
             game = pickle.loads(data)
             if self._wallet_redis is not None:
@@ -73,7 +96,10 @@ class TableManager:
             if any(p.user_id == user_id for p in game.players):
                 return game, chat_id
 
-        chat_id_data = await self._redis.get(self._player_chat_key(str(user_id)))
+        chat_id_data = await self._redis_ops.safe_get(
+            self._player_chat_key(str(user_id)),
+            log_extra={"user_id": user_id},
+        )
         if chat_id_data is None:
             raise LookupError(f"No game found for user {user_id}")
 
@@ -95,14 +121,18 @@ class TableManager:
 
     # Internal -----------------------------------------------------------
     async def _save(self, chat_id: ChatId, game: Game) -> None:
-        await self._redis.set(self._game_key(chat_id), pickle.dumps(game))
+        await self._redis_ops.safe_set(
+            self._game_key(chat_id), pickle.dumps(game), log_extra={"chat_id": chat_id}
+        )
         await self._update_player_index(chat_id, game)
 
     async def _update_player_index(self, chat_id: ChatId, game: Game) -> None:
         players = {str(player.user_id) for player in game.players}
         players_key = self._chat_players_key(chat_id)
 
-        previous_players_raw = await self._redis.smembers(players_key)
+        previous_players_raw = await self._redis_ops.safe_smembers(
+            players_key, log_extra={"chat_id": chat_id}
+        )
         previous_players = {
             member.decode() if isinstance(member, bytes) else str(member)
             for member in previous_players_raw
@@ -110,16 +140,28 @@ class TableManager:
 
         stale_players = previous_players - players
         if stale_players:
-            stale_keys = [self._player_chat_key(player_id) for player_id in stale_players]
-            await self._redis.delete(*stale_keys)
+            for player_id in stale_players:
+                stale_key = self._player_chat_key(player_id)
+                try:
+                    normalized_id: Union[int, str] = int(player_id)
+                except (TypeError, ValueError):
+                    normalized_id = player_id
+                await self._redis_ops.safe_delete(
+                    stale_key, log_extra={"user_id": normalized_id}
+                )
 
         if players:
             mapping = {
                 self._player_chat_key(player_id): str(chat_id)
                 for player_id in players
             }
-            await self._redis.mset(mapping)
+            await self._redis_ops.safe_mset(
+                mapping,
+                log_extra={"chat_id": chat_id, "players": list(players)},
+            )
 
-        await self._redis.delete(players_key)
+        await self._redis_ops.safe_delete(players_key, log_extra={"chat_id": chat_id})
         if players:
-            await self._redis.sadd(players_key, *players)
+            await self._redis_ops.safe_sadd(
+                players_key, *players, log_extra={"chat_id": chat_id}
+            )

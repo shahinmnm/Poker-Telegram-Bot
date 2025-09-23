@@ -9,6 +9,8 @@ from typing import Awaitable, Callable, Dict, Iterable, Optional, Tuple, TypeVar
 
 from cachetools import TTLCache
 
+from pokerapp.utils.redis_safeops import RedisSafeOps
+
 
 logger = logging.getLogger(__name__)
 
@@ -112,12 +114,14 @@ class PlayerReportCache:
         ttl: int = 120,
         maxsize: int = 1024,
         logger_: Optional[logging.Logger] = None,
+        redis_ops: Optional[RedisSafeOps] = None,
     ) -> None:
         self._cache: TTLCache[int, T] = TTLCache(maxsize=maxsize, ttl=ttl)
         self._locks: Dict[int, asyncio.Lock] = {}
         self._hits = 0
         self._misses = 0
         self._logger = logger_ or logger.getChild("player_report")
+        self._redis_ops = redis_ops
 
     def _get_lock(self, user_id: int) -> asyncio.Lock:
         lock = self._locks.get(user_id)
