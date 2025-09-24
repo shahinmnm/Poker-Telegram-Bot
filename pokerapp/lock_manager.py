@@ -7,9 +7,21 @@ import logging
 from contextlib import asynccontextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
-from typing import Any, AsyncIterator, Dict, List, Mapping, Optional, Set, Tuple, TYPE_CHECKING
+from typing import (
+    Any,
+    AsyncIterator,
+    Dict,
+    List,
+    Mapping,
+    Optional,
+    Sequence,
+    Set,
+    Tuple,
+    TYPE_CHECKING,
+)
 from weakref import WeakKeyDictionary
 
+from pokerapp.bootstrap import _make_service_logger
 from pokerapp.utils.locks import ReentrantAsyncLock
 from pokerapp.utils.logging_helpers import add_context, normalise_request_category
 
@@ -18,13 +30,24 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
 
 
 LOCK_LEVELS: Dict[str, int] = {
-    "stage": 1,
     "engine_stage": 1,
-    "wallet": 2,
-    "player_wallet": 2,
-    "stats": 3,
-    "player_report": 3,
+    "player_report": 2,
+    "wallet": 3,
 }
+
+_LOCK_PREFIX_LEVELS: Tuple[Tuple[str, str], ...] = (
+    ("stage:", "engine_stage"),
+    ("engine_stage:", "engine_stage"),
+    ("pokerbot:player_report", "player_report"),
+    ("player_report:", "player_report"),
+    ("wallet:", "wallet"),
+    ("player_wallet:", "wallet"),
+    ("pokerbot:wallet:", "wallet"),
+)
+
+
+class LockOrderError(RuntimeError):
+    """Raised when locks are acquired out of the configured order."""
 
 
 @dataclass
@@ -55,7 +78,10 @@ class LockManager:
         category_timeouts: Optional[Mapping[str, Any]] = None,
         config: Optional["Config"] = None,
     ) -> None:
-        self._logger = add_context(logger)
+        base_logger = add_context(logger)
+        self._logger = _make_service_logger(
+            base_logger, "lock_manager", "lock_manager"
+        )
         self._default_timeout_seconds = default_timeout_seconds
         self._max_retries = max(0, max_retries)
         self._retry_backoff_seconds = max(0.0, retry_backoff_seconds)
@@ -72,6 +98,9 @@ class LockManager:
             f"lock_manager_state_{id(self)}",
             default=(),
         )
+        self._level_state_var: ContextVar[Tuple[int, ...]] = ContextVar(
+            f"lock_manager_levels_{id(self)}", default=()
+        )
         resolved_category_timeouts = category_timeouts
         if resolved_category_timeouts is None:
             config_instance = config
@@ -83,9 +112,12 @@ class LockManager:
                 else:
                     config_instance = Config()
             if config_instance is not None:
-                resolved_category_timeouts = getattr(
-                    config_instance, "LOCK_TIMEOUTS", None
-                )
+                constants = getattr(config_instance, "constants", None)
+                if constants is not None:
+                    locks_section = constants.section("locks")
+                    raw_timeouts = locks_section.get("category_timeouts_seconds")
+                    if isinstance(raw_timeouts, Mapping):
+                        resolved_category_timeouts = raw_timeouts
         self._category_timeouts = self._normalise_category_timeouts(
             resolved_category_timeouts
         )
@@ -123,6 +155,7 @@ class LockManager:
 
     def _set_current_acquisitions(self, acquisitions: List[_LockAcquisition]) -> None:
         self._lock_state_var.set(tuple(acquisitions))
+        self._set_current_levels([item.level for item in acquisitions])
         task = asyncio.current_task()
         if task is None:
             return
@@ -130,6 +163,12 @@ class LockManager:
             self._task_lock_state[task] = acquisitions
         else:
             self._task_lock_state.pop(task, None)
+
+    def _get_current_levels(self) -> List[int]:
+        return list(self._level_state_var.get())
+
+    def _set_current_levels(self, levels: Sequence[int]) -> None:
+        self._level_state_var.set(tuple(levels))
 
     def _extract_context_from_key(self, key: str) -> Dict[str, Any]:
         category, _, remainder = key.partition(":")
@@ -371,6 +410,28 @@ class LockManager:
                 ),
             )
             raise TimeoutError(message)
+        resolved_level = self._resolve_level(key, override=level)
+        guard_context = self._build_context_payload(
+            key, resolved_level, additional=combined_context
+        )
+        acquisition_order = self._get_current_levels()
+        guard_log_context = dict(guard_context)
+        guard_log_context["acquisition_order"] = acquisition_order
+        self._logger.debug(
+            "Guard acquired lock '%s' (level=%s) with order %s for chat %s%s",
+            key,
+            resolved_level,
+            acquisition_order,
+            guard_context.get("chat_id"),
+            self._format_context(guard_log_context),
+            extra=self._log_extra(
+                guard_log_context,
+                event_type="lock_guard_acquired",
+                lock_key=key,
+                lock_level=resolved_level,
+                acquisition_order=acquisition_order,
+            ),
+        )
         try:
             yield
         finally:
@@ -495,10 +556,18 @@ class LockManager:
         snapshot["cycles"] = self._detect_cycles(dependency_graph)
         return snapshot
 
+    def _resolve_lock_category(self, key: str) -> Optional[str]:
+        for prefix, category in _LOCK_PREFIX_LEVELS:
+            if key.startswith(prefix):
+                return category
+        return None
+
     def _resolve_level(self, key: str, *, override: Optional[int]) -> int:
         if override is not None:
             return override
-        category = key.split(":", 1)[0]
+        category = self._resolve_lock_category(key)
+        if category is None:
+            return self._default_lock_level
         return LOCK_LEVELS.get(category, self._default_lock_level)
 
     def _resolve_timeout(
@@ -506,8 +575,10 @@ class LockManager:
     ) -> Optional[float]:
         if override is not None:
             return override
-        category = key.split(":", 1)[0]
-        category_timeout = self._category_timeouts.get(category)
+        category = self._resolve_lock_category(key)
+        category_timeout = None
+        if category is not None:
+            category_timeout = self._category_timeouts.get(category)
         if category_timeout is not None:
             return category_timeout
         return self._default_timeout_seconds
@@ -524,27 +595,30 @@ class LockManager:
         if any(item.key == key for item in acquisitions):
             # Re-entrant acquire; allow regardless of order.
             return
-        highest = max(acquisitions, key=lambda item: item.level)
-        if level < highest.level:
-            held_contexts = [
-                f"{item.key}(level={item.level})" for item in acquisitions
-            ]
-            lock_identity = self._format_lock_identity(key, level, context)
-            message = (
-                "Lock ordering violation: attempting to acquire %s while holding %s"
-            ) % (lock_identity, held_contexts)
-            self._logger.error(
-                "%s%s",
-                message,
-                self._format_context(context),
-                extra=self._log_extra(
-                    context,
-                    event_type="lock_order_violation",
-                    lock_key=key,
-                    lock_level=level,
-                ),
-            )
-            raise RuntimeError(message)
+        held_levels = self._get_current_levels()
+        highest_level = max(held_levels) if held_levels else None
+        if highest_level is None or level >= highest_level:
+            return
+        held_contexts = [f"{item.key}(level={item.level})" for item in acquisitions]
+        lock_identity = self._format_lock_identity(key, level, context)
+        message = (
+            "Lock ordering violation: attempting to acquire %s while holding %s"
+        ) % (lock_identity, held_contexts)
+        violation_context = dict(context)
+        violation_context["acquisition_order"] = held_levels
+        self._logger.error(
+            "%s%s",
+            message,
+            self._format_context(violation_context),
+            extra=self._log_extra(
+                violation_context,
+                event_type="lock_order_violation",
+                lock_key=key,
+                lock_level=level,
+                acquisition_order=held_levels,
+            ),
+        )
+        raise LockOrderError(message)
 
     def _record_acquired(
         self,
@@ -667,4 +741,4 @@ class LockManager:
         name = task.get_name()
         return f"{name}#{id(task):x}"
 
-__all__ = ["LockManager"]
+__all__ = ["LockManager", "LockOrderError"]
