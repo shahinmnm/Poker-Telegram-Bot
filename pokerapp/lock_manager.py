@@ -7,17 +7,23 @@ import logging
 from contextlib import asynccontextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
-from typing import Any, AsyncIterator, Dict, List, Mapping, Optional, Set, Tuple
+from typing import Any, AsyncIterator, Dict, List, Mapping, Optional, Set, Tuple, TYPE_CHECKING
 from weakref import WeakKeyDictionary
 
 from pokerapp.utils.locks import ReentrantAsyncLock
 from pokerapp.utils.logging_helpers import add_context, normalise_request_category
 
+if TYPE_CHECKING:  # pragma: no cover - typing only
+    from pokerapp.config import Config
+
 
 LOCK_LEVELS: Dict[str, int] = {
+    "stage": 1,
     "engine_stage": 1,
-    "player_report": 2,
-    "wallet": 3,
+    "wallet": 2,
+    "player_wallet": 2,
+    "stats": 3,
+    "player_report": 3,
 }
 
 
@@ -47,6 +53,7 @@ class LockManager:
         max_retries: int = 3,
         retry_backoff_seconds: float = 1,
         category_timeouts: Optional[Mapping[str, Any]] = None,
+        config: Optional["Config"] = None,
     ) -> None:
         self._logger = add_context(logger)
         self._default_timeout_seconds = default_timeout_seconds
@@ -65,7 +72,23 @@ class LockManager:
             f"lock_manager_state_{id(self)}",
             default=(),
         )
-        self._category_timeouts = self._normalise_category_timeouts(category_timeouts)
+        resolved_category_timeouts = category_timeouts
+        if resolved_category_timeouts is None:
+            config_instance = config
+            if config_instance is None:
+                try:
+                    from pokerapp.config import Config  # local import to avoid cycles
+                except Exception:  # pragma: no cover - defensive
+                    config_instance = None
+                else:
+                    config_instance = Config()
+            if config_instance is not None:
+                resolved_category_timeouts = getattr(
+                    config_instance, "LOCK_TIMEOUTS", None
+                )
+        self._category_timeouts = self._normalise_category_timeouts(
+            resolved_category_timeouts
+        )
         self._metrics: Dict[str, int] = {"lock_contention": 0, "lock_timeouts": 0}
 
     async def _get_lock(self, key: str) -> ReentrantAsyncLock:
@@ -108,6 +131,21 @@ class LockManager:
         else:
             self._task_lock_state.pop(task, None)
 
+    def _extract_context_from_key(self, key: str) -> Dict[str, Any]:
+        category, _, remainder = key.partition(":")
+        payload: Dict[str, Any] = {
+            "lock_category": category or key,
+            "lock_key": key,
+            "lock_name": key,
+        }
+        if category in {"stage", "engine_stage"} and remainder:
+            chat_candidate, *_ = remainder.split(":", 1)
+            try:
+                payload.setdefault("chat_id", int(chat_candidate))
+            except ValueError:
+                payload.setdefault("chat_id", chat_candidate)
+        return payload
+
     def _build_context_payload(
         self,
         key: str,
@@ -115,10 +153,28 @@ class LockManager:
         *,
         additional: Optional[Mapping[str, Any]] = None,
     ) -> Dict[str, Any]:
-        payload = dict(additional or {})
+        payload = self._extract_context_from_key(key)
+        if additional:
+            payload.update(dict(additional))
+        payload.setdefault("chat_id", payload.get("chat_id"))
+        payload.setdefault("game_id", payload.get("game_id"))
         payload.setdefault("lock_key", key)
+        payload.setdefault("lock_name", key)
         payload.setdefault("lock_level", level)
         return payload
+
+    def _format_lock_identity(
+        self, key: str, level: int, context: Mapping[str, Any]
+    ) -> str:
+        return (
+            "Lock '%s' (level=%s, chat_id=%s, game_id=%s)"
+            % (
+                key,
+                level,
+                context.get("chat_id"),
+                context.get("game_id"),
+            )
+        )
 
     async def acquire(
         self,
@@ -166,6 +222,9 @@ class LockManager:
                     break
 
             self._register_waiting(task, key, resolved_level, context_payload)
+            lock_identity = self._format_lock_identity(
+                key, resolved_level, context_payload
+            )
             try:
                 owner = getattr(lock, "_owner", None)
                 if owner is not None and owner is not task:
@@ -178,8 +237,8 @@ class LockManager:
                 self._record_acquired(key, resolved_level, context_payload)
                 if attempt == 0 and elapsed < 0.1:
                     self._logger.info(
-                        "Lock '%s' acquired quickly in %.3fs%s",
-                        key,
+                        "%s acquired quickly in %.3fs%s",
+                        lock_identity,
                         elapsed,
                         self._format_context(context_payload),
                         extra=self._log_extra(
@@ -193,8 +252,8 @@ class LockManager:
                     )
                 else:
                     self._logger.info(
-                        "Lock '%s' acquired after %d attempt(s) in %.3fs%s",
-                        key,
+                        "%s acquired after %d attempt(s) in %.3fs%s",
+                        lock_identity,
                         attempt + 1,
                         elapsed,
                         self._format_context(context_payload),
@@ -214,8 +273,8 @@ class LockManager:
                 if deadline is not None:
                     remaining = max(0.0, deadline - loop.time())
                 self._logger.warning(
-                    "Timeout acquiring lock '%s' on attempt %d (remaining %.3fs)%s",
-                    key,
+                    "Timeout acquiring %s on attempt %d (remaining %.3fs)%s",
+                    lock_identity,
                     attempt + 1,
                     remaining if remaining is not None else float("inf"),
                     self._format_context(context_payload),
@@ -230,8 +289,8 @@ class LockManager:
                 )
             except asyncio.CancelledError:
                 self._logger.warning(
-                    "Lock acquisition for '%s' cancelled on attempt %d%s",
-                    key,
+                    "Lock acquisition for %s cancelled on attempt %d%s",
+                    lock_identity,
                     attempt + 1,
                     self._format_context(context_payload),
                     extra=self._log_extra(
@@ -257,9 +316,10 @@ class LockManager:
                             break
                         await asyncio.sleep(min(backoff, remaining_sleep))
 
+        lock_identity = self._format_lock_identity(key, resolved_level, context_payload)
         self._logger.error(
-            "Failed to acquire lock '%s' after %d attempts%s",
-            key,
+            "Failed to acquire %s after %d attempts%s",
+            lock_identity,
             attempts,
             self._format_context(context_payload),
             extra=self._log_extra(
@@ -289,12 +349,16 @@ class LockManager:
             key, timeout=timeout, context=combined_context, level=level
         )
         if not acquired:
-            message = f"Timeout acquiring lock '{key}'"
+            resolved_level = self._resolve_level(key, override=level)
             failure_context = self._build_context_payload(
                 key,
-                self._resolve_level(key, override=level),
+                resolved_level,
                 additional=combined_context,
             )
+            failure_identity = self._format_lock_identity(
+                key, resolved_level, failure_context
+            )
+            message = f"Timeout acquiring {failure_identity}"
             self._logger.warning(
                 "%s%s",
                 message,
@@ -318,15 +382,19 @@ class LockManager:
         lock = self._locks.get(key)
         base_context = dict(context or {})
         if lock is None:
+            resolved_level = self._resolve_level(key, override=None)
+            unknown_context = self._build_context_payload(
+                key, resolved_level, additional=base_context
+            )
             self._logger.debug(
-                "Release requested for unknown lock '%s'%s",
-                key,
-                self._format_context(base_context),
+                "Release requested for unknown %s%s",
+                self._format_lock_identity(key, resolved_level, unknown_context),
+                self._format_context(unknown_context),
                 extra=self._log_extra(
-                    base_context,
+                    unknown_context,
                     event_type="lock_release_unknown",
                     lock_key=key,
-                    lock_level=None,
+                    lock_level=unknown_context.get("lock_level"),
                 ),
             )
             return
@@ -350,8 +418,8 @@ class LockManager:
             lock.release()
         except RuntimeError:
             self._logger.exception(
-                "Failed to release lock '%s' due to ownership mismatch%s",
-                key,
+                "Failed to release %s due to ownership mismatch%s",
+                self._format_lock_identity(key, release_level, context_payload),
                 self._format_context(context_payload),
                 extra=self._log_extra(
                     context_payload,
@@ -367,8 +435,10 @@ class LockManager:
                 if release_context:
                     context_payload = release_context
             self._logger.info(
-                "Lock '%s' released%s",
-                key,
+                "%s released%s",
+                self._format_lock_identity(
+                    key, context_payload.get("lock_level", release_level), context_payload
+                ),
                 self._format_context(context_payload),
                 extra=self._log_extra(
                     context_payload,
@@ -459,10 +529,10 @@ class LockManager:
             held_contexts = [
                 f"{item.key}(level={item.level})" for item in acquisitions
             ]
+            lock_identity = self._format_lock_identity(key, level, context)
             message = (
-                "Lock ordering violation: attempting to acquire '%s' (level=%d) while "
-                "holding %s"
-            ) % (key, level, held_contexts)
+                "Lock ordering violation: attempting to acquire %s while holding %s"
+            ) % (lock_identity, held_contexts)
             self._logger.error(
                 "%s%s",
                 message,
@@ -587,6 +657,9 @@ class LockManager:
             "event_type": event_type,
             "lock_context": dict(context) if context else {},
         }
+        lock_name = context.get("lock_name") or context.get("lock_key")
+        if lock_name is not None:
+            payload.setdefault("lock_name", lock_name)
         payload.update(extra)
         return payload
 

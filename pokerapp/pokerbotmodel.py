@@ -229,6 +229,7 @@ class PokerBotModel:
         self._lock_manager = LockManager(
             logger=logger.getChild("lock_manager"),
             category_timeouts=getattr(cfg, "LOCK_TIMEOUTS", None),
+            config=cfg,
         )
         self._player_identity_manager = PlayerIdentityManager(
             table_manager=self._table_manager,
