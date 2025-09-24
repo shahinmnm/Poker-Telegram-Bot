@@ -5,8 +5,8 @@ from __future__ import annotations
 import logging
 from typing import Any, Awaitable, Callable, Dict, Optional, Tuple
 
-from pokerapp.entities import ChatId, Game, GameState, Player, PlayerState
-from pokerapp.config import get_game_constants
+from pokerapp.entities import ChatId, Game, GameState, Money, Player, PlayerState, Wallet
+from pokerapp.config import Config, get_game_constants
 from pokerapp.player_manager import PlayerManager
 from pokerapp.pokerbotview import PokerBotViewer
 from pokerapp.stats_reporter import StatsReporter
@@ -26,6 +26,42 @@ else:
 _STAGE_LOCK_PREFIX = _ENGINE_KEYS.get("stage_lock_prefix", "stage:")
 
 
+class _DebugWallet(Wallet):
+    async def add_daily(self, amount: Money) -> Money:
+        return 0
+
+    async def has_daily_bonus(self) -> bool:
+        return False
+
+    async def inc(self, amount: Money = 0) -> Money:
+        return 0
+
+    async def inc_authorized_money(self, game_id: str, amount: Money) -> None:
+        return None
+
+    async def authorized_money(self, game_id: str) -> Money:
+        return 0
+
+    async def authorize(self, game_id: str, amount: Money) -> None:
+        return None
+
+    async def authorize_all(self, game_id: str) -> Money:
+        return 0
+
+    async def value(self) -> Money:
+        return 0
+
+    async def approve(self, game_id: str) -> None:
+        return None
+
+    async def cancel(self, game_id: str) -> None:
+        return None
+
+
+_DEBUG_WALLET = _DebugWallet()
+_DEBUG_DEALER_USER_ID = "debug-dealer"
+
+
 class MatchmakingService:
     """Encapsulate start-hand orchestration and round progression."""
 
@@ -42,6 +78,7 @@ class MatchmakingService:
         safe_int: Callable[[ChatId], int],
         old_players_key: str,
         logger: logging.Logger,
+        config: Optional[Config] = None,
     ) -> None:
         self._view = view
         self._round_rate = round_rate
@@ -53,6 +90,7 @@ class MatchmakingService:
         self._safe_int = safe_int
         self._old_players_key = old_players_key
         self._logger = logger
+        self._config = config or Config()
 
     # ------------------------------------------------------------------
     # Public API
@@ -212,9 +250,48 @@ class MatchmakingService:
             game.dealer_index = new_dealer_index
 
         if game.dealer_index == -1:
+            if self._config.ALLOW_EMPTY_DEALER:
+                fallback_player = self._ensure_debug_dealer(game)
+                self._logger.debug(
+                    "Using debug dealer fallback: assigned seat %s (created_dummy=%s)",
+                    game.dealer_index,
+                    bool(fallback_player),
+                )
+                return True
             self._logger.warning("Cannot start game without an occupied dealer seat")
             return False
         return True
+
+    def _ensure_debug_dealer(self, game: Game) -> Optional[Player]:
+        if game.players:
+            first_player = game.players[0]
+            seat_index = getattr(first_player, "seat_index", None)
+            if isinstance(seat_index, int) and seat_index >= 0:
+                game.dealer_index = seat_index
+            else:
+                game.dealer_index = 0
+            return None
+
+        existing_dummy: Optional[Player] = getattr(game, "_debug_dummy_dealer", None)
+        if isinstance(existing_dummy, Player):
+            game.dealer_index = 0
+            game.seats[0] = existing_dummy
+            existing_dummy.is_dealer = True
+            existing_dummy.seat_index = 0
+            return existing_dummy
+
+        dummy_player = Player(
+            user_id=_DEBUG_DEALER_USER_ID,
+            mention_markdown="Debug Dealer",
+            wallet=_DEBUG_WALLET,
+            ready_message_id="",
+            seat_index=0,
+        )
+        dummy_player.is_dealer = True
+        game.seats[0] = dummy_player
+        game.dealer_index = 0
+        setattr(game, "_debug_dummy_dealer", dummy_player)
+        return dummy_player
 
     async def _initialize_hand_state(self, game: Game, chat_id: ChatId) -> None:
         game.state = GameState.ROUND_PRE_FLOP

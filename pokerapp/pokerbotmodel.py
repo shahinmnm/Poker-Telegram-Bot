@@ -274,6 +274,7 @@ class PokerBotModel:
             safe_int=self._safe_int,
             old_players_key=KEY_OLD_PLAYERS,
             logger=logger.getChild("matchmaking"),
+            config=cfg,
         )
         self._telegram_ops = telegram_safe_ops or TelegramSafeOps(
             self._view,
