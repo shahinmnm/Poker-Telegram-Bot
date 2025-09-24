@@ -22,6 +22,7 @@ from typing import Any, Awaitable, Callable, Dict, Iterable, List, Optional, Set
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes
 from telegram.helpers import mention_markdown as format_mention_markdown
+from telegram.error import RetryAfter
 
 from pokerapp.entities import (
     ChatId,
@@ -457,67 +458,39 @@ class GameEngine:
 
             await self._clear_game_messages(game, chat_id)
 
-            hand_id = game.id
             pot_total = game.pot
             payouts: Dict[int, int] = defaultdict(int)
             hand_labels: Dict[int, Optional[str]] = {}
 
+            folded_player_ids = [
+                player.user_id for player in game.players_by(states=(PlayerState.FOLD,))
+            ]
+
             if not contenders:
-                active_players = game.players_by(states=(PlayerState.ACTIVE,))
-                if len(active_players) == 1:
-                    winner = active_players[0]
-                    amount = pot_total
-                    if amount > 0:
-                        await winner.wallet.inc(amount)
-                        payouts[self._safe_int(winner.user_id)] += amount
-                    hand_labels[self._safe_int(winner.user_id)] = "پیروزی با فولد رقبا"
-                    await self._view.send_message(
-                        chat_id,
-                        f"🏆 تمام بازیکنان دیگر فولد کردند! {winner.mention_markdown} برنده {amount}$ شد.",
-                    )
+                await self._process_fold_win(
+                    game,
+                    folded_player_ids,
+                    payouts=payouts,
+                    hand_labels=hand_labels,
+                    chat_id=chat_id,
+                )
             else:
                 contender_details = self._evaluate_contender_hands(game, contenders)
                 winners_by_pot = self._determine_winners(game, contender_details)
-
-                for detail in contender_details:
-                    player = detail.get("player")
-                    if not player:
-                        continue
-                    label = self.hand_type_to_label(detail.get("hand_type"))
-                    if label:
-                        hand_labels[self._safe_int(player.user_id)] = label
-
-                if winners_by_pot:
-                    for pot in winners_by_pot:
-                        pot_amount = pot.get("amount", 0)
-                        winners_info = pot.get("winners", [])
-                        if pot_amount > 0 and winners_info:
-                            base_share, remainder = divmod(pot_amount, len(winners_info))
-                            for index, winner in enumerate(winners_info):
-                                player = winner.get("player")
-                                if not player:
-                                    continue
-                                win_amount = base_share + (1 if index < remainder else 0)
-                                if win_amount > 0:
-                                    await player.wallet.inc(win_amount)
-                                    payouts[self._safe_int(player.user_id)] += win_amount
-                                winner_label = self.hand_type_to_label(
-                                    winner.get("hand_type")
-                                )
-                                if (
-                                    winner_label
-                                    and self._safe_int(player.user_id) not in hand_labels
-                                ):
-                                    hand_labels[self._safe_int(player.user_id)] = winner_label
-                else:
-                    await self._view.send_message(
-                        chat_id,
-                        "ℹ️ هیچ برنده‌ای در این دست مشخص نشد. مشکلی در منطق بازی رخ داده است.",
-                    )
-
-                await _send_with_retry(
-                    self._view.send_showdown_results, chat_id, game, winners_by_pot
+                winner_data = {
+                    "contender_details": contender_details,
+                    "winners_by_pot": winners_by_pot,
+                }
+                await self._process_showdown_results(
+                    game,
+                    winner_data,
+                    payouts=payouts,
+                    hand_labels=hand_labels,
+                    chat_id=chat_id,
+                    send_with_retry=_send_with_retry,
                 )
+
+            await self._distribute_payouts(game, payouts)
 
             await self._stats_reporter.hand_finished(
                 game,
@@ -527,26 +500,139 @@ class GameEngine:
                 pot_total=pot_total,
             )
 
-            game.pot = 0
-            game.state = GameState.FINISHED
-
-            remaining_players = []
-            for player in game.players:
-                if await player.wallet.value() > 0:
-                    remaining_players.append(player)
-            context.chat_data[self._old_players_key] = [
-                player.user_id for player in remaining_players
-            ]
-
-            await self._request_metrics.end_cycle(
-                self._safe_int(chat_id), cycle_token=game.id
+            await self._reset_game_state(
+                game,
+                context=context,
+                chat_id=chat_id,
             )
-            await self._player_manager.clear_player_anchors(game)
-            game.reset()
-            await self._table_manager.save_game(chat_id, game)
 
             await _send_with_retry(self._view.send_new_hand_ready_message, chat_id)
             await self._player_manager.send_join_prompt(game, chat_id)
+
+    async def _process_fold_win(
+        self,
+        game: Game,
+        folded_player_ids: Iterable[UserId],
+        *,
+        payouts: Dict[int, int],
+        hand_labels: Dict[int, Optional[str]],
+        chat_id: ChatId,
+    ) -> None:
+        active_players = game.players_by(states=(PlayerState.ACTIVE,))
+        folded_count = len(tuple(folded_player_ids))
+        if len(active_players) != 1:
+            return
+
+        winner = active_players[0]
+        amount = game.pot
+        winner_id = self._safe_int(winner.user_id)
+
+        if amount > 0:
+            payouts[winner_id] += amount
+
+        hand_labels[winner_id] = "پیروزی با فولد رقبا"
+
+        fold_phrase = "تمام بازیکنان دیگر فولد کردند"
+        if folded_count:
+            fold_phrase = f"{fold_phrase} ({folded_count} نفر)"
+
+        await self._view.send_message(
+            chat_id,
+            f"🏆 {fold_phrase}! {winner.mention_markdown} برنده {amount}$ شد.",
+        )
+
+    async def _process_showdown_results(
+        self,
+        game: Game,
+        winner_data: Dict[str, object],
+        *,
+        payouts: Dict[int, int],
+        hand_labels: Dict[int, Optional[str]],
+        chat_id: ChatId,
+        send_with_retry: Callable[..., Awaitable[None]],
+    ) -> None:
+        contender_details = list(winner_data.get("contender_details", []))
+        winners_by_pot = list(winner_data.get("winners_by_pot", []))
+
+        for detail in contender_details:
+            player = detail.get("player") if isinstance(detail, dict) else None
+            if not player:
+                continue
+            label = self.hand_type_to_label(detail.get("hand_type"))
+            if label:
+                hand_labels[self._safe_int(player.user_id)] = label
+
+        if winners_by_pot:
+            for pot in winners_by_pot:
+                if not isinstance(pot, dict):
+                    continue
+                pot_amount = pot.get("amount", 0)
+                winners_info = pot.get("winners", [])
+                if pot_amount > 0 and winners_info:
+                    base_share, remainder = divmod(pot_amount, len(winners_info))
+                    for index, winner in enumerate(winners_info):
+                        player = winner.get("player") if isinstance(winner, dict) else None
+                        if not player:
+                            continue
+                        win_amount = base_share + (1 if index < remainder else 0)
+                        if win_amount > 0:
+                            payouts[self._safe_int(player.user_id)] += win_amount
+                        winner_label = self.hand_type_to_label(winner.get("hand_type"))
+                        player_id = self._safe_int(player.user_id)
+                        if winner_label and player_id not in hand_labels:
+                            hand_labels[player_id] = winner_label
+        else:
+            await self._view.send_message(
+                chat_id,
+                "ℹ️ هیچ برنده‌ای در این دست مشخص نشد. مشکلی در منطق بازی رخ داده است.",
+            )
+
+        await send_with_retry(
+            self._view.send_showdown_results, chat_id, game, winners_by_pot
+        )
+
+    async def _distribute_payouts(
+        self,
+        game: Game,
+        payouts: Dict[int, int],
+    ) -> None:
+        if not payouts:
+            return
+
+        for player in game.players:
+            player_id = self._safe_int(getattr(player, "user_id", 0))
+            amount = payouts.get(player_id, 0)
+            if amount > 0:
+                await player.wallet.inc(amount)
+
+    async def _reset_game_state(
+        self,
+        game: Game,
+        *,
+        context: ContextTypes.DEFAULT_TYPE,
+        chat_id: ChatId,
+    ) -> None:
+        game.pot = 0
+        game.state = GameState.FINISHED
+
+        remaining_players = []
+        for player in game.players:
+            wallet = getattr(player, "wallet", None)
+            if wallet is None:
+                continue
+            if await wallet.value() > 0:
+                remaining_players.append(player)
+
+        context.chat_data[self._old_players_key] = [
+            player.user_id for player in remaining_players
+        ]
+
+        await self._request_metrics.end_cycle(
+            self._safe_int(chat_id), cycle_token=game.id
+        )
+        await self._player_manager.clear_player_anchors(game)
+        game.reset()
+        await self._table_manager.save_game(chat_id, game)
 
     def _evaluate_contender_hands(
         self, game: Game, contenders: Iterable[Player]
@@ -924,7 +1010,9 @@ class GameEngine:
             stop_request=stop_request,
         )
 
-        await self._reset_game_state(game=game, chat_id=chat_id, context=context)
+        await self._reset_game_state_after_stop(
+            game=game, chat_id=chat_id, context=context
+        )
 
     def _validate_stop_request(
         self,
@@ -1056,19 +1144,16 @@ class GameEngine:
 
         context.chat_data.pop(self.KEY_STOP_REQUEST, None)
 
-    async def _reset_game_state(
+    async def _reset_game_state_after_stop(
         self,
         *,
         game: Game,
         chat_id: ChatId,
         context: ContextTypes.DEFAULT_TYPE,
     ) -> None:
-        game.pot = 0
-
-        await self._request_metrics.end_cycle(
-            self._safe_int(chat_id), cycle_token=game.id
+        await self._reset_game_state(
+            game,
+            context=context,
+            chat_id=chat_id,
         )
-        await self._player_manager.clear_player_anchors(game)
-        game.reset()
-        await self._table_manager.save_game(chat_id, game)
         await self._view.send_message(chat_id, self.STOPPED_NOTIFICATION)
