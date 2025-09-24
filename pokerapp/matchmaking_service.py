@@ -54,16 +54,7 @@ class MatchmakingService:
     ) -> None:
         await self._player_manager.cleanup_ready_prompt(game, chat_id)
 
-        if not hasattr(game, "dealer_index"):
-            game.dealer_index = -1
-
-        new_dealer_index = game.advance_dealer()
-        if new_dealer_index == -1:
-            new_dealer_index = game.next_occupied_seat(-1)
-            game.dealer_index = new_dealer_index
-
-        if game.dealer_index == -1:
-            self._logger.warning("Cannot start game without an occupied dealer seat")
+        if not self._ensure_dealer_position(game):
             return
 
         await self._stats_reporter.hand_started(
@@ -72,35 +63,21 @@ class MatchmakingService:
             build_identity_from_player,
         )
 
-        game.state = GameState.ROUND_PRE_FLOP
-        await self._request_metrics.start_cycle(self._safe_int(chat_id), game.id)
+        await self._initialize_hand_state(game, chat_id)
+        await self._clear_seat_state(game, chat_id)
 
-        await self._player_manager.clear_seat_announcement(game, chat_id)
-        await self._player_manager.clear_player_anchors(game)
-
-        await self._divide_cards(game, chat_id)
+        await self._deal_hole_cards(game, chat_id)
         if game.state == GameState.INITIAL:
             return
 
-        current_player = await self._round_rate.set_blinds(game, chat_id)
-        self._player_manager.assign_role_labels(game)
+        current_player = await self._post_blinds_and_prepare_players(game, chat_id)
 
-        await self._stats_reporter.invalidate_players(game.players)
-
-        game.chat_id = chat_id
-
-        async with self._lock_manager.guard(self._stage_lock_key(chat_id), timeout=10):
-            await self._view.send_player_role_anchors(game=game, chat_id=chat_id)
-
-        action_str = "بازی شروع شد"
-        game.last_actions.append(action_str)
-        if len(game.last_actions) > 5:
-            game.last_actions.pop(0)
-
-        if current_player:
-            await self._send_turn_message(game, current_player, chat_id)
-
-        context.chat_data[self._old_players_key] = [p.user_id for p in game.players]
+        await self._handle_post_start_notifications(
+            context=context,
+            game=game,
+            chat_id=chat_id,
+            current_player=current_player,
+        )
 
     async def progress_stage(
         self,
@@ -211,6 +188,65 @@ class MatchmakingService:
 
             cards = [game.remain_cards.pop(), game.remain_cards.pop()]
             player.cards = cards
+
+    def _ensure_dealer_position(self, game: Game) -> bool:
+        if not hasattr(game, "dealer_index"):
+            game.dealer_index = -1
+
+        new_dealer_index = game.advance_dealer()
+        if new_dealer_index == -1:
+            new_dealer_index = game.next_occupied_seat(-1)
+            game.dealer_index = new_dealer_index
+
+        if game.dealer_index == -1:
+            self._logger.warning("Cannot start game without an occupied dealer seat")
+            return False
+        return True
+
+    async def _initialize_hand_state(self, game: Game, chat_id: ChatId) -> None:
+        game.state = GameState.ROUND_PRE_FLOP
+        await self._request_metrics.start_cycle(self._safe_int(chat_id), game.id)
+
+    async def _clear_seat_state(self, game: Game, chat_id: ChatId) -> None:
+        await self._player_manager.clear_seat_announcement(game, chat_id)
+        await self._player_manager.clear_player_anchors(game)
+
+    async def _deal_hole_cards(self, game: Game, chat_id: ChatId) -> None:
+        await self._divide_cards(game, chat_id)
+
+    async def _post_blinds_and_prepare_players(
+        self, game: Game, chat_id: ChatId
+    ) -> Optional[Player]:
+        current_player = await self._round_rate.set_blinds(game, chat_id)
+        self._player_manager.assign_role_labels(game)
+        await self._stats_reporter.invalidate_players(game.players)
+        return current_player
+
+    async def _handle_post_start_notifications(
+        self,
+        *,
+        context,
+        game: Game,
+        chat_id: ChatId,
+        current_player: Optional[Player],
+    ) -> None:
+        game.chat_id = chat_id
+
+        async with self._lock_manager.guard(self._stage_lock_key(chat_id), timeout=10):
+            await self._view.send_player_role_anchors(game=game, chat_id=chat_id)
+
+        self._record_game_start_action(game)
+
+        if current_player:
+            await self._send_turn_message(game, current_player, chat_id)
+
+        context.chat_data[self._old_players_key] = [p.user_id for p in game.players]
+
+    def _record_game_start_action(self, game: Game) -> None:
+        action_str = "بازی شروع شد"
+        game.last_actions.append(action_str)
+        if len(game.last_actions) > 5:
+            game.last_actions.pop(0)
 
     async def _add_cards_to_table(
         self,

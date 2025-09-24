@@ -266,7 +266,7 @@ class PokerBotModel:
         """Serialize stateful operations for a chat while allowing nesting."""
 
         key = f"chat:{self._safe_int(chat_id)}"
-        async with self._lock_manager.guard(key, timeout=10):
+        async with self._lock_manager.guard(key, timeout=10, level=0):
             yield
 
     def assign_role_labels(self, game: Game) -> None:
