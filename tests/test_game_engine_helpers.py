@@ -149,7 +149,7 @@ async def test_reset_game_state_clears_pot_and_persists(game_engine_setup):
     game = Game()
     game.pot = 300
 
-    await game_engine_setup.engine._reset_game_state(
+    await game_engine_setup.engine._reset_core_game_state(
         game=game,
         chat_id=-400,
         context=SimpleNamespace(chat_data={}),

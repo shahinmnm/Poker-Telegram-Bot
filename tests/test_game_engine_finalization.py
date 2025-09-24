@@ -329,7 +329,7 @@ async def test_process_showdown_results_handles_empty_winners():
 
 
 @pytest.mark.asyncio
-async def test_handle_winners_returns_payouts_and_labels_for_showdown():
+async def test_determine_winners_returns_payouts_and_labels_for_showdown():
     view = _build_view_mock()
     bot = MagicMock()
     cfg = MagicMock(DEBUG=False)
@@ -351,7 +351,9 @@ async def test_handle_winners_returns_payouts_and_labels_for_showdown():
 
     engine = model._game_engine
     engine._evaluate_contender_hands = MagicMock(return_value=[{"player": None}])
-    engine._determine_winners = MagicMock(return_value=[{"amount": 100, "winners": []}])
+    engine._determine_pot_winners = MagicMock(
+        return_value=[{"amount": 100, "winners": []}]
+    )
 
     active_player = Player(
         user_id=999,
@@ -389,20 +391,20 @@ async def test_handle_winners_returns_payouts_and_labels_for_showdown():
     engine._process_showdown_results = AsyncMock(side_effect=fake_showdown)
 
     chat_id = -1234
-    payouts, hand_labels, announcements = await engine._handle_winners(
+    payouts, hand_labels, announcements = await engine._determine_winners(
         game=game, chat_id=chat_id
     )
 
     assert payouts[active_player.user_id] == 75
     assert hand_labels[active_player.user_id] == "label"
     engine._evaluate_contender_hands.assert_called_once()
-    engine._determine_winners.assert_called_once()
+    engine._determine_pot_winners.assert_called_once()
     engine._process_showdown_results.assert_awaited_once()
     assert announcements == [announcement_stub]
 
 
 @pytest.mark.asyncio
-async def test_handle_winners_invokes_fold_processor_when_no_contenders():
+async def test_determine_winners_invokes_fold_processor_when_no_contenders():
     view = _build_view_mock()
     bot = MagicMock()
     cfg = MagicMock(DEBUG=False)
@@ -436,7 +438,7 @@ async def test_handle_winners_invokes_fold_processor_when_no_contenders():
     game = Game()
     game.add_player(folded_player, seat_index=0)
 
-    payouts, hand_labels, announcements = await engine._handle_winners(
+    payouts, hand_labels, announcements = await engine._determine_winners(
         game=game, chat_id=-4321
     )
 
@@ -448,7 +450,7 @@ async def test_handle_winners_invokes_fold_processor_when_no_contenders():
 
 
 @pytest.mark.asyncio
-async def test_payout_delegates_to_distribute_payouts():
+async def test_execute_payouts_delegates_to_distribute_payouts():
     view = _build_view_mock()
     bot = MagicMock()
     cfg = MagicMock(DEBUG=False)
@@ -475,7 +477,7 @@ async def test_payout_delegates_to_distribute_payouts():
     payouts[1] = 100
     game = Game()
 
-    await engine._payout(game=game, payouts=payouts)
+    await engine._execute_payouts(game=game, payouts=payouts)
 
     engine._distribute_payouts.assert_awaited_once()
     args, kwargs = engine._distribute_payouts.await_args
@@ -485,7 +487,7 @@ async def test_payout_delegates_to_distribute_payouts():
 
 
 @pytest.mark.asyncio
-async def test_announce_results_sends_all_announcements():
+async def test_notify_results_sends_all_announcements():
     view = _build_view_mock()
     bot = MagicMock()
     cfg = MagicMock(DEBUG=False)
@@ -521,7 +523,7 @@ async def test_announce_results_sends_all_announcements():
         },
     ]
 
-    await engine._announce_results(chat_id=-99, announcements=announcements)
+    await engine._notify_results(chat_id=-99, announcements=announcements)
 
     assert engine._telegram_ops.send_message_safe.await_count == 2
     sent_calls = engine._telegram_ops.send_message_safe.await_args_list
@@ -591,7 +593,7 @@ async def test_record_hand_results_updates_cache_and_stats():
 
 
 @pytest.mark.asyncio
-async def test_reset_state_resets_game_and_prompts_players():
+async def test_reset_game_state_resets_game_and_prompts_players():
     view = _build_view_mock()
     bot = MagicMock()
     cfg = MagicMock(DEBUG=False)
@@ -612,7 +614,7 @@ async def test_reset_state_resets_game_and_prompts_players():
     )
 
     engine = model._game_engine
-    engine._reset_game_state = AsyncMock()
+    engine._reset_core_game_state = AsyncMock()
     engine._telegram_ops.send_message_safe = AsyncMock()
     engine._player_manager.send_join_prompt = AsyncMock()
 
@@ -621,14 +623,14 @@ async def test_reset_state_resets_game_and_prompts_players():
     chat_id = -55
     game_id = 321
 
-    await engine._reset_state(
+    await engine._reset_game_state(
         game=game,
         context=context,
         chat_id=chat_id,
         game_id=game_id,
     )
 
-    engine._reset_game_state.assert_awaited_once_with(
+    engine._reset_core_game_state.assert_awaited_once_with(
         game,
         context=context,
         chat_id=chat_id,
@@ -722,7 +724,11 @@ async def test_reset_game_state_clears_pot_and_saves_game():
     context = SimpleNamespace(chat_data={})
     chat_id = -222
 
-    await model._game_engine._reset_game_state(game, context=context, chat_id=chat_id)
+    await model._game_engine._reset_core_game_state(
+        game,
+        context=context,
+        chat_id=chat_id,
+    )
 
     assert context.chat_data[KEY_OLD_PLAYERS] == [player_active.user_id]
     model._game_engine._request_metrics.end_cycle.assert_awaited_once_with(

@@ -993,7 +993,7 @@ async def test_showdown_sends_new_hand_message_before_join_prompt():
     model._game_engine._clear_game_messages = AsyncMock()
     model._player_manager.send_join_prompt = AsyncMock(side_effect=record_join_prompt)
     model._game_engine._evaluate_contender_hands = MagicMock(return_value=[])
-    model._game_engine._determine_winners = MagicMock(return_value=[])
+    model._game_engine._determine_pot_winners = MagicMock(return_value=[])
 
     game = Game()
     wallet = make_wallet_mock(100)

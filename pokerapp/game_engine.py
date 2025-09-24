@@ -539,14 +539,14 @@ class GameEngine:
             pot_total = game.pot
             game_id = getattr(game, "id", None)
 
-            payouts, hand_labels, announcements = await self._handle_winners(
+            payouts, hand_labels, announcements = await self._determine_winners(
                 game=game,
                 chat_id=chat_id,
             )
 
-            await self._payout(game=game, payouts=payouts)
+            await self._execute_payouts(game=game, payouts=payouts)
 
-            await self._announce_results(
+            await self._notify_results(
                 chat_id=chat_id,
                 announcements=announcements,
             )
@@ -560,14 +560,14 @@ class GameEngine:
                 players_snapshot=players_snapshot,
             )
 
-            await self._reset_state(
+            await self._reset_game_state(
                 game=game,
                 context=context,
                 chat_id=chat_id,
                 game_id=game_id,
             )
 
-    async def _handle_winners(
+    async def _determine_winners(
         self,
         *,
         game: Game,
@@ -599,7 +599,7 @@ class GameEngine:
             return payouts, hand_labels, announcements
 
         contender_details = self._evaluate_contender_hands(game, contenders)
-        winners_by_pot = self._determine_winners(game, contender_details)
+        winners_by_pot = self._determine_pot_winners(game, contender_details)
         winner_data = {
             "contender_details": contender_details,
             "winners_by_pot": winners_by_pot,
@@ -615,7 +615,7 @@ class GameEngine:
         )
         return payouts, hand_labels, announcements
 
-    async def _payout(
+    async def _execute_payouts(
         self,
         *,
         game: Game,
@@ -623,7 +623,7 @@ class GameEngine:
     ) -> None:
         await self._distribute_payouts(game, payouts)
 
-    async def _announce_results(
+    async def _notify_results(
         self,
         *,
         chat_id: ChatId,
@@ -662,7 +662,7 @@ class GameEngine:
             pot_total=pot_total,
         )
 
-    async def _reset_state(
+    async def _reset_game_state(
         self,
         *,
         game: Game,
@@ -670,7 +670,7 @@ class GameEngine:
         chat_id: ChatId,
         game_id: Optional[int],
     ) -> None:
-        await self._reset_game_state(
+        await self._reset_core_game_state(
             game,
             context=context,
             chat_id=chat_id,
@@ -830,7 +830,7 @@ class GameEngine:
             if amount > 0:
                 await player.wallet.inc(amount)
 
-    async def _reset_game_state(
+    async def _reset_core_game_state(
         self,
         game: Game,
         *,
@@ -898,7 +898,7 @@ class GameEngine:
             )
         return details
 
-    def _determine_winners(
+    def _determine_pot_winners(
         self, game: Game, contender_details: List[Dict[str, object]]
     ) -> List[Dict[str, object]]:
         if not contender_details or game.pot == 0:
@@ -1434,7 +1434,7 @@ class GameEngine:
         chat_id: ChatId,
         context: ContextTypes.DEFAULT_TYPE,
     ) -> None:
-        await self._reset_game_state(
+        await self._reset_core_game_state(
             game,
             context=context,
             chat_id=chat_id,
