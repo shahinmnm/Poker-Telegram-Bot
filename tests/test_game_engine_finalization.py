@@ -216,6 +216,7 @@ async def test_process_showdown_results_populates_payouts_and_labels():
     payouts = defaultdict(int)
     hand_labels: Dict[int, Optional[str]] = {}
     chat_id = -654
+
     async def _passthrough_send_message_safe(*, call, **_kwargs):
         return await call()
 
@@ -292,6 +293,7 @@ async def test_process_showdown_results_handles_empty_winners():
 
     payouts = defaultdict(int)
     hand_labels: Dict[int, Optional[str]] = {}
+
     async def _passthrough_send_message_safe(*, call, **_kwargs):
         return await call()
 

@@ -498,7 +498,7 @@ class AdaptivePlayerReportCache(PlayerReportCache):
                 expire=max(ttl, 0) or None,
                 log_extra=self._build_log_extra(
                     user_id=user_id,
-                    cache_event="persistent_store", 
+                    cache_event="persistent_store",
                     ttl_event_type=event_type,
                 ),
             )
