@@ -126,7 +126,7 @@ def _non_negative_float(value: Any, default: float) -> float:
         value,
         default,
         converter=float,
-        is_valid=lambda parsed: parsed > 0,
+        is_valid=lambda parsed: parsed >= 0,
     )
 
 
