@@ -412,6 +412,42 @@ class Config:
         else:
             self.RATE_LIMIT_PER_SECOND = parsed_rate_limit_per_second
 
+        telegram_max_retries_raw = os.getenv("POKERBOT_TELEGRAM_MAX_RETRIES")
+        parsed_telegram_max_retries = self._parse_positive_int(
+            telegram_max_retries_raw,
+            env_var="POKERBOT_TELEGRAM_MAX_RETRIES",
+        )
+        self.TELEGRAM_MAX_RETRIES: int = (
+            parsed_telegram_max_retries if parsed_telegram_max_retries is not None else 3
+        )
+
+        base_delay_raw = os.getenv("POKERBOT_TELEGRAM_RETRY_BASE_DELAY")
+        parsed_base_delay = self._parse_positive_float(
+            base_delay_raw,
+            env_var="POKERBOT_TELEGRAM_RETRY_BASE_DELAY",
+        )
+        self.TELEGRAM_RETRY_BASE_DELAY: float = (
+            parsed_base_delay if parsed_base_delay is not None else 0.5
+        )
+
+        max_delay_raw = os.getenv("POKERBOT_TELEGRAM_RETRY_MAX_DELAY")
+        parsed_max_delay = self._parse_positive_float(
+            max_delay_raw,
+            env_var="POKERBOT_TELEGRAM_RETRY_MAX_DELAY",
+        )
+        self.TELEGRAM_RETRY_MAX_DELAY: float = (
+            parsed_max_delay if parsed_max_delay is not None else 4.0
+        )
+
+        multiplier_raw = os.getenv("POKERBOT_TELEGRAM_RETRY_MULTIPLIER")
+        parsed_multiplier = self._parse_positive_float(
+            multiplier_raw,
+            env_var="POKERBOT_TELEGRAM_RETRY_MULTIPLIER",
+        )
+        self.TELEGRAM_RETRY_MULTIPLIER: float = (
+            parsed_multiplier if parsed_multiplier is not None else 2.0
+        )
+
         timezone_env = os.getenv("POKERBOT_TIMEZONE", "").strip()
         timezone_candidate = timezone_env or DEFAULT_TIMEZONE_NAME
         try:
@@ -550,3 +586,39 @@ class Config:
                 default,
             )
             return default
+
+    @staticmethod
+    def _parse_positive_float(
+        raw_value: Optional[str], *, env_var: Optional[str]
+    ) -> Optional[float]:
+        if not raw_value:
+            return None
+        try:
+            value = float(raw_value)
+        except ValueError:
+            if env_var:
+                logger.warning(
+                    "Invalid float value '%s' for %s; ignoring it.",
+                    raw_value,
+                    env_var,
+                )
+            else:
+                logger.warning(
+                    "Invalid float value '%s'; ignoring it.",
+                    raw_value,
+                )
+            return None
+        if value <= 0:
+            if env_var:
+                logger.warning(
+                    "%s must be greater than zero; ignoring %s.",
+                    env_var,
+                    raw_value,
+                )
+            else:
+                logger.warning(
+                    "Float configuration value must be greater than zero; ignoring %s.",
+                    raw_value,
+                )
+            return None
+        return value

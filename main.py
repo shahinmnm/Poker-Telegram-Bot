@@ -124,6 +124,7 @@ def main() -> None:
         request_metrics=services.request_metrics,
         private_match_service=services.private_match_service,
         messaging_service_factory=services.messaging_service_factory,
+        telegram_safeops_factory=services.telegram_safeops_factory,
     )
     if use_polling:
         bot.run_polling()

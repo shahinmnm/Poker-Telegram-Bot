@@ -16,6 +16,7 @@ from pokerapp.private_match_service import PrivateMatchService
 from pokerapp.utils.messaging_service import MessagingService
 from pokerapp.utils.redis_safeops import RedisSafeOps
 from pokerapp.utils.request_metrics import RequestMetrics
+from pokerapp.utils.telegram_safeops import TelegramSafeOps
 from pokerapp.utils.player_report_cache import PlayerReportCache
 
 
@@ -32,6 +33,7 @@ class ApplicationServices:
     request_metrics: RequestMetrics
     private_match_service: PrivateMatchService
     messaging_service_factory: Callable[..., MessagingService]
+    telegram_safeops_factory: Callable[..., TelegramSafeOps]
 
 
 def _build_stats_service(logger: logging.Logger, cfg: Config) -> BaseStatsService:
@@ -111,6 +113,16 @@ def build_services(cfg: Config) -> ApplicationServices:
             last_message_hash_lock=last_message_hash_lock,
         )
 
+    def telegram_safeops_factory(*, view) -> TelegramSafeOps:
+        return TelegramSafeOps(
+            view,
+            logger=logger.getChild("telegram_safeops"),
+            max_retries=cfg.TELEGRAM_MAX_RETRIES,
+            base_delay=cfg.TELEGRAM_RETRY_BASE_DELAY,
+            max_delay=cfg.TELEGRAM_RETRY_MAX_DELAY,
+            backoff_multiplier=cfg.TELEGRAM_RETRY_MULTIPLIER,
+        )
+
     return ApplicationServices(
         logger=logger,
         kv_async=kv_async,
@@ -121,5 +133,6 @@ def build_services(cfg: Config) -> ApplicationServices:
         request_metrics=request_metrics,
         private_match_service=private_match_service,
         messaging_service_factory=messaging_service_factory,
+        telegram_safeops_factory=telegram_safeops_factory,
     )
 

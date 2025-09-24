@@ -3818,6 +3818,8 @@ class PokerBotViewer:
         text: str,
         reply_markup: ReplyKeyboardMarkup = None,
         request_category: RequestCategory = RequestCategory.GENERAL,
+        *,
+        suppress_exceptions: bool = True,
     ) -> Optional[MessageId]:
         """Sends a message and returns its ID, or None if not applicable."""
         context = self._build_context("send_message_return_id", chat_id=chat_id)
@@ -3859,6 +3861,8 @@ class PokerBotViewer:
                     "request_params": {"text": text},
                 },
             )
+            if not suppress_exceptions:
+                raise
         return None
 
     async def last_message_edit_at(
@@ -4029,6 +4033,8 @@ class PokerBotViewer:
         parse_mode: str = ParseMode.MARKDOWN,
         disable_web_page_preview: bool = False,
         request_category: RequestCategory = RequestCategory.GENERAL,
+        *,
+        suppress_exceptions: bool = True,
     ) -> Optional[MessageId]:
         """Edit a message using the central ``MessagingService``.
 
@@ -4074,7 +4080,9 @@ class PokerBotViewer:
                     "context": context,
                 },
             )
-            return None
+            if suppress_exceptions:
+                return None
+            raise
 
     async def delete_message(
         self,
@@ -4084,6 +4092,7 @@ class PokerBotViewer:
         allow_anchor_deletion: bool = False,
         anchor_reason: Optional[str] = None,
         game: Optional[Game] = None,
+        suppress_exceptions: bool = True,
     ) -> None:
         """Delete a message while keeping the cache in sync."""
         normalized_message = self._safe_int(message_id)
@@ -4230,6 +4239,8 @@ class PokerBotViewer:
                         "message_id": message_id,
                     },
                 )
+                if not suppress_exceptions:
+                    raise
                 return
             finally:
                 await self._clear_callback_tokens_for_message(

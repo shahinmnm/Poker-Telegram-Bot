@@ -20,7 +20,6 @@ from collections import defaultdict
 from typing import Any, Awaitable, Callable, Dict, Iterable, List, Optional, Set, Tuple
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.error import RetryAfter
 from telegram.ext import ContextTypes
 from telegram.helpers import mention_markdown as format_mention_markdown
 
@@ -39,6 +38,7 @@ from pokerapp.pokerbotview import PokerBotViewer
 from pokerapp.lock_manager import LockManager
 from pokerapp.table_manager import TableManager
 from pokerapp.utils.request_metrics import RequestCategory, RequestMetrics
+from pokerapp.utils.telegram_safeops import TelegramSafeOps
 from pokerapp.matchmaking_service import MatchmakingService
 from pokerapp.player_manager import PlayerManager
 from pokerapp.stats_reporter import StatsReporter
@@ -140,7 +140,7 @@ class GameEngine:
         build_identity_from_player: Callable[[Player], PlayerIdentity],
         safe_int: Callable[[ChatId], int],
         old_players_key: str,
-        safe_edit_message_text: Callable[..., Awaitable[Optional[MessageId]]],
+        telegram_safe_ops: TelegramSafeOps,
         lock_manager: LockManager,
         logger: logging.Logger,
     ) -> None:
@@ -156,7 +156,7 @@ class GameEngine:
         self._build_identity_from_player = build_identity_from_player
         self._safe_int = safe_int
         self._old_players_key = old_players_key
-        self._safe_edit_message_text = safe_edit_message_text
+        self._telegram_ops = telegram_safe_ops
         self._lock_manager = lock_manager
         self._logger = logger
 
@@ -527,7 +527,7 @@ class GameEngine:
             context=context,
         )
 
-        message_id = await self._safe_edit_message_text(
+        message_id = await self._telegram_ops.edit_message_text(
             chat_id,
             stop_request.get("message_id"),
             message_text,
@@ -696,7 +696,7 @@ class GameEngine:
         context.chat_data.pop(self.KEY_STOP_REQUEST, None)
 
         resume_text = "✅ رأی به ادامه‌ی بازی داده شد. بازی ادامه می‌یابد."
-        await self._safe_edit_message_text(
+        await self._telegram_ops.edit_message_text(
             chat_id,
             message_id,
             resume_text,
@@ -769,7 +769,7 @@ class GameEngine:
             context=context,
         )
 
-        message_id = await self._safe_edit_message_text(
+        message_id = await self._telegram_ops.edit_message_text(
             chat_id,
             stop_request.get("message_id"),
             message_text,
@@ -842,7 +842,7 @@ class GameEngine:
     ) -> None:
         message_text = self._build_stop_cancellation_message(stop_request)
 
-        await self._safe_edit_message_text(
+        await self._telegram_ops.edit_message_text(
             chat_id,
             stop_request.get("message_id"),
             message_text,

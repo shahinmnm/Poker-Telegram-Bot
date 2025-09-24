@@ -24,7 +24,9 @@ def game_engine_setup():
     player_manager = MagicMock()
     player_manager.clear_player_anchors = AsyncMock()
 
-    safe_edit_message_text = AsyncMock(return_value=None)
+    telegram_safe_ops = SimpleNamespace(
+        edit_message_text=AsyncMock(return_value=None)
+    )
 
     engine = GameEngine(
         table_manager=table_manager,
@@ -39,7 +41,7 @@ def game_engine_setup():
         build_identity_from_player=lambda player: player,
         safe_int=int,
         old_players_key="old_players",
-        safe_edit_message_text=safe_edit_message_text,
+        telegram_safe_ops=telegram_safe_ops,
         lock_manager=MagicMock(),
         logger=MagicMock(),
     )
@@ -51,7 +53,7 @@ def game_engine_setup():
         request_metrics=request_metrics,
         stats_reporter=stats_reporter,
         player_manager=player_manager,
-        safe_edit_message_text=safe_edit_message_text,
+        telegram_safe_ops=telegram_safe_ops,
     )
 
 
@@ -108,7 +110,7 @@ async def test_finalize_stop_request_updates_message_and_clears_context(
         stop_request=stop_request,
     )
 
-    game_engine_setup.safe_edit_message_text.assert_awaited_once()
+    game_engine_setup.telegram_safe_ops.edit_message_text.assert_awaited_once()
     assert (
         game_engine_setup.engine.KEY_STOP_REQUEST not in context.chat_data
     )
