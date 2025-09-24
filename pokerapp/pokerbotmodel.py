@@ -28,7 +28,8 @@ from telegram.helpers import mention_markdown as format_mention_markdown
 import logging
 
 from pokerapp.config import Config, get_game_constants
-from pokerapp.utils.datetime_utils import utc_isoformat, utc_now
+from pokerapp.utils.datetime_utils import utc_isoformat
+from pokerapp.utils.time_utils import DEFAULT_TIMEZONE_NAME, now_utc
 from pokerapp.winnerdetermination import WinnerDetermination
 from pokerapp.cards import Cards
 from pokerapp.entities import (
@@ -168,7 +169,13 @@ class PokerBotModel:
             logger_=logger.getChild("player_report_cache"),
             persistent_store=self._redis_ops,
         )
-        self._stats: BaseStatsService = stats_service or NullStatsService()
+        cfg_timezone = getattr(cfg, "TIMEZONE_NAME", DEFAULT_TIMEZONE_NAME)
+        if stats_service is not None:
+            self._stats: BaseStatsService = stats_service
+            cfg_timezone = getattr(stats_service, "timezone_name", cfg_timezone)
+        else:
+            self._stats = NullStatsService(timezone_name=cfg_timezone)
+        self._timezone_name = cfg_timezone
         self._stats.bind_player_report_cache(self._player_report_cache)
         self._lock_manager = LockManager(logger=logger.getChild("lock_manager"))
         self._player_manager = PlayerManager(
@@ -572,7 +579,7 @@ class PokerBotModel:
             message_id=message_id,
             countdown=countdown,
             text=text,
-            updated_at=utc_now(),
+            updated_at=now_utc(),
         )
         async with self._countdown_cache_lock:
             self._countdown_cache[key] = entry
@@ -712,7 +719,7 @@ class PokerBotModel:
                 return
 
             countdown_value = max(int(remaining), 0)
-            now = utc_now()
+            now = now_utc()
             text, keyboard = self._build_ready_message(game, countdown_value)
             countdown_ctx[KEY_START_COUNTDOWN_LAST_TEXT] = text
             countdown_ctx[KEY_START_COUNTDOWN_LAST_TIMESTAMP] = now
@@ -745,9 +752,7 @@ class PokerBotModel:
                 )
                 game.ready_message_main_text = payload_text
                 countdown_ctx[KEY_START_COUNTDOWN_LAST_TEXT] = payload_text
-                countdown_ctx[KEY_START_COUNTDOWN_LAST_TIMESTAMP] = (
-                    utc_now()
-                )
+                countdown_ctx[KEY_START_COUNTDOWN_LAST_TIMESTAMP] = now_utc()
                 return payload_text, payload_keyboard
 
             should_start_countdown = False
@@ -1044,9 +1049,7 @@ class PokerBotModel:
         countdown_value = countdown_ctx.get("seconds")
         text, keyboard = self._build_ready_message(game, countdown_value)
         countdown_ctx[KEY_START_COUNTDOWN_LAST_TEXT] = text
-        countdown_ctx[KEY_START_COUNTDOWN_LAST_TIMESTAMP] = (
-            utc_now()
-        )
+        countdown_ctx[KEY_START_COUNTDOWN_LAST_TIMESTAMP] = now_utc()
         current_text = getattr(game, "ready_message_main_text", "")
 
         if game.ready_message_main_id:
@@ -1312,7 +1315,7 @@ class PokerBotModel:
                 if turn_update.message_id:
                     game.turn_message_id = turn_update.message_id
 
-                game.last_turn_time = utc_now()
+                game.last_turn_time = now_utc()
 
                 logger.debug(
                     "Turn message refreshed",
@@ -1851,7 +1854,7 @@ class WalletManagerModel(Wallet):
         if await self.has_daily_bonus():
             raise UserException("شما قبلاً پاداش روزانه خود را دریافت کرده‌اید.")
 
-        now = utc_now()
+        now = now_utc()
         tomorrow = now.replace(
             hour=0, minute=0, second=0, microsecond=0
         ) + datetime.timedelta(days=1)

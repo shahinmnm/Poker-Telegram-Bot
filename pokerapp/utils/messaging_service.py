@@ -32,7 +32,7 @@ try:  # pragma: no cover - prometheus_client optional
 except Exception:  # pragma: no cover - optional dependency missing
     Counter = None  # type: ignore[assignment]
 
-from pokerapp.utils.datetime_utils import utc_now
+from pokerapp.utils.time_utils import now_utc
 from pokerapp.utils.debug_trace import trace_telegram_api_call
 from pokerapp.utils.request_metrics import RequestCategory, RequestMetrics
 
@@ -743,7 +743,7 @@ class MessagingService:
                     if not waiter.future.done():
                         waiter.future.set_result(result)
             finally:
-                timestamp = utc_now()
+                timestamp = now_utc()
                 self._last_edit_timestamp[key] = timestamp
                 async with state.guard:
                     state.last_flush = time.monotonic()

@@ -29,7 +29,8 @@ from sqlalchemy.ext.asyncio import (
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 from sqlalchemy.pool import StaticPool
 
-from pokerapp.utils.datetime_utils import ensure_utc, utc_now
+from pokerapp.utils.datetime_utils import ensure_utc
+from pokerapp.utils.time_utils import DEFAULT_TIMEZONE_NAME, format_local, now_utc
 from pokerapp.utils.markdown import escape_markdown_v1
 
 if TYPE_CHECKING:
@@ -184,6 +185,13 @@ class _HandContext:
 class BaseStatsService:
     """Abstract base class for statistics services."""
 
+    def __init__(self, *, timezone_name: str = DEFAULT_TIMEZONE_NAME) -> None:
+        self._timezone_name = timezone_name
+
+    @property
+    def timezone_name(self) -> str:
+        return self._timezone_name
+
     async def register_player_profile(
         self, identity: PlayerIdentity, *, timestamp: Optional[dt.datetime] = None
     ) -> None:
@@ -233,6 +241,9 @@ class BaseStatsService:
 
 class NullStatsService(BaseStatsService):
     """Fallback service used when the SQL database is not configured."""
+
+    def __init__(self, *, timezone_name: str = DEFAULT_TIMEZONE_NAME) -> None:
+        super().__init__(timezone_name=timezone_name)
 
     async def register_player_profile(
         self, identity: PlayerIdentity, *, timestamp: Optional[dt.datetime] = None
@@ -286,7 +297,9 @@ class StatsService(BaseStatsService):
         *,
         echo: bool = False,
         player_report_cache: Optional["AdaptivePlayerReportCache"] = None,
+        timezone_name: str = DEFAULT_TIMEZONE_NAME,
     ) -> None:
+        super().__init__(timezone_name=timezone_name)
         self._enabled = bool(database_url)
         self._engine: Optional[AsyncEngine] = None
         self._sessionmaker: Optional[async_sessionmaker[AsyncSession]] = None
@@ -312,7 +325,7 @@ class StatsService(BaseStatsService):
 
     @staticmethod
     def _utcnow() -> dt.datetime:
-        return utc_now()
+        return now_utc()
 
     @staticmethod
     def _coerce_int(value: Optional[int | str]) -> int:
@@ -839,6 +852,20 @@ class StatsService(BaseStatsService):
                     .limit(3)
                 )
             ).scalars().all()
+
+            stats.first_seen = ensure_utc(stats.first_seen)
+            stats.last_seen = ensure_utc(stats.last_seen)
+            if stats.last_game_at is not None:
+                stats.last_game_at = ensure_utc(stats.last_game_at)
+            if stats.last_bonus_at is not None:
+                stats.last_bonus_at = ensure_utc(stats.last_bonus_at)
+
+            for row in recent_games:
+                if row.started_at is not None:
+                    row.started_at = ensure_utc(row.started_at)
+                if row.finished_at is not None:
+                    row.finished_at = ensure_utc(row.finished_at)
+
             return PlayerStatisticsReport(
                 stats=stats,
                 recent_games=list(recent_games),
@@ -963,13 +990,15 @@ class StatsService(BaseStatsService):
         if roi is not None:
             lines.append(f"📐 بازده سرمایه (ROI): {roi:.1f}%")
         if stats.last_game_at:
-            lines.append(
-                f"🕰️ آخرین بازی: {stats.last_game_at.strftime('%Y-%m-%d %H:%M UTC')}"
+            last_game = format_local(
+                stats.last_game_at, "%Y-%m-%d %H:%M %Z", tz_name=self._timezone_name
             )
+            lines.append(f"🕰️ آخرین بازی: {last_game}")
         if stats.last_bonus_at:
-            lines.append(
-                f"🎯 آخرین بونوس: {stats.last_bonus_at.strftime('%Y-%m-%d %H:%M UTC')}"
+            last_bonus = format_local(
+                stats.last_bonus_at, "%Y-%m-%d %H:%M %Z", tz_name=self._timezone_name
             )
+            lines.append(f"🎯 آخرین بونوس: {last_bonus}")
 
         if report.top_winning_hands:
             lines.append("\n🥇 پراکندگی دست‌های برنده:")
@@ -988,11 +1017,12 @@ class StatsService(BaseStatsService):
                     prefix = "❌ باخت"
                 else:
                     prefix = "🤝 مساوی"
-                timestamp = (
-                    game.finished_at.strftime("%Y-%m-%d %H:%M")
-                    if game.finished_at
-                    else "-"
-                )
+                if game.finished_at:
+                    timestamp = format_local(
+                        game.finished_at, "%Y-%m-%d %H:%M", tz_name=self._timezone_name
+                    )
+                else:
+                    timestamp = "-"
                 hand_name = game.hand_type or "بدون شو-داون"
                 lines.append(
                     f"• {timestamp} | {prefix} | سود: {self._format_currency(game.net_profit)} | دست: {hand_name}"
