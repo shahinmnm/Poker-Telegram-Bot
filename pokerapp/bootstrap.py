@@ -18,6 +18,7 @@ from pokerapp.utils.redis_safeops import RedisSafeOps
 from pokerapp.utils.request_metrics import RequestMetrics
 from pokerapp.utils.telegram_safeops import TelegramSafeOps
 from pokerapp.utils.player_report_cache import PlayerReportCache
+from pokerapp.utils.cache import AdaptivePlayerReportCache
 
 
 @dataclass(frozen=True)
@@ -30,6 +31,7 @@ class ApplicationServices:
     table_manager: TableManager
     stats_service: BaseStatsService
     player_report_cache: PlayerReportCache
+    adaptive_player_report_cache: AdaptivePlayerReportCache
     request_metrics: RequestMetrics
     private_match_service: PrivateMatchService
     messaging_service_factory: Callable[..., MessagingService]
@@ -76,9 +78,18 @@ def build_services(cfg: Config) -> ApplicationServices:
 
     stats_service = _build_stats_service(logger.getChild("stats"), cfg)
 
+    adaptive_player_report_cache = AdaptivePlayerReportCache(
+        default_ttl=cfg.PLAYER_REPORT_TTL_DEFAULT,
+        bonus_ttl=cfg.PLAYER_REPORT_TTL_BONUS,
+        post_hand_ttl=cfg.PLAYER_REPORT_TTL_POST_HAND,
+        logger_=logger.getChild("adaptive_player_report_cache"),
+        persistent_store=redis_ops,
+    )
+    stats_service.bind_player_report_cache(adaptive_player_report_cache)
+
     player_report_cache = PlayerReportCache(
         redis_ops,
-        logger=logger,
+        logger=logger.getChild("shared_player_report_cache"),
     )
 
     request_metrics = RequestMetrics(logger_=logger.getChild("metrics"))
@@ -130,6 +141,7 @@ def build_services(cfg: Config) -> ApplicationServices:
         table_manager=table_manager,
         stats_service=stats_service,
         player_report_cache=player_report_cache,
+        adaptive_player_report_cache=adaptive_player_report_cache,
         request_metrics=request_metrics,
         private_match_service=private_match_service,
         messaging_service_factory=messaging_service_factory,

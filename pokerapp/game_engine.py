@@ -808,7 +808,9 @@ class GameEngine:
             if player.wallet:
                 await player.wallet.cancel(original_game_id)
 
-        await self._stats_reporter.invalidate_players(player_list)
+        await self._stats_reporter.invalidate_players(
+            player_list, event_type="hand_finished"
+        )
 
     def _build_stop_cancellation_message(
         self, stop_request: Dict[str, object]

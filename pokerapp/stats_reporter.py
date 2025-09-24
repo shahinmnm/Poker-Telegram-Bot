@@ -15,6 +15,7 @@ from pokerapp.stats import (
 from pokerapp.utils.player_report_cache import (
     PlayerReportCache as RedisPlayerReportCache,
 )
+from pokerapp.utils.cache import AdaptivePlayerReportCache
 
 
 class StatsReporter:
@@ -25,11 +26,13 @@ class StatsReporter:
         *,
         stats_service: BaseStatsService,
         player_report_cache: Optional[RedisPlayerReportCache],
+        adaptive_player_report_cache: Optional[AdaptivePlayerReportCache],
         safe_int: Callable[[ChatId], int],
         logger: logging.Logger,
     ) -> None:
         self._stats = stats_service
         self._player_report_cache = player_report_cache
+        self._adaptive_player_report_cache = adaptive_player_report_cache
         self._safe_int = safe_int
         self._logger = logger
 
@@ -80,15 +83,15 @@ class StatsReporter:
                 results=results,
                 pot_total=pot_total,
             )
-        await self.invalidate_players(game.players)
+        await self.invalidate_players(game.players, event_type="hand_finished")
 
     async def invalidate_players(
-        self, players: Iterable[Player | int]
+        self,
+        players: Iterable[Player | int],
+        *,
+        event_type: Optional[str] = None,
     ) -> None:
         """Invalidate cached stats reports for the supplied ``players``."""
-
-        if not self._player_report_cache:
-            return
 
         normalized: Set[int] = set()
         for player in players:
@@ -105,7 +108,16 @@ class StatsReporter:
         if not normalized:
             return
 
-        await self._player_report_cache.invalidate(normalized)
+        if self._adaptive_player_report_cache:
+            if event_type:
+                self._adaptive_player_report_cache.invalidate_on_event(
+                    normalized, event_type
+                )
+            else:
+                self._adaptive_player_report_cache.invalidate_many(normalized)
+
+        if self._player_report_cache:
+            await self._player_report_cache.invalidate(normalized)
 
     # ------------------------------------------------------------------
     # Helpers

@@ -214,3 +214,74 @@ async def test_concurrent_get_uses_single_loader_call():
     result = await cache.get_with_context(77, loader)
     assert result == "payload"
     assert cache.metrics()["default"]["hits"] >= 1
+
+
+@pytest.mark.asyncio
+async def test_hand_finished_event_sets_post_hand_ttl(monkeypatch):
+    cache = AdaptivePlayerReportCache(default_ttl=120, post_hand_ttl=15)
+    time_state = {"value": 0.0}
+    monkeypatch.setattr(cache, "_timer", lambda: time_state["value"])
+
+    calls = {"count": 0}
+
+    async def loader() -> Dict[str, int]:
+        calls["count"] += 1
+        return {"value": calls["count"]}
+
+    cache.invalidate_on_event([42], event_type="hand_finished")
+    first = await cache.get_with_context(42, loader)
+    assert first == {"value": 1}
+    assert cache._expiry_map[42] - time_state["value"] == pytest.approx(15)
+
+    time_state["value"] = 14.5
+    hit = await cache.get_with_context(42, loader)
+    assert hit == {"value": 1}
+    assert calls["count"] == 1
+
+    time_state["value"] = 15.1
+    second = await cache.get_with_context(42, loader)
+    assert second == {"value": 2}
+    assert calls["count"] == 2
+
+
+@pytest.mark.asyncio
+async def test_cache_entry_expires_from_memory_and_persistent_store(monkeypatch):
+    redis = fakeredis.aioredis.FakeRedis()
+    redis_ops = RedisSafeOps(redis, max_retries=0, timeout_seconds=0.1)
+    cache = AdaptivePlayerReportCache(
+        default_ttl=60,
+        post_hand_ttl=1,
+        persistent_store=redis_ops,
+    )
+
+    time_state = {"value": 0.0}
+
+    def fake_timer() -> float:
+        return time_state["value"]
+
+    monkeypatch.setattr(cache, "_timer", fake_timer)
+
+    calls = {"count": 0}
+
+    async def loader() -> Dict[str, int]:
+        calls["count"] += 1
+        return {"value": calls["count"]}
+
+    cache.invalidate_on_event([7], event_type="hand_finished")
+    first = await cache.get_with_context(7, loader)
+    assert first == {"value": 1}
+    ttl = await redis.ttl("stats:7")
+    assert ttl in (1,)
+
+    time_state["value"] = 0.5
+    cached = await cache.get_with_context(7, loader)
+    assert cached == {"value": 1}
+    assert calls["count"] == 1
+
+    time_state["value"] = 1.2
+    await asyncio.sleep(1.2)
+    assert await redis.exists("stats:7") == 0
+
+    refreshed = await cache.get_with_context(7, loader)
+    assert refreshed == {"value": 2}
+    assert calls["count"] == 2

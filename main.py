@@ -121,6 +121,7 @@ def main() -> None:
         stats_service=services.stats_service,
         redis_ops=services.redis_ops,
         player_report_cache=services.player_report_cache,
+        adaptive_player_report_cache=services.adaptive_player_report_cache,
         request_metrics=services.request_metrics,
         private_match_service=services.private_match_service,
         messaging_service_factory=services.messaging_service_factory,
