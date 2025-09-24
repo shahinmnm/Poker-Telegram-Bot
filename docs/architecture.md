@@ -13,7 +13,10 @@ dataclass with everything required by [`pokerapp/pokerbot.py`](../pokerapp/poker
 
 Bootstrap reads configuration, sets up logging, and instantiates infrastructure
 clients once. Those singletons are then threaded through factories so higher
-layers never reach out to global state.
+layers never reach out to global state. The Mermaid graph below is generated
+from the relationships encoded inside `bootstrap.build_services`, making it a
+developer-friendly snapshot of how runtime wiring flows from configuration into
+the bot, model, and engine layers.
 
 ```mermaid
 flowchart TD

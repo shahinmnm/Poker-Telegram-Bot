@@ -3,15 +3,17 @@
 This document expands on the concise state machine reference at the top of
 [`pokerapp/game_engine.py`](../pokerapp/game_engine.py). It links the public
 coroutines that drive the table lifecycle with the collaborating services that
-persist chat state, talk to Telegram, and record statistics.
+persist chat state, talk to Telegram, and record statistics. Hands always start
+in `WAITING`, travel through the betting stages, and conclude when
+`finalize_game()` resets the chat back to the lobby.
 
 ## State progression at a glance
 
 The poker bot advances through well-defined `GameState` values. Hands start in
-`WAITING` (players join) and finish when `finalize_game` runs. The diagram below
-shows the happy-path transition sequence alongside the coroutines that move the
-state machine forward. Early exits (for example when everyone folds) are also
-handled by `finalize_game`. The Mermaid source lives in
+`WAITING` (players join) and finish when `finalize_game()` runs. The diagram
+below shows the happy-path transition sequence alongside the coroutines that
+move the state machine forward. Early exits (for example when everyone folds)
+are also handled by `finalize_game()`. The Mermaid source lives in
 [`docs/diagrams/game_flow_sequence.mmd`](diagrams/game_flow_sequence.mmd) so the
 image can be regenerated without editing this narrative.
 
@@ -49,7 +51,7 @@ sequenceDiagram
         else ROUND_TURN → ROUND_RIVER
             MS->>GE: add_cards_to_table(1)
             GE->>TG: broadcast river snapshot
-        else ROUND_RIVER → FINISHED
+        else ROUND_RIVER → finalize_game()
             MS->>GE: finalize_game(...)
         end
         GE->>TM: save_game(chat_id, game)
@@ -63,22 +65,22 @@ sequenceDiagram
     GE->>PM: send_join_prompt() → back to WAITING
 ```
 
-### Stage specific responsibilities
+### State triggers, exits, and responsibilities
 
-| Stage | Transition | Trigger & conditions | Key responsibilities |
-| ----- | ---------- | ------------------- | ------------------- |
-| `WAITING` | → `ROUND_PRE_FLOP` | `PlayerManager` has enough ready players to satisfy `MIN_PLAYERS` and a `/start` request is processed. | `PlayerManager.send_join_prompt` displays the CTA. `TableManager` keeps the pending game persisted so reconnections resume correctly. |
-| `ROUND_PRE_FLOP` | → `ROUND_FLOP` | `GameEngine.progress_stage` delegates to `MatchmakingService.progress_stage` once blinds are posted and the betting cycle completes without everyone folding. | Dealer button rotation, blind posting, hole-card dealing, statistics start hooks, `RequestMetrics.start_cycle`. |
-| `ROUND_FLOP` | → `ROUND_TURN` | The flop betting round resolves (all active players have matched the highest bet or folded). | Burn + deal three community cards, reset `has_acted` flags, notify viewers, persist table snapshot. |
-| `ROUND_TURN` | → `ROUND_RIVER` | Turn betting cycle completes under the stage lock. | Deal the fourth card, refresh betting order, persist state. |
-| `ROUND_RIVER` | → `FINISHED` | River betting completes or only one player remains. | Deal the final card, determine if betting continues or hand can be settled immediately. |
-| `FINISHED` | → `WAITING` | `GameEngine.finalize_game` has distributed the pot and sent results. | Evaluate hands, distribute pot, emit statistics, clear anchors, prompt new hand. |
+| Stage | Entry trigger | Exit conditions | Key responsibilities |
+| ----- | ------------- | --------------- | ------------------- |
+| `WAITING` | `finalize_game()` completes or a brand-new chat initializes a persisted `Game` record. `PlayerManager.send_join_prompt` keeps the lobby visible. | `MatchmakingService.start_game` is invoked after a `/start` request and enough ready seats exist. | Accept join requests, persist the waiting game via `TableManager`, broadcast countdown updates. |
+| `ROUND_PRE_FLOP` | `GameEngine.start_game` acquires the stage lock, rotates blinds, and delegates to `MatchmakingService.start_game`. | All active players act (call/raise/fold) and the betting cycle resolves, or every contender but one folds. In both cases `progress_stage` returns control. | Assign dealer/blind roles, post blinds, deal hole cards, trigger `RequestMetrics.start_cycle`, persist the updated `Game` snapshot. |
+| `ROUND_FLOP` | `progress_stage` advances from pre-flop and burns + deals three community cards under the stage lock. | Betting cycle completes with at least two contenders, or the table short-circuits to `finalize_game()` when only one player remains. | Reset `has_acted`, publish flop snapshots via `PokerBotViewer`, save state through `TableManager`. |
+| `ROUND_TURN` | Triggered by `progress_stage` immediately after the flop round resolves. | Stage betting resolves with multiple contenders, or the hand ends early because everyone but one folded/timed out. | Deal the turn card, refresh betting order, keep telemetry/logging via `RequestMetrics`. |
+| `ROUND_RIVER` | Reached when turn betting finalises while at least two active players remain. | Betting cycle completes; if more than one contender survives, `progress_stage` calls `finalize_game()` for showdown, otherwise the single remaining player wins immediately. | Deal the river card, instruct the viewer to render the full board, persist the final betting state. |
+| `finalize_game()` | Called from `progress_stage`, `request_stop`, or timeout/error handlers whenever a hand needs to settle. | `GameEngine._reset_game_state` saves the `WAITING` state and `PlayerManager.send_join_prompt` re-opens the lobby. | Determine winners, distribute payouts, emit statistics, invalidate caches, clean up Telegram anchors, and reset timers/locks. |
 
 `MatchmakingService.progress_stage` enforces stage order while holding the
 `LockManager` stage lock so that Telegram callbacks, background jobs, and rate
 limited retries cannot interleave inconsistent mutations. If at any point only
 one player remains (everyone else folded or timed out) the engine short-circuits
-to `finalize_game` even if community cards are still undealt.
+to `finalize_game()` even if community cards are still undealt.
 
 ## Transition rules and safeguards
 
@@ -92,7 +94,7 @@ to `finalize_game` even if community cards are still undealt.
 - **Community card dealing** — `MatchmakingService.add_cards_to_table` is only
   invoked while holding the stage lock, guaranteeing that snapshots published by
   `PokerBotViewer` match the persisted `Game` state.
-- **Finalisation** — `GameEngine.finalize_game` is responsible for both normal
+- **Finalisation** — `GameEngine.finalize_game()` is responsible for both normal
   showdowns and early finishes. It computes winners, writes statistics, and
   resets the chat back to `WAITING`.
 
