@@ -94,6 +94,10 @@
         "fa": "بازیکنان فعال:",
         "en": "Active players:"
       },
+      "active_player_line": {
+        "fa": "{mark} {player}",
+        "en": "{mark} {player}"
+      },
       "vote_counts": {
         "fa": "آراء تأیید: {confirmed}/{required}",
         "en": "Approval votes: {confirmed}/{required}"
@@ -129,6 +133,10 @@
       "no_votes": {
         "fa": "هیچ رأی فعالی ثبت نشد.",
         "en": "No active votes were recorded."
+      },
+      "no_active_players_placeholder": {
+        "fa": "—",
+        "en": "—"
       },
       "stopped_notification": {
         "fa": "🛑 بازی متوقف شد.",

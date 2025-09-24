@@ -33,7 +33,7 @@ from pokerapp.entities import (
     UserException,
     UserId,
 )
-from pokerapp.config import get_game_constants
+from pokerapp.config import GameConstants, get_game_constants
 from pokerapp.pokerbotview import PokerBotViewer
 from pokerapp.lock_manager import LockManager
 from pokerapp.table_manager import TableManager
@@ -54,32 +54,6 @@ _CONSTANTS = get_game_constants()
 _GAME_CONSTANTS = _CONSTANTS.game
 _ENGINE_CONSTANTS = _CONSTANTS.engine
 _TRANSLATIONS_ROOT = _CONSTANTS.translations
-_DEFAULT_LANGUAGE = (
-    _TRANSLATIONS_ROOT.get("default_language", "fa")
-    if isinstance(_TRANSLATIONS_ROOT, dict)
-    else "fa"
-)
-_LANGUAGE_ORDER = tuple(dict.fromkeys([_DEFAULT_LANGUAGE, "fa", "en"]))
-_STOP_TRANSLATIONS = (
-    _TRANSLATIONS_ROOT.get("stop_vote", {})
-    if isinstance(_TRANSLATIONS_ROOT, dict)
-    else {}
-)
-_STOP_BUTTONS = (
-    _STOP_TRANSLATIONS.get("buttons", {})
-    if isinstance(_STOP_TRANSLATIONS, dict)
-    else {}
-)
-_STOP_MESSAGES = (
-    _STOP_TRANSLATIONS.get("messages", {})
-    if isinstance(_STOP_TRANSLATIONS, dict)
-    else {}
-)
-_STOP_ERRORS = (
-    _STOP_TRANSLATIONS.get("errors", {})
-    if isinstance(_STOP_TRANSLATIONS, dict)
-    else {}
-)
 _REDIS_KEY_SECTIONS = _CONSTANTS.redis_keys
 if isinstance(_REDIS_KEY_SECTIONS, dict):
     _ENGINE_REDIS_KEYS = _REDIS_KEY_SECTIONS.get("engine", {})
@@ -89,9 +63,27 @@ else:
     _ENGINE_REDIS_KEYS = {}
 
 
-def _select_translation(entry: Any, default: str) -> str:
+def _compute_language_order(translations_root: Any) -> Tuple[str, ...]:
+    default_language = "fa"
+    if isinstance(translations_root, dict):
+        candidate = translations_root.get("default_language")
+        if isinstance(candidate, str) and candidate:
+            default_language = candidate
+    return tuple(dict.fromkeys([default_language, "fa", "en"]))
+
+
+_LANGUAGE_ORDER = _compute_language_order(_TRANSLATIONS_ROOT)
+
+
+def _select_translation(
+    entry: Any,
+    default: str,
+    *,
+    language_order: Optional[Iterable[str]] = None,
+) -> str:
+    languages = tuple(language_order or _LANGUAGE_ORDER)
     if isinstance(entry, dict):
-        for language in _LANGUAGE_ORDER:
+        for language in languages:
             text = entry.get(language)
             if isinstance(text, str) and text:
                 return text
@@ -175,91 +167,6 @@ class GameEngine:
         "stop_resume_callback",
         "stop:resume",
     )
-    STOP_CONFIRM_BUTTON_TEXT = _select_translation(
-        _STOP_BUTTONS.get("confirm"),
-        "Confirm stop",
-    )
-    STOP_RESUME_BUTTON_TEXT = _select_translation(
-        _STOP_BUTTONS.get("resume"),
-        "Resume game",
-    )
-    STOP_TITLE_TEMPLATE = _select_translation(
-        _STOP_MESSAGES.get("title"),
-        "🛑 *Stop game request*",
-    )
-    STOP_INITIATED_BY_TEMPLATE = _select_translation(
-        _STOP_MESSAGES.get("initiated_by"),
-        "Requested by {initiator}",
-    )
-    STOP_ACTIVE_PLAYERS_LABEL = _select_translation(
-        _STOP_MESSAGES.get("active_players_label"),
-        "Active players:",
-    )
-    STOP_VOTE_COUNTS_TEMPLATE = _select_translation(
-        _STOP_MESSAGES.get("vote_counts"),
-        "Approval votes: {confirmed}/{required}",
-    )
-    STOP_MANAGER_LABEL_TEMPLATE = _select_translation(
-        _STOP_MESSAGES.get("manager_label"),
-        "👤 Game manager: {manager}",
-    )
-    STOP_MANAGER_OVERRIDE_HINT = _select_translation(
-        _STOP_MESSAGES.get("manager_override_hint"),
-        "They can approve the stop vote alone.",
-    )
-    STOP_OTHER_VOTES_LABEL = _select_translation(
-        _STOP_MESSAGES.get("other_votes_label"),
-        "Other voters:",
-    )
-    STOP_RESUME_NOTICE = _select_translation(
-        _STOP_MESSAGES.get("resume_text"),
-        "✅ The game will continue.",
-    )
-    STOP_MANAGER_OVERRIDE_SUMMARY = _select_translation(
-        _STOP_MESSAGES.get("manager_override_summary"),
-        "🛑 *The manager stopped the game.*",
-    )
-    STOP_MAJORITY_SUMMARY = _select_translation(
-        _STOP_MESSAGES.get("majority_stop_summary"),
-        "🛑 *The game was stopped by majority vote.*",
-    )
-    STOP_VOTE_SUMMARY_TEMPLATE = _select_translation(
-        _STOP_MESSAGES.get("vote_summary"),
-        "Approval votes: {approved}/{required}",
-    )
-    STOP_NO_VOTES_TEXT = _select_translation(
-        _STOP_MESSAGES.get("no_votes"),
-        "No active votes were recorded.",
-    )
-    STOPPED_NOTIFICATION = _select_translation(
-        _STOP_MESSAGES.get("stopped_notification"),
-        "🛑 The game has been stopped.",
-    )
-    ERROR_NO_ACTIVE_GAME = _select_translation(
-        _STOP_ERRORS.get("no_active_game"),
-        "There is no active game to stop.",
-    )
-    ERROR_NOT_IN_GAME = _select_translation(
-        _STOP_ERRORS.get("not_in_game"),
-        "Only seated players can request to stop the game.",
-    )
-    ERROR_NO_ACTIVE_PLAYERS = _select_translation(
-        _STOP_ERRORS.get("no_active_players"),
-        "There are no active players to vote.",
-    )
-    ERROR_NO_REQUEST_TO_RESUME = _select_translation(
-        _STOP_ERRORS.get("no_request_to_resume"),
-        "There is no stop request to resume.",
-    )
-    ERROR_NO_ACTIVE_REQUEST = _select_translation(
-        _STOP_ERRORS.get("no_active_request"),
-        "There is no active stop request.",
-    )
-    ERROR_NOT_ALLOWED_TO_VOTE = _select_translation(
-        _STOP_ERRORS.get("not_allowed_to_vote"),
-        "Only active players or the manager may vote.",
-    )
-
     def __init__(
         self,
         *,
@@ -278,6 +185,7 @@ class GameEngine:
         telegram_safe_ops: TelegramSafeOps,
         lock_manager: LockManager,
         logger: logging.Logger,
+        constants: Optional[GameConstants] = None,
     ) -> None:
         self._table_manager = table_manager
         self._view = view
@@ -294,6 +202,8 @@ class GameEngine:
         self._telegram_ops = telegram_safe_ops
         self._lock_manager = lock_manager
         self._logger = logger
+        self.constants = constants or _CONSTANTS
+        self._initialize_stop_translations()
 
     @staticmethod
     def state_token(state: Any) -> str:
@@ -306,6 +216,145 @@ class GameEngine:
         if isinstance(value, str):
             return value
         return str(state)
+
+    def _initialize_stop_translations(self) -> None:
+        translations_root = getattr(self.constants, "translations", {})
+        if not isinstance(translations_root, dict):
+            translations_root = {}
+
+        language_order = _compute_language_order(translations_root)
+
+        stop_translations = translations_root.get("stop_vote", {})
+        if not isinstance(stop_translations, dict):
+            stop_translations = {}
+
+        stop_buttons = stop_translations.get("buttons", {})
+        if not isinstance(stop_buttons, dict):
+            stop_buttons = {}
+
+        stop_messages = stop_translations.get("messages", {})
+        if not isinstance(stop_messages, dict):
+            stop_messages = {}
+
+        stop_errors = stop_translations.get("errors", {})
+        if not isinstance(stop_errors, dict):
+            stop_errors = {}
+
+        self.STOP_CONFIRM_BUTTON_TEXT = _select_translation(
+            stop_buttons.get("confirm"),
+            "Confirm stop",
+            language_order=language_order,
+        )
+        self.STOP_RESUME_BUTTON_TEXT = _select_translation(
+            stop_buttons.get("resume"),
+            "Resume game",
+            language_order=language_order,
+        )
+        self.STOP_TITLE_TEMPLATE = _select_translation(
+            stop_messages.get("title"),
+            "🛑 *Stop game request*",
+            language_order=language_order,
+        )
+        self.STOP_INITIATED_BY_TEMPLATE = _select_translation(
+            stop_messages.get("initiated_by"),
+            "Requested by {initiator}",
+            language_order=language_order,
+        )
+        self.STOP_ACTIVE_PLAYERS_LABEL = _select_translation(
+            stop_messages.get("active_players_label"),
+            "Active players:",
+            language_order=language_order,
+        )
+        self.STOP_ACTIVE_PLAYER_LINE_TEMPLATE = _select_translation(
+            stop_messages.get("active_player_line"),
+            "{mark} {player}",
+            language_order=language_order,
+        )
+        self.STOP_VOTE_COUNTS_TEMPLATE = _select_translation(
+            stop_messages.get("vote_counts"),
+            "Approval votes: {confirmed}/{required}",
+            language_order=language_order,
+        )
+        self.STOP_MANAGER_LABEL_TEMPLATE = _select_translation(
+            stop_messages.get("manager_label"),
+            "👤 Game manager: {manager}",
+            language_order=language_order,
+        )
+        self.STOP_MANAGER_OVERRIDE_HINT = _select_translation(
+            stop_messages.get("manager_override_hint"),
+            "They can approve the stop vote alone.",
+            language_order=language_order,
+        )
+        self.STOP_OTHER_VOTES_LABEL = _select_translation(
+            stop_messages.get("other_votes_label"),
+            "Other voters:",
+            language_order=language_order,
+        )
+        self.STOP_RESUME_NOTICE = _select_translation(
+            stop_messages.get("resume_text"),
+            "✅ The game will continue.",
+            language_order=language_order,
+        )
+        self.STOP_MANAGER_OVERRIDE_SUMMARY = _select_translation(
+            stop_messages.get("manager_override_summary"),
+            "🛑 *The manager stopped the game.*",
+            language_order=language_order,
+        )
+        self.STOP_MAJORITY_SUMMARY = _select_translation(
+            stop_messages.get("majority_stop_summary"),
+            "🛑 *The game was stopped by majority vote.*",
+            language_order=language_order,
+        )
+        self.STOP_VOTE_SUMMARY_TEMPLATE = _select_translation(
+            stop_messages.get("vote_summary"),
+            "Approval votes: {approved}/{required}",
+            language_order=language_order,
+        )
+        self.STOP_NO_VOTES_TEXT = _select_translation(
+            stop_messages.get("no_votes"),
+            "No active votes were recorded.",
+            language_order=language_order,
+        )
+        self.STOP_NO_ACTIVE_PLAYERS_PLACEHOLDER = _select_translation(
+            stop_messages.get("no_active_players_placeholder"),
+            "—",
+            language_order=language_order,
+        )
+        self.STOPPED_NOTIFICATION = _select_translation(
+            stop_messages.get("stopped_notification"),
+            "🛑 The game has been stopped.",
+            language_order=language_order,
+        )
+        self.ERROR_NO_ACTIVE_GAME = _select_translation(
+            stop_errors.get("no_active_game"),
+            "There is no active game to stop.",
+            language_order=language_order,
+        )
+        self.ERROR_NOT_IN_GAME = _select_translation(
+            stop_errors.get("not_in_game"),
+            "Only seated players can request to stop the game.",
+            language_order=language_order,
+        )
+        self.ERROR_NO_ACTIVE_PLAYERS = _select_translation(
+            stop_errors.get("no_active_players"),
+            "There are no active players to vote.",
+            language_order=language_order,
+        )
+        self.ERROR_NO_REQUEST_TO_RESUME = _select_translation(
+            stop_errors.get("no_request_to_resume"),
+            "There is no stop request to resume.",
+            language_order=language_order,
+        )
+        self.ERROR_NO_ACTIVE_REQUEST = _select_translation(
+            stop_errors.get("no_active_request"),
+            "There is no active stop request.",
+            language_order=language_order,
+        )
+        self.ERROR_NOT_ALLOWED_TO_VOTE = _select_translation(
+            stop_errors.get("not_allowed_to_vote"),
+            "Only active players or the manager may vote.",
+            language_order=language_order,
+        )
 
     def _stage_lock_key(self, chat_id: ChatId) -> str:
         return f"{self.STAGE_LOCK_PREFIX}{self._safe_int(chat_id)}"
@@ -738,9 +787,14 @@ class GameEngine:
         active_lines = []
         for player in active_players:
             mark = "✅" if player.user_id in votes else "⬜️"
-            active_lines.append(f"{mark} {player.mention_markdown}")
+            active_lines.append(
+                self.STOP_ACTIVE_PLAYER_LINE_TEMPLATE.format(
+                    mark=mark,
+                    player=player.mention_markdown,
+                )
+            )
         if not active_lines:
-            active_lines.append("—")
+            active_lines.append(self.STOP_NO_ACTIVE_PLAYERS_PLACEHOLDER)
 
         lines = [
             self.STOP_TITLE_TEMPLATE,
