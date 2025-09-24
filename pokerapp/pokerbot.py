@@ -16,6 +16,7 @@ from pokerapp.table_manager import TableManager
 from pokerapp.stats import BaseStatsService
 from pokerapp.private_match_service import PrivateMatchService
 from pokerapp.utils.messaging_service import MessagingService
+from pokerapp.utils.telegram_safeops import TelegramSafeOps
 from pokerapp.utils.redis_safeops import RedisSafeOps
 from pokerapp.utils.request_metrics import RequestMetrics
 from pokerapp.utils.player_report_cache import PlayerReportCache
@@ -34,6 +35,7 @@ if TYPE_CHECKING:
 
 
 MessagingServiceFactory = Callable[..., MessagingService]
+TelegramSafeOpsFactory = Callable[..., TelegramSafeOps]
 
 
 class PokerBot:
@@ -61,6 +63,7 @@ class PokerBot:
         request_metrics: RequestMetrics,
         private_match_service: PrivateMatchService,
         messaging_service_factory: MessagingServiceFactory,
+        telegram_safeops_factory: TelegramSafeOpsFactory,
     ):
         self._cfg = cfg
         self._token = token
@@ -88,6 +91,7 @@ class PokerBot:
         self._request_metrics = request_metrics
         self._private_match_service = private_match_service
         self._messaging_service_factory = messaging_service_factory
+        self._telegram_safeops_factory = telegram_safeops_factory
         self._player_report_cache = player_report_cache
         self._build_application()
 
@@ -219,6 +223,7 @@ class PokerBot:
             request_metrics=self._request_metrics,
             messaging_service_factory=self._messaging_service_factory,
         )
+        telegram_safe_ops = self._telegram_safeops_factory(view=self._view)
         self._model = PokerBotModel(
             view=self._view,
             bot=self._application.bot,
@@ -229,6 +234,7 @@ class PokerBot:
             stats_service=self._stats_service,
             redis_ops=self._redis_ops,
             player_report_cache=self._player_report_cache,
+            telegram_safe_ops=telegram_safe_ops,
         )
         self._controller = PokerBotCotroller(self._model, self._application)
 

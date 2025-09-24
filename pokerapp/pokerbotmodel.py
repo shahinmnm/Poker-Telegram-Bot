@@ -21,7 +21,6 @@ from telegram import (
     User,
 )
 from telegram.constants import ParseMode
-from telegram.error import BadRequest, RetryAfter, TelegramError
 from telegram.ext import CallbackContext, ContextTypes
 from telegram.helpers import mention_markdown as format_mention_markdown
 
@@ -73,6 +72,7 @@ from pokerapp.player_manager import PlayerManager
 from pokerapp.matchmaking_service import MatchmakingService
 from pokerapp.stats_reporter import StatsReporter
 from pokerapp.game_engine import GameEngine
+from pokerapp.utils.telegram_safeops import TelegramSafeOps
 
 _GAME_CONSTANTS = get_game_constants()
 _GAME_SECTION = _GAME_CONSTANTS.game
@@ -147,6 +147,7 @@ class PokerBotModel:
         *,
         redis_ops: Optional[RedisSafeOps] = None,
         player_report_cache: Optional[RedisPlayerReportCache] = None,
+        telegram_safe_ops: Optional[TelegramSafeOps] = None,
     ):
         self._view: PokerBotViewer = view
         self._bot: Bot = bot
@@ -224,6 +225,14 @@ class PokerBotModel:
             old_players_key=KEY_OLD_PLAYERS,
             logger=logger.getChild("matchmaking"),
         )
+        self._telegram_ops = telegram_safe_ops or TelegramSafeOps(
+            self._view,
+            logger=logger.getChild("telegram_safeops"),
+            max_retries=getattr(cfg, "TELEGRAM_MAX_RETRIES", 3),
+            base_delay=getattr(cfg, "TELEGRAM_RETRY_BASE_DELAY", 0.5),
+            max_delay=getattr(cfg, "TELEGRAM_RETRY_MAX_DELAY", 4.0),
+            backoff_multiplier=getattr(cfg, "TELEGRAM_RETRY_MULTIPLIER", 2.0),
+        )
         self._private_match_service.configure(
             safe_int=self._safe_int,
             build_private_menu=self._build_private_menu,
@@ -249,7 +258,7 @@ class PokerBotModel:
             build_identity_from_player=self._build_identity_from_player,
             safe_int=self._safe_int,
             old_players_key=KEY_OLD_PLAYERS,
-            safe_edit_message_text=self._safe_edit_message_text,
+            telegram_safe_ops=self._telegram_ops,
             lock_manager=self._lock_manager,
             logger=logger.getChild("game_engine"),
         )
@@ -883,98 +892,15 @@ class PokerBotModel:
         log_context: Optional[str] = None,
         request_category: RequestCategory = RequestCategory.GENERAL,
     ) -> Optional[MessageId]:
-        """
-        Safely edit a message's text, retrying on rate limits and
-        sending a new message if the original cannot be edited.
-
-        The method handles ``BadRequest`` and ``RetryAfter`` errors by
-        retrying or falling back to sending a fresh message. The ID of
-        the edited or newly sent message is returned.
-        """
-
-        if not message_id:
-            return await self._view.send_message_return_id(
-                chat_id, text, reply_markup=reply_markup
-            )
-
-        try:
-            result = await self._view.edit_message_text(
-                chat_id=chat_id,
-                message_id=message_id,
-                text=text,
-                reply_markup=reply_markup,
-                request_category=request_category,
-                parse_mode=parse_mode,
-            )
-        except RetryAfter as exc:
-            await asyncio.sleep(exc.retry_after)
-            result = await self._view.edit_message_text(
-                chat_id=chat_id,
-                message_id=message_id,
-                text=text,
-                reply_markup=reply_markup,
-                request_category=request_category,
-                parse_mode=parse_mode,
-            )
-        except BadRequest as exc:
-            error_message = getattr(exc, "message", None) or str(exc)
-            preview = text
-            max_preview_length = 120
-            if len(preview) > max_preview_length:
-                preview = preview[: max_preview_length - 3] + "..."
-            logger.warning(
-                "BadRequest when editing message; will send a replacement",
-                extra={
-                    "chat_id": chat_id,
-                    "message_id": message_id,
-                    "context": log_context or "general",
-                    "error_message": error_message,
-                    "text_preview": preview,
-                },
-            )
-            result = None
-        except TelegramError as exc:
-            logger.error(
-                "TelegramError when editing message; will send a replacement",
-                extra={
-                    "chat_id": chat_id,
-                    "message_id": message_id,
-                    "context": log_context or "general",
-                    "error_type": type(exc).__name__,
-                },
-            )
-            result = None
-        else:
-            if result:
-                return result
-
-        new_id = await self._view.send_message_return_id(
+        return await self._telegram_ops.edit_message_text(
             chat_id,
+            message_id,
             text,
             reply_markup=reply_markup,
+            parse_mode=parse_mode,
+            log_context=log_context,
             request_category=request_category,
         )
-        if new_id and message_id and new_id != message_id:
-            try:
-                await self._view.delete_message(chat_id, message_id)
-            except Exception as e:
-                logger.debug(
-                    "Failed to delete message after replacement",
-                    extra={
-                        "chat_id": chat_id,
-                        "old_message_id": message_id,
-                        "error_type": type(e).__name__,
-                    },
-                )
-            logger.info(
-                "Sent replacement message after edit failure",
-                extra={
-                    "chat_id": chat_id,
-                    "old_message_id": message_id,
-                    "new_message_id": new_id,
-                },
-            )
-        return new_id
 
     async def show_table(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """کارت‌های روی میز را به درخواست بازیکن با فرمت جدید نمایش می‌دهد."""
@@ -1066,7 +992,7 @@ class PokerBotModel:
 
         if game.ready_message_main_id:
             if text != current_text:
-                new_id = await self._safe_edit_message_text(
+                new_id = await self._telegram_ops.edit_message_text(
                     chat_id,
                     game.ready_message_main_id,
                     text,
