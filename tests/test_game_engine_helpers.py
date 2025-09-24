@@ -1,9 +1,11 @@
+import json
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
 from pokerapp.entities import Game, GameState, Player, PlayerState
+from pokerapp.config import GameConstants
 from pokerapp.game_engine import GameEngine
 
 
@@ -131,7 +133,7 @@ async def test_reset_game_state_clears_pot_and_persists(game_engine_setup):
     game_engine_setup.player_manager.clear_player_anchors.assert_awaited_once_with(game)
     game_engine_setup.table_manager.save_game.assert_awaited_once_with(-400, game)
     game_engine_setup.view.send_message.assert_awaited_once_with(
-        -400, GameEngine.STOPPED_NOTIFICATION
+        -400, game_engine_setup.engine.STOPPED_NOTIFICATION
     )
 
 
@@ -160,11 +162,11 @@ def test_render_stop_request_message_uses_translations(game_engine_setup):
     )
 
     lines = message.splitlines()
-    assert lines[0] == GameEngine.STOP_TITLE_TEMPLATE
-    assert lines[1] == GameEngine.STOP_INITIATED_BY_TEMPLATE.format(
+    assert lines[0] == engine.STOP_TITLE_TEMPLATE
+    assert lines[1] == engine.STOP_INITIATED_BY_TEMPLATE.format(
         initiator=player.mention_markdown
     )
-    assert GameEngine.STOP_ACTIVE_PLAYERS_LABEL in lines
+    assert engine.STOP_ACTIVE_PLAYERS_LABEL in lines
 
 
 @pytest.mark.asyncio
@@ -208,3 +210,130 @@ async def test_check_if_stop_passes_triggers_cancel(game_engine_setup):
     )
 
     engine.cancel_hand.assert_awaited_once()
+
+
+def test_game_engine_custom_stop_translations(tmp_path):
+    custom_translations = {
+        "default_language": "en",
+        "stop_vote": {
+            "buttons": {
+                "confirm": {"en": "Approve stop", "fa": "تأیید توقف"},
+                "resume": {"en": "Keep playing", "fa": "ادامه بازی"},
+            },
+            "messages": {
+                "title": {
+                    "en": "Custom stop request",
+                    "fa": "درخواست توقف سفارشی",
+                },
+                "initiated_by": {
+                    "en": "Starter: {initiator}",
+                    "fa": "شروع‌کننده: {initiator}",
+                },
+                "active_players_label": {
+                    "en": "Players in hand:",
+                    "fa": "بازیکنان حاضر:",
+                },
+                "active_player_line": {
+                    "en": "{player} :: {mark}",
+                    "fa": "{player} :: {mark}",
+                },
+                "vote_counts": {
+                    "en": "Votes {confirmed}/{required}",
+                    "fa": "آرا {confirmed}/{required}",
+                },
+                "resume_text": {
+                    "en": "Game resumes",
+                    "fa": "بازی ادامه می‌یابد",
+                },
+                "no_active_players_placeholder": {
+                    "en": "No active players",
+                    "fa": "بازیکن فعالی وجود ندارد",
+                },
+            },
+            "errors": {
+                "no_active_game": {
+                    "en": "No active game",
+                    "fa": "بازی فعالی وجود ندارد",
+                }
+            },
+        },
+    }
+
+    translations_file = tmp_path / "translations.json"
+    translations_file.write_text(
+        json.dumps(custom_translations, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+
+    constants = GameConstants(
+        translations_path=str(translations_file),
+        translation_defaults={"default_language": "en"},
+    )
+
+    table_manager = MagicMock()
+    table_manager.save_game = AsyncMock()
+
+    view = MagicMock()
+    request_metrics = MagicMock()
+    stats_reporter = MagicMock()
+    player_manager = MagicMock()
+    player_manager.clear_player_anchors = AsyncMock()
+
+    telegram_safe_ops = SimpleNamespace(
+        edit_message_text=AsyncMock(return_value=None)
+    )
+
+    engine = GameEngine(
+        table_manager=table_manager,
+        view=view,
+        winner_determination=MagicMock(),
+        request_metrics=request_metrics,
+        round_rate=MagicMock(),
+        player_manager=player_manager,
+        matchmaking_service=MagicMock(),
+        stats_reporter=stats_reporter,
+        clear_game_messages=AsyncMock(),
+        build_identity_from_player=lambda player: player,
+        safe_int=int,
+        old_players_key="old_players",
+        telegram_safe_ops=telegram_safe_ops,
+        lock_manager=MagicMock(),
+        logger=MagicMock(),
+        constants=constants,
+    )
+
+    game = Game()
+    player = Player(
+        user_id=1,
+        mention_markdown="@player",
+        wallet=None,
+        ready_message_id=None,
+    )
+    player.state = PlayerState.ACTIVE
+    game.add_player(player, seat_index=0)
+    game.state = GameState.ROUND_FLOP
+
+    stop_request = {
+        "active_players": [1],
+        "votes": {1},
+        "initiator": 1,
+        "message_id": None,
+        "manager_override": False,
+    }
+
+    context = SimpleNamespace(chat_data={})
+
+    message = engine.render_stop_request_message(
+        game=game,
+        stop_request=stop_request,
+        context=context,
+    )
+
+    assert engine.STOP_TITLE_TEMPLATE == "Custom stop request"
+    assert "Custom stop request" in message
+
+    expected_line = engine.STOP_ACTIVE_PLAYER_LINE_TEMPLATE.format(
+        mark="✅",
+        player=player.mention_markdown,
+    )
+    assert expected_line in message
