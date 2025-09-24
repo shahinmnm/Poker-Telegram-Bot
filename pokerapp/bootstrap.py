@@ -56,6 +56,16 @@ def _build_stats_service(logger: ContextLoggerAdapter, cfg: Config) -> BaseStats
         return NullStatsService(timezone_name=cfg.TIMEZONE_NAME)
 
 
+def _make_service_logger(
+    parent_logger: ContextLoggerAdapter, child_name: str, category: str
+) -> ContextLoggerAdapter:
+    """Return a child logger enriched with the provided ``category`` context."""
+
+    return enforce_context(
+        parent_logger.getChild(child_name), {"request_category": category}
+    )
+
+
 def build_services(cfg: Config) -> ApplicationServices:
     """Initialise logging and infrastructure dependencies for the bot."""
 
@@ -71,9 +81,7 @@ def build_services(cfg: Config) -> ApplicationServices:
 
     redis_ops = RedisSafeOps(
         kv_async,
-        logger=enforce_context(
-            logger.getChild("redis_safeops"), {"request_category": "redis"}
-        ),
+        logger=_make_service_logger(logger, "redis_safeops", "redis"),
     )
 
     table_manager = TableManager(
@@ -82,18 +90,15 @@ def build_services(cfg: Config) -> ApplicationServices:
         wallet_redis_ops=redis_ops,
     )
 
-    stats_logger = enforce_context(
-        logger.getChild("stats"), {"request_category": "stats"}
-    )
+    stats_logger = _make_service_logger(logger, "stats", "stats")
     stats_service = _build_stats_service(stats_logger, cfg)
 
     adaptive_player_report_cache = AdaptivePlayerReportCache(
         default_ttl=cfg.PLAYER_REPORT_TTL_DEFAULT,
         bonus_ttl=cfg.PLAYER_REPORT_TTL_BONUS,
         post_hand_ttl=cfg.PLAYER_REPORT_TTL_POST_HAND,
-        logger_=enforce_context(
-            logger.getChild("adaptive_player_report_cache"),
-            {"request_category": "player_report_cache"},
+        logger_=_make_service_logger(
+            logger, "adaptive_player_report_cache", "player_report_cache"
         ),
         persistent_store=redis_ops,
     )
@@ -101,25 +106,19 @@ def build_services(cfg: Config) -> ApplicationServices:
 
     player_report_cache = PlayerReportCache(
         redis_ops,
-        logger=enforce_context(
-            logger.getChild("shared_player_report_cache"),
-            {"request_category": "player_report_cache"},
+        logger=_make_service_logger(
+            logger, "shared_player_report_cache", "player_report_cache"
         ),
     )
 
     request_metrics = RequestMetrics(
-        logger_=enforce_context(
-            logger.getChild("metrics"), {"request_category": "metrics"}
-        )
+        logger_=_make_service_logger(logger, "metrics", "metrics")
     )
 
     private_match_service = PrivateMatchService(
         kv_async,
         table_manager,
-        logger=enforce_context(
-            logger.getChild("private_match"),
-            {"request_category": "private_match"},
-        ),
+        logger=_make_service_logger(logger, "private_match", "private_match"),
         constants=cfg.constants,
         redis_ops=redis_ops,
     )
@@ -138,10 +137,7 @@ def build_services(cfg: Config) -> ApplicationServices:
             bot,
             cache_ttl=cache_ttl,
             cache_maxsize=cache_maxsize,
-            logger_=enforce_context(
-                logger.getChild("messaging_service"),
-                {"request_category": "messaging"},
-            ),
+            logger_=_make_service_logger(logger, "messaging_service", "messaging"),
             request_metrics=request_metrics,
             deleted_messages=deleted_messages,
             deleted_messages_lock=deleted_messages_lock,
@@ -152,9 +148,8 @@ def build_services(cfg: Config) -> ApplicationServices:
     def telegram_safeops_factory(*, view) -> TelegramSafeOps:
         return TelegramSafeOps(
             view,
-            logger=enforce_context(
-                logger.getChild("telegram_safeops"),
-                {"request_category": "telegram_safeops"},
+            logger=_make_service_logger(
+                logger, "telegram_safeops", "telegram_safeops"
             ),
             max_retries=cfg.TELEGRAM_MAX_RETRIES,
             base_delay=cfg.TELEGRAM_RETRY_BASE_DELAY,
