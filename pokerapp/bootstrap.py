@@ -19,13 +19,14 @@ from pokerapp.utils.request_metrics import RequestMetrics
 from pokerapp.utils.telegram_safeops import TelegramSafeOps
 from pokerapp.utils.player_report_cache import PlayerReportCache
 from pokerapp.utils.cache import AdaptivePlayerReportCache
+from pokerapp.utils.logging_helpers import ContextLoggerAdapter, add_context
 
 
 @dataclass(frozen=True)
 class ApplicationServices:
     """Container for infrastructure dependencies shared across the bot."""
 
-    logger: logging.Logger
+    logger: ContextLoggerAdapter
     kv_async: aioredis.Redis
     redis_ops: RedisSafeOps
     table_manager: TableManager
@@ -38,7 +39,7 @@ class ApplicationServices:
     telegram_safeops_factory: Callable[..., TelegramSafeOps]
 
 
-def _build_stats_service(logger: logging.Logger, cfg: Config) -> BaseStatsService:
+def _build_stats_service(logger: ContextLoggerAdapter, cfg: Config) -> BaseStatsService:
     if not cfg.DATABASE_URL:
         return NullStatsService(timezone_name=cfg.TIMEZONE_NAME)
 
@@ -59,7 +60,7 @@ def build_services(cfg: Config) -> ApplicationServices:
     """Initialise logging and infrastructure dependencies for the bot."""
 
     setup_logging(logging.INFO, debug_mode=cfg.DEBUG)
-    logger = logging.getLogger("pokerbot")
+    logger = add_context(logging.getLogger("pokerbot"))
 
     kv_async = aioredis.Redis(
         host=cfg.REDIS_HOST,

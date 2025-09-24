@@ -11,6 +11,7 @@ import redis.asyncio as aioredis
 from redis.exceptions import ConnectionError, NoScriptError, ResponseError, TimeoutError
 
 from pokerapp.logging_config import ContextJsonFormatter
+from pokerapp.utils.logging_helpers import add_context
 
 MetricsRecorder = Callable[[str, float, str], None]
 
@@ -37,7 +38,8 @@ class RedisSafeOps:
         metrics_recorder: Optional[MetricsRecorder] = None,
     ) -> None:
         self._redis = redis_client
-        self._logger = logger or logging.getLogger(__name__).getChild("RedisSafeOps")
+        base_logger = logger or logging.getLogger(__name__).getChild("RedisSafeOps")
+        self._logger = add_context(base_logger)
         self._max_retries = max_retries
         self._base_backoff = base_backoff
         self._backoff_factor = backoff_factor
@@ -47,11 +49,14 @@ class RedisSafeOps:
         # Ensure logs follow the JSON structure even when a custom logger is
         # provided without handlers.  If the application already configured
         # logging we simply propagate to the parent handlers.
-        if not self._logger.handlers and not self._logger.propagate:
+        underlying_logger = (
+            self._logger.logger if isinstance(self._logger, logging.LoggerAdapter) else self._logger
+        )
+        if not underlying_logger.handlers and not underlying_logger.propagate:
             handler = logging.StreamHandler()
             handler.setFormatter(ContextJsonFormatter())
-            self._logger.addHandler(handler)
-            self._logger.setLevel(logging.INFO)
+            underlying_logger.addHandler(handler)
+            underlying_logger.setLevel(logging.INFO)
 
     async def call(
         self,

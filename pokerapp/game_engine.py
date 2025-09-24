@@ -393,6 +393,11 @@ class GameEngine:
                             extra={
                                 "error_type": type(exc).__name__,
                                 "request_params": {"attempt": attempt + 1, "args": args},
+                                "game_id": getattr(game, "id", None),
+                                "chat_id": self._safe_int(chat_id),
+                                "user_id": None,
+                                "request_category": None,
+                                "event_type": "finalize_game_message_retry",
                             },
                         )
                         if attempt + 1 >= retries:
@@ -563,6 +568,10 @@ class GameEngine:
                 "Pot calculation mismatch",
                 extra={
                     "chat_id": getattr(game, "chat_id", None),
+                    "game_id": getattr(game, "id", None),
+                    "user_id": None,
+                    "request_category": None,
+                    "event_type": "pot_calculation_mismatch",
                     "request_params": {
                         "game_pot": game.pot,
                         "calculated": calculated_pot_total,

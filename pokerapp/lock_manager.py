@@ -10,6 +10,7 @@ from typing import Any, AsyncIterator, Dict, List, Mapping, Optional, Set, Tuple
 from weakref import WeakKeyDictionary
 
 from pokerapp.utils.locks import ReentrantAsyncLock
+from pokerapp.utils.logging_helpers import add_context, normalise_request_category
 
 
 LOCK_LEVELS: Dict[str, int] = {
@@ -47,7 +48,7 @@ class LockManager:
         max_retries: int = 3,
         retry_backoff_seconds: float = 1,
     ) -> None:
-        self._logger = logger
+        self._logger = add_context(logger)
         self._default_timeout_seconds = default_timeout_seconds
         self._max_retries = max(0, max_retries)
         self._retry_backoff_seconds = max(0.0, retry_backoff_seconds)
@@ -125,6 +126,14 @@ class LockManager:
                         key,
                         elapsed,
                         self._format_context(context_payload),
+                        extra=self._log_extra(
+                            context_payload,
+                            event_type="lock_acquired",
+                            lock_key=key,
+                            lock_level=resolved_level,
+                            attempts=attempt + 1,
+                            attempt_duration=elapsed,
+                        ),
                     )
                 else:
                     self._logger.info(
@@ -133,6 +142,14 @@ class LockManager:
                         attempt + 1,
                         elapsed,
                         self._format_context(context_payload),
+                        extra=self._log_extra(
+                            context_payload,
+                            event_type="lock_acquired",
+                            lock_key=key,
+                            lock_level=resolved_level,
+                            attempts=attempt + 1,
+                            attempt_duration=elapsed,
+                        ),
                     )
                 return True
             except asyncio.TimeoutError:
@@ -145,6 +162,14 @@ class LockManager:
                     attempt + 1,
                     remaining if remaining is not None else float("inf"),
                     self._format_context(context_payload),
+                    extra=self._log_extra(
+                        context_payload,
+                        event_type="lock_timeout",
+                        lock_key=key,
+                        lock_level=resolved_level,
+                        attempts=attempt + 1,
+                        remaining_time=remaining,
+                    ),
                 )
             except asyncio.CancelledError:
                 self._logger.warning(
@@ -152,6 +177,13 @@ class LockManager:
                     key,
                     attempt + 1,
                     self._format_context(context_payload),
+                    extra=self._log_extra(
+                        context_payload,
+                        event_type="lock_cancelled",
+                        lock_key=key,
+                        lock_level=resolved_level,
+                        attempts=attempt + 1,
+                    ),
                 )
                 raise
             finally:
@@ -173,6 +205,13 @@ class LockManager:
             key,
             attempts,
             self._format_context(context_payload),
+            extra=self._log_extra(
+                context_payload,
+                event_type="lock_failure",
+                lock_key=key,
+                lock_level=resolved_level,
+                attempts=attempts,
+            ),
         )
         return False
 
@@ -188,7 +227,17 @@ class LockManager:
         acquired = await self.acquire(key, timeout=timeout, context=context, level=level)
         if not acquired:
             message = f"Timeout acquiring lock '{key}'"
-            self._logger.warning("%s%s", message, self._format_context(dict(context or {})))
+            self._logger.warning(
+                "%s%s",
+                message,
+                self._format_context(dict(context or {})),
+                extra=self._log_extra(
+                    dict(context or {}),
+                    event_type="lock_guard_timeout",
+                    lock_key=key,
+                    lock_level=level,
+                ),
+            )
             raise TimeoutError(message)
         try:
             yield
@@ -205,6 +254,12 @@ class LockManager:
                 "Release requested for unknown lock '%s'%s",
                 key,
                 self._format_context(context_payload),
+                extra=self._log_extra(
+                    context_payload,
+                    event_type="lock_release_unknown",
+                    lock_key=key,
+                    lock_level=None,
+                ),
             )
             return
 
@@ -221,13 +276,27 @@ class LockManager:
                 "Failed to release lock '%s' due to ownership mismatch%s",
                 key,
                 self._format_context(context_payload),
+                extra=self._log_extra(
+                    context_payload,
+                    event_type="lock_release_error",
+                    lock_key=key,
+                    lock_level=None,
+                ),
             )
             raise
         else:
             if task is not None and record_entry is not None:
                 context_payload = self._finalize_release(task, record_entry[0])
             self._logger.info(
-                "Lock '%s' released%s", key, self._format_context(context_payload)
+                "Lock '%s' released%s",
+                key,
+                self._format_context(context_payload),
+                extra=self._log_extra(
+                    context_payload,
+                    event_type="lock_released",
+                    lock_key=key,
+                    lock_level=None,
+                ),
             )
 
     def detect_deadlock(self) -> Dict[str, Any]:
@@ -305,7 +374,17 @@ class LockManager:
                 "Lock ordering violation: attempting to acquire '%s' (level=%d) while "
                 "holding %s"
             ) % (key, level, held_contexts)
-            self._logger.error("%s%s", message, self._format_context(context))
+            self._logger.error(
+                "%s%s",
+                message,
+                self._format_context(context),
+                extra=self._log_extra(
+                    context,
+                    event_type="lock_order_violation",
+                    lock_key=key,
+                    lock_level=level,
+                ),
+            )
             raise RuntimeError(message)
 
     def _record_acquired(
@@ -403,6 +482,27 @@ class LockManager:
             return ""
         parts = ", ".join(f"{key}={context[key]!r}" for key in sorted(context))
         return f" [context: {parts}]"
+
+    def _log_extra(
+        self,
+        context: Mapping[str, Any],
+        *,
+        event_type: str,
+        request_category: Any | None = None,
+        **extra: Any,
+    ) -> Dict[str, Any]:
+        payload: Dict[str, Any] = {
+            "game_id": context.get("game_id"),
+            "chat_id": context.get("chat_id"),
+            "user_id": context.get("user_id"),
+            "request_category": normalise_request_category(
+                request_category if request_category is not None else context.get("request_category")
+            ),
+            "event_type": event_type,
+            "lock_context": dict(context) if context else {},
+        }
+        payload.update(extra)
+        return payload
 
     def _describe_task(self, task: asyncio.Task[Any]) -> str:
         name = task.get_name()
