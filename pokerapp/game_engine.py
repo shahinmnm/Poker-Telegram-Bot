@@ -539,7 +539,7 @@ class GameEngine:
             pot_total = game.pot
             game_id = getattr(game, "id", None)
 
-            payouts, hand_labels = await self._handle_winners(
+            payouts, hand_labels, announcements = await self._handle_winners(
                 game=game,
                 chat_id=chat_id,
             )
@@ -547,6 +547,11 @@ class GameEngine:
             await self._payout(game=game, payouts=payouts)
 
             await self._announce_results(
+                chat_id=chat_id,
+                announcements=announcements,
+            )
+
+            await self._record_hand_results(
                 game=game,
                 chat_id=chat_id,
                 payouts=dict(payouts),
@@ -567,9 +572,14 @@ class GameEngine:
         *,
         game: Game,
         chat_id: ChatId,
-    ) -> Tuple[DefaultDict[int, int], Dict[int, Optional[str]]]:
+    ) -> Tuple[
+        DefaultDict[int, int],
+        Dict[int, Optional[str]],
+        List[Dict[str, Any]],
+    ]:
         payouts: DefaultDict[int, int] = defaultdict(int)
         hand_labels: Dict[int, Optional[str]] = {}
+        announcements: List[Dict[str, Any]] = []
 
         contenders = game.players_by(states=(PlayerState.ACTIVE, PlayerState.ALL_IN))
         folded_player_ids = [
@@ -577,14 +587,16 @@ class GameEngine:
         ]
 
         if not contenders:
-            await self._process_fold_win(
-                game,
-                folded_player_ids,
-                payouts=payouts,
-                hand_labels=hand_labels,
-                chat_id=chat_id,
+            announcements.extend(
+                await self._process_fold_win(
+                    game,
+                    folded_player_ids,
+                    payouts=payouts,
+                    hand_labels=hand_labels,
+                    chat_id=chat_id,
+                )
             )
-            return payouts, hand_labels
+            return payouts, hand_labels, announcements
 
         contender_details = self._evaluate_contender_hands(game, contenders)
         winners_by_pot = self._determine_winners(game, contender_details)
@@ -592,14 +604,16 @@ class GameEngine:
             "contender_details": contender_details,
             "winners_by_pot": winners_by_pot,
         }
-        await self._process_showdown_results(
-            game,
-            winner_data,
-            payouts=payouts,
-            hand_labels=hand_labels,
-            chat_id=chat_id,
+        announcements.extend(
+            await self._process_showdown_results(
+                game,
+                winner_data,
+                payouts=payouts,
+                hand_labels=hand_labels,
+                chat_id=chat_id,
+            )
         )
-        return payouts, hand_labels
+        return payouts, hand_labels, announcements
 
     async def _payout(
         self,
@@ -610,6 +624,23 @@ class GameEngine:
         await self._distribute_payouts(game, payouts)
 
     async def _announce_results(
+        self,
+        *,
+        chat_id: ChatId,
+        announcements: Iterable[Dict[str, Any]],
+    ) -> None:
+        for announcement in announcements:
+            call = announcement.get("call")
+            if call is None:
+                continue
+            await self._telegram_ops.send_message_safe(
+                call=call,
+                chat_id=chat_id,
+                operation=announcement.get("operation"),
+                log_extra=announcement.get("log_extra"),
+            )
+
+    async def _record_hand_results(
         self,
         *,
         game: Game,
@@ -668,11 +699,11 @@ class GameEngine:
         payouts: Dict[int, int],
         hand_labels: Dict[int, Optional[str]],
         chat_id: ChatId,
-    ) -> None:
+    ) -> List[Dict[str, Any]]:
         active_players = game.players_by(states=(PlayerState.ACTIVE,))
         folded_count = len(tuple(folded_player_ids))
         if len(active_players) != 1:
-            return
+            return []
 
         winner = active_players[0]
         amount = game.pot
@@ -690,18 +721,21 @@ class GameEngine:
         message_text = (
             f"🏆 {fold_phrase}! {winner.mention_markdown} برنده {amount}$ شد."
         )
-        await self._telegram_ops.send_message_safe(
-            call=lambda text=message_text: self._view.send_message(chat_id, text),
-            chat_id=chat_id,
-            operation="announce_fold_win_message",
-            log_extra=self._build_telegram_log_extra(
-                chat_id=chat_id,
-                message_id=None,
-                game_id=getattr(game, "id", None),
-                operation="announce_fold_win_message",
-                request_category=RequestCategory.GENERAL,
-            ),
-        )
+        return [
+            {
+                "call": lambda text=message_text: self._view.send_message(
+                    chat_id, text
+                ),
+                "operation": "announce_fold_win_message",
+                "log_extra": self._build_telegram_log_extra(
+                    chat_id=chat_id,
+                    message_id=None,
+                    game_id=getattr(game, "id", None),
+                    operation="announce_fold_win_message",
+                    request_category=RequestCategory.GENERAL,
+                ),
+            }
+        ]
 
     async def _process_showdown_results(
         self,
@@ -711,9 +745,11 @@ class GameEngine:
         payouts: Dict[int, int],
         hand_labels: Dict[int, Optional[str]],
         chat_id: ChatId,
-    ) -> None:
+    ) -> List[Dict[str, Any]]:
         contender_details = list(winner_data.get("contender_details", []))
         winners_by_pot = list(winner_data.get("winners_by_pot", []))
+
+        announcements: List[Dict[str, Any]] = []
 
         for detail in contender_details:
             player = detail.get("player") if isinstance(detail, dict) else None
@@ -742,37 +778,43 @@ class GameEngine:
                         player_id = self._safe_int(player.user_id)
                         if winner_label and player_id not in hand_labels:
                             hand_labels[player_id] = winner_label
-        else:
+        if not winners_by_pot:
             message_text = (
                 "ℹ️ هیچ برنده‌ای در این دست مشخص نشد. مشکلی در منطق بازی رخ داده است."
             )
-            await self._telegram_ops.send_message_safe(
-                call=lambda text=message_text: self._view.send_message(chat_id, text),
-                chat_id=chat_id,
-                operation="announce_showdown_warning",
-                log_extra=self._build_telegram_log_extra(
+            announcements.append(
+                {
+                    "call": lambda text=message_text: self._view.send_message(
+                        chat_id, text
+                    ),
+                    "operation": "announce_showdown_warning",
+                    "log_extra": self._build_telegram_log_extra(
+                        chat_id=chat_id,
+                        message_id=None,
+                        game_id=getattr(game, "id", None),
+                        operation="announce_showdown_warning",
+                        request_category=RequestCategory.GENERAL,
+                    ),
+                }
+            )
+
+        announcements.append(
+            {
+                "call": lambda winners=winners_by_pot: self._view.send_showdown_results(
+                    chat_id, game, winners
+                ),
+                "operation": "send_showdown_results",
+                "log_extra": self._build_telegram_log_extra(
                     chat_id=chat_id,
                     message_id=None,
                     game_id=getattr(game, "id", None),
-                    operation="announce_showdown_warning",
+                    operation="send_showdown_results",
                     request_category=RequestCategory.GENERAL,
                 ),
-            )
-
-        await self._telegram_ops.send_message_safe(
-            call=lambda: self._view.send_showdown_results(
-                chat_id, game, winners_by_pot
-            ),
-            chat_id=chat_id,
-            operation="send_showdown_results",
-            log_extra=self._build_telegram_log_extra(
-                chat_id=chat_id,
-                message_id=None,
-                game_id=getattr(game, "id", None),
-                operation="send_showdown_results",
-                request_category=RequestCategory.GENERAL,
-            ),
+            }
         )
+
+        return announcements
 
     async def _distribute_payouts(
         self,
