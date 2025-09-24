@@ -205,7 +205,10 @@ class PokerBotModel:
             self._stats = NullStatsService(timezone_name=cfg_timezone)
         self._timezone_name = cfg_timezone
         self._stats.bind_player_report_cache(self._player_report_cache)
-        self._lock_manager = LockManager(logger=logger.getChild("lock_manager"))
+        self._lock_manager = LockManager(
+            logger=logger.getChild("lock_manager"),
+            category_timeouts=getattr(cfg, "LOCK_TIMEOUTS", None),
+        )
         self._player_identity_manager = PlayerIdentityManager(
             table_manager=self._table_manager,
             kv=self._kv,

@@ -22,7 +22,7 @@ async def test_lock_manager_acquire_when_free() -> None:
     logger = logging.getLogger("lock_manager_test_free")
     manager = LockManager(logger=logger, default_timeout_seconds=1)
 
-    key = "stage:free"
+    key = "engine_stage:free"
     acquired = await manager.acquire(key, timeout=0.5)
     assert acquired
     manager.release(key)
@@ -41,7 +41,7 @@ async def test_lock_manager_retries_before_acquire() -> None:
         retry_backoff_seconds=0.05,
     )
 
-    key = "stage:retry"
+    key = "engine_stage:retry"
 
     async def holder() -> None:
         async with manager.guard(key, timeout=1):
@@ -76,7 +76,7 @@ async def test_lock_manager_guard_timeout() -> None:
         retry_backoff_seconds=0.05,
     )
 
-    key = "stage:timeout"
+    key = "engine_stage:timeout"
 
     async def holder() -> None:
         async with manager.guard(key, timeout=1):
@@ -100,12 +100,18 @@ async def test_lock_manager_context_logging() -> None:
     logger.setLevel(logging.INFO)
     manager = LockManager(logger=logger, default_timeout_seconds=1)
 
-    context = {"chat_id": 42, "game_id": "abc"}
-    async with manager.guard("stage:context", context=context):
+    context = {"chat_id": 42}
+    context_extra = {"game_id": "abc"}
+    async with manager.guard(
+        "engine_stage:context", context=context, context_extra=context_extra
+    ):
         pass
 
     messages = [record.getMessage() for record in handler.records]
-    expected_fragment = "[context: chat_id=42, game_id='abc']"
+    expected_fragment = (
+        "[context: chat_id=42, game_id='abc', lock_key='engine_stage:context',"
+        " lock_level=1]"
+    )
     assert any("acquired" in message and expected_fragment in message for message in messages)
     assert any("released" in message and expected_fragment in message for message in messages)
 
@@ -113,17 +119,77 @@ async def test_lock_manager_context_logging() -> None:
 
 
 @pytest.mark.asyncio
+async def test_lock_manager_category_timeout_override() -> None:
+    logger = logging.getLogger("lock_manager_test_category_timeout")
+    manager = LockManager(
+        logger=logger,
+        default_timeout_seconds=5,
+        max_retries=0,
+        retry_backoff_seconds=0.01,
+        category_timeouts={"engine_stage": 0.05},
+    )
+
+    key = "engine_stage:category-timeout"
+
+    async def holder() -> None:
+        async with manager.guard(key, timeout=0.2):
+            await asyncio.sleep(0.2)
+
+    hold_task = asyncio.create_task(holder())
+    await asyncio.sleep(0.05)
+
+    with pytest.raises(TimeoutError):
+        async with manager.guard(key):
+            pass
+
+    await hold_task
+
+
+@pytest.mark.asyncio
+async def test_lock_manager_metrics_recording() -> None:
+    logger = logging.getLogger("lock_manager_test_metrics")
+    manager = LockManager(
+        logger=logger,
+        default_timeout_seconds=0.5,
+        max_retries=0,
+        retry_backoff_seconds=0.01,
+        category_timeouts={"engine_stage": 0.1},
+    )
+
+    key = "engine_stage:metrics"
+
+    async def holder() -> None:
+        async with manager.guard(key, timeout=0.2):
+            await asyncio.sleep(0.15)
+
+    hold_task = asyncio.create_task(holder())
+    await asyncio.sleep(0.05)
+
+    with pytest.raises(TimeoutError):
+        async with manager.guard(key, timeout=0.05):
+            pass
+
+    await hold_task
+
+    metrics = manager.metrics
+    assert metrics["lock_timeouts"] >= 1
+    assert metrics["lock_contention"] >= 1
+
+
+@pytest.mark.asyncio
 async def test_lock_manager_enforces_lock_hierarchy() -> None:
     logger = logging.getLogger("lock_manager_test_hierarchy")
     manager = LockManager(logger=logger, default_timeout_seconds=1)
 
-    async with manager.guard("stage:hierarchy", context={"order": "stage"}):
-        async with manager.guard("player:hierarchy", context={"order": "player"}):
+    async with manager.guard("engine_stage:hierarchy", context={"order": "stage"}):
+        async with manager.guard(
+            "player_report:hierarchy", context={"order": "player"}
+        ):
             pass
 
-    async with manager.guard("player:reverse", context={"order": "player"}):
+    async with manager.guard("player_report:reverse", context={"order": "player"}):
         with pytest.raises(RuntimeError):
-            await manager.acquire("stage:reverse", context={"order": "stage"})
+            await manager.acquire("engine_stage:reverse", context={"order": "stage"})
 
 
 @pytest.mark.asyncio
@@ -142,7 +208,7 @@ async def test_detect_deadlock_cycle_detection() -> None:
 
     async def task_one() -> None:
         async with manager.guard(
-            "stage:cycle",
+            "engine_stage:cycle",
             timeout=5,
             context={"task": "one"},
             level=5,
@@ -151,7 +217,7 @@ async def test_detect_deadlock_cycle_detection() -> None:
             await start_cycle.wait()
             try:
                 acquired = await manager.acquire(
-                    "player:cycle",
+                    "player_report:cycle",
                     timeout=5,
                     context={"task": "one"},
                     level=5,
@@ -163,7 +229,7 @@ async def test_detect_deadlock_cycle_detection() -> None:
 
     async def task_two() -> None:
         async with manager.guard(
-            "player:cycle",
+            "player_report:cycle",
             timeout=5,
             context={"task": "two"},
             level=5,
@@ -172,7 +238,7 @@ async def test_detect_deadlock_cycle_detection() -> None:
             await start_cycle.wait()
             try:
                 acquired = await manager.acquire(
-                    "stage:cycle",
+                    "engine_stage:cycle",
                     timeout=5,
                     context={"task": "two"},
                     level=5,
