@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from typing import Any, Awaitable, Callable, Optional, TypeVar
+from typing import Any, Awaitable, Callable, Mapping, Optional, TypeVar
 
 from telegram.constants import ParseMode
 from telegram.error import BadRequest, NetworkError, RetryAfter, TelegramError, TimedOut
@@ -59,6 +59,7 @@ class TelegramSafeOps:
         parse_mode: str = ParseMode.MARKDOWN,
         log_context: Optional[str] = None,
         request_category: RequestCategory = RequestCategory.GENERAL,
+        log_extra: Optional[Mapping[str, Any]] = None,
     ) -> Optional[MessageId]:
         """Safely edit a message, retrying transient failures when required."""
 
@@ -84,9 +85,12 @@ class TelegramSafeOps:
                     parse_mode=parse_mode,
                     suppress_exceptions=False,
                 ),
+                log_extra=log_extra,
             )
         except BadRequest as exc:
-            self._log_bad_request(chat_id, message_id, text, log_context, exc)
+            self._log_bad_request(
+                chat_id, message_id, text, log_context, exc, extra=log_extra
+            )
             result = None
         except TelegramError as exc:
             self._logger.error(
@@ -97,6 +101,7 @@ class TelegramSafeOps:
                     operation="edit_message_text",
                     context=log_context,
                     error_type=type(exc).__name__,
+                    extra=log_extra,
                 ),
             )
             result = None
@@ -109,6 +114,7 @@ class TelegramSafeOps:
                     operation="edit_message_text",
                     context=log_context,
                     error_type=type(exc).__name__,
+                    extra=log_extra,
                 ),
             )
             raise
@@ -134,6 +140,7 @@ class TelegramSafeOps:
                         message_id,
                         suppress_exceptions=False,
                     ),
+                    log_extra=log_extra,
                 )
             except Exception as exc:  # pragma: no cover - defensive
                 self._logger.debug(
@@ -143,6 +150,7 @@ class TelegramSafeOps:
                         message_id=message_id,
                         operation="delete_message",
                         error_type=type(exc).__name__,
+                        extra=log_extra,
                     ),
                 )
 
@@ -153,10 +161,70 @@ class TelegramSafeOps:
                     message_id=message_id,
                     operation="edit_message_text",
                     new_message_id=new_id,
+                    extra=log_extra,
                 ),
             )
 
         return new_id
+
+    async def send_message_safe(
+        self,
+        *,
+        call: Callable[[], Awaitable[T]],
+        chat_id: Optional[ChatId],
+        operation: Optional[str] = None,
+        log_extra: Optional[Mapping[str, Any]] = None,
+    ) -> T:
+        """Execute a sending coroutine with retry and structured logging."""
+
+        op_name = operation or getattr(call, "__name__", "send_message")
+        return await self._execute(
+            operation=op_name,
+            call=call,
+            chat_id=chat_id,
+            message_id=None,
+            log_extra=log_extra,
+        )
+
+    async def edit_message_safe(
+        self,
+        *,
+        call: Callable[[], Awaitable[T]],
+        chat_id: Optional[ChatId],
+        message_id: Optional[MessageId],
+        operation: Optional[str] = None,
+        log_extra: Optional[Mapping[str, Any]] = None,
+    ) -> T:
+        """Execute an edit coroutine with retry and structured logging."""
+
+        op_name = operation or getattr(call, "__name__", "edit_message")
+        return await self._execute(
+            operation=op_name,
+            call=call,
+            chat_id=chat_id,
+            message_id=message_id,
+            log_extra=log_extra,
+        )
+
+    async def delete_message_safe(
+        self,
+        *,
+        call: Callable[[], Awaitable[T]],
+        chat_id: Optional[ChatId],
+        message_id: Optional[MessageId],
+        operation: Optional[str] = None,
+        log_extra: Optional[Mapping[str, Any]] = None,
+    ) -> T:
+        """Execute a delete coroutine with retry and structured logging."""
+
+        op_name = operation or getattr(call, "__name__", "delete_message")
+        return await self._execute(
+            operation=op_name,
+            call=call,
+            chat_id=chat_id,
+            message_id=message_id,
+            log_extra=log_extra,
+        )
 
     async def _send_message_return_id(
         self,
@@ -177,6 +245,7 @@ class TelegramSafeOps:
                 request_category=request_category,
                 suppress_exceptions=False,
             ),
+            log_extra=None,
         )
 
     async def _execute(
@@ -186,6 +255,7 @@ class TelegramSafeOps:
         call: Callable[[], Awaitable[T]],
         chat_id: Optional[ChatId],
         message_id: Optional[MessageId],
+        log_extra: Optional[Mapping[str, Any]] = None,
     ) -> T:
         max_attempts = self._max_retries + 1
         attempt = 0
@@ -209,6 +279,7 @@ class TelegramSafeOps:
                         max_attempts=max_attempts,
                         retry_after=wait_time,
                         error_type=type(exc).__name__,
+                        extra=log_extra,
                     ),
                 )
                 if attempt >= max_attempts:
@@ -222,6 +293,7 @@ class TelegramSafeOps:
                             max_attempts=max_attempts,
                             retry_after=wait_time,
                             error_type=type(exc).__name__,
+                            extra=log_extra,
                         ),
                     )
                     raise
@@ -242,6 +314,7 @@ class TelegramSafeOps:
                             attempt=attempt,
                             max_attempts=max_attempts,
                             error_type=type(exc).__name__,
+                            extra=log_extra,
                         ),
                     )
                     raise
@@ -255,6 +328,7 @@ class TelegramSafeOps:
                         max_attempts=max_attempts,
                         error_type=type(exc).__name__,
                         delay=delay,
+                        extra=log_extra,
                     ),
                 )
                 await asyncio.sleep(delay)
@@ -268,17 +342,20 @@ class TelegramSafeOps:
         message_id: Optional[MessageId],
         operation: str,
         context: Optional[str] = None,
+        extra: Optional[Mapping[str, Any]] = None,
         **kwargs: Any,
     ) -> dict[str, Any]:
-        extra: dict[str, Any] = {
+        payload: dict[str, Any] = {
             "chat_id": chat_id,
             "message_id": message_id,
             "operation": operation,
         }
         if context is not None:
-            extra["context"] = context
-        extra.update(kwargs)
-        return extra
+            payload["context"] = context
+        if extra is not None:
+            payload.update(dict(extra))
+        payload.update(kwargs)
+        return payload
 
     def _log_bad_request(
         self,
@@ -287,6 +364,8 @@ class TelegramSafeOps:
         text: str,
         context: Optional[str],
         exc: BadRequest,
+        *,
+        extra: Optional[Mapping[str, Any]] = None,
     ) -> None:
         preview = text
         max_preview_length = 120
@@ -302,6 +381,7 @@ class TelegramSafeOps:
                 context=context or "general",
                 error_message=error_message,
                 text_preview=preview,
+                extra=extra,
             ),
         )
 

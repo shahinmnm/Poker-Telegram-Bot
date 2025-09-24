@@ -18,11 +18,9 @@ import datetime
 import logging
 from collections import defaultdict
 from typing import Any, Awaitable, Callable, Dict, Iterable, List, Optional, Set, Tuple
-
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes
 from telegram.helpers import mention_markdown as format_mention_markdown
-from telegram.error import RetryAfter
 
 from pokerapp.entities import (
     ChatId,
@@ -217,6 +215,21 @@ class GameEngine:
         if isinstance(value, str):
             return value
         return str(state)
+
+    def _build_telegram_log_extra(
+        self,
+        *,
+        chat_id: ChatId,
+        operation: str,
+        message_id: Optional[MessageId],
+        game_id: Optional[str],
+    ) -> Dict[str, Any]:
+        return {
+            "chat_id": self._safe_int(chat_id),
+            "message_id": message_id,
+            "game_id": game_id,
+            "operation": operation,
+        }
 
     def _initialize_stop_translations(self) -> None:
         translations_root = getattr(self.constants, "translations", {})
@@ -426,33 +439,6 @@ class GameEngine:
         async with self._lock_manager.guard(
             self._stage_lock_key(chat_id), timeout=10
         ):
-            async def _send_with_retry(
-                func: Callable[..., Awaitable[None]],
-                *args: object,
-                retries: int = 3,
-            ) -> None:
-                for attempt in range(retries):
-                    try:
-                        await func(*args)
-                        return
-                    except RetryAfter as exc:
-                        await asyncio.sleep(exc.retry_after)
-                    except Exception as exc:  # pragma: no cover - defensive logging
-                        self._logger.error(
-                            "Error sending message attempt",
-                            extra={
-                                "error_type": type(exc).__name__,
-                                "request_params": {"attempt": attempt + 1, "args": args},
-                                "game_id": getattr(game, "id", None),
-                                "chat_id": self._safe_int(chat_id),
-                                "user_id": None,
-                                "request_category": None,
-                                "event_type": "finalize_game_message_retry",
-                            },
-                        )
-                        if attempt + 1 >= retries:
-                            return
-
             contenders = game.players_by(states=(PlayerState.ACTIVE, PlayerState.ALL_IN))
             game.chat_id = chat_id
 
@@ -461,6 +447,7 @@ class GameEngine:
             pot_total = game.pot
             payouts: Dict[int, int] = defaultdict(int)
             hand_labels: Dict[int, Optional[str]] = {}
+            game_id = getattr(game, "id", None)
 
             folded_player_ids = [
                 player.user_id for player in game.players_by(states=(PlayerState.FOLD,))
@@ -487,7 +474,6 @@ class GameEngine:
                     payouts=payouts,
                     hand_labels=hand_labels,
                     chat_id=chat_id,
-                    send_with_retry=_send_with_retry,
                 )
 
             await self._distribute_payouts(game, payouts)
@@ -506,7 +492,17 @@ class GameEngine:
                 chat_id=chat_id,
             )
 
-            await _send_with_retry(self._view.send_new_hand_ready_message, chat_id)
+            await self._telegram_ops.send_message_safe(
+                call=lambda: self._view.send_new_hand_ready_message(chat_id),
+                chat_id=chat_id,
+                operation="send_new_hand_ready_message",
+                log_extra=self._build_telegram_log_extra(
+                    chat_id=chat_id,
+                    message_id=None,
+                    game_id=game_id,
+                    operation="send_new_hand_ready_message",
+                ),
+            )
             await self._player_manager.send_join_prompt(game, chat_id)
 
     async def _process_fold_win(
@@ -549,7 +545,6 @@ class GameEngine:
         payouts: Dict[int, int],
         hand_labels: Dict[int, Optional[str]],
         chat_id: ChatId,
-        send_with_retry: Callable[..., Awaitable[None]],
     ) -> None:
         contender_details = list(winner_data.get("contender_details", []))
         winners_by_pot = list(winner_data.get("winners_by_pot", []))
@@ -587,8 +582,18 @@ class GameEngine:
                 "ℹ️ هیچ برنده‌ای در این دست مشخص نشد. مشکلی در منطق بازی رخ داده است.",
             )
 
-        await send_with_retry(
-            self._view.send_showdown_results, chat_id, game, winners_by_pot
+        await self._telegram_ops.send_message_safe(
+            call=lambda: self._view.send_showdown_results(
+                chat_id, game, winners_by_pot
+            ),
+            chat_id=chat_id,
+            operation="send_showdown_results",
+            log_extra=self._build_telegram_log_extra(
+                chat_id=chat_id,
+                message_id=None,
+                game_id=getattr(game, "id", None),
+                operation="send_showdown_results",
+            ),
         )
 
     async def _distribute_payouts(
