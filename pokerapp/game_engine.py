@@ -1054,12 +1054,20 @@ class GameEngine:
             context=context,
         )
 
+        current_message_id = stop_request.get("message_id")
         message_id = await self._telegram_ops.edit_message_text(
             chat_id,
-            stop_request.get("message_id"),
+            current_message_id,
             message_text,
             reply_markup=self.build_stop_request_markup(),
             request_category=RequestCategory.GENERAL,
+            log_extra=self._build_telegram_log_extra(
+                chat_id=chat_id,
+                message_id=current_message_id,
+                game_id=getattr(game, "id", None),
+                operation="stop_vote_request_message",
+                request_category=RequestCategory.GENERAL,
+            ),
         )
         stop_request["message_id"] = message_id
         context.chat_data[self.KEY_STOP_REQUEST] = stop_request
@@ -1236,6 +1244,13 @@ class GameEngine:
             self.STOP_RESUME_NOTICE,
             reply_markup=None,
             request_category=RequestCategory.GENERAL,
+            log_extra=self._build_telegram_log_extra(
+                chat_id=chat_id,
+                message_id=message_id,
+                game_id=getattr(game, "id", None),
+                operation="stop_vote_resume_message",
+                request_category=RequestCategory.GENERAL,
+            ),
         )
 
     async def cancel_hand(
@@ -1305,12 +1320,20 @@ class GameEngine:
             context=context,
         )
 
+        current_message_id = stop_request.get("message_id")
         message_id = await self._telegram_ops.edit_message_text(
             chat_id,
-            stop_request.get("message_id"),
+            current_message_id,
             message_text,
             reply_markup=self.build_stop_request_markup(),
             request_category=RequestCategory.GENERAL,
+            log_extra=self._build_telegram_log_extra(
+                chat_id=chat_id,
+                message_id=current_message_id,
+                game_id=getattr(game, "id", None),
+                operation="stop_vote_request_message",
+                request_category=RequestCategory.GENERAL,
+            ),
         )
         stop_request["message_id"] = message_id
         context.chat_data[self.KEY_STOP_REQUEST] = stop_request
@@ -1386,12 +1409,20 @@ class GameEngine:
     ) -> None:
         message_text = self._build_stop_cancellation_message(stop_request)
 
+        current_message_id = stop_request.get("message_id")
         await self._telegram_ops.edit_message_text(
             chat_id,
-            stop_request.get("message_id"),
+            current_message_id,
             message_text,
             reply_markup=None,
             request_category=RequestCategory.GENERAL,
+            log_extra=self._build_telegram_log_extra(
+                chat_id=chat_id,
+                message_id=current_message_id,
+                game_id=stop_request.get("game_id"),
+                operation="stop_vote_finalize_message",
+                request_category=RequestCategory.GENERAL,
+            ),
         )
 
         context.chat_data.pop(self.KEY_STOP_REQUEST, None)
