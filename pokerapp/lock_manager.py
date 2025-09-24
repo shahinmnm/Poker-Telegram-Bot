@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from contextlib import asynccontextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass
 from typing import Any, AsyncIterator, Dict, List, Mapping, Optional, Set, Tuple
 from weakref import WeakKeyDictionary
@@ -14,11 +15,9 @@ from pokerapp.utils.logging_helpers import add_context, normalise_request_catego
 
 
 LOCK_LEVELS: Dict[str, int] = {
-    "global": 0,
-    "stage": 10,
-    "table": 20,
-    "player": 30,
-    "hand": 40,
+    "engine_stage": 1,
+    "player_report": 2,
+    "wallet": 3,
 }
 
 
@@ -47,6 +46,7 @@ class LockManager:
         default_timeout_seconds: Optional[float] = 5,
         max_retries: int = 3,
         retry_backoff_seconds: float = 1,
+        category_timeouts: Optional[Mapping[str, Any]] = None,
     ) -> None:
         self._logger = add_context(logger)
         self._default_timeout_seconds = default_timeout_seconds
@@ -61,6 +61,12 @@ class LockManager:
             WeakKeyDictionary()
         )
         self._default_lock_level = (max(LOCK_LEVELS.values()) if LOCK_LEVELS else 0) + 10
+        self._lock_state_var: ContextVar[Tuple[_LockAcquisition, ...]] = ContextVar(
+            f"lock_manager_state_{id(self)}",
+            default=(),
+        )
+        self._category_timeouts = self._normalise_category_timeouts(category_timeouts)
+        self._metrics: Dict[str, int] = {"lock_contention": 0, "lock_timeouts": 0}
 
     async def _get_lock(self, key: str) -> ReentrantAsyncLock:
         async with self._locks_guard:
@@ -69,6 +75,50 @@ class LockManager:
                 lock = ReentrantAsyncLock()
                 self._locks[key] = lock
             return lock
+
+    def _normalise_category_timeouts(
+        self, source: Optional[Mapping[str, Any]]
+    ) -> Dict[str, float]:
+        if not source:
+            return {}
+        resolved: Dict[str, float] = {}
+        for raw_key, raw_value in source.items():
+            if raw_key is None:
+                continue
+            key = str(raw_key)
+            try:
+                numeric = float(raw_value)
+            except (TypeError, ValueError):
+                continue
+            if numeric <= 0:
+                continue
+            resolved[key] = numeric
+        return resolved
+
+    def _get_current_acquisitions(self) -> List[_LockAcquisition]:
+        return list(self._lock_state_var.get())
+
+    def _set_current_acquisitions(self, acquisitions: List[_LockAcquisition]) -> None:
+        self._lock_state_var.set(tuple(acquisitions))
+        task = asyncio.current_task()
+        if task is None:
+            return
+        if acquisitions:
+            self._task_lock_state[task] = acquisitions
+        else:
+            self._task_lock_state.pop(task, None)
+
+    def _build_context_payload(
+        self,
+        key: str,
+        level: int,
+        *,
+        additional: Optional[Mapping[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        payload = dict(additional or {})
+        payload.setdefault("lock_key", key)
+        payload.setdefault("lock_level", level)
+        return payload
 
     async def acquire(
         self,
@@ -86,10 +136,13 @@ class LockManager:
 
         lock = await self._get_lock(key)
         resolved_level = self._resolve_level(key, override=level)
-        context_payload = dict(context or {})
-        self._validate_lock_order(task, key, resolved_level, context_payload)
+        context_payload = self._build_context_payload(
+            key, resolved_level, additional=context
+        )
+        current_acquisitions = self._get_current_acquisitions()
+        self._validate_lock_order(current_acquisitions, key, resolved_level, context_payload)
 
-        total_timeout = self._default_timeout_seconds if timeout is None else timeout
+        total_timeout = self._resolve_timeout(key, timeout)
         deadline: Optional[float]
         loop = asyncio.get_running_loop()
         if total_timeout is None:
@@ -114,12 +167,15 @@ class LockManager:
 
             self._register_waiting(task, key, resolved_level, context_payload)
             try:
+                owner = getattr(lock, "_owner", None)
+                if owner is not None and owner is not task:
+                    self._metrics["lock_contention"] += 1
                 if attempt_timeout is None:
                     await lock.acquire()
                 else:
                     await asyncio.wait_for(lock.acquire(), timeout=attempt_timeout)
                 elapsed = loop.time() - attempt_start
-                self._record_acquired(task, key, resolved_level, context_payload)
+                self._record_acquired(key, resolved_level, context_payload)
                 if attempt == 0 and elapsed < 0.1:
                     self._logger.info(
                         "Lock '%s' acquired quickly in %.3fs%s",
@@ -153,6 +209,7 @@ class LockManager:
                     )
                 return True
             except asyncio.TimeoutError:
+                self._metrics["lock_timeouts"] += 1
                 remaining = None
                 if deadline is not None:
                     remaining = max(0.0, deadline - loop.time())
@@ -222,40 +279,51 @@ class LockManager:
         *,
         timeout: Optional[float] = None,
         context: Optional[Mapping[str, Any]] = None,
+        context_extra: Optional[Mapping[str, Any]] = None,
         level: Optional[int] = None,
     ) -> AsyncIterator[None]:
-        acquired = await self.acquire(key, timeout=timeout, context=context, level=level)
+        combined_context: Dict[str, Any] = dict(context or {})
+        if context_extra:
+            combined_context.update(context_extra)
+        acquired = await self.acquire(
+            key, timeout=timeout, context=combined_context, level=level
+        )
         if not acquired:
             message = f"Timeout acquiring lock '{key}'"
+            failure_context = self._build_context_payload(
+                key,
+                self._resolve_level(key, override=level),
+                additional=combined_context,
+            )
             self._logger.warning(
                 "%s%s",
                 message,
-                self._format_context(dict(context or {})),
+                self._format_context(dict(failure_context)),
                 extra=self._log_extra(
-                    dict(context or {}),
+                    dict(failure_context),
                     event_type="lock_guard_timeout",
                     lock_key=key,
-                    lock_level=level,
+                    lock_level=failure_context.get("lock_level"),
                 ),
             )
             raise TimeoutError(message)
         try:
             yield
         finally:
-            self.release(key, context=context)
+            self.release(key, context=combined_context)
 
     def release(
         self, key: str, context: Optional[Mapping[str, Any]] = None
     ) -> None:
         lock = self._locks.get(key)
-        context_payload = dict(context or {})
+        base_context = dict(context or {})
         if lock is None:
             self._logger.debug(
                 "Release requested for unknown lock '%s'%s",
                 key,
-                self._format_context(context_payload),
+                self._format_context(base_context),
                 extra=self._log_extra(
-                    context_payload,
+                    base_context,
                     event_type="lock_release_unknown",
                     lock_key=key,
                     lock_level=None,
@@ -267,8 +335,17 @@ class LockManager:
         record_entry: Optional[Tuple[int, _LockAcquisition]] = None
         if task is not None:
             record_entry = self._find_lock_record(task, key)
-            if record_entry is not None and not context_payload:
-                context_payload = dict(record_entry[1].context)
+            if record_entry is not None and not base_context:
+                base_context = dict(record_entry[1].context)
+
+        release_level = (
+            record_entry[1].level
+            if record_entry is not None
+            else self._resolve_level(key, override=None)
+        )
+        context_payload = self._build_context_payload(
+            key, release_level, additional=base_context
+        )
         try:
             lock.release()
         except RuntimeError:
@@ -280,13 +357,15 @@ class LockManager:
                     context_payload,
                     event_type="lock_release_error",
                     lock_key=key,
-                    lock_level=None,
+                    lock_level=context_payload.get("lock_level"),
                 ),
             )
             raise
         else:
             if task is not None and record_entry is not None:
-                context_payload = self._finalize_release(task, record_entry[0])
+                release_context = self._finalize_release(record_entry[0])
+                if release_context:
+                    context_payload = release_context
             self._logger.info(
                 "Lock '%s' released%s",
                 key,
@@ -295,7 +374,7 @@ class LockManager:
                     context_payload,
                     event_type="lock_released",
                     lock_key=key,
-                    lock_level=None,
+                    lock_level=context_payload.get("lock_level"),
                 ),
             )
 
@@ -352,14 +431,24 @@ class LockManager:
         category = key.split(":", 1)[0]
         return LOCK_LEVELS.get(category, self._default_lock_level)
 
+    def _resolve_timeout(
+        self, key: str, override: Optional[float]
+    ) -> Optional[float]:
+        if override is not None:
+            return override
+        category = key.split(":", 1)[0]
+        category_timeout = self._category_timeouts.get(category)
+        if category_timeout is not None:
+            return category_timeout
+        return self._default_timeout_seconds
+
     def _validate_lock_order(
         self,
-        task: asyncio.Task[Any],
+        acquisitions: List[_LockAcquisition],
         key: str,
         level: int,
         context: Dict[str, Any],
     ) -> None:
-        acquisitions = self._task_lock_state.get(task)
         if not acquisitions:
             return
         if any(item.key == key for item in acquisitions):
@@ -389,21 +478,19 @@ class LockManager:
 
     def _record_acquired(
         self,
-        task: asyncio.Task[Any],
         key: str,
         level: int,
         context: Dict[str, Any],
     ) -> None:
-        acquisitions = self._task_lock_state.get(task)
-        if acquisitions is None:
-            acquisitions = []
-            self._task_lock_state[task] = acquisitions
+        acquisitions = self._get_current_acquisitions()
         if acquisitions and acquisitions[-1].key == key:
             acquisitions[-1].count += 1
+            self._set_current_acquisitions(acquisitions)
             return
         acquisitions.append(
             _LockAcquisition(key=key, level=level, context=dict(context), count=1)
         )
+        self._set_current_acquisitions(acquisitions)
 
     def _find_lock_record(
         self, task: asyncio.Task[Any], key: str
@@ -417,10 +504,8 @@ class LockManager:
                 return index, record
         return None
 
-    def _finalize_release(
-        self, task: asyncio.Task[Any], index: int
-    ) -> Dict[str, Any]:
-        acquisitions = self._task_lock_state.get(task)
+    def _finalize_release(self, index: int) -> Dict[str, Any]:
+        acquisitions = self._get_current_acquisitions()
         if not acquisitions or not (0 <= index < len(acquisitions)):
             return {}
         record = acquisitions[index]
@@ -428,10 +513,7 @@ class LockManager:
         context = dict(record.context)
         if record.count <= 0:
             acquisitions.pop(index)
-        if acquisitions:
-            self._task_lock_state[task] = acquisitions
-        else:
-            self._task_lock_state.pop(task, None)
+        self._set_current_acquisitions(acquisitions)
         return context
 
     def _register_waiting(
@@ -482,6 +564,10 @@ class LockManager:
             return ""
         parts = ", ".join(f"{key}={context[key]!r}" for key in sorted(context))
         return f" [context: {parts}]"
+
+    @property
+    def metrics(self) -> Dict[str, int]:
+        return dict(self._metrics)
 
     def _log_extra(
         self,

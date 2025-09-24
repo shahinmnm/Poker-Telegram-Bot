@@ -3,7 +3,7 @@ import logging
 import os
 from copy import deepcopy
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Mapping, Optional, Tuple
 from urllib.parse import urljoin
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
@@ -71,6 +71,13 @@ _DEFAULT_GAME_CONSTANTS_DATA: Dict[str, Any] = {
         "key_start_countdown_context": "start_countdown_context",
         "stop_confirm_callback": "stop:confirm",
         "stop_resume_callback": "stop:resume",
+    },
+    "locks": {
+        "category_timeouts_seconds": {
+            "engine_stage": 10.0,
+            "player_report": 5.0,
+            "wallet": 5.0,
+        }
     },
 }
 
@@ -364,6 +371,13 @@ def get_game_constants() -> GameConstants:
 class Config:
     def __init__(self):
         self.constants: GameConstants = GAME_CONSTANTS
+        locks_section = self.constants.section("locks")
+        raw_lock_timeouts = locks_section.get("category_timeouts_seconds")
+        if not isinstance(raw_lock_timeouts, Mapping):
+            raw_lock_timeouts = None
+        self.LOCK_TIMEOUTS: Dict[str, float] = self._normalise_lock_timeouts(
+            raw_lock_timeouts
+        )
         self.REDIS_HOST: str = os.getenv(
             "POKERBOT_REDIS_HOST",
             default="localhost",
@@ -640,6 +654,26 @@ class Config:
             return combined_url
 
         return ""
+
+    @staticmethod
+    def _normalise_lock_timeouts(
+        raw_mapping: Optional[Mapping[str, Any]]
+    ) -> Dict[str, float]:
+        if not raw_mapping:
+            return {}
+        resolved: Dict[str, float] = {}
+        for raw_key, raw_value in raw_mapping.items():
+            if raw_key is None:
+                continue
+            key = str(raw_key)
+            try:
+                numeric = float(raw_value)
+            except (TypeError, ValueError):
+                continue
+            if numeric <= 0:
+                continue
+            resolved[key] = float(numeric)
+        return resolved
 
     @staticmethod
     def _get_first_nonempty_env(*keys: str) -> Tuple[Optional[str], Optional[str]]:
