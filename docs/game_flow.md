@@ -1,299 +1,144 @@
-# PokerBot Game Flow & Architecture
+# PokerBot Game Flow
 
-This guide documents the current decoupled architecture of the Poker Telegram Bot.
-It cross-references the runtime entry points, lifecycle methods, and supporting
-services that collaborate to run a single hand of Texas Hold'em. The goal is to
-explain how infrastructure dependencies are injected, how the game progresses
-through its stages, and how presentation updates reach Telegram clients.
+This document expands on the concise state machine reference at the top of
+[`pokerapp/game_engine.py`](../pokerapp/game_engine.py). It links the public
+coroutines that drive the table lifecycle with the collaborating services that
+persist chat state, talk to Telegram, and record statistics.
 
-The documentation is intentionally grounded in the production implementation:
+## State progression at a glance
 
-- [`pokerapp/pokerbot.py`](../pokerapp/pokerbot.py) hosts the Telegram
-  orchestration (`run_webhook`, `run_polling`, `_build_application`).
-- [`pokerapp/pokerbotview.py`](../pokerapp/pokerbotview.py) renders inline
-  keyboards and manages anchor caches for efficient message edits.
-- [`pokerapp/game_engine.py`](../pokerapp/game_engine.py) encapsulates the state
-  machine (`start_game`, `progress_stage`, `finalize_game`).
-- [`README.md`](../README.md) captures player-facing rules and the daily bonus
-  table that contextualise the stages below.
+The poker bot advances through well-defined `GameState` values. Hands start in
+`WAITING` (players join) and finish when `finalize_game` runs. The diagram below
+shows the happy-path transition sequence alongside the coroutines that move the
+state machine forward. Early exits (for example when everyone folds) are also
+handled by `finalize_game`.
 
-## Architecture Modules & Roles
+```mermaid
+sequenceDiagram
+    autonumber
+    participant TG as Telegram
+    participant PM as PlayerManager
+    participant GE as GameEngine
+    participant MS as MatchmakingService
+    participant TM as TableManager
+    participant SS as StatsService/Reporter
 
-| Module | Responsibility | Injected Collaborators |
-| ------ | --------------- | ---------------------- |
-| `PokerBot` | Builds the `Application` object and wires controllers, handlers, and job queue. | `logging.Logger`, `RequestMetrics`, `RedisSafeOps`, Redis connection (`kv_async`), `TableManager`, `BaseStatsService`, `PrivateMatchService`, `MessagingServiceFactory`. |
-| `PokerBotModel` | Business rules bridging Telegram updates and the game engine. | `PokerBotViewer`, `TableManager`, `BaseStatsService`, Redis (`kv`), `Config`. |
-| `PokerBotViewer` | Presentation layer for players and spectators (inline keyboards, card renders, throttled edits). | `RequestMetrics`, `MessagingService`, Telegram `Bot`. |
-| `GameEngine` | Game state machine, table orchestration, persistence, and statistics updates. | `TableManager`, `PokerBotViewer`, `WinnerDetermination`, `RequestMetrics`, `BaseStatsService`, `LockManager`, logger. |
-| Supporting Services | Infra dependencies created during bootstrap. | Redis (`kv_async`), Postgres-backed `StatsService`, metrics collectors, messaging adapters. |
+    Note over TG,GE: WAITING — lobby is open
+    TG->>PM: /start & Join button callbacks
+    PM->>TM: save_game(chat_id, game)
+    PM->>GE: request start when seats ready
 
-The bootstrap script (`main.py`) remains responsible for configuring logging,
-instantiating Redis, stats, and metrics clients, and injecting them into the
-`PokerBot` constructor. All runtime objects now share these singletons rather
-than creating ad-hoc connections internally.
+    Note over GE,MS: ROUND_PRE_FLOP setup
+    GE->>MS: start_game(context, game, chat)
+    MS->>TM: persist dealer/blind rotations
+    MS->>SS: hand_started(...)
+    MS->>TG: deal hole cards via PokerBotViewer
 
-## High-Level Architecture Diagram
+    loop Betting cycle per stage
+        Note over GE,MS: progress_stage() called
+        GE->>MS: progress_stage(context, game, chat)
+        MS->>MS: collect bets & reset has_acted
+        alt ROUND_PRE_FLOP → ROUND_FLOP
+            MS->>GE: add_cards_to_table(3)
+            GE->>TG: broadcast flop snapshot
+        else ROUND_FLOP → ROUND_TURN
+            MS->>GE: add_cards_to_table(1)
+            GE->>TG: broadcast turn snapshot
+        else ROUND_TURN → ROUND_RIVER
+            MS->>GE: add_cards_to_table(1)
+            GE->>TG: broadcast river snapshot
+        else ROUND_RIVER → FINISHED
+            MS->>GE: finalize_game(...)
+        end
+        GE->>TM: save_game(chat_id, game)
+    end
 
-```
-                  ┌───────────────────────────────┐
-                  │        main.py / bootstrap    │
-                  │  • load Config & logging      │
-                  │  • build Redis / metrics      │
-                  │  • construct StatsService     │
-                  │  • instantiate PokerBot      │
-                  └──────────────┬────────────────┘
-                                 │  injected deps
-                                 ▼
-                   ┌───────────────────────────────┐
-                   │           PokerBot            │
-                   │  • PTB Application builder    │
-                   │  • run_webhook / run_polling  │
-                   │  • controller wiring          │
-                   └──────┬───────────────┬────────┘
-                          │               │
-                          ▼               ▼
-               ┌────────────────┐   ┌────────────────┐
-               │ PokerBotModel  │   │ PokerBotViewer │
-               │ • state & DI   │   │ • UI rendering │
-               │ • GameEngine   │   │ • anchor cache │
-               └──────┬─────────┘   └────────┬───────┘
-                      │                      │
-                      ▼                      │
-               ┌────────────────┐            │
-               │  GameEngine    │◄───────────┘
-               │ • game states  │
-               │ • TableManager │
-               │ • StatsService │
-               │ • metrics/logs │
-               └────────────────┘
+    Note over GE,SS: finalize_game()
+    GE->>GE: finalize_game(context, game, chat)
+    GE->>TG: send_showdown_results()
+    GE->>SS: hand_finished(payouts, hand_labels)
+    GE->>TM: reset+save_game(chat_id, game)
+    GE->>PM: send_join_prompt() → back to WAITING
 ```
 
-### PlantUML (architecture)
+### Stage specific responsibilities
+
+| Stage | Trigger | Key responsibilities |
+| ----- | ------- | ------------------- |
+| `WAITING` | Player reactions (`/start`, inline joins) | `PlayerManager.send_join_prompt` displays the CTA. `TableManager` keeps the pending game persisted so reconnections resume correctly. |
+| `ROUND_PRE_FLOP` | `MatchmakingService.start_game` | Dealer button rotation, blind posting, hole-card dealing, statistics start hooks, `RequestMetrics.start_cycle`. |
+| `ROUND_FLOP` | `GameEngine.progress_stage` → `MatchmakingService.progress_stage` | Burn + deal three community cards, reset `has_acted` flags, notify viewers, persist table snapshot. |
+| `ROUND_TURN` | Subsequent `progress_stage` call | Deal the fourth card, refresh betting order, persist state. |
+| `ROUND_RIVER` | Subsequent `progress_stage` call | Deal the final card, determine if betting continues or hand can be settled immediately. |
+| `FINISHED` | `GameEngine.finalize_game` | Evaluate hands, distribute pot, emit statistics, clear anchors, prompt new hand. |
+
+`MatchmakingService.progress_stage` enforces stage order while holding the
+`LockManager` stage lock so that Telegram callbacks, background jobs, and rate
+limited retries cannot interleave inconsistent mutations.
+
+## Swimlane — collaborating components
+
+The following swimlane diagram captures how the main services collaborate during
+one full hand. Each lane highlights the responsibilities that the class owns or
+delegates.
 
 ```plantuml
-@startuml PokerBotArchitecture
-!pragma layout smetana
-skinparam componentStyle rectangle
-
-package "Bootstrap" {
-  [main.py]
-}
-
-component PokerBot
-component PokerBotModel
-component PokerBotViewer
-component GameEngine
-component TableManager
-component BaseStatsService as StatsService
-component RequestMetrics
-component MessagingService
-component Logger
-component Redis
-component WinnerDetermination
-
-[main.py] --> PokerBot : inject logger / metrics / redis / stats
-PokerBot --> PokerBotModel : create
-PokerBot --> PokerBotViewer : create
-PokerBot --> RequestMetrics
-PokerBot --> MessagingService
-PokerBotModel --> GameEngine : orchestrate
-PokerBotModel --> TableManager
-PokerBotModel --> StatsService
-GameEngine --> TableManager
-GameEngine --> PokerBotViewer
-GameEngine --> WinnerDetermination
-GameEngine --> StatsService
-GameEngine --> RequestMetrics
-PokerBotViewer --> MessagingService
-PokerBotViewer --> RequestMetrics
-
-Logger -[#blue]-> PokerBot
-Redis -[#blue]-> PokerBot
+@startuml GameFlowSwimlane
+|Telegram|
+start
+:Players tap /start and join buttons;
+|PlayerManager|
+:Record join intent;
+:Persist ready prompt via TableManager;
+|GameEngine|
+:detect required players;
+:acquire stage lock;
+|MatchmakingService|
+:start_game();
+:assign dealer & blinds;
+:deal_hole_cards();
+|PokerBotViewer|
+:send private hole cards;
+|GameEngine|
+:progress_stage();
+|MatchmakingService|
+:collect_bets_for_pot();
+:transition ROUND_PRE_FLOP→ROUND_FLOP;
+|PokerBotViewer|
+:announce flop;
+|GameEngine|
+:progress_stage();
+|MatchmakingService|
+:transition to turn & river;
+|PokerBotViewer|
+:update community cards;
+|GameEngine|
+:finalize_game();
+|StatsService|
+:hand_finished(payouts);
+|TableManager|
+:reset & save game;
+|PlayerManager|
+:send_join_prompt();
+|Telegram|
+:Players ready for next hand;
+stop
 @enduml
 ```
 
-## Sequence Diagram — Bot Startup & Dependency Injection
+## Supporting services referenced
 
-The following diagram traces control as bootstrap code builds the Telegram
-Application and wires the decoupled services.
+- **TableManager** keeps one `Game` object per chat persisted to Redis so that
+  reconnections and bot restarts recover ongoing hands.
+- **PlayerManager** renders the join prompt, manages seat assignments, and keeps
+  localized role labels (dealer, small blind, big blind) up to date.
+- **PokerBotViewer** is the façade around the messaging layer. It batches edits
+  and renders translated templates for table messages and anchors.
+- **StatsService** (via `StatsReporter`) records per-hand statistics and drives
+  bonus eligibility caches using `AdaptivePlayerReportCache`.
+- **RequestMetrics** records timing and outcome metadata for each major player
+  interaction so incidents can be diagnosed.
 
-```
-main.py            PokerBot           PTB Application        PokerBotViewer   PokerBotModel   GameEngine
-   |                  |                      |                     |               |              |
-   | configure cfg    |                      |                     |               |              |
-   | build logger     |                      |                     |               |              |
-   | build redis ---->| __init__             |                     |               |              |
-   | build stats ---->|  _build_application  |                     |               |              |
-   | build metrics -->|--------------------->| builder             |               |              |
-   |                  |  create viewer --------------------------->|               |              |
-   |                  |  create model ------------------------------------------->| injects      |
-   |                  |  wire controller     |                     |               |              |
-   |                  |  add handlers       |                     |               |              |
-   |                  |  return Application |                     |               |              |
-   |                  | ready to run        |                     |               |              |
-```
-
-### PlantUML (startup sequence)
-
-```plantuml
-@startuml StartupSequence
-actor Bootstrap as main
-participant PokerBot
-participant "PTB Application" as Application
-participant PokerBotViewer as Viewer
-participant PokerBotModel as Model
-participant GameEngine as Engine
-
-main -> PokerBot : __init__(token, cfg, logger, redis,...)
-activate PokerBot
-PokerBot -> PokerBot : _build_application()
-PokerBot -> Application : builder.build()
-activate Application
-PokerBot -> Viewer : create(view deps)
-activate Viewer
-Viewer --> PokerBot : instance
-deactivate Viewer
-PokerBot -> Model : create(view, table_manager, stats,...)
-activate Model
-Model -> Engine : create(table_manager, view, metrics,...)
-activate Engine
-Engine --> Model : instance
-deactivate Engine
-Model --> PokerBot : instance
-deactivate Model
-Application --> PokerBot : instance
-deactivate Application
-PokerBot --> main : ready
-@enduml
-```
-
-## Sequence Diagram — Game Start → Stage Progression → Finalization
-
-This flow describes what happens after players tap `/start` and the bot begins a
-hand.
-
-```
-Player/Telegram   PokerBotController   PokerBotModel        GameEngine           PokerBotViewer     TableManager   StatsService
-       |                |                    |                   |                     |                 |              |
-       | /start command |                    |                   |                     |                 |              |
-       |--------------->| handle_start       |                   |                     |                 |              |
-       |                |------------------->| start_game_async  |                   |                     |              |
-       |                |                    |------------------>| start_game         | send anchors ---->| persist      | hand_start
-       |                |                    |                   | deal blinds/cards  | update board      |              |
-       | bet actions    |                    | progress_stage    |------------------->| stage change      | update state |
-       |----------------|------------------->|------------------>| collect bets       | refresh anchors   | store pot    |
-       |                |                    |                   | advance GameState  | notify players    |              |
-       | showdown       |                    | finalize_game     |------------------->| final summary     | reset table  | record stats
-       |                |                    |                   | determine winners  | post winners      | cleanup      | finish_hand
-```
-
-### PlantUML (game lifecycle)
-
-```plantuml
-@startuml GameLifecycle
-actor Player
-participant PokerBotController as Controller
-participant PokerBotModel as Model
-participant GameEngine as Engine
-participant PokerBotViewer as Viewer
-participant TableManager as Tables
-participant BaseStatsService as Stats
-
-Player -> Controller : /start
-Controller -> Model : handle_start()
-Model -> Engine : start_game(context, game, chat)
-Engine -> Viewer : send_join_prompt / anchors
-Engine -> Tables : persist game state
-Engine -> Stats : record hand_start
-
-Player -> Controller : betting callbacks
-Controller -> Model : apply_action()
-Model -> Engine : progress_stage(context, chat, game)
-Engine -> Viewer : update stage anchors
-Engine -> Tables : sync stage & pot
-
-Model -> Engine : finalize_game()
-Engine -> Viewer : send_results()
-Engine -> Stats : finish_hand()
-Engine -> Tables : reset_table()
-@enduml
-```
-
-## Poker Game State Machine
-
-`GameEngine.ACTIVE_GAME_STATES` and `_progress_stage_locked` control the allowed
-transitions. The ASCII state diagram below matches the actual implementation,
-including early termination rules.
-
-```
-┌────────┐
-│WAITING │  (lobby / gathering players)
-└──┬─────┘
-   │ start_game()
-   ▼
-┌─────────────────┐
-│ROUND_PRE_FLOP   │ --deal hole cards--> assigns blinds, sets current player
-└──────┬──────────┘
-       │ progress_stage()
-       ▼
-┌─────────────────┐    ┌────────────────┐    ┌────────────────┐
-│ROUND_FLOP       │ -> │ROUND_TURN      │ -> │ROUND_RIVER     │
-└──────┬──────────┘    └──────┬─────────┘    └──────┬─────────┘
-       │ add community cards         │ add final card      │ showdown
-       ▼                             ▼                    ▼
-┌─────────────────┐
-│FINISHED         │ <- finalize_game() updates stats, payouts, summaries
-└──────┬──────────┘
-       │ reset_table()
-       ▼
-┌─────────────────┐
-│WAITING_NEW_HAND │ (anchors cleared, ready for next /start)
-└─────────────────┘
-```
-
-### PlantUML (state machine)
-
-```plantuml
-@startuml GameStateMachine
-hide empty description
-[*] --> WAITING
-WAITING --> ROUND_PRE_FLOP : start_game()
-ROUND_PRE_FLOP --> ROUND_FLOP : progress_stage()
-ROUND_FLOP --> ROUND_TURN : progress_stage()
-ROUND_TURN --> ROUND_RIVER : progress_stage()
-ROUND_RIVER --> FINISHED : finalize_game()
-FINISHED --> WAITING_NEW_HAND : reset_table()
-
-ROUND_PRE_FLOP --> FINISHED : folds or <2 contenders
-ROUND_FLOP --> FINISHED : folds or <2 contenders
-ROUND_TURN --> FINISHED : folds or <2 contenders
-ROUND_RIVER --> FINISHED : folds, showdown, bankroll zero
-@enduml
-```
-
-## Dependency Injection & Instrumentation
-
-- **Logger** — Propagated from bootstrap to `PokerBot` and further into
-  `GameEngine` for diagnostic events (stage transitions, retry warnings).
-- **Redis / TableManager** — `PokerBotModel` and `GameEngine` use the shared
-  Redis pool for persisting tables, stage locks, and ready messages. Safe
-  operations flow through `RedisSafeOps` to centralise retry policies.
-- **RequestMetrics** — Counted in `PokerBotViewer` (Telegram API throughput) and
-  `GameEngine` (stage progression, join prompts) for operational dashboards.
-- **StatsService** — Called during `start_game` (identity caching) and
-  `finalize_game` (`finish_hand`, payouts) to track leaderboard data.
-- **MessagingService** — Created by `PokerBot` and consumed by `PokerBotViewer`
-  to abstract over send/edit/delete operations with automatic retries.
-
-## In-Code Cross References
-
-New inline documentation points back to this guide:
-
-- `PokerBot` class docstring summarises dependency injection and links here.
-- `GameEngine` module docstring contains the ASCII state machine.
-- `PokerBotViewer` module docstring references the architecture and UI sections.
-- Inline comments inside `_build_application` describe how the Application wires
-  the view and model.
-
-Consult these markers to jump between code and documentation when extending the
-bot or preparing tests.
+Together these components allow the state machine to remain small and
+cohesively focused on poker rules while infra concerns (persistence, retries,
+metrics, localization) remain testable in isolation.
