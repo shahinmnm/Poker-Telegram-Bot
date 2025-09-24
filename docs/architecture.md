@@ -1,192 +1,97 @@
-# Architecture & Dependency Injection
+# Architecture Overview
 
-This guide summarises how the Telegram bot is composed at runtime, which
-infrastructure services are shared across components, and how locking is used to
-keep concurrent updates consistent.
+This document describes how the Telegram bot is wired together at runtime. The
+composition root lives inside [`pokerapp/bootstrap.py`](../pokerapp/bootstrap.py)
+and builds the long-lived services that the bot reuses for every chat. Those
+services are injected into the game model, engine, and viewers so that gameplay
+logic never relies on global singletons.
 
-The authoritative implementation lives in
-[`pokerapp/bootstrap.py`](../pokerapp/bootstrap.py). It exposes a single
-`build_services(cfg)` entry point that constructs an `ApplicationServices`
-dataclass with everything required by [`pokerapp/pokerbot.py`](../pokerapp/pokerbot.py).
-
-## Dependency injection overview
-
-Bootstrap reads configuration, sets up logging, and instantiates infrastructure
-clients once. Those singletons are then threaded through factories so higher
-layers never reach out to global state. The Mermaid graph below is generated
-from the relationships encoded inside `bootstrap.build_services`, making it a
-developer-friendly snapshot of how runtime wiring flows from configuration into
-the bot, model, and engine layers.
+## Composition root
 
 ```mermaid
 flowchart TD
     subgraph Bootstrap[bootstrap.build_services]
-        CFG[Config]
-        LOG[setup_logging]
-        REDIS[(Redis connection)]
-        OPS[RedisSafeOps]
-        TM[TableManager]
-        STATS[StatsService or NullStatsService]
-        CACHE[AdaptivePlayerReportCache]
-        REPORT_CACHE[PlayerReportCache]
+        CFG[Config & secrets]
+        LOG[Logging]
+        REDIS[(Redis pool)]
+        SAFEOPS[TelegramSafeOps factory]
+        MSG[MessagingService factory]
+        TABLE[TableManager]
+        STATS[StatsService]
+        ADAPTIVE[AdaptivePlayerReportCache]
+        CACHE[PlayerReportCache]
+        PRIVATE[PrivateMatchService]
         METRICS[RequestMetrics]
-        PRIV[PrivateMatchService]
-        MSGFACT[messaging_service_factory]
-        SAFEFACT[telegram_safeops_factory]
+        LOCKS[LockManager]
     end
 
     CFG --> LOG
     LOG --> REDIS
-    REDIS --> OPS
-    OPS --> TM
-    OPS --> PRIV
-    REDIS --> PRIV
+    REDIS --> TABLE
+    REDIS --> PRIVATE
+    REDIS --> SAFEOPS
     LOG --> STATS
-    CFG --> STATS
-    STATS --> CACHE
-    CACHE --> REPORT_CACHE
-    OPS --> REPORT_CACHE
+    STATS --> ADAPTIVE
+    ADAPTIVE --> CACHE
     LOG --> METRICS
-    METRICS --> MSGFACT
-    METRICS --> PRIV
-    REDIS --> TM
+    METRICS --> MSG
+    METRICS --> PRIVATE
+    TABLE -->|persists| REDIS
+    SAFEOPS -->|wraps| MSG
 
-    subgraph Application[PokerBot]
-        APP_SVC[ApplicationServices]
+    subgraph Application[Telegram bot]
         BOT[PokerBot]
-        VIEWER[PokerBotViewer]
         MODEL[PokerBotModel]
         ENGINE[GameEngine]
-        PM[PlayerManager]
-        MS[MatchmakingService]
-    end
-
-    Bootstrap --> APP_SVC
-    APP_SVC --> BOT
-    APP_SVC --> VIEWER
-    APP_SVC --> MODEL
-    MODEL --> ENGINE
-    ENGINE --> PM
-    ENGINE --> MS
-```
-
-The Mermaid source for this dependency-injection diagram is located at
-[`docs/diagrams/architecture_di_overview.mmd`](diagrams/architecture_di_overview.mmd).
-
-`ApplicationServices` keeps factories lightweight: the `MessagingService` and
-`TelegramSafeOps` instances are created per Telegram `Application` and receive
-shared metrics/logging dependencies automatically.
-
-## Component responsibilities & data flow
-
-```mermaid
-flowchart LR
-    subgraph Telegram Layer
-        TG[Telegram API]
         VIEW[PokerBotViewer]
-    end
-
-    subgraph Game Layer
-        MODEL[PokerBotModel]
-        ENGINE[GameEngine]
-        PM[PlayerManager]
         MATCH[MatchmakingService]
-        TABLE[TableManager]
-        STATS[StatsReporter/StatsService]
-        METRIC[RequestMetrics]
     end
 
-    subgraph Persistence
-        REDIS[(Redis)]
-        DB[(Database)]
-    end
-
-    TG <--> VIEW
-    VIEW --> MODEL : callbacks / updates
-    MODEL --> ENGINE : start_game, progress_stage, finalize_game
-    ENGINE --> MATCH : orchestration
-    MATCH --> TABLE : save_game
-    ENGINE --> TABLE
-    TABLE --> REDIS
-    ENGINE --> PM : seat/role updates
-    PM --> VIEW : join prompt & anchors
-    ENGINE --> VIEW : table snapshots
-    ENGINE --> STATS : hand_started / hand_finished
-    STATS --> DB
-    ENGINE --> METRIC : cycle tracking
-    METRIC --> REDIS : counters
+    Bootstrap --> BOT
+    BOT --> MODEL
+    MODEL --> ENGINE
+    ENGINE --> MATCH
+    ENGINE --> VIEW
 ```
 
-You can regenerate the component data-flow diagram from
-[`docs/diagrams/architecture_data_flow.mmd`](diagrams/architecture_data_flow.mmd).
+*Bootstrap* is the only module that touches raw configuration, network clients,
+or logging setup. Everything else is passed in as constructor arguments, which
+makes the poker logic easy to test and reason about.
 
-Key takeaways:
+## Core services
 
-- **PokerBot** (not shown) keeps only Telegram wiring; all poker logic lives in
-  `PokerBotModel` and `GameEngine` with collaborators injected at construction.
-- **MatchmakingService** encapsulates the stage transitions and blind handling,
-  leaving `GameEngine` to focus on higher-level orchestration and finalisation.
-- **TableManager** is the single source of truth for `Game` objects, persisting
-  snapshots to Redis and rehydrating wallets when necessary.
-- **StatsService** may be a no-op (`NullStatsService`) or a fully backed SQL
-  implementation; the interface is stable so the rest of the engine does not
-  change.
-- **MessagingService** hides Telegram retry policies and deduplication; it is
-  created through the factory stored in `ApplicationServices` so each `Bot`
-  instance is isolated while still sharing metrics counters.
+| Service | Responsibility |
+| ------- | -------------- |
+| **TableManager** | Persists `Game` snapshots in Redis, rehydrates games after bot restarts, and enforces per-chat storage isolation. |
+| **StatsService / StatsReporter** | Streams `hand_started` and `hand_finished` events into the relational database or a no-op backend, depending on configuration. |
+| **PlayerReportCache** | Provides cached leaderboard and player statistics for `/stats` requests so users see instant responses. |
+| **AdaptivePlayerReportCache** | Learns which players query stats most often and invalidates their cache entries immediately after each hand or stop vote. |
+| **PrivateMatchService** | Manages private matches, old-player reminders, and other orchestration that spans multiple hands. |
+| **MessagingService** | Encapsulates Telegram throttling, retries, and Markdown formatting. Instances are created through a factory stored in `ApplicationServices`. |
+| **TelegramSafeOps** | Wraps `MessagingService` calls with logging metadata, context-aware rate limiting, and exception handling so background tasks remain resilient. |
 
-## Lock hierarchy
+All of these services are created once by the bootstrapper and either stored
+inside `ApplicationServices` or exposed via factories for per-chat usage.
 
-`LockManager` defines acquisition levels to guard against deadlocks. Locks must
-always be taken from lowest numeric level to highest. If a coroutine already
-holds a high-level lock, it cannot attempt to take a lower-level one.
+## GameEngine dependencies
 
-```mermaid
-graph TD
-    A[global lock
-    level 0] --> B[stage lock
-    level 10]
-    B --> C[table lock
-    level 20]
-    C --> D[player lock
-    level 30]
-    D --> E[hand lock
-    level 40]
-```
+`GameEngine` receives its collaborators through dependency injection. The main
+constructor arguments are:
 
-The lock diagram is synchronised with
-[`docs/diagrams/lock_hierarchy.mmd`](diagrams/lock_hierarchy.mmd).
+- `TableManager` — source of truth for persisted `Game` objects.
+- `PokerBotViewer` — renders keyboards and status messages to Telegram.
+- `MatchmakingService` — drives stage transitions (`start_game`, `progress_stage`,
+  and dealing helpers) while holding the `LockManager` stage lock.
+- `PlayerManager` — manages seating, ready prompts, and stop votes.
+- `StatsReporter` — records `hand_started`/`hand_finished` events and invalidates
+  caches for player reports.
+- `RequestMetrics` — tracks per-stage timing and request categories for logging.
+- `TelegramSafeOps` — ensures Telegram API calls are retried safely with rich
+  logging metadata.
+- `AdaptivePlayerReportCache` — keeps frequently requested statistics fresh.
+- `LockManager` — coordinates stage/table/player locks so concurrent callbacks do
+  not corrupt game state.
 
-## Stats & reporting collaboration
-
-`StatsService` owns the database connection pool and orchestrates background
-aggregation tasks. When `bootstrap.build_services` is invoked the service either
-constructs a concrete implementation (for production) or a `NullStatsService`
-stub. Regardless of the concrete type it wires two helper caches:
-
-- **`AdaptivePlayerReportCache`** tracks the most recent statistics snapshot per
-  player and invalidates entries when hands finish. It trades memory for a
-  responsive `/stats` command even in chats with limited Redis throughput.
-- **`PlayerReportCache`** stores rendered, localised report payloads so the bot
-  can respond immediately to repeated requests within the cache TTL.
-
-`StatsService` publishes both caches via the shared `ApplicationServices`
-dataclass. `PokerBotModel` consumes the high-level interface, while
-`GameEngine.finalize_game` emits `hand_finished` events with raw payout data.
-`AdaptivePlayerReportCache` listens to those events to expire affected player
-entries, ensuring the next `/stats` call picks up the fresh totals without
-manual cache busting.
-
-Practical guidelines:
-
-1. **Stage locks** (e.g. `GameEngine._stage_lock_key`) wrap state transitions so
-   Telegram callbacks cannot mutate the same chat simultaneously.
-2. **Table locks** are used by `TableManager` to serialise persistence for a
-   given chat when multiple operations are inflight.
-3. **Player locks** guard wallet mutations and bankroll operations.
-4. **Hand locks** are reserved for expensive winner-determination or stats
-   processing that needs exclusive access to the `Game` model.
-
-When introducing new locks choose a level equal to or higher than the resource
-it protects. This keeps lock acquisition order predictable and makes the
-observability inside `LockManager`'s structured logging meaningful.
+The combination of a single composition root and constructor injection keeps the
+bot modular: new services can be swapped in (for example a different cache or
+messaging backend) without editing the poker logic itself.

@@ -12,6 +12,11 @@ The bot plays role "our admin": he divides cards, adds cards, controlls whose tu
 
 All things that we need to do is adding bot to your group chat on telegram and every member needs to press the join button at the beginning of round. Then the game will be started. Rules of the texas poker you can read briefly below:
 
+## Documentation
+
+- [Architecture overview](docs/architecture.md) — explains how `bootstrap.py` wires the runtime services and which collaborators the engine receives.
+- [Game flow](docs/game_flow.md) — visualises the state machine, lock usage, cache invalidations, and early exit paths for each hand.
+
 ## Architecture overview
 
 The production bot is split into three cooperating layers:
