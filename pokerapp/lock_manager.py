@@ -24,6 +24,7 @@ from weakref import WeakKeyDictionary
 from pokerapp.bootstrap import _make_service_logger
 from pokerapp.utils.locks import ReentrantAsyncLock
 from pokerapp.utils.logging_helpers import add_context, normalise_request_category
+from pokerapp.utils.time_utils import now_utc
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from pokerapp.config import Config
@@ -77,6 +78,7 @@ class LockManager:
         retry_backoff_seconds: float = 1,
         category_timeouts: Optional[Mapping[str, Any]] = None,
         config: Optional["Config"] = None,
+        debug_acquire_logs: bool = False,
     ) -> None:
         base_logger = add_context(logger)
         self._logger = _make_service_logger(
@@ -122,6 +124,7 @@ class LockManager:
             resolved_category_timeouts
         )
         self._metrics: Dict[str, int] = {"lock_contention": 0, "lock_timeouts": 0}
+        self._debug_acquire_logs = bool(debug_acquire_logs)
 
     async def _get_lock(self, key: str) -> ReentrantAsyncLock:
         async with self._locks_guard:
@@ -236,6 +239,26 @@ class LockManager:
         )
         current_acquisitions = self._get_current_acquisitions()
         self._validate_lock_order(current_acquisitions, key, resolved_level, context_payload)
+        acquisition_order = self._get_current_levels()
+        acquiring_extra = self._log_extra(
+            context_payload,
+            event_type="lock_acquiring",
+            lock_key=key,
+            lock_level=resolved_level,
+            acquisition_order=acquisition_order,
+        )
+        acquiring_extra.setdefault("lock_name", context_payload.get("lock_name", key))
+        acquiring_extra.setdefault("chat_id", context_payload.get("chat_id"))
+        acquiring_extra.setdefault("lock_level", resolved_level)
+        acquiring_extra["order"] = acquisition_order
+        acquiring_extra["lock_category"] = self._resolve_lock_category(key)
+        acquiring_extra["start_timestamp"] = now_utc().isoformat()
+        log_method = (
+            self._logger.debug
+            if getattr(self, "_debug_acquire_logs", False)
+            else self._logger.info
+        )
+        log_method("Acquiring lock", extra=acquiring_extra)
 
         total_timeout = self._resolve_timeout(key, timeout)
         deadline: Optional[float]
