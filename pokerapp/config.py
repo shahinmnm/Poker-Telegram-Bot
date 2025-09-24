@@ -17,6 +17,8 @@ _BASE_DIR = Path(__file__).resolve().parent.parent
 _DEFAULT_CONFIG_DIR = _BASE_DIR / "config"
 _DEFAULT_GAME_CONSTANTS_PATH = _DEFAULT_CONFIG_DIR / "game_constants.yaml"
 _DEFAULT_SYSTEM_CONSTANTS_PATH = _DEFAULT_CONFIG_DIR / "system_constants.json"
+_DEFAULT_TRANSLATIONS_PATH = _DEFAULT_CONFIG_DIR / "data" / "translations.json"
+_DEFAULT_REDIS_KEYS_PATH = _DEFAULT_CONFIG_DIR / "data" / "redis_keys.json"
 
 _DEFAULT_GAME_CONSTANTS_DATA: Dict[str, Any] = {
     "game": {
@@ -81,6 +83,15 @@ _DEFAULT_SYSTEM_CONSTANTS_DATA: Dict[str, Any] = {
     "default_timezone_name": "Asia/Tehran",
 }
 
+_DEFAULT_TRANSLATIONS_DATA: Dict[str, Any] = {"default_language": "fa"}
+
+_DEFAULT_REDIS_KEYS_DATA: Dict[str, Any] = {
+    "engine": {
+        "stage_lock_prefix": "stage:",
+        "stop_request": "stop_request",
+    }
+}
+
 
 def _resolve_config_path(candidate: Optional[str], default: Path) -> Path:
     if not candidate:
@@ -109,6 +120,10 @@ class GameConstants:
         path: Optional[str] = None,
         *,
         defaults: Optional[Dict[str, Any]] = None,
+        translations_path: Optional[str] = None,
+        redis_keys_path: Optional[str] = None,
+        translation_defaults: Optional[Dict[str, Any]] = None,
+        redis_key_defaults: Optional[Dict[str, Any]] = None,
     ) -> None:
         resolved_path = _resolve_config_path(
             path or os.getenv("POKERBOT_GAME_CONSTANTS_FILE"),
@@ -116,7 +131,23 @@ class GameConstants:
         )
         self._path: Path = resolved_path
         self._defaults: Dict[str, Any] = deepcopy(defaults or _DEFAULT_GAME_CONSTANTS_DATA)
+        self._translations_path: Path = _resolve_config_path(
+            translations_path or os.getenv("POKERBOT_TRANSLATIONS_FILE"),
+            _DEFAULT_TRANSLATIONS_PATH,
+        )
+        self._redis_keys_path: Path = _resolve_config_path(
+            redis_keys_path or os.getenv("POKERBOT_REDIS_KEYS_FILE"),
+            _DEFAULT_REDIS_KEYS_PATH,
+        )
+        self._translation_defaults: Dict[str, Any] = deepcopy(
+            translation_defaults or _DEFAULT_TRANSLATIONS_DATA
+        )
+        self._redis_key_defaults: Dict[str, Any] = deepcopy(
+            redis_key_defaults or _DEFAULT_REDIS_KEYS_DATA
+        )
         self._data: Dict[str, Any] = {}
+        self._translations: Dict[str, Any] = {}
+        self._redis_keys: Dict[str, Any] = {}
         self.reload()
 
     @property
@@ -166,6 +197,66 @@ class GameConstants:
         if raw_data:
             merged = _deep_merge(merged, raw_data)
         self._data = merged
+        self._translations = self._load_json_resource(
+            path=self._translations_path,
+            defaults=self._translation_defaults,
+            stage="translations_load",
+        )
+        self._redis_keys = self._load_json_resource(
+            path=self._redis_keys_path,
+            defaults=self._redis_key_defaults,
+            stage="redis_keys_load",
+        )
+
+    def _load_json_resource(
+        self,
+        *,
+        path: Path,
+        defaults: Dict[str, Any],
+        stage: str,
+    ) -> Dict[str, Any]:
+        loaded: Dict[str, Any] = {}
+        try:
+            with path.open("r", encoding="utf-8") as handle:
+                parsed = json.load(handle)
+            if isinstance(parsed, dict):
+                loaded = parsed
+            else:
+                logger.warning(
+                    "JSON resource did not contain an object; using defaults.",
+                    extra={
+                        "category": "config",
+                        "config_path": str(path),
+                        "stage": stage,
+                        "error_type": "InvalidMapping",
+                    },
+                )
+        except FileNotFoundError:
+            logger.warning(
+                "JSON resource file not found; using default values.",
+                extra={
+                    "category": "config",
+                    "config_path": str(path),
+                    "stage": stage,
+                    "error_type": "FileNotFoundError",
+                },
+            )
+        except json.JSONDecodeError as exc:
+            logger.warning(
+                "Failed to parse JSON resource; using defaults.",
+                extra={
+                    "category": "config",
+                    "config_path": str(path),
+                    "stage": stage,
+                    "error_type": type(exc).__name__,
+                },
+                exc_info=True,
+            )
+
+        merged = deepcopy(defaults)
+        if loaded:
+            merged = _deep_merge(merged, loaded)
+        return merged
 
     def get(self, key: str, default: Any = None) -> Any:
         value = self._data.get(key, default)
@@ -192,6 +283,14 @@ class GameConstants:
     @property
     def engine(self) -> Dict[str, Any]:
         return self.section("engine")
+
+    @property
+    def translations(self) -> Dict[str, Any]:
+        return deepcopy(self._translations)
+
+    @property
+    def redis_keys(self) -> Dict[str, Any]:
+        return deepcopy(self._redis_keys)
 
 
 def _load_system_constants() -> Dict[str, Any]:

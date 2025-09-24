@@ -8,19 +8,40 @@ from typing import Iterable, Optional
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
 from pokerapp.entities import ChatId, Game, GameState, Player, UserId
+from pokerapp.config import get_game_constants
 from pokerapp.pokerbotview import PokerBotViewer
 from pokerapp.table_manager import TableManager
+
+
+_CONSTANTS = get_game_constants()
+_TRANSLATIONS = _CONSTANTS.translations
+_DEFAULT_LANGUAGE = _TRANSLATIONS.get("default_language", "fa")
+_LANGUAGE_ORDER = tuple(dict.fromkeys([_DEFAULT_LANGUAGE, "fa", "en"]))
+_ROLE_TRANSLATIONS = _TRANSLATIONS.get("roles", {})
+
+
+def _resolve_role_label(key: str, fallback: str) -> str:
+    entry = _ROLE_TRANSLATIONS.get(key, {})
+    if isinstance(entry, dict):
+        for lang in _LANGUAGE_ORDER:
+            text = entry.get(lang)
+            if isinstance(text, str) and text:
+                return text
+    return fallback
+
+
+_ROLE_LABELS = {
+    "dealer": _resolve_role_label("dealer", "Dealer"),
+    "small_blind": _resolve_role_label("small_blind", "Small blind"),
+    "big_blind": _resolve_role_label("big_blind", "Big blind"),
+    "player": _resolve_role_label("player", "Player"),
+}
 
 
 class PlayerManager:
     """Coordinate player seating, role assignment, and anchor maintenance."""
 
-    ROLE_TRANSLATIONS = {
-        "dealer": "دیلر",
-        "small_blind": "بلایند کوچک",
-        "big_blind": "بلایند بزرگ",
-        "player": "بازیکن",
-    }
+    ROLE_TRANSLATIONS = _ROLE_LABELS
 
     def __init__(
         self,

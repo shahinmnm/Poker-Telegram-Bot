@@ -3,7 +3,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from pokerapp.entities import Game, GameState, Player
+from pokerapp.entities import Game, GameState, Player, PlayerState
 from pokerapp.game_engine import GameEngine
 
 
@@ -131,8 +131,40 @@ async def test_reset_game_state_clears_pot_and_persists(game_engine_setup):
     game_engine_setup.player_manager.clear_player_anchors.assert_awaited_once_with(game)
     game_engine_setup.table_manager.save_game.assert_awaited_once_with(-400, game)
     game_engine_setup.view.send_message.assert_awaited_once_with(
-        -400, "🛑 بازی متوقف شد."
+        -400, GameEngine.STOPPED_NOTIFICATION
     )
+
+
+def test_render_stop_request_message_uses_translations(game_engine_setup):
+    engine = game_engine_setup.engine
+    game = Game()
+    player = Player(user_id=1, mention_markdown="@one", wallet=None, ready_message_id=None)
+    player.state = PlayerState.ACTIVE
+    game.add_player(player, seat_index=0)
+    game.state = GameState.ROUND_FLOP
+
+    stop_request = {
+        "active_players": [1],
+        "votes": {1},
+        "initiator": 1,
+        "message_id": None,
+        "manager_override": False,
+    }
+
+    context = SimpleNamespace(chat_data={})
+
+    message = engine.render_stop_request_message(
+        game=game,
+        stop_request=stop_request,
+        context=context,
+    )
+
+    lines = message.splitlines()
+    assert lines[0] == GameEngine.STOP_TITLE_TEMPLATE
+    assert lines[1] == GameEngine.STOP_INITIATED_BY_TEMPLATE.format(
+        initiator=player.mention_markdown
+    )
+    assert GameEngine.STOP_ACTIVE_PLAYERS_LABEL in lines
 
 
 @pytest.mark.asyncio

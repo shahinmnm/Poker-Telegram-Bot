@@ -78,6 +78,13 @@ _GAME_CONSTANTS = get_game_constants()
 _GAME_SECTION = _GAME_CONSTANTS.game
 _UI_SECTION = _GAME_CONSTANTS.ui
 _ENGINE_SECTION = _GAME_CONSTANTS.engine
+_REDIS_KEYS = _GAME_CONSTANTS.redis_keys
+if isinstance(_REDIS_KEYS, dict):
+    _ENGINE_REDIS_KEYS = _REDIS_KEYS.get("engine", {})
+    if not isinstance(_ENGINE_REDIS_KEYS, dict):
+        _ENGINE_REDIS_KEYS = {}
+else:
+    _ENGINE_REDIS_KEYS = {}
 
 DICE_MULT = int(_GAME_SECTION.get("dice_mult", 10))
 DICE_DELAY_SEC = int(_GAME_SECTION.get("dice_delay_sec", 5))
@@ -101,6 +108,11 @@ KEY_STOP_REQUEST = GameEngine.KEY_STOP_REQUEST
 
 STOP_CONFIRM_CALLBACK = GameEngine.STOP_CONFIRM_CALLBACK
 STOP_RESUME_CALLBACK = GameEngine.STOP_RESUME_CALLBACK
+
+STAGE_LOCK_PREFIX = _ENGINE_REDIS_KEYS.get(
+    "stage_lock_prefix",
+    GameEngine.STAGE_LOCK_PREFIX,
+)
 
 # MAX_PLAYERS = 8 (Defined in entities)
 # MIN_PLAYERS = 2 (Defined in entities)
@@ -1246,7 +1258,7 @@ class PokerBotModel:
         """پیام نوبت را ارسال کرده و شناسه آن را برای حذف در آینده ذخیره می‌کند."""
         async with self._chat_guard(chat_id):
             async with self._lock_manager.guard(
-                f"stage:{self._safe_int(chat_id)}", timeout=10
+                f"{STAGE_LOCK_PREFIX}{self._safe_int(chat_id)}", timeout=10
             ):
                 game.chat_id = chat_id
                 await self._view.update_player_anchors_and_keyboards(game)
