@@ -4,6 +4,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+from pokerapp.config import Config
 from pokerapp.entities import Game, GameState, Player
 from pokerapp.matchmaking_service import MatchmakingService
 
@@ -94,6 +95,35 @@ def test_ensure_dealer_position_advances_to_occupied_seat(matchmaking_setup):
 
     assert service._ensure_dealer_position(game) is True
     assert game.dealer_index == 0
+
+
+def test_ensure_dealer_position_allows_debug_dummy(monkeypatch, matchmaking_setup):
+    monkeypatch.setenv("POKERBOT_ALLOW_EMPTY_DEALER", "1")
+    cfg = Config()
+    logger = MagicMock()
+
+    service = MatchmakingService(
+        view=matchmaking_setup.view,
+        round_rate=matchmaking_setup.round_rate,
+        request_metrics=matchmaking_setup.request_metrics,
+        player_manager=matchmaking_setup.player_manager,
+        stats_reporter=matchmaking_setup.stats_reporter,
+        lock_manager=matchmaking_setup.lock_manager,
+        send_turn_message=matchmaking_setup.send_turn_message,
+        safe_int=int,
+        old_players_key="old_players",
+        logger=logger,
+        config=cfg,
+    )
+
+    game = Game()
+    game.seats = [None for _ in game.seats]
+    game.dealer_index = -1
+
+    assert service._ensure_dealer_position(game) is True
+    assert game.dealer_index == 0
+    assert isinstance(game.seats[0], Player)
+    assert logger.debug.called
 
 
 @pytest.mark.asyncio

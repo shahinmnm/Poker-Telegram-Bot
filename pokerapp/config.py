@@ -640,6 +640,13 @@ class Config:
         self.ALLOWED_UPDATES: Optional[List[str]] = self._parse_allowed_updates(
             allowed_updates_raw
         )
+        allow_empty_dealer_raw = os.getenv("POKERBOT_ALLOW_EMPTY_DEALER")
+        allow_empty_dealer = False
+        if allow_empty_dealer_raw is not None:
+            allow_empty_dealer = (
+                allow_empty_dealer_raw.strip().lower() in {"1", "true", "yes", "on"}
+            )
+        self.ALLOW_EMPTY_DEALER: bool = self.DEBUG or allow_empty_dealer
         max_connections_raw, max_connections_source = self._get_first_nonempty_env(
             "POKERBOT_WEBHOOK_MAX_CONNECTIONS",
             "POKERBOT_MAX_CONNECTIONS",
