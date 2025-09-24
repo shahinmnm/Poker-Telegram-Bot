@@ -319,6 +319,263 @@ async def test_process_showdown_results_handles_empty_winners():
 
 
 @pytest.mark.asyncio
+async def test_handle_winners_returns_payouts_and_labels_for_showdown():
+    view = _build_view_mock()
+    bot = MagicMock()
+    cfg = MagicMock(DEBUG=False)
+    cfg.constants = get_game_constants()
+    kv = fakeredis.aioredis.FakeRedis()
+    table_manager = MagicMock()
+    stats = _build_stats_service()
+
+    private_match_service = _make_private_match_service(kv, table_manager)
+    model = PokerBotModel(
+        view=view,
+        bot=bot,
+        cfg=cfg,
+        kv=kv,
+        table_manager=table_manager,
+        private_match_service=private_match_service,
+        stats_service=stats,
+    )
+
+    engine = model._game_engine
+    engine._evaluate_contender_hands = MagicMock(return_value=[{"player": None}])
+    engine._determine_winners = MagicMock(return_value=[{"amount": 100, "winners": []}])
+
+    active_player = Player(
+        user_id=999,
+        mention_markdown="@active",
+        wallet=_make_wallet_mock(0),
+        ready_message_id="ready-a",
+    )
+    active_player.state = PlayerState.ACTIVE
+    folded_player = Player(
+        user_id=500,
+        mention_markdown="@folded",
+        wallet=_make_wallet_mock(0),
+        ready_message_id="ready-f",
+    )
+    folded_player.state = PlayerState.FOLD
+
+    game = Game()
+    game.add_player(active_player, seat_index=0)
+    game.add_player(folded_player, seat_index=1)
+
+    async def fake_showdown(
+        game: Game,
+        winner_data: Dict[str, object],
+        *,
+        payouts: Dict[int, int],
+        hand_labels: Dict[int, Optional[str]],
+        chat_id: int,
+    ) -> None:
+        payouts[active_player.user_id] += 75
+        hand_labels[active_player.user_id] = "label"
+
+    engine._process_showdown_results = AsyncMock(side_effect=fake_showdown)
+
+    chat_id = -1234
+    payouts, hand_labels = await engine._handle_winners(game=game, chat_id=chat_id)
+
+    assert payouts[active_player.user_id] == 75
+    assert hand_labels[active_player.user_id] == "label"
+    engine._evaluate_contender_hands.assert_called_once()
+    engine._determine_winners.assert_called_once()
+    engine._process_showdown_results.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_handle_winners_invokes_fold_processor_when_no_contenders():
+    view = _build_view_mock()
+    bot = MagicMock()
+    cfg = MagicMock(DEBUG=False)
+    cfg.constants = get_game_constants()
+    kv = fakeredis.aioredis.FakeRedis()
+    table_manager = MagicMock()
+    stats = _build_stats_service()
+
+    private_match_service = _make_private_match_service(kv, table_manager)
+    model = PokerBotModel(
+        view=view,
+        bot=bot,
+        cfg=cfg,
+        kv=kv,
+        table_manager=table_manager,
+        private_match_service=private_match_service,
+        stats_service=stats,
+    )
+
+    engine = model._game_engine
+    engine._process_fold_win = AsyncMock()
+
+    folded_player = Player(
+        user_id=2000,
+        mention_markdown="@folded",
+        wallet=_make_wallet_mock(0),
+        ready_message_id="ready-f",
+    )
+    folded_player.state = PlayerState.FOLD
+
+    game = Game()
+    game.add_player(folded_player, seat_index=0)
+
+    payouts, hand_labels = await engine._handle_winners(game=game, chat_id=-4321)
+
+    engine._process_fold_win.assert_awaited_once()
+    assert isinstance(payouts, defaultdict)
+    assert dict(payouts) == {}
+    assert hand_labels == {}
+
+
+@pytest.mark.asyncio
+async def test_payout_delegates_to_distribute_payouts():
+    view = _build_view_mock()
+    bot = MagicMock()
+    cfg = MagicMock(DEBUG=False)
+    cfg.constants = get_game_constants()
+    kv = fakeredis.aioredis.FakeRedis()
+    table_manager = MagicMock()
+    stats = _build_stats_service()
+
+    private_match_service = _make_private_match_service(kv, table_manager)
+    model = PokerBotModel(
+        view=view,
+        bot=bot,
+        cfg=cfg,
+        kv=kv,
+        table_manager=table_manager,
+        private_match_service=private_match_service,
+        stats_service=stats,
+    )
+
+    engine = model._game_engine
+    engine._distribute_payouts = AsyncMock()
+
+    payouts = defaultdict(int)
+    payouts[1] = 100
+    game = Game()
+
+    await engine._payout(game=game, payouts=payouts)
+
+    engine._distribute_payouts.assert_awaited_once()
+    args, kwargs = engine._distribute_payouts.await_args
+    assert args[0] is game
+    assert args[1] is payouts
+    assert kwargs == {}
+
+
+@pytest.mark.asyncio
+async def test_announce_results_updates_cache_and_stats():
+    view = _build_view_mock()
+    bot = MagicMock()
+    cfg = MagicMock(DEBUG=False)
+    cfg.constants = get_game_constants()
+    kv = fakeredis.aioredis.FakeRedis()
+    table_manager = MagicMock()
+    stats = _build_stats_service()
+
+    private_match_service = _make_private_match_service(kv, table_manager)
+    model = PokerBotModel(
+        view=view,
+        bot=bot,
+        cfg=cfg,
+        kv=kv,
+        table_manager=table_manager,
+        private_match_service=private_match_service,
+        stats_service=stats,
+    )
+
+    engine = model._game_engine
+    engine._invalidate_adaptive_report_cache = MagicMock()
+    engine._stats_reporter.hand_finished = AsyncMock()
+
+    game = Game()
+    player = Player(
+        user_id=7,
+        mention_markdown="@player",
+        wallet=_make_wallet_mock(0),
+        ready_message_id="ready",
+    )
+    players_snapshot = [player]
+    payouts = {7: 40}
+    hand_labels = {7: "label"}
+
+    await engine._announce_results(
+        game=game,
+        chat_id=-99,
+        payouts=payouts,
+        hand_labels=hand_labels,
+        pot_total=150,
+        players_snapshot=players_snapshot,
+    )
+
+    engine._invalidate_adaptive_report_cache.assert_called_once_with(
+        players_snapshot, event_type="hand_finished"
+    )
+    engine._stats_reporter.hand_finished.assert_awaited_once_with(
+        game,
+        -99,
+        payouts=payouts,
+        hand_labels=hand_labels,
+        pot_total=150,
+    )
+
+
+@pytest.mark.asyncio
+async def test_reset_state_resets_game_and_prompts_players():
+    view = _build_view_mock()
+    bot = MagicMock()
+    cfg = MagicMock(DEBUG=False)
+    cfg.constants = get_game_constants()
+    kv = fakeredis.aioredis.FakeRedis()
+    table_manager = MagicMock()
+    stats = _build_stats_service()
+
+    private_match_service = _make_private_match_service(kv, table_manager)
+    model = PokerBotModel(
+        view=view,
+        bot=bot,
+        cfg=cfg,
+        kv=kv,
+        table_manager=table_manager,
+        private_match_service=private_match_service,
+        stats_service=stats,
+    )
+
+    engine = model._game_engine
+    engine._reset_game_state = AsyncMock()
+    engine._telegram_ops.send_message_safe = AsyncMock()
+    engine._player_manager.send_join_prompt = AsyncMock()
+
+    game = Game()
+    context = SimpleNamespace(chat_data={})
+    chat_id = -55
+    game_id = 321
+
+    await engine._reset_state(
+        game=game,
+        context=context,
+        chat_id=chat_id,
+        game_id=game_id,
+    )
+
+    engine._reset_game_state.assert_awaited_once_with(
+        game,
+        context=context,
+        chat_id=chat_id,
+        send_stop_notification=False,
+    )
+    engine._telegram_ops.send_message_safe.assert_awaited_once()
+    _, kwargs = engine._telegram_ops.send_message_safe.await_args
+    assert kwargs["chat_id"] == chat_id
+    assert kwargs["operation"] == "send_new_hand_ready_message"
+    assert callable(kwargs["call"])
+    assert kwargs["log_extra"]["game_id"] == game_id
+    engine._player_manager.send_join_prompt.assert_awaited_once_with(game, chat_id)
+
+
+@pytest.mark.asyncio
 async def test_distribute_payouts_updates_wallets():
     view = _build_view_mock()
     bot = MagicMock()

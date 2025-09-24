@@ -17,7 +17,18 @@ import asyncio
 import datetime
 import logging
 from collections import defaultdict
-from typing import Any, Awaitable, Callable, Dict, Iterable, List, Optional, Set, Tuple
+from typing import (
+    Any,
+    Awaitable,
+    Callable,
+    DefaultDict,
+    Dict,
+    Iterable,
+    List,
+    Optional,
+    Set,
+    Tuple,
+)
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes
 from telegram.helpers import mention_markdown as format_mention_markdown
@@ -520,78 +531,134 @@ class GameEngine:
         async with self._lock_manager.guard(
             self._stage_lock_key(chat_id), timeout=10
         ):
-            contenders = game.players_by(states=(PlayerState.ACTIVE, PlayerState.ALL_IN))
             game.chat_id = chat_id
             players_snapshot = list(game.players)
 
             await self._clear_game_messages(game, chat_id)
 
             pot_total = game.pot
-            payouts: Dict[int, int] = defaultdict(int)
-            hand_labels: Dict[int, Optional[str]] = {}
             game_id = getattr(game, "id", None)
 
-            folded_player_ids = [
-                player.user_id for player in game.players_by(states=(PlayerState.FOLD,))
-            ]
-
-            if not contenders:
-                await self._process_fold_win(
-                    game,
-                    folded_player_ids,
-                    payouts=payouts,
-                    hand_labels=hand_labels,
-                    chat_id=chat_id,
-                )
-            else:
-                contender_details = self._evaluate_contender_hands(game, contenders)
-                winners_by_pot = self._determine_winners(game, contender_details)
-                winner_data = {
-                    "contender_details": contender_details,
-                    "winners_by_pot": winners_by_pot,
-                }
-                await self._process_showdown_results(
-                    game,
-                    winner_data,
-                    payouts=payouts,
-                    hand_labels=hand_labels,
-                    chat_id=chat_id,
-                )
-
-            await self._distribute_payouts(game, payouts)
-
-            self._invalidate_adaptive_report_cache(
-                players_snapshot, event_type="hand_finished"
+            payouts, hand_labels = await self._handle_winners(
+                game=game,
+                chat_id=chat_id,
             )
 
-            await self._stats_reporter.hand_finished(
-                game,
-                chat_id,
+            await self._payout(game=game, payouts=payouts)
+
+            await self._announce_results(
+                game=game,
+                chat_id=chat_id,
                 payouts=dict(payouts),
                 hand_labels=hand_labels,
                 pot_total=pot_total,
+                players_snapshot=players_snapshot,
             )
 
-            await self._reset_game_state(
-                game,
+            await self._reset_state(
+                game=game,
                 context=context,
                 chat_id=chat_id,
-                send_stop_notification=False,
+                game_id=game_id,
             )
 
-            await self._telegram_ops.send_message_safe(
-                call=lambda: self._view.send_new_hand_ready_message(chat_id),
+    async def _handle_winners(
+        self,
+        *,
+        game: Game,
+        chat_id: ChatId,
+    ) -> Tuple[DefaultDict[int, int], Dict[int, Optional[str]]]:
+        payouts: DefaultDict[int, int] = defaultdict(int)
+        hand_labels: Dict[int, Optional[str]] = {}
+
+        contenders = game.players_by(states=(PlayerState.ACTIVE, PlayerState.ALL_IN))
+        folded_player_ids = [
+            player.user_id for player in game.players_by(states=(PlayerState.FOLD,))
+        ]
+
+        if not contenders:
+            await self._process_fold_win(
+                game,
+                folded_player_ids,
+                payouts=payouts,
+                hand_labels=hand_labels,
                 chat_id=chat_id,
-                operation="send_new_hand_ready_message",
-                log_extra=self._build_telegram_log_extra(
-                    chat_id=chat_id,
-                    message_id=None,
-                    game_id=game_id,
-                    operation="send_new_hand_ready_message",
-                    request_category=RequestCategory.GENERAL,
-                ),
             )
-            await self._player_manager.send_join_prompt(game, chat_id)
+            return payouts, hand_labels
+
+        contender_details = self._evaluate_contender_hands(game, contenders)
+        winners_by_pot = self._determine_winners(game, contender_details)
+        winner_data = {
+            "contender_details": contender_details,
+            "winners_by_pot": winners_by_pot,
+        }
+        await self._process_showdown_results(
+            game,
+            winner_data,
+            payouts=payouts,
+            hand_labels=hand_labels,
+            chat_id=chat_id,
+        )
+        return payouts, hand_labels
+
+    async def _payout(
+        self,
+        *,
+        game: Game,
+        payouts: DefaultDict[int, int],
+    ) -> None:
+        await self._distribute_payouts(game, payouts)
+
+    async def _announce_results(
+        self,
+        *,
+        game: Game,
+        chat_id: ChatId,
+        payouts: Dict[int, int],
+        hand_labels: Dict[int, Optional[str]],
+        pot_total: int,
+        players_snapshot: Iterable[Player],
+    ) -> None:
+        self._invalidate_adaptive_report_cache(
+            players_snapshot, event_type="hand_finished"
+        )
+
+        await self._stats_reporter.hand_finished(
+            game,
+            chat_id,
+            payouts=payouts,
+            hand_labels=hand_labels,
+            pot_total=pot_total,
+        )
+
+    async def _reset_state(
+        self,
+        *,
+        game: Game,
+        context: ContextTypes.DEFAULT_TYPE,
+        chat_id: ChatId,
+        game_id: Optional[int],
+    ) -> None:
+        await self._reset_game_state(
+            game,
+            context=context,
+            chat_id=chat_id,
+            send_stop_notification=False,
+        )
+
+        await self._telegram_ops.send_message_safe(
+            call=lambda: self._view.send_new_hand_ready_message(chat_id),
+            chat_id=chat_id,
+            operation="send_new_hand_ready_message",
+            log_extra=self._build_telegram_log_extra(
+                chat_id=chat_id,
+                message_id=None,
+                game_id=game_id,
+                operation="send_new_hand_ready_message",
+                request_category=RequestCategory.GENERAL,
+            ),
+        )
+        await self._player_manager.send_join_prompt(game, chat_id)
 
     async def _process_fold_win(
         self,
