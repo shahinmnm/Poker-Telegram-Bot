@@ -1,0 +1,41 @@
+@startuml GameFlowSwimlane
+|Telegram|
+start
+:Players tap /start and join buttons;
+|PlayerManager|
+:Record join intent;
+:Persist ready prompt via TableManager;
+|GameEngine|
+:detect required players;
+:acquire stage lock;
+|MatchmakingService|
+:start_game();
+:assign dealer & blinds;
+:deal_hole_cards();
+|PokerBotViewer|
+:send private hole cards;
+|GameEngine|
+:progress_stage();
+|MatchmakingService|
+:collect_bets_for_pot();
+:transition ROUND_PRE_FLOP→ROUND_FLOP;
+|PokerBotViewer|
+:announce flop;
+|GameEngine|
+:progress_stage();
+|MatchmakingService|
+:transition to turn & river;
+|PokerBotViewer|
+:update community cards;
+|GameEngine|
+:finalize_game();
+|StatsService|
+:hand_finished(payouts);
+|TableManager|
+:reset & save game;
+|PlayerManager|
+:send_join_prompt();
+|Telegram|
+:Players ready for next hand;
+stop
+@enduml

@@ -1,0 +1,45 @@
+sequenceDiagram
+    autonumber
+    participant TG as Telegram
+    participant PM as PlayerManager
+    participant GE as GameEngine
+    participant MS as MatchmakingService
+    participant TM as TableManager
+    participant SS as StatsService/Reporter
+
+    Note over TG,GE: WAITING — lobby is open
+    TG->>PM: /start & Join button callbacks
+    PM->>TM: save_game(chat_id, game)
+    PM->>GE: request start when seats ready
+
+    Note over GE,MS: ROUND_PRE_FLOP setup
+    GE->>MS: start_game(context, game, chat)
+    MS->>TM: persist dealer/blind rotations
+    MS->>SS: hand_started(...)
+    MS->>TG: deal hole cards via PokerBotViewer
+
+    loop Betting cycle per stage
+        Note over GE,MS: progress_stage() called
+        GE->>MS: progress_stage(context, game, chat)
+        MS->>MS: collect bets & reset has_acted
+        alt ROUND_PRE_FLOP → ROUND_FLOP
+            MS->>GE: add_cards_to_table(3)
+            GE->>TG: broadcast flop snapshot
+        else ROUND_FLOP → ROUND_TURN
+            MS->>GE: add_cards_to_table(1)
+            GE->>TG: broadcast turn snapshot
+        else ROUND_TURN → ROUND_RIVER
+            MS->>GE: add_cards_to_table(1)
+            GE->>TG: broadcast river snapshot
+        else ROUND_RIVER → FINISHED
+            MS->>GE: finalize_game(...)
+        end
+        GE->>TM: save_game(chat_id, game)
+    end
+
+    Note over GE,SS: finalize_game()
+    GE->>GE: finalize_game(context, game, chat)
+    GE->>TG: send_showdown_results()
+    GE->>SS: hand_finished(payouts, hand_labels)
+    GE->>TM: reset+save_game(chat_id, game)
+    GE->>PM: send_join_prompt() → back to WAITING

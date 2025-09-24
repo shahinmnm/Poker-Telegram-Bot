@@ -1,0 +1,49 @@
+flowchart TD
+    subgraph Bootstrap[bootstrap.build_services]
+        CFG[Config]
+        LOG[setup_logging]
+        REDIS[(Redis connection)]
+        OPS[RedisSafeOps]
+        TM[TableManager]
+        STATS[StatsService or NullStatsService]
+        CACHE[AdaptivePlayerReportCache]
+        REPORT_CACHE[PlayerReportCache]
+        METRICS[RequestMetrics]
+        PRIV[PrivateMatchService]
+        MSGFACT[messaging_service_factory]
+        SAFEFACT[telegram_safeops_factory]
+    end
+
+    CFG --> LOG
+    LOG --> REDIS
+    REDIS --> OPS
+    OPS --> TM
+    OPS --> PRIV
+    REDIS --> PRIV
+    LOG --> STATS
+    CFG --> STATS
+    STATS --> CACHE
+    CACHE --> REPORT_CACHE
+    OPS --> REPORT_CACHE
+    LOG --> METRICS
+    METRICS --> MSGFACT
+    METRICS --> PRIV
+    REDIS --> TM
+
+    subgraph Application[PokerBot]
+        APP_SVC[ApplicationServices]
+        BOT[PokerBot]
+        VIEWER[PokerBotViewer]
+        MODEL[PokerBotModel]
+        ENGINE[GameEngine]
+        PM[PlayerManager]
+        MS[MatchmakingService]
+    end
+
+    Bootstrap --> APP_SVC
+    APP_SVC --> BOT
+    APP_SVC --> VIEWER
+    APP_SVC --> MODEL
+    MODEL --> ENGINE
+    ENGINE --> PM
+    ENGINE --> MS

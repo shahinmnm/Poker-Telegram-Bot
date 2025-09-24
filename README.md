@@ -30,7 +30,9 @@ The new dependency-injection centric architecture is documented in depth inside
 [`docs/architecture.md`](docs/architecture.md), including Mermaid diagrams that
 illustrate how `bootstrap.py` wires shared services. For a visual walkthrough of
 the per-hand lifecycle consult [`docs/game_flow.md`](docs/game_flow.md), which
-contains sequence and swimlane diagrams of the round progression.
+contains sequence and swimlane diagrams of the round progression. All diagram
+sources live under [`docs/diagrams/`](docs/diagrams) so they can be regenerated
+without editing the Markdown guides.
 
 ## Game flow reference
 
