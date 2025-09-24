@@ -215,11 +215,15 @@ class PokerBotModel:
             post_hand_ttl=_resolve_ttl("PLAYER_REPORT_TTL_POST_HAND", 45),
         )
         cfg_timezone = getattr(cfg, "TIMEZONE_NAME", DEFAULT_TIMEZONE_NAME)
+        if not isinstance(cfg_timezone, str) or not cfg_timezone.strip():
+            cfg_timezone = DEFAULT_TIMEZONE_NAME
         if stats_service is not None:
             self._stats: BaseStatsService = stats_service
             cfg_timezone = getattr(stats_service, "timezone_name", cfg_timezone)
         else:
             self._stats = NullStatsService(timezone_name=cfg_timezone)
+        if not isinstance(cfg_timezone, str) or not cfg_timezone.strip():
+            cfg_timezone = DEFAULT_TIMEZONE_NAME
         self._timezone_name = cfg_timezone
         self._stats.bind_player_report_cache(self._player_report_cache)
         self._lock_manager = LockManager(

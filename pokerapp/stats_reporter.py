@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import logging
-from typing import Callable, Dict, Iterable, Optional, Sequence, Set
+from typing import Callable, Dict, Iterable, Optional, Sequence
 
 from pokerapp.entities import ChatId, Game, Player, PlayerState
 from pokerapp.stats import (
@@ -15,6 +15,7 @@ from pokerapp.stats import (
 from pokerapp.utils.player_report_cache import (
     PlayerReportCache as RedisPlayerReportCache,
 )
+from pokerapp.utils.common import normalize_player_ids
 from pokerapp.utils.cache import AdaptivePlayerReportCache
 
 
@@ -93,18 +94,7 @@ class StatsReporter:
     ) -> None:
         """Invalidate cached stats reports for the supplied ``players``."""
 
-        normalized: Set[int] = set()
-        for player in players:
-            user_id = player if isinstance(player, int) else getattr(player, "user_id", None)
-            if user_id is None:
-                continue
-            try:
-                user_id_int = int(user_id)
-            except (TypeError, ValueError):
-                continue
-            if user_id_int:
-                normalized.add(user_id_int)
-
+        normalized = normalize_player_ids(players)
         if not normalized:
             return
 

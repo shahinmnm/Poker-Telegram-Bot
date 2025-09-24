@@ -39,6 +39,7 @@ from pokerapp.table_manager import TableManager
 from pokerapp.utils.request_metrics import RequestCategory, RequestMetrics
 from pokerapp.utils.telegram_safeops import TelegramSafeOps
 from pokerapp.utils.cache import AdaptivePlayerReportCache
+from pokerapp.utils.common import normalize_player_ids
 from pokerapp.matchmaking_service import MatchmakingService
 from pokerapp.player_manager import PlayerManager
 from pokerapp.stats_reporter import StatsReporter
@@ -96,24 +97,37 @@ def _select_translation(
 _AUTO_START_DEFAULTS = _GAME_CONSTANTS.get("auto_start", {})
 
 
-def _positive_int(value: Any, default: int) -> int:
+def _coerce_numeric(
+    value: Any,
+    default: float,
+    *,
+    converter: Callable[[Any], float | int],
+    is_valid: Callable[[float], bool],
+) -> float:
+    """Return ``default`` when conversion or validation fails."""
+
     try:
-        parsed = int(value)
+        parsed = converter(value)
     except (TypeError, ValueError):
         return default
-    if parsed <= 0:
+    if not is_valid(parsed):
         return default
     return parsed
+
+
+def _positive_int(value: Any, default: int) -> int:
+    return int(
+        _coerce_numeric(value, float(default), converter=int, is_valid=lambda parsed: parsed > 0)
+    )
 
 
 def _non_negative_float(value: Any, default: float) -> float:
-    try:
-        parsed = float(value)
-    except (TypeError, ValueError):
-        return default
-    if parsed <= 0:
-        return default
-    return parsed
+    return _coerce_numeric(
+        value,
+        default,
+        converter=float,
+        is_valid=lambda parsed: parsed > 0,
+    )
 
 
 class GameEngine:
@@ -269,145 +283,155 @@ class GameEngine:
         if not isinstance(stop_errors, dict):
             stop_errors = {}
 
-        self.STOP_CONFIRM_BUTTON_TEXT = _select_translation(
-            stop_buttons.get("confirm"),
-            "Confirm stop",
-            language_order=language_order,
-        )
-        self.STOP_RESUME_BUTTON_TEXT = _select_translation(
-            stop_buttons.get("resume"),
-            "Resume game",
-            language_order=language_order,
-        )
-        self.STOP_TITLE_TEMPLATE = _select_translation(
-            stop_messages.get("title"),
-            "🛑 *Stop game request*",
-            language_order=language_order,
-        )
-        self.STOP_INITIATED_BY_TEMPLATE = _select_translation(
-            stop_messages.get("initiated_by"),
-            "Requested by {initiator}",
-            language_order=language_order,
-        )
-        self.STOP_ACTIVE_PLAYERS_LABEL = _select_translation(
-            stop_messages.get("active_players_label"),
-            "Active players:",
-            language_order=language_order,
-        )
-        self.STOP_ACTIVE_PLAYER_LINE_TEMPLATE = _select_translation(
-            stop_messages.get("active_player_line"),
-            "{mark} {player}",
-            language_order=language_order,
-        )
-        self.STOP_VOTE_COUNTS_TEMPLATE = _select_translation(
-            stop_messages.get("vote_counts"),
-            "Approval votes: {confirmed}/{required}",
-            language_order=language_order,
-        )
-        self.STOP_MANAGER_LABEL_TEMPLATE = _select_translation(
-            stop_messages.get("manager_label"),
-            "👤 Game manager: {manager}",
-            language_order=language_order,
-        )
-        self.STOP_MANAGER_OVERRIDE_HINT = _select_translation(
-            stop_messages.get("manager_override_hint"),
-            "They can approve the stop vote alone.",
-            language_order=language_order,
-        )
-        self.STOP_OTHER_VOTES_LABEL = _select_translation(
-            stop_messages.get("other_votes_label"),
-            "Other voters:",
-            language_order=language_order,
-        )
-        self.STOP_RESUME_NOTICE = _select_translation(
-            stop_messages.get("resume_text"),
-            "✅ The game will continue.",
-            language_order=language_order,
-        )
-        self.STOP_MANAGER_OVERRIDE_SUMMARY = _select_translation(
-            stop_messages.get("manager_override_summary"),
-            "🛑 *The manager stopped the game.*",
-            language_order=language_order,
-        )
-        self.STOP_MAJORITY_SUMMARY = _select_translation(
-            stop_messages.get("majority_stop_summary"),
-            "🛑 *The game was stopped by majority vote.*",
-            language_order=language_order,
-        )
-        self.STOP_VOTE_SUMMARY_TEMPLATE = _select_translation(
-            stop_messages.get("vote_summary"),
-            "Approval votes: {approved}/{required}",
-            language_order=language_order,
-        )
-        self.STOP_NO_VOTES_TEXT = _select_translation(
-            stop_messages.get("no_votes"),
-            "No active votes were recorded.",
-            language_order=language_order,
-        )
-        self.STOP_NO_ACTIVE_PLAYERS_PLACEHOLDER = _select_translation(
-            stop_messages.get("no_active_players_placeholder"),
-            "—",
-            language_order=language_order,
-        )
-        self.STOPPED_NOTIFICATION = _select_translation(
-            stop_messages.get("stopped_notification"),
-            "🛑 The game has been stopped.",
-            language_order=language_order,
-        )
-        self.ERROR_NO_ACTIVE_GAME = _select_translation(
-            stop_errors.get("no_active_game"),
-            "There is no active game to stop.",
-            language_order=language_order,
-        )
-        self.ERROR_NOT_IN_GAME = _select_translation(
-            stop_errors.get("not_in_game"),
-            "Only seated players can request to stop the game.",
-            language_order=language_order,
-        )
-        self.ERROR_NO_ACTIVE_PLAYERS = _select_translation(
-            stop_errors.get("no_active_players"),
-            "There are no active players to vote.",
-            language_order=language_order,
-        )
-        self.ERROR_NO_REQUEST_TO_RESUME = _select_translation(
-            stop_errors.get("no_request_to_resume"),
-            "There is no stop request to resume.",
-            language_order=language_order,
-        )
-        self.ERROR_NO_ACTIVE_REQUEST = _select_translation(
-            stop_errors.get("no_active_request"),
-            "There is no active stop request.",
-            language_order=language_order,
-        )
-        self.ERROR_NOT_ALLOWED_TO_VOTE = _select_translation(
-            stop_errors.get("not_allowed_to_vote"),
-            "Only active players or the manager may vote.",
-            language_order=language_order,
-        )
+        translation_entries = [
+            ("STOP_CONFIRM_BUTTON_TEXT", stop_buttons, "confirm", "Confirm stop"),
+            ("STOP_RESUME_BUTTON_TEXT", stop_buttons, "resume", "Resume game"),
+            (
+                "STOP_TITLE_TEMPLATE",
+                stop_messages,
+                "title",
+                "🛑 *Stop game request*",
+            ),
+            (
+                "STOP_INITIATED_BY_TEMPLATE",
+                stop_messages,
+                "initiated_by",
+                "Requested by {initiator}",
+            ),
+            (
+                "STOP_ACTIVE_PLAYERS_LABEL",
+                stop_messages,
+                "active_players_label",
+                "Active players:",
+            ),
+            (
+                "STOP_ACTIVE_PLAYER_LINE_TEMPLATE",
+                stop_messages,
+                "active_player_line",
+                "{mark} {player}",
+            ),
+            (
+                "STOP_VOTE_COUNTS_TEMPLATE",
+                stop_messages,
+                "vote_counts",
+                "Approval votes: {confirmed}/{required}",
+            ),
+            (
+                "STOP_MANAGER_LABEL_TEMPLATE",
+                stop_messages,
+                "manager_label",
+                "👤 Game manager: {manager}",
+            ),
+            (
+                "STOP_MANAGER_OVERRIDE_HINT",
+                stop_messages,
+                "manager_override_hint",
+                "They can approve the stop vote alone.",
+            ),
+            (
+                "STOP_OTHER_VOTES_LABEL",
+                stop_messages,
+                "other_votes_label",
+                "Other voters:",
+            ),
+            (
+                "STOP_RESUME_NOTICE",
+                stop_messages,
+                "resume_text",
+                "✅ The game will continue.",
+            ),
+            (
+                "STOP_MANAGER_OVERRIDE_SUMMARY",
+                stop_messages,
+                "manager_override_summary",
+                "🛑 *The manager stopped the game.*",
+            ),
+            (
+                "STOP_MAJORITY_SUMMARY",
+                stop_messages,
+                "majority_stop_summary",
+                "🛑 *The game was stopped by majority vote.*",
+            ),
+            (
+                "STOP_VOTE_SUMMARY_TEMPLATE",
+                stop_messages,
+                "vote_summary",
+                "Approval votes: {approved}/{required}",
+            ),
+            (
+                "STOP_NO_VOTES_TEXT",
+                stop_messages,
+                "no_votes",
+                "No active votes were recorded.",
+            ),
+            (
+                "STOP_NO_ACTIVE_PLAYERS_PLACEHOLDER",
+                stop_messages,
+                "no_active_players_placeholder",
+                "—",
+            ),
+            (
+                "STOPPED_NOTIFICATION",
+                stop_messages,
+                "stopped_notification",
+                "🛑 The game has been stopped.",
+            ),
+            (
+                "ERROR_NO_ACTIVE_GAME",
+                stop_errors,
+                "no_active_game",
+                "There is no active game to stop.",
+            ),
+            (
+                "ERROR_NOT_IN_GAME",
+                stop_errors,
+                "not_in_game",
+                "Only seated players can request to stop the game.",
+            ),
+            (
+                "ERROR_NO_ACTIVE_PLAYERS",
+                stop_errors,
+                "no_active_players",
+                "There are no active players to vote.",
+            ),
+            (
+                "ERROR_NO_REQUEST_TO_RESUME",
+                stop_errors,
+                "no_request_to_resume",
+                "There is no stop request to resume.",
+            ),
+            (
+                "ERROR_NO_ACTIVE_REQUEST",
+                stop_errors,
+                "no_active_request",
+                "There is no active stop request.",
+            ),
+            (
+                "ERROR_NOT_ALLOWED_TO_VOTE",
+                stop_errors,
+                "not_allowed_to_vote",
+                "Only active players or the manager may vote.",
+            ),
+        ]
+
+        for attribute, source, key, default in translation_entries:
+            setattr(
+                self,
+                attribute,
+                _select_translation(
+                    source.get(key), default, language_order=language_order
+                ),
+            )
 
     def _stage_lock_key(self, chat_id: ChatId) -> str:
         return f"{self.STAGE_LOCK_PREFIX}{self._safe_int(chat_id)}"
-
-    def _normalize_player_ids(self, players: Iterable[Player]) -> Set[int]:
-        normalized: Set[int] = set()
-        for player in players:
-            user_id = getattr(player, "user_id", None)
-            if user_id is None:
-                continue
-            try:
-                parsed = int(user_id)
-            except (TypeError, ValueError):
-                continue
-            if parsed:
-                normalized.add(parsed)
-        return normalized
 
     def _invalidate_adaptive_report_cache(
         self, players: Iterable[Player], *, event_type: str
     ) -> None:
         if self._adaptive_player_report_cache is None:
             return
-        player_ids = self._normalize_player_ids(players)
+        player_ids = normalize_player_ids(players)
         if not player_ids:
             return
         self._adaptive_player_report_cache.invalidate_on_event(

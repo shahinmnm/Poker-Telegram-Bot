@@ -302,13 +302,6 @@ class AdaptivePlayerReportCache(PlayerReportCache):
         payload.update(kwargs)
         return payload
 
-    async def get(
-        self,
-        user_id: int,
-        loader: Callable[[], Awaitable[Optional[T]]],
-    ) -> Optional[T]:
-        return await self.get_with_context(user_id, loader)
-
     async def get_with_context(
         self,
         user_id: int,
@@ -367,16 +360,16 @@ class AdaptivePlayerReportCache(PlayerReportCache):
         self._next_ttl.pop(normalized_id, None)
         self._invalidate_internal(normalized_id, event_type=None)
 
-    def invalidate_many(self, user_ids: Iterable[int]) -> None:
-        for user_id in user_ids:
-            self.invalidate(user_id)
-
     def invalidate_on_event(self, user_ids: Iterable[int], event_type: str) -> None:
         ttl = self._resolve_ttl(event_type)
         for user_id in user_ids:
             normalized_id = int(user_id)
             self._next_ttl[normalized_id] = (event_type, ttl)
             self._invalidate_internal(normalized_id, event_type=event_type)
+
+    # ``get`` remains part of the public API for historical callers; route it to
+    # the context-aware implementation to avoid duplication.
+    get = get_with_context
 
     def metrics(self) -> Dict[str, Dict[str, int]]:
         snapshot = {key: dict(value) for key, value in self._event_metrics.items()}
