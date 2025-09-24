@@ -227,11 +227,22 @@ class GameEngine:
         operation: str,
         message_id: Optional[MessageId],
         game_id: Optional[str],
+        request_category: RequestCategory | str | None = None,
+        event_type: Optional[str] = None,
+        user_id: Optional[UserId] = None,
     ) -> Dict[str, Any]:
+        category: Optional[str]
+        if isinstance(request_category, RequestCategory):
+            category = request_category.value
+        else:
+            category = request_category
         return {
             "chat_id": self._safe_int(chat_id),
             "message_id": message_id,
             "game_id": game_id,
+            "user_id": self._safe_int(user_id) if user_id is not None else None,
+            "event_type": event_type or f"telegram_{operation}",
+            "request_category": category or RequestCategory.GENERAL.value,
             "operation": operation,
         }
 
@@ -553,6 +564,7 @@ class GameEngine:
                     message_id=None,
                     game_id=game_id,
                     operation="send_new_hand_ready_message",
+                    request_category=RequestCategory.GENERAL,
                 ),
             )
             await self._player_manager.send_join_prompt(game, chat_id)
@@ -645,6 +657,7 @@ class GameEngine:
                 message_id=None,
                 game_id=getattr(game, "id", None),
                 operation="send_showdown_results",
+                request_category=RequestCategory.GENERAL,
             ),
         )
 
@@ -763,13 +776,16 @@ class GameEngine:
         if discrepancy > 0 and winners_by_pot:
             winners_by_pot[0]["amount"] += discrepancy
         elif discrepancy < 0:
+            chat_identifier = getattr(game, "chat_id", None)
             self._logger.error(
                 "Pot calculation mismatch",
                 extra={
-                    "chat_id": getattr(game, "chat_id", None),
+                    "chat_id": self._safe_int(chat_identifier)
+                    if chat_identifier is not None
+                    else None,
                     "game_id": getattr(game, "id", None),
                     "user_id": None,
-                    "request_category": None,
+                    "request_category": "engine",
                     "event_type": "pot_calculation_mismatch",
                     "request_params": {
                         "game_pot": game.pot,
