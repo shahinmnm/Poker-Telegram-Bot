@@ -15,7 +15,7 @@ from pokerapp.player_manager import PlayerManager
 from pokerapp.pokerbotview import PokerBotViewer
 from pokerapp.stats import BaseStatsService, PlayerIdentity
 from pokerapp.table_manager import TableManager
-from pokerapp.utils.datetime_utils import utc_now
+from pokerapp.utils.time_utils import now_utc
 from pokerapp.utils.markdown import escape_markdown_v1
 from pokerapp.utils.request_metrics import RequestMetrics
 from pokerapp.utils.redis_safeops import RedisSafeOps
@@ -143,7 +143,7 @@ class PrivateMatchService:
         return self._decode_hash(data)
 
     async def cleanup_private_queue(self) -> None:
-        now = utc_now()
+        now = now_utc()
         cutoff_ts = int(now.timestamp()) - self._queue_ttl
         expired = await self._redis_ops.safe_zrangebyscore(
             self._queue_key,
@@ -215,7 +215,7 @@ class PrivateMatchService:
             self._build_player_info_from_state(user_id_str, state)
             for user_id_str, state, _ in valid[:2]
         ]
-        now_ts = int(utc_now().timestamp())
+        now_ts = int(now_utc().timestamp())
         for idx, (user_id_str, state, _) in enumerate(valid[:2]):
             opponent = players[1 - idx]
             state_key = self.private_user_key(user_id_str)
@@ -251,7 +251,7 @@ class PrivateMatchService:
                 "opponent": existing_state.get("opponent") if existing_state else None,
             }
 
-        timestamp = int(utc_now().timestamp())
+        timestamp = int(now_utc().timestamp())
         display_name = (
             user.full_name
             or user.first_name
@@ -325,7 +325,7 @@ class PrivateMatchService:
                 self._require_player_manager().private_chat_ids[safe_user_id] = info.chat_id
         await self._table_manager.save_game(chat_id, game)
 
-        started_at = utc_now()
+        started_at = now_utc()
         match_key = self.private_match_key(match_id)
         match_extra = {"match_id": match_id, "chat_id": chat_id}
         await self._redis_ops.safe_hset(

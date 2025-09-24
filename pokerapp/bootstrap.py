@@ -36,18 +36,19 @@ class ApplicationServices:
 
 def _build_stats_service(logger: logging.Logger, cfg: Config) -> BaseStatsService:
     if not cfg.DATABASE_URL:
-        return NullStatsService()
+        return NullStatsService(timezone_name=cfg.TIMEZONE_NAME)
 
     try:
         stats_service = StatsService(
             cfg.DATABASE_URL,
             echo=getattr(cfg, "DATABASE_ECHO", False),
+            timezone_name=cfg.TIMEZONE_NAME,
         )
         stats_service.ensure_ready_blocking()
         return stats_service
     except Exception:  # pragma: no cover - defensive logging
         logger.exception("Failed to initialise StatsService; using NullStatsService")
-        return NullStatsService()
+        return NullStatsService(timezone_name=cfg.TIMEZONE_NAME)
 
 
 def build_services(cfg: Config) -> ApplicationServices:

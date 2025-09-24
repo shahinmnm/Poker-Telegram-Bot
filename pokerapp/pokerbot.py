@@ -404,12 +404,12 @@ class PokerBot:
     ) -> None:
         error = getattr(context, "error", None)
         if isinstance(error, BaseException):
-            logger.error(
+            self._logger.error(
                 "Error while processing update %s", getattr(update, "update_id", update),
                 exc_info=error,
             )
         else:
-            logger.error(
+            self._logger.error(
                 "Error while processing update %s with payload %s",
                 getattr(update, "update_id", update),
                 error,
