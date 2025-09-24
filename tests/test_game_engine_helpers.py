@@ -28,8 +28,12 @@ def game_engine_setup():
     player_manager = MagicMock()
     player_manager.clear_player_anchors = AsyncMock()
 
+    async def _passthrough_send_message_safe(*, call, **_kwargs):
+        return await call()
+
     telegram_safe_ops = SimpleNamespace(
-        edit_message_text=AsyncMock(return_value=None)
+        edit_message_text=AsyncMock(return_value=None),
+        send_message_safe=AsyncMock(side_effect=_passthrough_send_message_safe),
     )
 
     engine = GameEngine(

@@ -687,9 +687,20 @@ class GameEngine:
         if folded_count:
             fold_phrase = f"{fold_phrase} ({folded_count} نفر)"
 
-        await self._view.send_message(
-            chat_id,
-            f"🏆 {fold_phrase}! {winner.mention_markdown} برنده {amount}$ شد.",
+        message_text = (
+            f"🏆 {fold_phrase}! {winner.mention_markdown} برنده {amount}$ شد."
+        )
+        await self._telegram_ops.send_message_safe(
+            call=lambda text=message_text: self._view.send_message(chat_id, text),
+            chat_id=chat_id,
+            operation="announce_fold_win_message",
+            log_extra=self._build_telegram_log_extra(
+                chat_id=chat_id,
+                message_id=None,
+                game_id=getattr(game, "id", None),
+                operation="announce_fold_win_message",
+                request_category=RequestCategory.GENERAL,
+            ),
         )
 
     async def _process_showdown_results(
@@ -732,9 +743,20 @@ class GameEngine:
                         if winner_label and player_id not in hand_labels:
                             hand_labels[player_id] = winner_label
         else:
-            await self._view.send_message(
-                chat_id,
-                "ℹ️ هیچ برنده‌ای در این دست مشخص نشد. مشکلی در منطق بازی رخ داده است.",
+            message_text = (
+                "ℹ️ هیچ برنده‌ای در این دست مشخص نشد. مشکلی در منطق بازی رخ داده است."
+            )
+            await self._telegram_ops.send_message_safe(
+                call=lambda text=message_text: self._view.send_message(chat_id, text),
+                chat_id=chat_id,
+                operation="announce_showdown_warning",
+                log_extra=self._build_telegram_log_extra(
+                    chat_id=chat_id,
+                    message_id=None,
+                    game_id=getattr(game, "id", None),
+                    operation="announce_showdown_warning",
+                    request_category=RequestCategory.GENERAL,
+                ),
             )
 
         await self._telegram_ops.send_message_safe(
@@ -800,7 +822,20 @@ class GameEngine:
         game.reset()
         await self._table_manager.save_game(chat_id, game)
         if send_stop_notification:
-            await self._view.send_message(chat_id, self.STOPPED_NOTIFICATION)
+            await self._telegram_ops.send_message_safe(
+                call=lambda text=self.STOPPED_NOTIFICATION: self._view.send_message(
+                    chat_id, text
+                ),
+                chat_id=chat_id,
+                operation="send_stop_notification",
+                log_extra=self._build_telegram_log_extra(
+                    chat_id=chat_id,
+                    message_id=None,
+                    game_id=getattr(game, "id", None),
+                    operation="send_stop_notification",
+                    request_category=RequestCategory.GENERAL,
+                ),
+            )
 
     def _evaluate_contender_hands(
         self, game: Game, contenders: Iterable[Player]
@@ -1332,4 +1367,17 @@ class GameEngine:
             chat_id=chat_id,
             send_stop_notification=False,
         )
-        await self._view.send_message(chat_id, self.STOPPED_NOTIFICATION)
+        await self._telegram_ops.send_message_safe(
+            call=lambda text=self.STOPPED_NOTIFICATION: self._view.send_message(
+                chat_id, text
+            ),
+            chat_id=chat_id,
+            operation="send_stop_notification",
+            log_extra=self._build_telegram_log_extra(
+                chat_id=chat_id,
+                message_id=None,
+                game_id=getattr(game, "id", None),
+                operation="send_stop_notification",
+                request_category=RequestCategory.GENERAL,
+            ),
+        )
