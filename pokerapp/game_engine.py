@@ -962,14 +962,25 @@ class GameEngine:
                     "error_type": "PotMismatch",
                 },
             )
+            notify_payload = {
+                "event": "pot_mismatch",
+                "game_pot": game.pot,
+                "calculated": calculated_pot_total,
+            }
+            log_extra = self._build_telegram_log_extra(
+                chat_id=chat_identifier,
+                message_id=None,
+                game_id=getattr(game, "id", None),
+                operation="notify_admin_pot_mismatch",
+                request_category=RequestCategory.GENERAL,
+            )
             try:
                 asyncio.create_task(
-                    self._view.notify_admin(
-                        {
-                            "event": "pot_mismatch",
-                            "game_pot": game.pot,
-                            "calculated": calculated_pot_total,
-                        }
+                    self._telegram_ops.send_message_safe(
+                        call=lambda data=notify_payload: self._view.notify_admin(data),
+                        chat_id=chat_identifier,
+                        operation="notify_admin_pot_mismatch",
+                        log_extra=log_extra,
                     )
                 )
             except Exception:  # pragma: no cover - notify best effort
