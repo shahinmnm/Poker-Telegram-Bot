@@ -233,6 +233,77 @@ class GameEngine:
         self._adaptive_player_report_cache = adaptive_player_report_cache
         self._initialize_stop_translations()
 
+    def _log_extra(
+        self,
+        *,
+        stage: str,
+        game: Optional[Game] = None,
+        chat_id: Optional[ChatId] = None,
+        env_config_missing: Optional[Any] = None,
+        **extra_fields: Any,
+    ) -> Dict[str, Any]:
+        resolved_chat_id: Optional[int]
+        if chat_id is not None:
+            try:
+                resolved_chat_id = self._safe_int(chat_id)
+            except Exception:  # pragma: no cover - defensive fallback
+                resolved_chat_id = chat_id  # type: ignore[assignment]
+        elif game is not None and getattr(game, "chat_id", None) is not None:
+            candidate = getattr(game, "chat_id")
+            try:
+                resolved_chat_id = self._safe_int(candidate)
+            except Exception:  # pragma: no cover - fallback to candidate
+                resolved_chat_id = candidate  # type: ignore[assignment]
+        else:
+            resolved_chat_id = None
+
+        dealer_index = -1
+        players_ready = 0
+        if game is not None:
+            dealer_index = getattr(game, "dealer_index", -1)
+            if hasattr(game, "seated_players"):
+                try:
+                    players_ready = len(game.seated_players())
+                except Exception:  # pragma: no cover - fallback to attribute
+                    players_ready = getattr(game, "seated_count", lambda: 0)()
+
+        extra: Dict[str, Any] = {
+            "category": "engine",
+            "stage": stage,
+            "chat_id": resolved_chat_id,
+            "game_id": getattr(game, "id", None) if game is not None else None,
+            "dealer_index": dealer_index,
+            "players_ready": players_ready,
+            "env_config_missing": list(env_config_missing or []),
+        }
+
+        if self._logger.isEnabledFor(logging.DEBUG) and game is not None:
+            snapshot = []
+            try:
+                players = game.seated_players()
+            except Exception:  # pragma: no cover - fallback to attribute
+                players = list(getattr(game, "players", []))
+            for player in players:
+                snapshot.append(
+                    {
+                        "user_id": getattr(player, "user_id", None),
+                        "seat_index": getattr(player, "seat_index", None),
+                        "stack": getattr(player, "stack", None),
+                        "total_bet": getattr(player, "total_bet", None),
+                        "state": getattr(getattr(player, "state", None), "name", None),
+                    }
+                )
+            extra.update(
+                {
+                    "debug_stage": getattr(getattr(game, "state", None), "name", None),
+                    "debug_pot": getattr(game, "pot", None),
+                    "debug_player_snapshot": snapshot,
+                }
+            )
+
+        extra.update(extra_fields)
+        return extra
+
     @staticmethod
     def state_token(state: Any) -> str:
         """Return a token representing the provided state."""
@@ -947,20 +1018,19 @@ class GameEngine:
             chat_identifier = getattr(game, "chat_id", None)
             self._logger.error(
                 "Pot calculation mismatch",
-                extra={
-                    "chat_id": self._safe_int(chat_identifier)
-                    if chat_identifier is not None
-                    else None,
-                    "game_id": getattr(game, "id", None),
-                    "user_id": None,
-                    "request_category": "engine",
-                    "event_type": "pot_calculation_mismatch",
-                    "request_params": {
+                extra=self._log_extra(
+                    stage="payout-resolution",
+                    game=game,
+                    chat_id=chat_identifier,
+                    request_category="engine",
+                    event_type="pot_calculation_mismatch",
+                    request_params={
                         "game_pot": game.pot,
                         "calculated": calculated_pot_total,
                     },
-                    "error_type": "PotMismatch",
-                },
+                    error_type="PotMismatch",
+                    user_id=None,
+                ),
             )
             notify_payload = {
                 "event": "pot_mismatch",
