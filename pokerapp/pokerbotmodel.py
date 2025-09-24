@@ -28,7 +28,7 @@ import logging
 
 from pokerapp.config import Config, get_game_constants
 from pokerapp.utils.datetime_utils import utc_isoformat
-from pokerapp.utils.time_utils import DEFAULT_TIMEZONE_NAME, now_utc
+from pokerapp.utils.time_utils import DEFAULT_TIMEZONE_NAME, format_local, now_utc
 from pokerapp.winnerdetermination import WinnerDetermination
 from pokerapp.cards import Cards
 from pokerapp.entities import (
@@ -700,7 +700,11 @@ class PokerBotModel:
             await self._table_manager.save_game(chat_id, game)
 
     def _build_ready_message(
-        self, game: Game, countdown: Optional[int]
+        self,
+        game: Game,
+        countdown: Optional[int],
+        *,
+        anchor_time: Optional[datetime.datetime] = None,
     ) -> Tuple[str, InlineKeyboardMarkup]:
         ready_items = [
             f"{idx+1}. (صندلی {idx+1}) {p.mention_markdown} 🟢"
@@ -719,6 +723,14 @@ class PokerBotModel:
             lines.append("🚀 بازی در حال شروع است...")
         else:
             lines.append(f"⏳ بازی تا {countdown} ثانیه دیگر شروع می‌شود.")
+            anchor = anchor_time or now_utc()
+            if anchor.tzinfo is None or anchor.tzinfo.utcoffset(anchor) is None:
+                anchor = anchor.replace(tzinfo=datetime.timezone.utc)
+            target_time = anchor + datetime.timedelta(seconds=countdown)
+            localized = format_local(
+                target_time, "%H:%M:%S", tz_name=self._timezone_name
+            )
+            lines.append(f"🕒 زمان تقریبی شروع: {localized}")
             lines.append("🚀 برای شروع سریع‌تر بازی /start را بزنید یا صبر کنید.")
 
         text = "\n".join(lines)
@@ -787,7 +799,9 @@ class PokerBotModel:
 
             countdown_value = max(int(remaining), 0)
             now = now_utc()
-            text, keyboard = self._build_ready_message(game, countdown_value)
+            text, keyboard = self._build_ready_message(
+                game, countdown_value, anchor_time=now
+            )
             countdown_ctx[KEY_START_COUNTDOWN_LAST_TEXT] = text
             countdown_ctx[KEY_START_COUNTDOWN_LAST_TIMESTAMP] = now
             game.ready_message_main_text = text
@@ -814,12 +828,13 @@ class PokerBotModel:
             countdown_active = bool(countdown_ctx.get("active"))
 
             def payload_fn(seconds_left: int) -> Tuple[str, InlineKeyboardMarkup]:
+                anchor = now_utc()
                 payload_text, payload_keyboard = self._build_ready_message(
-                    game, max(seconds_left, 0)
+                    game, max(seconds_left, 0), anchor_time=anchor
                 )
                 game.ready_message_main_text = payload_text
                 countdown_ctx[KEY_START_COUNTDOWN_LAST_TEXT] = payload_text
-                countdown_ctx[KEY_START_COUNTDOWN_LAST_TIMESTAMP] = now_utc()
+                countdown_ctx[KEY_START_COUNTDOWN_LAST_TIMESTAMP] = anchor
                 return payload_text, payload_keyboard
 
             should_start_countdown = False
@@ -1032,9 +1047,12 @@ class PokerBotModel:
 
         countdown_ctx = self._get_countdown_context(context, chat_id, game)
         countdown_value = countdown_ctx.get("seconds")
-        text, keyboard = self._build_ready_message(game, countdown_value)
+        anchor = now_utc()
+        text, keyboard = self._build_ready_message(
+            game, countdown_value, anchor_time=anchor
+        )
         countdown_ctx[KEY_START_COUNTDOWN_LAST_TEXT] = text
-        countdown_ctx[KEY_START_COUNTDOWN_LAST_TIMESTAMP] = now_utc()
+        countdown_ctx[KEY_START_COUNTDOWN_LAST_TIMESTAMP] = anchor
         current_text = getattr(game, "ready_message_main_text", "")
 
         if game.ready_message_main_id:
