@@ -5,6 +5,7 @@ from __future__ import annotations
 import datetime as dt
 import logging
 from functools import lru_cache
+from typing import Optional
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from pokerapp.config import DEFAULT_TIMEZONE_NAME as CONFIG_DEFAULT_TIMEZONE_NAME
@@ -30,11 +31,21 @@ def _ensure_aware_utc(value: dt.datetime) -> dt.datetime:
     return value.astimezone(UTC)
 
 
+def _normalize_timezone_name(candidate: Optional[str]) -> str:
+    """Return a sanitized timezone name or the configured default."""
+
+    if isinstance(candidate, str):
+        stripped = candidate.strip()
+        if stripped:
+            return stripped
+    return DEFAULT_TIMEZONE_NAME
+
+
 @lru_cache(maxsize=32)
-def _resolve_zoneinfo(name: str) -> dt.tzinfo:
+def _resolve_zoneinfo(name: Optional[str]) -> dt.tzinfo:
     """Return a ``tzinfo`` for ``name`` falling back to UTC on failure."""
 
-    candidate = name or DEFAULT_TIMEZONE_NAME
+    candidate = _normalize_timezone_name(name)
     try:
         return ZoneInfo(candidate)
     except ZoneInfoNotFoundError:
@@ -47,7 +58,7 @@ def _resolve_zoneinfo(name: str) -> dt.tzinfo:
         return UTC
 
 
-def to_local(value: dt.datetime, tz_name: str = DEFAULT_TIMEZONE_NAME) -> dt.datetime:
+def to_local(value: dt.datetime, tz_name: Optional[str] = DEFAULT_TIMEZONE_NAME) -> dt.datetime:
     """Convert ``value`` to the target timezone, assuming UTC when naive."""
 
     aware_utc = _ensure_aware_utc(value)
@@ -56,7 +67,7 @@ def to_local(value: dt.datetime, tz_name: str = DEFAULT_TIMEZONE_NAME) -> dt.dat
 
 
 def format_local(
-    value: dt.datetime, fmt: str, tz_name: str = DEFAULT_TIMEZONE_NAME
+    value: dt.datetime, fmt: str, tz_name: Optional[str] = DEFAULT_TIMEZONE_NAME
 ) -> str:
     """Return ``value`` formatted in the requested timezone using ``fmt``."""
 
