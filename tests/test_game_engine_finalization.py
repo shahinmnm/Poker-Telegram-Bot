@@ -139,6 +139,7 @@ async def test_process_fold_win_assigns_payout_and_announces_winner():
     )
 
     game = Game()
+    game.id = "test-game-showdown"
     game.pot = 200
     winner.state = PlayerState.ACTIVE
     folded.state = PlayerState.FOLD
@@ -203,6 +204,7 @@ async def test_process_showdown_results_populates_payouts_and_labels():
     )
 
     game = Game()
+    game.id = "test-game-showdown"
     game.pot = 120
     winner.state = PlayerState.ACTIVE
     loser.state = PlayerState.ACTIVE
@@ -214,7 +216,11 @@ async def test_process_showdown_results_populates_payouts_and_labels():
     payouts = defaultdict(int)
     hand_labels: Dict[int, Optional[str]] = {}
     chat_id = -654
-    send_with_retry = AsyncMock()
+    async def _passthrough_send_message_safe(*, call, **_kwargs):
+        return await call()
+
+    send_message_safe = AsyncMock(side_effect=_passthrough_send_message_safe)
+    model._game_engine._telegram_ops.send_message_safe = send_message_safe
 
     winner_data = {
         "contender_details": [
@@ -237,18 +243,18 @@ async def test_process_showdown_results_populates_payouts_and_labels():
         payouts=payouts,
         hand_labels=hand_labels,
         chat_id=chat_id,
-        send_with_retry=send_with_retry,
     )
 
     assert payouts[winner.user_id] == 120
     assert hand_labels[winner.user_id]
     assert hand_labels[loser.user_id]
-    send_with_retry.assert_awaited_once()
-    send_args, _ = send_with_retry.await_args
-    assert send_args[0] is view.send_showdown_results
-    assert send_args[1] == chat_id
-    assert send_args[2] is game
-    assert send_args[3] == winner_data["winners_by_pot"]
+    send_message_safe.assert_awaited_once()
+    _, send_kwargs = send_message_safe.await_args
+    assert send_kwargs["chat_id"] == chat_id
+    assert send_kwargs["operation"] == "send_showdown_results"
+    assert callable(send_kwargs["call"])
+    assert send_kwargs["log_extra"]["operation"] == "send_showdown_results"
+    assert send_kwargs["log_extra"]["game_id"] == "test-game-showdown"
     view.send_message.assert_not_awaited()
 
 
@@ -286,7 +292,11 @@ async def test_process_showdown_results_handles_empty_winners():
 
     payouts = defaultdict(int)
     hand_labels: Dict[int, Optional[str]] = {}
-    send_with_retry = AsyncMock()
+    async def _passthrough_send_message_safe(*, call, **_kwargs):
+        return await call()
+
+    send_message_safe = AsyncMock(side_effect=_passthrough_send_message_safe)
+    model._game_engine._telegram_ops.send_message_safe = send_message_safe
     chat_id = -111
 
     winner_data = {
@@ -300,11 +310,10 @@ async def test_process_showdown_results_handles_empty_winners():
         payouts=payouts,
         hand_labels=hand_labels,
         chat_id=chat_id,
-        send_with_retry=send_with_retry,
     )
 
     view.send_message.assert_awaited_once()
-    send_with_retry.assert_awaited_once()
+    send_message_safe.assert_awaited_once()
 
 
 @pytest.mark.asyncio

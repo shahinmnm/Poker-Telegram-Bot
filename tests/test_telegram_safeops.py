@@ -166,3 +166,82 @@ async def test_bad_request_falls_back_to_send(monkeypatch, logger):
     assert result == 555
     assert view.calls.send == 1
     assert view.calls.delete == 1
+
+
+@pytest.mark.asyncio
+async def test_send_message_safe_retries_retry_after(monkeypatch, logger):
+    view = _DummyView()
+
+    attempts = {"count": 0}
+
+    async def flaky_call():
+        attempts["count"] += 1
+        if attempts["count"] == 1:
+            raise RetryAfter(retry_after=0.25)
+        return "ok"
+
+    sleep_calls = []
+
+    async def fake_sleep(duration):
+        sleep_calls.append(duration)
+
+    monkeypatch.setattr(asyncio, "sleep", fake_sleep)
+
+    safe_ops = TelegramSafeOps(
+        view,
+        logger=logger,
+        max_retries=2,
+        base_delay=0.1,
+        max_delay=1.0,
+        backoff_multiplier=2.0,
+    )
+
+    result = await safe_ops.send_message_safe(
+        call=flaky_call,
+        chat_id=123,
+        operation="custom_send",
+        log_extra={"game_id": "game-123"},
+    )
+
+    assert result == "ok"
+    assert attempts["count"] == 2
+    assert sleep_calls == [0.25]
+
+
+@pytest.mark.asyncio
+async def test_delete_message_safe_exhausts_retries(monkeypatch, logger):
+    view = _DummyView()
+
+    attempts = {"count": 0}
+
+    async def always_fail():
+        attempts["count"] += 1
+        raise TimedOut("timeout")
+
+    sleep_calls = []
+
+    async def fake_sleep(duration):
+        sleep_calls.append(duration)
+
+    monkeypatch.setattr(asyncio, "sleep", fake_sleep)
+
+    safe_ops = TelegramSafeOps(
+        view,
+        logger=logger,
+        max_retries=1,
+        base_delay=0.2,
+        max_delay=0.5,
+        backoff_multiplier=2.0,
+    )
+
+    with pytest.raises(TimedOut):
+        await safe_ops.delete_message_safe(
+            call=always_fail,
+            chat_id=999,
+            message_id=555,
+            operation="custom_delete",
+            log_extra={"game_id": "game-999"},
+        )
+
+    assert sleep_calls == [0.2]
+    assert attempts["count"] == 2
