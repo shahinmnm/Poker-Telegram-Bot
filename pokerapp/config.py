@@ -19,13 +19,15 @@ _DEFAULT_GAME_CONSTANTS_PATH = _DEFAULT_CONFIG_DIR / "game_constants.yaml"
 _DEFAULT_SYSTEM_CONSTANTS_PATH = _DEFAULT_CONFIG_DIR / "system_constants.json"
 _DEFAULT_TRANSLATIONS_PATH = _DEFAULT_CONFIG_DIR / "data" / "translations.json"
 _DEFAULT_REDIS_KEYS_PATH = _DEFAULT_CONFIG_DIR / "data" / "redis_keys.json"
+_DEFAULT_EMOJIS_PATH = _DEFAULT_CONFIG_DIR / "data" / "emojis.json"
+_DEFAULT_ROLES_PATH = _DEFAULT_CONFIG_DIR / "data" / "roles.json"
+_DEFAULT_HANDS_PATH = _DEFAULT_CONFIG_DIR / "data" / "hands.json"
 
 _DEFAULT_GAME_CONSTANTS_DATA: Dict[str, Any] = {
     "game": {
         "dice_mult": 10,
         "dice_delay_sec": 5,
         "bonuses": [5, 20, 40, 80, 160, 320],
-        "dices": "⚀⚁⚂⚃⚄⚅",
         "min_players": 2,
         "max_players": 8,
         "small_blind": 5,
@@ -96,7 +98,58 @@ _DEFAULT_REDIS_KEYS_DATA: Dict[str, Any] = {
     "engine": {
         "stage_lock_prefix": "stage:",
         "stop_request": "stop_request",
-    }
+    },
+    "player_report": {
+        "cache_prefix": "pokerbot:player_report:",
+    },
+}
+
+_DEFAULT_EMOJIS_DATA: Dict[str, Any] = {
+    "dice": {
+        "faces": ["⚀", "⚁", "⚂", "⚃", "⚄", "⚅"],
+        "sequence": "⚀⚁⚂⚃⚄⚅",
+        "roll": "🎲",
+    },
+    "suits": {
+        "♠": "♠\ufe0f",
+        "♥": "♥\ufe0f",
+        "♦": "♦\ufe0f",
+        "♣": "♣\ufe0f",
+    },
+    "chips": {
+        "pot": "💰",
+        "stack": "💵",
+        "bet": "🎲",
+        "profit": "💰",
+        "winnings": "💵",
+        "average_pot": "🏺",
+    },
+}
+
+_DEFAULT_ROLES_DATA: Dict[str, Any] = {
+    "default_language": "fa",
+    "roles": {
+        "dealer": {"fa": "دیلر", "en": "Dealer"},
+        "small_blind": {"fa": "بلایند کوچک", "en": "Small blind"},
+        "big_blind": {"fa": "بلایند بزرگ", "en": "Big blind"},
+        "player": {"fa": "بازیکن", "en": "Player"},
+    },
+}
+
+_DEFAULT_HANDS_DATA: Dict[str, Any] = {
+    "default_language": "fa",
+    "hands": {
+        "ROYAL_FLUSH": {"fa": "رویال فلاش", "en": "Royal Flush", "emoji": "👑"},
+        "STRAIGHT_FLUSH": {"fa": "استریت فلاش", "en": "Straight Flush", "emoji": "💎"},
+        "FOUR_OF_A_KIND": {"fa": "کاره (چهار تایی)", "en": "Four of a Kind", "emoji": "💣"},
+        "FULL_HOUSE": {"fa": "فول هاوس", "en": "Full House", "emoji": "🏠"},
+        "FLUSH": {"fa": "فلاش (رنگ)", "en": "Flush", "emoji": "🎨"},
+        "STRAIGHT": {"fa": "استریت (ردیف)", "en": "Straight", "emoji": "🚀"},
+        "THREE_OF_A_KIND": {"fa": "سه تایی", "en": "Three of a Kind", "emoji": "🧩"},
+        "TWO_PAIR": {"fa": "دو پِر", "en": "Two Pair", "emoji": "✌️"},
+        "PAIR": {"fa": "پِر (جفت)", "en": "Pair", "emoji": "🔗"},
+        "HIGH_CARD": {"fa": "کارت بالا", "en": "High Card", "emoji": "🃏"},
+    },
 }
 
 
@@ -129,8 +182,14 @@ class GameConstants:
         defaults: Optional[Dict[str, Any]] = None,
         translations_path: Optional[str] = None,
         redis_keys_path: Optional[str] = None,
+        emojis_path: Optional[str] = None,
+        roles_path: Optional[str] = None,
+        hands_path: Optional[str] = None,
         translation_defaults: Optional[Dict[str, Any]] = None,
         redis_key_defaults: Optional[Dict[str, Any]] = None,
+        emoji_defaults: Optional[Dict[str, Any]] = None,
+        role_defaults: Optional[Dict[str, Any]] = None,
+        hand_defaults: Optional[Dict[str, Any]] = None,
     ) -> None:
         resolved_path = _resolve_config_path(
             path or os.getenv("POKERBOT_GAME_CONSTANTS_FILE"),
@@ -146,15 +205,39 @@ class GameConstants:
             redis_keys_path or os.getenv("POKERBOT_REDIS_KEYS_FILE"),
             _DEFAULT_REDIS_KEYS_PATH,
         )
+        self._emojis_path: Path = _resolve_config_path(
+            emojis_path or os.getenv("POKERBOT_EMOJIS_FILE"),
+            _DEFAULT_EMOJIS_PATH,
+        )
+        self._roles_path: Path = _resolve_config_path(
+            roles_path or os.getenv("POKERBOT_ROLES_FILE"),
+            _DEFAULT_ROLES_PATH,
+        )
+        self._hands_path: Path = _resolve_config_path(
+            hands_path or os.getenv("POKERBOT_HANDS_FILE"),
+            _DEFAULT_HANDS_PATH,
+        )
         self._translation_defaults: Dict[str, Any] = deepcopy(
             translation_defaults or _DEFAULT_TRANSLATIONS_DATA
         )
         self._redis_key_defaults: Dict[str, Any] = deepcopy(
             redis_key_defaults or _DEFAULT_REDIS_KEYS_DATA
         )
+        self._emoji_defaults: Dict[str, Any] = deepcopy(
+            emoji_defaults or _DEFAULT_EMOJIS_DATA
+        )
+        self._role_defaults: Dict[str, Any] = deepcopy(
+            role_defaults or _DEFAULT_ROLES_DATA
+        )
+        self._hand_defaults: Dict[str, Any] = deepcopy(
+            hand_defaults or _DEFAULT_HANDS_DATA
+        )
         self._data: Dict[str, Any] = {}
         self._translations: Dict[str, Any] = {}
         self._redis_keys: Dict[str, Any] = {}
+        self._emojis: Dict[str, Any] = {}
+        self._roles: Dict[str, Any] = {}
+        self._hands: Dict[str, Any] = {}
         self.reload()
 
     @property
@@ -213,6 +296,21 @@ class GameConstants:
             path=self._redis_keys_path,
             defaults=self._redis_key_defaults,
             stage="redis_keys_load",
+        )
+        self._emojis = self._load_json_resource(
+            path=self._emojis_path,
+            defaults=self._emoji_defaults,
+            stage="emojis_load",
+        )
+        self._roles = self._load_json_resource(
+            path=self._roles_path,
+            defaults=self._role_defaults,
+            stage="roles_load",
+        )
+        self._hands = self._load_json_resource(
+            path=self._hands_path,
+            defaults=self._hand_defaults,
+            stage="hands_load",
         )
 
     def _load_json_resource(
@@ -298,6 +396,18 @@ class GameConstants:
     @property
     def redis_keys(self) -> Dict[str, Any]:
         return deepcopy(self._redis_keys)
+
+    @property
+    def emojis(self) -> Dict[str, Any]:
+        return deepcopy(self._emojis)
+
+    @property
+    def roles(self) -> Dict[str, Any]:
+        return deepcopy(self._roles)
+
+    @property
+    def hands(self) -> Dict[str, Any]:
+        return deepcopy(self._hands)
 
 
 def _load_system_constants() -> Dict[str, Any]:

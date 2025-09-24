@@ -1,0 +1,21 @@
+{
+  "default_language": "fa",
+  "roles": {
+    "dealer": {
+      "fa": "دیلر",
+      "en": "Dealer"
+    },
+    "small_blind": {
+      "fa": "بلایند کوچک",
+      "en": "Small blind"
+    },
+    "big_blind": {
+      "fa": "بلایند بزرگ",
+      "en": "Big blind"
+    },
+    "player": {
+      "fa": "بازیکن",
+      "en": "Player"
+    }
+  }
+}

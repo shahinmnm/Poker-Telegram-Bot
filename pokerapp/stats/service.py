@@ -6,7 +6,7 @@ import logging
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, Iterable, List, Optional, TYPE_CHECKING
+from typing import Any, Dict, Iterable, List, Optional, TYPE_CHECKING
 
 from sqlalchemy import (
     BigInteger,
@@ -29,6 +29,7 @@ from sqlalchemy.ext.asyncio import (
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 from sqlalchemy.pool import StaticPool
 
+from pokerapp.config import get_game_constants
 from pokerapp.utils.datetime_utils import ensure_utc
 from pokerapp.utils.time_utils import DEFAULT_TIMEZONE_NAME, format_local, now_utc
 from pokerapp.utils.markdown import escape_markdown_v1
@@ -38,6 +39,24 @@ if TYPE_CHECKING:
 
 
 logger = logging.getLogger(__name__)
+
+_CONSTANTS = get_game_constants()
+_EMOJI_DATA = _CONSTANTS.emojis
+
+
+def _chip_emoji(key: str, default: str) -> str:
+    if isinstance(_EMOJI_DATA, dict):
+        chips = _EMOJI_DATA.get("chips", {})
+        if isinstance(chips, dict):
+            value = chips.get(key)
+            if isinstance(value, str) and value:
+                return value
+    return default
+
+
+_PROFIT_EMOJI = _chip_emoji("profit", "💰")
+_WINNINGS_EMOJI = _chip_emoji("winnings", "💵")
+_AVERAGE_POT_EMOJI = _chip_emoji("average_pot", _chip_emoji("pot", "🏺"))
 
 MIGRATIONS_DIR = Path(__file__).resolve().parents[2] / "migrations"
 
@@ -929,12 +948,11 @@ class StatsService(BaseStatsService):
             f"⏱️ میانگین زمان هر دست: {self._format_duration(average_duration)}"
         )
         lines.append(
-            f"💰 سود/زیان تجمعی: {self._format_currency(stats.lifetime_profit)}"
+            f"{_PROFIT_EMOJI} سود/زیان تجمعی: {self._format_currency(stats.lifetime_profit)}"
         )
         lines.append(
-            "💵 مجموع برد: "
-            f"{self._format_currency(stats.total_amount_won)} | 📉 مجموع باخت: "
-            f"{self._format_currency(stats.total_amount_lost)}"
+            f"{_WINNINGS_EMOJI} مجموع برد: {self._format_currency(stats.total_amount_won)} | "
+            f"📉 مجموع باخت: {self._format_currency(stats.total_amount_lost)}"
         )
         lines.append(
             f"💳 مجموع شرط‌بندی: {self._format_currency(stats.lifetime_bet_amount)}"
@@ -951,7 +969,7 @@ class StatsService(BaseStatsService):
         if stats.total_pot_participated:
             average_pot = stats.total_pot_participated / max(total_games, 1)
             lines.append(
-                f"🏺 میانگین اندازه پات: {self._format_currency(int(average_pot))}"
+                f"{_AVERAGE_POT_EMOJI} میانگین اندازه پات: {self._format_currency(int(average_pot))}"
             )
         if stats.biggest_win_amount > 0:
             hand_name = stats.biggest_win_hand or "دست نامشخص"

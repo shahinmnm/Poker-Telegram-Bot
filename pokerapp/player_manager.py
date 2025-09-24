@@ -14,19 +14,30 @@ from pokerapp.table_manager import TableManager
 
 
 _CONSTANTS = get_game_constants()
-_TRANSLATIONS = _CONSTANTS.translations
-_DEFAULT_LANGUAGE = _TRANSLATIONS.get("default_language", "fa")
+_ROLES_RESOURCE = _CONSTANTS.roles
+if isinstance(_ROLES_RESOURCE, dict):
+    _RAW_ROLE_TRANSLATIONS = _ROLES_RESOURCE.get("roles", {})
+    if not isinstance(_RAW_ROLE_TRANSLATIONS, dict):
+        _RAW_ROLE_TRANSLATIONS = {}
+    _DEFAULT_LANGUAGE = _ROLES_RESOURCE.get("default_language", "fa")
+    if not isinstance(_DEFAULT_LANGUAGE, str) or not _DEFAULT_LANGUAGE:
+        _DEFAULT_LANGUAGE = "fa"
+else:
+    _RAW_ROLE_TRANSLATIONS = {}
+    _DEFAULT_LANGUAGE = "fa"
+
 _LANGUAGE_ORDER = tuple(dict.fromkeys([_DEFAULT_LANGUAGE, "fa", "en"]))
-_ROLE_TRANSLATIONS = _TRANSLATIONS.get("roles", {})
 
 
 def _resolve_role_label(key: str, fallback: str) -> str:
-    entry = _ROLE_TRANSLATIONS.get(key, {})
+    entry = _RAW_ROLE_TRANSLATIONS.get(key, {})
     if isinstance(entry, dict):
         for lang in _LANGUAGE_ORDER:
             text = entry.get(lang)
             if isinstance(text, str) and text:
                 return text
+    elif isinstance(entry, str) and entry:
+        return entry
     return fallback
 
 

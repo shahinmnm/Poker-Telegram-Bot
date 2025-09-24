@@ -79,6 +79,7 @@ _GAME_SECTION = _GAME_CONSTANTS.game
 _UI_SECTION = _GAME_CONSTANTS.ui
 _ENGINE_SECTION = _GAME_CONSTANTS.engine
 _REDIS_KEYS = _GAME_CONSTANTS.redis_keys
+_EMOJI_SECTION = _GAME_CONSTANTS.emojis
 if isinstance(_REDIS_KEYS, dict):
     _ENGINE_REDIS_KEYS = _REDIS_KEYS.get("engine", {})
     if not isinstance(_ENGINE_REDIS_KEYS, dict):
@@ -89,7 +90,23 @@ else:
 DICE_MULT = int(_GAME_SECTION.get("dice_mult", 10))
 DICE_DELAY_SEC = int(_GAME_SECTION.get("dice_delay_sec", 5))
 BONUSES = tuple(_GAME_SECTION.get("bonuses", (5, 20, 40, 80, 160, 320)))
-DICES = _GAME_SECTION.get("dices", "⚀⚁⚂⚃⚄⚅")
+if isinstance(_EMOJI_SECTION, dict):
+    _DICE_EMOJIS = _EMOJI_SECTION.get("dice", {})
+    if not isinstance(_DICE_EMOJIS, dict):
+        _DICE_EMOJIS = {}
+else:
+    _DICE_EMOJIS = {}
+_DICE_SEQUENCE = _DICE_EMOJIS.get("sequence")
+if not isinstance(_DICE_SEQUENCE, str) or not _DICE_SEQUENCE:
+    _DICE_FACES = _DICE_EMOJIS.get("faces")
+    if isinstance(_DICE_FACES, list) and _DICE_FACES:
+        _DICE_SEQUENCE = "".join(
+            str(face) for face in _DICE_FACES if isinstance(face, str)
+        )
+if not isinstance(_DICE_SEQUENCE, str) or not _DICE_SEQUENCE:
+    _DICE_SEQUENCE = _GAME_SECTION.get("dices", "⚀⚁⚂⚃⚄⚅")
+DICES = _DICE_SEQUENCE
+_DICE_ROLL_EMOJI = _DICE_EMOJIS.get("roll", "🎲")
 
 AUTO_START_MAX_UPDATES_PER_MINUTE = (
     GameEngine.AUTO_START_MAX_UPDATES_PER_MINUTE
@@ -901,14 +918,15 @@ class PokerBotModel:
     def _describe_player_role(self, game: Game, player: Player) -> str:
         seat_index = player.seat_index if player.seat_index is not None else -1
         roles: List[str] = []
+        role_labels = PlayerManager.ROLE_TRANSLATIONS
         if seat_index == game.dealer_index:
-            roles.append("دیلر")
+            roles.append(role_labels.get("dealer", "Dealer"))
         if seat_index == game.small_blind_index:
-            roles.append("بلایند کوچک")
+            roles.append(role_labels.get("small_blind", "Small blind"))
         if seat_index == game.big_blind_index:
-            roles.append("بلایند بزرگ")
+            roles.append(role_labels.get("big_blind", "Big blind"))
         if not roles:
-            roles.append("بازیکن")
+            roles.append(role_labels.get("player", "Player"))
         return "، ".join(dict.fromkeys(roles))
 
     async def _safe_edit_message_text(
@@ -1073,7 +1091,7 @@ class PokerBotModel:
                 private_chat_id=chat.id,
             )
             welcome_text = (
-                "🎲 خوش آمدید به بازی پوکر ما!\n"
+                f"{_DICE_ROLL_EMOJI} خوش آمدید به بازی پوکر ما!\n"
                 "لطفاً یکی از گزینه‌ها را از منوی زیر انتخاب کنید تا ادامه دهیم."
             )
             await self._view.send_message(

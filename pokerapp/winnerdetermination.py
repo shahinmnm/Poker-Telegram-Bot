@@ -12,13 +12,27 @@ HAND_RANK_MULTIPLIER = 15**5
 
 
 _CONSTANTS = get_game_constants()
-_TRANSLATIONS = _CONSTANTS.translations.get("hands", {})
+_HANDS_RESOURCE = _CONSTANTS.hands
+if isinstance(_HANDS_RESOURCE, dict):
+    _RAW_HAND_TRANSLATIONS = _HANDS_RESOURCE.get("hands", {})
+    if not isinstance(_RAW_HAND_TRANSLATIONS, dict):
+        _RAW_HAND_TRANSLATIONS = {}
+    _HAND_DEFAULT_LANGUAGE = _HANDS_RESOURCE.get("default_language", "fa")
+    if not isinstance(_HAND_DEFAULT_LANGUAGE, str) or not _HAND_DEFAULT_LANGUAGE:
+        _HAND_DEFAULT_LANGUAGE = "fa"
+else:
+    _RAW_HAND_TRANSLATIONS = {}
+    _HAND_DEFAULT_LANGUAGE = "fa"
+
+HAND_LANGUAGE_ORDER: Tuple[str, ...] = tuple(
+    dict.fromkeys([_HAND_DEFAULT_LANGUAGE, "fa", "en"])
+)
 
 
 def _load_hand_translations() -> Dict["HandsOfPoker", Dict[str, str]]:
     mapping: Dict[HandsOfPoker, Dict[str, str]] = {}
     for hand in HandsOfPoker:
-        entry = _TRANSLATIONS.get(hand.name, {})
+        entry = _RAW_HAND_TRANSLATIONS.get(hand.name, {})
         if isinstance(entry, dict):
             mapping[hand] = dict(entry)
         else:
