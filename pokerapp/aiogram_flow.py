@@ -221,6 +221,40 @@ class RequestManager:
         self._queue_delay = max(0.0, queue_delay)
         self._worker: Optional[asyncio.Task] = None
 
+    def _log_extra(
+        self,
+        *,
+        stage: str,
+        chat_id: Optional[int],
+        message_id: Optional[int],
+        env_config_missing: Optional[Any] = None,
+        **extra_fields: Any,
+    ) -> Dict[str, Any]:
+        extra: Dict[str, Any] = {
+            "category": "messaging",
+            "stage": stage,
+            "chat_id": chat_id,
+            "game_id": extra_fields.pop("game_id", None),
+            "dealer_index": extra_fields.pop("dealer_index", -1),
+            "players_ready": extra_fields.pop("players_ready", 0),
+            "env_config_missing": list(env_config_missing or []),
+            "message_id": message_id,
+        }
+
+        if logger.isEnabledFor(logging.DEBUG):
+            extra.update(
+                {
+                    "debug_queue_size": self._queue.qsize(),
+                    "debug_cache_items": len(self._cache),
+                    "debug_worker_active": self._worker is not None and not getattr(
+                        self._worker, "done", lambda: True
+                    )(),
+                }
+            )
+
+        extra.update(extra_fields)
+        return extra
+
     async def start(self) -> None:
         if self._worker is None:
             self._worker = asyncio.create_task(self._worker_loop())
@@ -246,6 +280,12 @@ class RequestManager:
                 "SKIP SEND: empty or invisible content for %s, msg %s",
                 chat_id,
                 None,
+                extra=self._log_extra(
+                    stage="send-message",
+                    chat_id=chat_id,
+                    message_id=None,
+                    reason="skip-empty",
+                ),
             )
             return None
 
@@ -270,7 +310,14 @@ class RequestManager:
                     )
                 except TelegramBadRequest as exc:  # pragma: no cover - network error
                     logger.warning(
-                        "TelegramBadRequest during send_message: %s", exc
+                        "TelegramBadRequest during send_message: %s",
+                        exc,
+                        extra=self._log_extra(
+                            stage="send-message",
+                            chat_id=chat_id,
+                            message_id=None,
+                            exception=str(exc),
+                        ),
                     )
                     return None
 
@@ -298,6 +345,12 @@ class RequestManager:
                 "SKIP SEND: empty or invisible content for %s, msg %s",
                 chat_id,
                 message_id,
+                extra=self._log_extra(
+                    stage="edit-message",
+                    chat_id=chat_id,
+                    message_id=message_id,
+                    reason="skip-empty",
+                ),
             )
             return message_id
 
@@ -312,6 +365,12 @@ class RequestManager:
                         "SKIP EDIT: identical content for %s, msg %s",
                         chat_id,
                         message_id,
+                        extra=self._log_extra(
+                            stage="edit-message",
+                            chat_id=chat_id,
+                            message_id=message_id,
+                            reason="cache-hit",
+                        ),
                     )
                     return message_id
 
@@ -324,6 +383,12 @@ class RequestManager:
                             "SKIP EDIT: identical content for %s, msg %s",
                             chat_id,
                             message_id,
+                            extra=self._log_extra(
+                                stage="edit-message",
+                                chat_id=chat_id,
+                                message_id=message_id,
+                                reason="cache-hit",
+                            ),
                         )
                         return message_id
                 try:
@@ -345,6 +410,12 @@ class RequestManager:
                     logger.warning(
                         "TelegramBadRequest during edit_message_text: %s",
                         exc,
+                        extra=self._log_extra(
+                            stage="edit-message",
+                            chat_id=chat_id,
+                            message_id=message_id,
+                            exception=str(exc),
+                        ),
                     )
                     return message_id
 
@@ -377,6 +448,12 @@ class RequestManager:
                         "SKIP EDIT: identical content for %s, msg %s",
                         chat_id,
                         message_id,
+                        extra=self._log_extra(
+                            stage="edit-reply-markup",
+                            chat_id=chat_id,
+                            message_id=message_id,
+                            reason="cache-hit",
+                        ),
                     )
                     return True
 
@@ -389,6 +466,12 @@ class RequestManager:
                             "SKIP EDIT: identical content for %s, msg %s",
                             chat_id,
                             message_id,
+                            extra=self._log_extra(
+                                stage="edit-reply-markup",
+                                chat_id=chat_id,
+                                message_id=message_id,
+                                reason="cache-hit",
+                            ),
                         )
                         return True
 
@@ -403,6 +486,12 @@ class RequestManager:
                     logger.warning(
                         "TelegramBadRequest during edit_message_reply_markup: %s",
                         exc,
+                        extra=self._log_extra(
+                            stage="edit-reply-markup",
+                            chat_id=chat_id,
+                            message_id=message_id,
+                            exception=str(exc),
+                        ),
                     )
                     return False
 
@@ -440,6 +529,12 @@ class RequestManager:
                     logger.warning(
                         "TelegramBadRequest during delete_message: %s",
                         exc,
+                        extra=self._log_extra(
+                            stage="delete-message",
+                            chat_id=chat_id,
+                            message_id=message_id,
+                            exception=str(exc),
+                        ),
                     )
                 await self._forget(chat_id, message_id)
                 return True
