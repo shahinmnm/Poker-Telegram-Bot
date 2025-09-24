@@ -13,9 +13,10 @@ from typing import Any, Awaitable, Callable, DefaultDict, Dict, Iterable, Option
 from cachetools import TTLCache
 
 from pokerapp.utils.redis_safeops import RedisSafeOps
+from pokerapp.utils.logging_helpers import enforce_context
 
 
-logger = logging.getLogger(__name__)
+logger = enforce_context(logging.getLogger(__name__), {"request_category": "cache"})
 
 
 @dataclass(frozen=True)
@@ -55,6 +56,26 @@ class MessageStateCache:
     def _key(chat_id: int, message_id: int) -> Tuple[int, int]:
         return int(chat_id), int(message_id)
 
+    def _log_extra(
+        self,
+        *,
+        chat_id: Optional[int],
+        message_id: Optional[int],
+        event_type: str,
+        **kwargs: Any,
+    ) -> Dict[str, Any]:
+        payload: Dict[str, Any] = {
+            "chat_id": chat_id,
+            "message_id": message_id,
+            "game_id": kwargs.pop("game_id", None),
+            "user_id": kwargs.pop("user_id", None),
+            "event_type": event_type,
+            "request_category": "message_cache",
+            "cache_component": "message_state_cache",
+        }
+        payload.update(kwargs)
+        return payload
+
     async def matches(self, chat_id: int, message_id: int, payload: MessagePayload) -> bool:
         """Return ``True`` when ``payload`` matches the cached value."""
 
@@ -65,13 +86,21 @@ class MessageStateCache:
                 self._hits += 1
                 self._logger.debug(
                     "MessageStateCache hit",
-                    extra={"chat_id": chat_id, "message_id": message_id},
+                    extra=self._log_extra(
+                        chat_id=chat_id,
+                        message_id=message_id,
+                        event_type="message_state_cache_hit",
+                    ),
                 )
                 return True
             self._misses += 1
             self._logger.debug(
                 "MessageStateCache miss",
-                extra={"chat_id": chat_id, "message_id": message_id},
+                extra=self._log_extra(
+                    chat_id=chat_id,
+                    message_id=message_id,
+                    event_type="message_state_cache_miss",
+                ),
             )
             return False
 
@@ -83,7 +112,11 @@ class MessageStateCache:
             self._cache[key] = payload
             self._logger.debug(
                 "MessageStateCache update",
-                extra={"chat_id": chat_id, "message_id": message_id},
+                extra=self._log_extra(
+                    chat_id=chat_id,
+                    message_id=message_id,
+                    event_type="message_state_cache_update",
+                ),
             )
 
     async def forget(self, chat_id: int, message_id: int) -> None:
@@ -95,7 +128,11 @@ class MessageStateCache:
                 self._cache.pop(key, None)
                 self._logger.debug(
                     "MessageStateCache invalidate",
-                    extra={"chat_id": chat_id, "message_id": message_id},
+                    extra=self._log_extra(
+                        chat_id=chat_id,
+                        message_id=message_id,
+                        event_type="message_state_cache_invalidate",
+                    ),
                 )
 
     @property
@@ -133,6 +170,18 @@ class PlayerReportCache:
             self._locks[user_id] = lock
         return lock
 
+    def _log_extra(self, *, user_id: int, event_type: str, **kwargs: Any) -> Dict[str, Any]:
+        payload: Dict[str, Any] = {
+            "chat_id": kwargs.pop("chat_id", None),
+            "game_id": kwargs.pop("game_id", None),
+            "user_id": user_id,
+            "event_type": event_type,
+            "request_category": "player_report_cache",
+            "cache_component": "player_report_cache",
+        }
+        payload.update(kwargs)
+        return payload
+
     async def get(
         self,
         user_id: int,
@@ -147,12 +196,20 @@ class PlayerReportCache:
                 self._hits += 1
                 value = self._cache[normalized_id]
                 self._logger.debug(
-                    "PlayerReportCache hit", extra={"user_id": normalized_id}
+                    "PlayerReportCache hit",
+                    extra=self._log_extra(
+                        user_id=normalized_id,
+                        event_type="player_report_cache_hit",
+                    ),
                 )
                 return value
             self._misses += 1
             self._logger.debug(
-                "PlayerReportCache miss", extra={"user_id": normalized_id}
+                "PlayerReportCache miss",
+                extra=self._log_extra(
+                    user_id=normalized_id,
+                    event_type="player_report_cache_miss",
+                ),
             )
             value = await loader()
             if value is not None:
@@ -164,7 +221,11 @@ class PlayerReportCache:
         if normalized_id in self._cache:
             self._cache.pop(normalized_id, None)
             self._logger.debug(
-                "PlayerReportCache invalidate", extra={"user_id": normalized_id}
+                "PlayerReportCache invalidate",
+                extra=self._log_extra(
+                    user_id=normalized_id,
+                    event_type="player_report_cache_invalidate",
+                ),
             )
 
     def invalidate_many(self, user_ids: Iterable[int]) -> None:
@@ -220,6 +281,27 @@ class AdaptivePlayerReportCache(PlayerReportCache):
         )
         self._timer = time.monotonic
 
+    def _build_log_extra(
+        self,
+        *,
+        user_id: Optional[int],
+        cache_event: str,
+        ttl_event_type: Optional[str],
+        **kwargs: Any,
+    ) -> Dict[str, Any]:
+        payload: Dict[str, Any] = {
+            "chat_id": kwargs.pop("chat_id", None),
+            "game_id": kwargs.pop("game_id", None),
+            "user_id": user_id,
+            "event_type": ttl_event_type,
+            "request_category": "player_report_cache",
+            "cache_component": "adaptive_player_report_cache",
+            "cache_event": cache_event,
+        }
+        payload.setdefault("ttl_event_type", ttl_event_type)
+        payload.update(kwargs)
+        return payload
+
     async def get(
         self,
         user_id: int,
@@ -244,12 +326,13 @@ class AdaptivePlayerReportCache(PlayerReportCache):
                 self._event_metrics[metrics_key]["hits"] += 1
                 self._logger.debug(
                     "AdaptivePlayerReportCache hit",
-                    extra={
-                        "user_id": normalized_id,
-                        "event_type": ttl_event_type,
-                        "ttl": ttl,
-                        "source": "memory",
-                    },
+                    extra=self._build_log_extra(
+                        user_id=normalized_id,
+                        cache_event="cache_hit",
+                        ttl_event_type=ttl_event_type,
+                        ttl=ttl,
+                        source="memory",
+                    ),
                 )
                 return self._cache[normalized_id]
 
@@ -266,11 +349,12 @@ class AdaptivePlayerReportCache(PlayerReportCache):
             self._event_metrics[metrics_key]["misses"] += 1
             self._logger.debug(
                 "AdaptivePlayerReportCache miss",
-                extra={
-                    "user_id": normalized_id,
-                    "event_type": ttl_event_type,
-                    "ttl": ttl,
-                },
+                extra=self._build_log_extra(
+                    user_id=normalized_id,
+                    cache_event="cache_miss",
+                    ttl_event_type=ttl_event_type,
+                    ttl=ttl,
+                ),
             )
             value = await loader()
             if value is not None:
@@ -343,12 +427,20 @@ class AdaptivePlayerReportCache(PlayerReportCache):
         try:
             payload = await self._persistent_store.safe_get(
                 self._redis_key(user_id),
-                log_extra={"user_id": user_id, "event_type": event_type},
+                log_extra=self._build_log_extra(
+                    user_id=user_id,
+                    cache_event="persistent_fetch",
+                    ttl_event_type=event_type,
+                ),
             )
         except Exception:
             self._logger.exception(
                 "Failed to fetch cache entry from persistent store",
-                extra={"user_id": user_id, "event_type": event_type},
+                extra=self._build_log_extra(
+                    user_id=user_id,
+                    cache_event="persistent_fetch_error",
+                    ttl_event_type=event_type,
+                ),
             )
             return None
         if not payload:
@@ -358,18 +450,23 @@ class AdaptivePlayerReportCache(PlayerReportCache):
         except Exception:
             self._logger.exception(
                 "Failed to deserialize player report cache entry",
-                extra={"user_id": user_id, "event_type": event_type},
+                extra=self._build_log_extra(
+                    user_id=user_id,
+                    cache_event="deserialize_error",
+                    ttl_event_type=event_type,
+                ),
             )
             return None
         self._store(user_id, value, ttl)
         self._logger.debug(
             "AdaptivePlayerReportCache hit",
-            extra={
-                "user_id": user_id,
-                "event_type": event_type,
-                "ttl": ttl,
-                "source": "persistent",
-            },
+            extra=self._build_log_extra(
+                user_id=user_id,
+                cache_event="cache_hit",
+                ttl_event_type=event_type,
+                ttl=ttl,
+                source="persistent",
+            ),
         )
         return value
 
@@ -387,7 +484,11 @@ class AdaptivePlayerReportCache(PlayerReportCache):
         except Exception:
             self._logger.exception(
                 "Failed to serialize player report cache entry",
-                extra={"user_id": user_id, "event_type": event_type},
+                extra=self._build_log_extra(
+                    user_id=user_id,
+                    cache_event="serialize_error",
+                    ttl_event_type=event_type,
+                ),
             )
             return
         try:
@@ -395,18 +496,32 @@ class AdaptivePlayerReportCache(PlayerReportCache):
                 self._redis_key(user_id),
                 payload,
                 expire=max(ttl, 0) or None,
-                log_extra={"user_id": user_id, "event_type": event_type},
+                log_extra=self._build_log_extra(
+                    user_id=user_id,
+                    cache_event="persistent_store", 
+                    ttl_event_type=event_type,
+                ),
             )
         except Exception:
             self._logger.exception(
                 "Failed to persist cache entry in Redis",
-                extra={"user_id": user_id, "event_type": event_type},
+                extra=self._build_log_extra(
+                    user_id=user_id,
+                    cache_event="persist_error",
+                    ttl_event_type=event_type,
+                ),
             )
 
     def _invalidate_internal(self, user_id: int, *, event_type: Optional[str]) -> None:
         removed = self._cache.pop(user_id, None) is not None
         self._expiry_map.pop(user_id, None)
-        log_payload: Dict[str, Any] = {"user_id": user_id, "event_type": event_type}
+        cache_event = "invalidate_removed" if removed else "invalidate_noop"
+        log_payload = self._build_log_extra(
+            user_id=user_id,
+            cache_event=cache_event,
+            ttl_event_type=event_type,
+            removed=removed,
+        )
         if removed:
             level = self._logger.info if event_type else self._logger.debug
             message = (
@@ -442,12 +557,20 @@ class AdaptivePlayerReportCache(PlayerReportCache):
             try:
                 await self._persistent_store.safe_delete(
                     self._redis_key(user_id),
-                    log_extra={"user_id": user_id, "event_type": event_type},
+                    log_extra=self._build_log_extra(
+                        user_id=user_id,
+                        cache_event="persistent_delete",
+                        ttl_event_type=event_type,
+                    ),
                 )
             except Exception:
                 self._logger.exception(
                     "Failed to delete cache entry in Redis",
-                    extra={"user_id": user_id, "event_type": event_type},
+                    extra=self._build_log_extra(
+                        user_id=user_id,
+                        cache_event="persistent_delete_error",
+                        ttl_event_type=event_type,
+                    ),
                 )
 
         loop.create_task(_delete())

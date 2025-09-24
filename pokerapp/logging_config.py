@@ -110,18 +110,18 @@ def setup_logging(level: int = logging.INFO, debug_mode: bool = False) -> None:
         root_logger.addHandler(handler)
     else:
         for handler in root_logger.handlers:
-            handler.setFormatter(ContextJsonFormatter())
+            handler.setFormatter(formatter)
 
     root_logger.setLevel(logging.DEBUG if debug_mode else level)
 
     debug_trace_logger = logging.getLogger("pokerbot.debug_trace")
     if not debug_trace_logger.handlers:
         debug_handler = logging.StreamHandler()
-        debug_handler.setFormatter(ContextJsonFormatter())
+        debug_handler.setFormatter(formatter)
         debug_trace_logger.addHandler(debug_handler)
     else:
         for handler in debug_trace_logger.handlers:
-            handler.setFormatter(ContextJsonFormatter())
+            handler.setFormatter(formatter)
     debug_trace_logger.setLevel(logging.DEBUG if debug_mode else level)
     debug_trace_logger.propagate = False
 
@@ -130,4 +130,4 @@ def setup_logging(level: int = logging.INFO, debug_mode: bool = False) -> None:
             continue
         if name.startswith(("pokerapp", "pokerbot")):
             for handler in logger_obj.handlers:
-                handler.setFormatter(ContextJsonFormatter())
+                handler.setFormatter(formatter)

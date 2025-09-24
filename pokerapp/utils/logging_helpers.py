@@ -8,15 +8,19 @@ from typing import Any, Dict, Mapping, MutableMapping, Tuple, Union
 
 LoggerLike = Union[logging.Logger, logging.LoggerAdapter]
 
-#: Standardised context keys emitted with each log record so downstream
-#: aggregation systems can rely on a consistent schema.
-STANDARD_CONTEXT_KEYS: Tuple[str, ...] = (
+#: Application log records must include these core context keys so that
+#: downstream processing pipelines can rely on a consistent schema.
+REQUIRED_LOG_KEYS: Tuple[str, ...] = (
     "game_id",
     "chat_id",
     "user_id",
-    "request_category",
     "event_type",
+    "request_category",
 )
+
+#: Backwards compatible alias used throughout the codebase.  The tuple mirrors
+#: ``REQUIRED_LOG_KEYS`` to avoid duplicating schemas in older call sites.
+STANDARD_CONTEXT_KEYS: Tuple[str, ...] = REQUIRED_LOG_KEYS
 
 #: Baseline context included in every logger adapter to guarantee the
 #: ``STANDARD_CONTEXT_KEYS`` are present in the payload, even when a specific
@@ -61,6 +65,26 @@ def add_context(logger: LoggerLike, **kwargs: Any) -> ContextLoggerAdapter:
     merged: Dict[str, Any] = {**DEFAULT_LOG_CONTEXT, **base_extra}
     merged.update(kwargs)
     return ContextLoggerAdapter(base_logger, merged)
+
+
+def enforce_context(
+    logger: LoggerLike, default_ctx: Mapping[str, Any] | None = None
+) -> ContextLoggerAdapter:
+    """Wrap ``logger`` ensuring :data:`REQUIRED_LOG_KEYS` are always present.
+
+    The helper is intended for boundary wiring (for example during
+    :mod:`pokerapp.bootstrap`) where infrastructure services receive a logger.
+    It merges any context that is already attached to ``logger`` with the
+    provided ``default_ctx`` while guaranteeing that the required keys exist.
+    """
+
+    base_logger, base_extra = _unwrap_logger(logger)
+    enforced: Dict[str, Any] = {**DEFAULT_LOG_CONTEXT, **base_extra}
+    if default_ctx:
+        enforced.update(default_ctx)
+    for key in REQUIRED_LOG_KEYS:
+        enforced.setdefault(key, None)
+    return ContextLoggerAdapter(base_logger, enforced)
 
 
 def normalise_request_category(value: Any) -> Any:

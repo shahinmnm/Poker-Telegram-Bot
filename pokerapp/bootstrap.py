@@ -19,7 +19,7 @@ from pokerapp.utils.request_metrics import RequestMetrics
 from pokerapp.utils.telegram_safeops import TelegramSafeOps
 from pokerapp.utils.player_report_cache import PlayerReportCache
 from pokerapp.utils.cache import AdaptivePlayerReportCache
-from pokerapp.utils.logging_helpers import ContextLoggerAdapter, add_context
+from pokerapp.utils.logging_helpers import ContextLoggerAdapter, enforce_context
 
 
 @dataclass(frozen=True)
@@ -60,7 +60,7 @@ def build_services(cfg: Config) -> ApplicationServices:
     """Initialise logging and infrastructure dependencies for the bot."""
 
     setup_logging(logging.INFO, debug_mode=cfg.DEBUG)
-    logger = add_context(logging.getLogger("pokerbot"))
+    logger = enforce_context(logging.getLogger("pokerbot"))
 
     kv_async = aioredis.Redis(
         host=cfg.REDIS_HOST,
@@ -69,7 +69,12 @@ def build_services(cfg: Config) -> ApplicationServices:
         password=cfg.REDIS_PASS or None,
     )
 
-    redis_ops = RedisSafeOps(kv_async, logger=logger.getChild("redis_safeops"))
+    redis_ops = RedisSafeOps(
+        kv_async,
+        logger=enforce_context(
+            logger.getChild("redis_safeops"), {"request_category": "redis"}
+        ),
+    )
 
     table_manager = TableManager(
         kv_async,
@@ -77,28 +82,44 @@ def build_services(cfg: Config) -> ApplicationServices:
         wallet_redis_ops=redis_ops,
     )
 
-    stats_service = _build_stats_service(logger.getChild("stats"), cfg)
+    stats_logger = enforce_context(
+        logger.getChild("stats"), {"request_category": "stats"}
+    )
+    stats_service = _build_stats_service(stats_logger, cfg)
 
     adaptive_player_report_cache = AdaptivePlayerReportCache(
         default_ttl=cfg.PLAYER_REPORT_TTL_DEFAULT,
         bonus_ttl=cfg.PLAYER_REPORT_TTL_BONUS,
         post_hand_ttl=cfg.PLAYER_REPORT_TTL_POST_HAND,
-        logger_=logger.getChild("adaptive_player_report_cache"),
+        logger_=enforce_context(
+            logger.getChild("adaptive_player_report_cache"),
+            {"request_category": "player_report_cache"},
+        ),
         persistent_store=redis_ops,
     )
     stats_service.bind_player_report_cache(adaptive_player_report_cache)
 
     player_report_cache = PlayerReportCache(
         redis_ops,
-        logger=logger.getChild("shared_player_report_cache"),
+        logger=enforce_context(
+            logger.getChild("shared_player_report_cache"),
+            {"request_category": "player_report_cache"},
+        ),
     )
 
-    request_metrics = RequestMetrics(logger_=logger.getChild("metrics"))
+    request_metrics = RequestMetrics(
+        logger_=enforce_context(
+            logger.getChild("metrics"), {"request_category": "metrics"}
+        )
+    )
 
     private_match_service = PrivateMatchService(
         kv_async,
         table_manager,
-        logger=logger.getChild("private_match"),
+        logger=enforce_context(
+            logger.getChild("private_match"),
+            {"request_category": "private_match"},
+        ),
         constants=cfg.constants,
         redis_ops=redis_ops,
     )
@@ -117,7 +138,10 @@ def build_services(cfg: Config) -> ApplicationServices:
             bot,
             cache_ttl=cache_ttl,
             cache_maxsize=cache_maxsize,
-            logger_=logger.getChild("messaging_service"),
+            logger_=enforce_context(
+                logger.getChild("messaging_service"),
+                {"request_category": "messaging"},
+            ),
             request_metrics=request_metrics,
             deleted_messages=deleted_messages,
             deleted_messages_lock=deleted_messages_lock,
@@ -128,7 +152,10 @@ def build_services(cfg: Config) -> ApplicationServices:
     def telegram_safeops_factory(*, view) -> TelegramSafeOps:
         return TelegramSafeOps(
             view,
-            logger=logger.getChild("telegram_safeops"),
+            logger=enforce_context(
+                logger.getChild("telegram_safeops"),
+                {"request_category": "telegram_safeops"},
+            ),
             max_retries=cfg.TELEGRAM_MAX_RETRIES,
             base_delay=cfg.TELEGRAM_RETRY_BASE_DELAY,
             max_delay=cfg.TELEGRAM_RETRY_MAX_DELAY,
