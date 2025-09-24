@@ -5,7 +5,7 @@ from typing import List
 
 import pytest
 
-from pokerapp.lock_manager import LockManager
+from pokerapp.lock_manager import LockManager, LockOrderError
 
 
 class _ListHandler(logging.Handler):
@@ -135,7 +135,7 @@ async def test_lock_manager_category_timeout_override() -> None:
         default_timeout_seconds=5,
         max_retries=0,
         retry_backoff_seconds=0.01,
-        category_timeouts={"stage": 0.05},
+        category_timeouts={"engine_stage": 0.05},
     )
 
     key = "stage:category-timeout"
@@ -162,7 +162,7 @@ async def test_lock_manager_metrics_recording() -> None:
         default_timeout_seconds=0.5,
         max_retries=0,
         retry_backoff_seconds=0.01,
-        category_timeouts={"stage": 0.1},
+        category_timeouts={"engine_stage": 0.1},
     )
 
     key = "stage:metrics"
@@ -186,22 +186,33 @@ async def test_lock_manager_metrics_recording() -> None:
 
 
 @pytest.mark.asyncio
-async def test_lock_manager_enforces_lock_hierarchy() -> None:
+async def test_lock_manager_respects_lock_order_levels() -> None:
     logger = logging.getLogger("lock_manager_test_hierarchy")
     manager = LockManager(logger=logger, default_timeout_seconds=1)
 
-    async with manager.guard("stage:hierarchy", context={"order": "stage"}):
+    async with manager.guard(
+        "stage:hierarchy", context={"order": "engine_stage"}
+    ):
         async with manager.guard(
-            "wallet:hierarchy", context={"order": "wallet"}
+            "pokerbot:player_report:hierarchy",
+            context={"order": "player_report"},
         ):
             async with manager.guard(
-                "stats:hierarchy", context={"order": "stats"}
+                "wallet:hierarchy", context={"order": "wallet"}
             ):
                 pass
 
+
+@pytest.mark.asyncio
+async def test_lock_manager_detects_reverse_lock_order() -> None:
+    logger = logging.getLogger("lock_manager_test_hierarchy_violation")
+    manager = LockManager(logger=logger, default_timeout_seconds=1)
+
     async with manager.guard("wallet:reverse", context={"order": "wallet"}):
-        with pytest.raises(RuntimeError):
-            await manager.acquire("stage:reverse", context={"order": "stage"})
+        with pytest.raises(LockOrderError):
+            await manager.acquire(
+                "stage:reverse", context={"order": "engine_stage"}
+            )
 
 
 @pytest.mark.asyncio
