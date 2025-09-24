@@ -20,6 +20,7 @@ from pokerapp.utils.telegram_safeops import TelegramSafeOps
 from pokerapp.utils.redis_safeops import RedisSafeOps
 from pokerapp.utils.request_metrics import RequestMetrics
 from pokerapp.utils.player_report_cache import PlayerReportCache
+from pokerapp.utils.cache import AdaptivePlayerReportCache
 
 
 @dataclass(frozen=True)
@@ -60,6 +61,7 @@ class PokerBot:
         stats_service: BaseStatsService,
         redis_ops: RedisSafeOps,
         player_report_cache: PlayerReportCache,
+        adaptive_player_report_cache: AdaptivePlayerReportCache,
         request_metrics: RequestMetrics,
         private_match_service: PrivateMatchService,
         messaging_service_factory: MessagingServiceFactory,
@@ -93,6 +95,7 @@ class PokerBot:
         self._messaging_service_factory = messaging_service_factory
         self._telegram_safeops_factory = telegram_safeops_factory
         self._player_report_cache = player_report_cache
+        self._adaptive_player_report_cache = adaptive_player_report_cache
         self._build_application()
 
     def run(self) -> None:
@@ -234,6 +237,7 @@ class PokerBot:
             stats_service=self._stats_service,
             redis_ops=self._redis_ops,
             player_report_cache=self._player_report_cache,
+            adaptive_player_report_cache=self._adaptive_player_report_cache,
             telegram_safe_ops=telegram_safe_ops,
         )
         self._controller = PokerBotCotroller(self._model, self._application)

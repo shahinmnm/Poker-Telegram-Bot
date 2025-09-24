@@ -56,6 +56,9 @@ _DEFAULT_GAME_CONSTANTS_DATA: Dict[str, Any] = {
         "private_match_queue_ttl": 180,
         "private_match_state_ttl": 3600,
         "player_report_cache_ttl_seconds": 300,
+        "player_report_ttl_default_seconds": 180,
+        "player_report_ttl_bonus_seconds": 60,
+        "player_report_ttl_post_hand_seconds": 45,
     },
     "engine": {
         "key_old_players": "old_players",
@@ -293,6 +296,36 @@ class Config:
             parsed_player_report_cache_ttl
             if parsed_player_report_cache_ttl is not None
             else default_player_report_cache_ttl
+        )
+        self.PLAYER_REPORT_TTL_DEFAULT = max(
+            self._parse_int_env(
+                os.getenv("POKERBOT_PLAYER_REPORT_TTL_DEFAULT"),
+                default=int(
+                    redis_constants.get("player_report_ttl_default_seconds", 180)
+                ),
+                env_var="POKERBOT_PLAYER_REPORT_TTL_DEFAULT",
+            ),
+            0,
+        )
+        self.PLAYER_REPORT_TTL_BONUS = max(
+            self._parse_int_env(
+                os.getenv("POKERBOT_PLAYER_REPORT_TTL_BONUS"),
+                default=int(
+                    redis_constants.get("player_report_ttl_bonus_seconds", 60)
+                ),
+                env_var="POKERBOT_PLAYER_REPORT_TTL_BONUS",
+            ),
+            0,
+        )
+        self.PLAYER_REPORT_TTL_POST_HAND = max(
+            self._parse_int_env(
+                os.getenv("POKERBOT_PLAYER_REPORT_TTL_POST_HAND"),
+                default=int(
+                    redis_constants.get("player_report_ttl_post_hand_seconds", 45)
+                ),
+                env_var="POKERBOT_PLAYER_REPORT_TTL_POST_HAND",
+            ),
+            0,
         )
         database_url_env = os.getenv("POKERBOT_DATABASE_URL", "").strip()
         if database_url_env:

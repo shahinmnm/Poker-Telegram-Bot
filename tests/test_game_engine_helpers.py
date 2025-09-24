@@ -84,7 +84,7 @@ async def test_refund_players_cancels_wallets_and_invalidates(game_engine_setup)
     wallet_a.cancel.assert_awaited_once_with("game-123")
     wallet_b.cancel.assert_awaited_once_with("game-123")
     game_engine_setup.stats_reporter.invalidate_players.assert_awaited_once_with(
-        [player_a, player_b]
+        [player_a, player_b], event_type="hand_finished"
     )
 
 

@@ -147,6 +147,7 @@ class PokerBotModel:
         *,
         redis_ops: Optional[RedisSafeOps] = None,
         player_report_cache: Optional[RedisPlayerReportCache] = None,
+        adaptive_player_report_cache: Optional[AdaptivePlayerReportCache] = None,
         telegram_safe_ops: Optional[TelegramSafeOps] = None,
     ):
         self._view: PokerBotViewer = view
@@ -169,9 +170,20 @@ class PokerBotModel:
         self._private_match_service = private_match_service
         self._winner_determine: WinnerDetermination = WinnerDetermination()
         self._round_rate = RoundRateModel(view=self._view, kv=self._kv, model=self)
-        self._player_report_cache = AdaptivePlayerReportCache(
+        def _resolve_ttl(attribute: str, fallback: int) -> int:
+            raw_value = getattr(cfg, attribute, fallback)
+            try:
+                parsed = int(raw_value)
+            except (TypeError, ValueError):
+                return fallback
+            return max(parsed, 0)
+
+        self._player_report_cache = adaptive_player_report_cache or AdaptivePlayerReportCache(
             logger_=logger.getChild("player_report_cache"),
             persistent_store=self._redis_ops,
+            default_ttl=_resolve_ttl("PLAYER_REPORT_TTL_DEFAULT", 120),
+            bonus_ttl=_resolve_ttl("PLAYER_REPORT_TTL_BONUS", 60),
+            post_hand_ttl=_resolve_ttl("PLAYER_REPORT_TTL_POST_HAND", 45),
         )
         cfg_timezone = getattr(cfg, "TIMEZONE_NAME", DEFAULT_TIMEZONE_NAME)
         if stats_service is not None:
@@ -201,6 +213,7 @@ class PokerBotModel:
         self._stats_reporter = StatsReporter(
             stats_service=self._stats,
             player_report_cache=self._shared_player_report_cache,
+            adaptive_player_report_cache=self._player_report_cache,
             safe_int=self._safe_int,
             logger=logger.getChild("stats_reporter"),
         )
