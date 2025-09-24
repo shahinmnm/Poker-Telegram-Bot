@@ -1,0 +1,165 @@
+{
+  "default_language": "fa",
+  "roles": {
+    "dealer": {
+      "fa": "دیلر",
+      "en": "Dealer"
+    },
+    "small_blind": {
+      "fa": "بلایند کوچک",
+      "en": "Small blind"
+    },
+    "big_blind": {
+      "fa": "بلایند بزرگ",
+      "en": "Big blind"
+    },
+    "player": {
+      "fa": "بازیکن",
+      "en": "Player"
+    }
+  },
+  "hands": {
+    "ROYAL_FLUSH": {
+      "fa": "رویال فلاش",
+      "en": "Royal Flush",
+      "emoji": "👑"
+    },
+    "STRAIGHT_FLUSH": {
+      "fa": "استریت فلاش",
+      "en": "Straight Flush",
+      "emoji": "💎"
+    },
+    "FOUR_OF_A_KIND": {
+      "fa": "کاره (چهار تایی)",
+      "en": "Four of a Kind",
+      "emoji": "💣"
+    },
+    "FULL_HOUSE": {
+      "fa": "فول هاوس",
+      "en": "Full House",
+      "emoji": "🏠"
+    },
+    "FLUSH": {
+      "fa": "فلاش (رنگ)",
+      "en": "Flush",
+      "emoji": "🎨"
+    },
+    "STRAIGHT": {
+      "fa": "استریت (ردیف)",
+      "en": "Straight",
+      "emoji": "🚀"
+    },
+    "THREE_OF_A_KIND": {
+      "fa": "سه تایی",
+      "en": "Three of a Kind",
+      "emoji": "🧩"
+    },
+    "TWO_PAIR": {
+      "fa": "دو پِر",
+      "en": "Two Pair",
+      "emoji": "✌️"
+    },
+    "PAIR": {
+      "fa": "پِر (جفت)",
+      "en": "Pair",
+      "emoji": "🔗"
+    },
+    "HIGH_CARD": {
+      "fa": "کارت بالا",
+      "en": "High Card",
+      "emoji": "🃏"
+    }
+  },
+  "stop_vote": {
+    "buttons": {
+      "confirm": {
+        "fa": "تأیید توقف",
+        "en": "Confirm stop"
+      },
+      "resume": {
+        "fa": "ادامه بازی",
+        "en": "Resume game"
+      }
+    },
+    "messages": {
+      "title": {
+        "fa": "🛑 *درخواست توقف بازی*",
+        "en": "🛑 *Stop game request*"
+      },
+      "initiated_by": {
+        "fa": "درخواست توسط {initiator}",
+        "en": "Requested by {initiator}"
+      },
+      "active_players_label": {
+        "fa": "بازیکنان فعال:",
+        "en": "Active players:"
+      },
+      "vote_counts": {
+        "fa": "آراء تأیید: {confirmed}/{required}",
+        "en": "Approval votes: {confirmed}/{required}"
+      },
+      "manager_label": {
+        "fa": "👤 مدیر بازی: {manager}",
+        "en": "👤 Game manager: {manager}"
+      },
+      "manager_override_hint": {
+        "fa": "او می‌تواند به تنهایی رأی توقف را تأیید کند.",
+        "en": "They can approve the stop vote alone."
+      },
+      "other_votes_label": {
+        "fa": "رأی سایر افراد:",
+        "en": "Other voters:"
+      },
+      "resume_text": {
+        "fa": "✅ رأی به ادامه‌ی بازی داده شد. بازی ادامه می‌یابد.",
+        "en": "✅ The game will continue."
+      },
+      "manager_override_summary": {
+        "fa": "🛑 *مدیر بازی بازی را متوقف کرد.*",
+        "en": "🛑 *The manager stopped the game.*"
+      },
+      "majority_stop_summary": {
+        "fa": "🛑 *بازی با رأی اکثریت متوقف شد.*",
+        "en": "🛑 *The game was stopped by majority vote.*"
+      },
+      "vote_summary": {
+        "fa": "آراء تأیید: {approved}/{required}",
+        "en": "Approval votes: {approved}/{required}"
+      },
+      "no_votes": {
+        "fa": "هیچ رأی فعالی ثبت نشد.",
+        "en": "No active votes were recorded."
+      },
+      "stopped_notification": {
+        "fa": "🛑 بازی متوقف شد.",
+        "en": "🛑 The game has been stopped."
+      }
+    },
+    "errors": {
+      "no_active_game": {
+        "fa": "بازی فعالی برای توقف وجود ندارد.",
+        "en": "There is no active game to stop."
+      },
+      "not_in_game": {
+        "fa": "فقط بازیکنان حاضر می‌توانند درخواست توقف بدهند.",
+        "en": "Only seated players can request to stop the game."
+      },
+      "no_active_players": {
+        "fa": "هیچ بازیکن فعالی برای رأی‌گیری وجود ندارد.",
+        "en": "There are no active players to vote."
+      },
+      "no_request_to_resume": {
+        "fa": "درخواست توقفی برای لغو وجود ندارد.",
+        "en": "There is no stop request to resume."
+      },
+      "no_active_request": {
+        "fa": "درخواست توقف فعالی وجود ندارد.",
+        "en": "There is no active stop request."
+      },
+      "not_allowed_to_vote": {
+        "fa": "تنها بازیکنان فعال یا مدیر می‌توانند رأی دهند.",
+        "en": "Only active players or the manager may vote."
+      }
+    }
+  }
+}

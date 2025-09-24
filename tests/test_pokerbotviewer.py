@@ -16,12 +16,16 @@ from pokerapp.config import (
 )
 from pokerapp.entities import Game, GameState, Player, PlayerAction
 from pokerapp.pokerbotview import PokerBotViewer, build_player_cards_keyboard
+from pokerapp.player_manager import PlayerManager
 from pokerapp.utils.request_metrics import RequestCategory
 
 
 MENTION_LINK = "tg://user?id=123"
 MENTION_MARKDOWN = f"[Player]({MENTION_LINK})"
 HIDDEN_MENTION_TEXT = f"[\u2063]({MENTION_LINK})\u2063"
+
+ROLE_DEALER = PlayerManager.ROLE_TRANSLATIONS["dealer"]
+ROLE_BIG_BLIND = PlayerManager.ROLE_TRANSLATIONS["big_blind"]
 
 
 def run(coro):
@@ -199,8 +203,8 @@ def test_update_player_anchors_and_keyboards_highlights_active_player():
     player_two.cards = [Card('9♣'), Card('9♦')]
     player_one.display_name = 'Player One'
     player_two.display_name = 'Player Two'
-    player_one.role_label = 'دیلر'
-    player_two.role_label = 'بلایند بزرگ'
+    player_one.role_label = ROLE_DEALER
+    player_two.role_label = ROLE_BIG_BLIND
 
     player_one.anchor_message = (game.chat_id, 101)
     player_two.anchor_message = (game.chat_id, 202)
@@ -282,7 +286,7 @@ def test_update_player_anchors_and_keyboards_highlights_active_player():
     assert "🟢 نوبت این بازیکن است." in first_text or "🔴 نوبت این بازیکن است." in first_text
     assert 'Player One' in first_text
     assert '🪑 صندلی: 1' in first_text
-    assert '🎖️ نقش: دیلر' in first_text
+    assert f"🎖️ نقش: {ROLE_DEALER}" in first_text
     assert isinstance(first_call.kwargs['reply_markup'], ReplyKeyboardMarkup)
     assert first_call.kwargs['force_send'] is True
     first_keyboard = first_call.kwargs['reply_markup']

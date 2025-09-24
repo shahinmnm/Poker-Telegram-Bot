@@ -2,12 +2,28 @@
 
 import enum
 from itertools import combinations
-from typing import List, Tuple, Dict
+from typing import Dict, List, Tuple
 
 from pokerapp.cards import Card, Cards
 from pokerapp.entities import Score
+from pokerapp.config import get_game_constants
 
 HAND_RANK_MULTIPLIER = 15**5
+
+
+_CONSTANTS = get_game_constants()
+_TRANSLATIONS = _CONSTANTS.translations.get("hands", {})
+
+
+def _load_hand_translations() -> Dict["HandsOfPoker", Dict[str, str]]:
+    mapping: Dict[HandsOfPoker, Dict[str, str]] = {}
+    for hand in HandsOfPoker:
+        entry = _TRANSLATIONS.get(hand.name, {})
+        if isinstance(entry, dict):
+            mapping[hand] = dict(entry)
+        else:
+            mapping[hand] = {}
+    return mapping
 
 class HandsOfPoker(enum.Enum):
     ROYAL_FLUSH = 10
@@ -21,19 +37,7 @@ class HandsOfPoker(enum.Enum):
     PAIR = 2
     HIGH_CARD = 1
 
-# --- دیکشنری برای نمایش نتایج با ایموجی و ترجمه ---
-HAND_NAMES_TRANSLATIONS: Dict[HandsOfPoker, Dict[str, str]] = {
-    HandsOfPoker.ROYAL_FLUSH:     {"fa": "رویال فلاش", "en": "Royal Flush", "emoji": "👑"},
-    HandsOfPoker.STRAIGHT_FLUSH:  {"fa": "استریت فلاش", "en": "Straight Flush", "emoji": "💎"},
-    HandsOfPoker.FOUR_OF_A_KIND:  {"fa": "کاره (چهار تایی)", "en": "Four of a Kind", "emoji": "💣"},
-    HandsOfPoker.FULL_HOUSE:      {"fa": "فول هاوس", "en": "Full House", "emoji": "🏠"},
-    HandsOfPoker.FLUSH:           {"fa": "فلاش (رنگ)", "en": "Flush", "emoji": "🎨"},
-    HandsOfPoker.STRAIGHT:        {"fa": "استریت (ردیف)", "en": "Straight", "emoji": "🚀"},
-    HandsOfPoker.THREE_OF_A_KIND: {"fa": "سه تایی", "en": "Three of a Kind", "emoji": "🧩"},
-    HandsOfPoker.TWO_PAIR:        {"fa": "دو پِر", "en": "Two Pair", "emoji": "✌️"},
-    HandsOfPoker.PAIR:            {"fa": "پِر (جفت)", "en": "Pair", "emoji": "🔗"},
-    HandsOfPoker.HIGH_CARD:       {"fa": "کارت بالا", "en": "High Card", "emoji": "🃏"},
-}
+HAND_NAMES_TRANSLATIONS: Dict[HandsOfPoker, Dict[str, str]] = _load_hand_translations()
 
 class WinnerDetermination:
     """

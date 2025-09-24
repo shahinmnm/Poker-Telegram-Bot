@@ -1,0 +1,6 @@
+{
+  "engine": {
+    "stage_lock_prefix": "stage:",
+    "stop_request": "stop_request"
+  }
+}

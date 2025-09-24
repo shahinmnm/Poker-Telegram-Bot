@@ -53,6 +53,53 @@ from pokerapp.winnerdetermination import (
 _CONSTANTS = get_game_constants()
 _GAME_CONSTANTS = _CONSTANTS.game
 _ENGINE_CONSTANTS = _CONSTANTS.engine
+_TRANSLATIONS_ROOT = _CONSTANTS.translations
+_DEFAULT_LANGUAGE = (
+    _TRANSLATIONS_ROOT.get("default_language", "fa")
+    if isinstance(_TRANSLATIONS_ROOT, dict)
+    else "fa"
+)
+_LANGUAGE_ORDER = tuple(dict.fromkeys([_DEFAULT_LANGUAGE, "fa", "en"]))
+_STOP_TRANSLATIONS = (
+    _TRANSLATIONS_ROOT.get("stop_vote", {})
+    if isinstance(_TRANSLATIONS_ROOT, dict)
+    else {}
+)
+_STOP_BUTTONS = (
+    _STOP_TRANSLATIONS.get("buttons", {})
+    if isinstance(_STOP_TRANSLATIONS, dict)
+    else {}
+)
+_STOP_MESSAGES = (
+    _STOP_TRANSLATIONS.get("messages", {})
+    if isinstance(_STOP_TRANSLATIONS, dict)
+    else {}
+)
+_STOP_ERRORS = (
+    _STOP_TRANSLATIONS.get("errors", {})
+    if isinstance(_STOP_TRANSLATIONS, dict)
+    else {}
+)
+_REDIS_KEY_SECTIONS = _CONSTANTS.redis_keys
+if isinstance(_REDIS_KEY_SECTIONS, dict):
+    _ENGINE_REDIS_KEYS = _REDIS_KEY_SECTIONS.get("engine", {})
+    if not isinstance(_ENGINE_REDIS_KEYS, dict):
+        _ENGINE_REDIS_KEYS = {}
+else:
+    _ENGINE_REDIS_KEYS = {}
+
+
+def _select_translation(entry: Any, default: str) -> str:
+    if isinstance(entry, dict):
+        for language in _LANGUAGE_ORDER:
+            text = entry.get(language)
+            if isinstance(text, str) and text:
+                return text
+    if isinstance(entry, str) and entry:
+        return entry
+    return default
+
+
 _AUTO_START_DEFAULTS = _GAME_CONSTANTS.get("auto_start", {})
 
 
@@ -115,7 +162,11 @@ class GameEngine:
         "key_start_countdown_context",
         "start_countdown_context",
     )
-    KEY_STOP_REQUEST = _ENGINE_CONSTANTS.get("key_stop_request", "stop_request")
+    STAGE_LOCK_PREFIX = _ENGINE_REDIS_KEYS.get("stage_lock_prefix", "stage:")
+    KEY_STOP_REQUEST = _ENGINE_REDIS_KEYS.get(
+        "stop_request",
+        _ENGINE_CONSTANTS.get("key_stop_request", "stop_request"),
+    )
     STOP_CONFIRM_CALLBACK = _ENGINE_CONSTANTS.get(
         "stop_confirm_callback",
         "stop:confirm",
@@ -123,6 +174,90 @@ class GameEngine:
     STOP_RESUME_CALLBACK = _ENGINE_CONSTANTS.get(
         "stop_resume_callback",
         "stop:resume",
+    )
+    STOP_CONFIRM_BUTTON_TEXT = _select_translation(
+        _STOP_BUTTONS.get("confirm"),
+        "Confirm stop",
+    )
+    STOP_RESUME_BUTTON_TEXT = _select_translation(
+        _STOP_BUTTONS.get("resume"),
+        "Resume game",
+    )
+    STOP_TITLE_TEMPLATE = _select_translation(
+        _STOP_MESSAGES.get("title"),
+        "🛑 *Stop game request*",
+    )
+    STOP_INITIATED_BY_TEMPLATE = _select_translation(
+        _STOP_MESSAGES.get("initiated_by"),
+        "Requested by {initiator}",
+    )
+    STOP_ACTIVE_PLAYERS_LABEL = _select_translation(
+        _STOP_MESSAGES.get("active_players_label"),
+        "Active players:",
+    )
+    STOP_VOTE_COUNTS_TEMPLATE = _select_translation(
+        _STOP_MESSAGES.get("vote_counts"),
+        "Approval votes: {confirmed}/{required}",
+    )
+    STOP_MANAGER_LABEL_TEMPLATE = _select_translation(
+        _STOP_MESSAGES.get("manager_label"),
+        "👤 Game manager: {manager}",
+    )
+    STOP_MANAGER_OVERRIDE_HINT = _select_translation(
+        _STOP_MESSAGES.get("manager_override_hint"),
+        "They can approve the stop vote alone.",
+    )
+    STOP_OTHER_VOTES_LABEL = _select_translation(
+        _STOP_MESSAGES.get("other_votes_label"),
+        "Other voters:",
+    )
+    STOP_RESUME_NOTICE = _select_translation(
+        _STOP_MESSAGES.get("resume_text"),
+        "✅ The game will continue.",
+    )
+    STOP_MANAGER_OVERRIDE_SUMMARY = _select_translation(
+        _STOP_MESSAGES.get("manager_override_summary"),
+        "🛑 *The manager stopped the game.*",
+    )
+    STOP_MAJORITY_SUMMARY = _select_translation(
+        _STOP_MESSAGES.get("majority_stop_summary"),
+        "🛑 *The game was stopped by majority vote.*",
+    )
+    STOP_VOTE_SUMMARY_TEMPLATE = _select_translation(
+        _STOP_MESSAGES.get("vote_summary"),
+        "Approval votes: {approved}/{required}",
+    )
+    STOP_NO_VOTES_TEXT = _select_translation(
+        _STOP_MESSAGES.get("no_votes"),
+        "No active votes were recorded.",
+    )
+    STOPPED_NOTIFICATION = _select_translation(
+        _STOP_MESSAGES.get("stopped_notification"),
+        "🛑 The game has been stopped.",
+    )
+    ERROR_NO_ACTIVE_GAME = _select_translation(
+        _STOP_ERRORS.get("no_active_game"),
+        "There is no active game to stop.",
+    )
+    ERROR_NOT_IN_GAME = _select_translation(
+        _STOP_ERRORS.get("not_in_game"),
+        "Only seated players can request to stop the game.",
+    )
+    ERROR_NO_ACTIVE_PLAYERS = _select_translation(
+        _STOP_ERRORS.get("no_active_players"),
+        "There are no active players to vote.",
+    )
+    ERROR_NO_REQUEST_TO_RESUME = _select_translation(
+        _STOP_ERRORS.get("no_request_to_resume"),
+        "There is no stop request to resume.",
+    )
+    ERROR_NO_ACTIVE_REQUEST = _select_translation(
+        _STOP_ERRORS.get("no_active_request"),
+        "There is no active stop request.",
+    )
+    ERROR_NOT_ALLOWED_TO_VOTE = _select_translation(
+        _STOP_ERRORS.get("not_allowed_to_vote"),
+        "Only active players or the manager may vote.",
     )
 
     def __init__(
@@ -173,7 +308,7 @@ class GameEngine:
         return str(state)
 
     def _stage_lock_key(self, chat_id: ChatId) -> str:
-        return f"stage:{self._safe_int(chat_id)}"
+        return f"{self.STAGE_LOCK_PREFIX}{self._safe_int(chat_id)}"
 
     async def start_game(
         self, context: ContextTypes.DEFAULT_TYPE, game: Game, chat_id: ChatId
@@ -468,10 +603,10 @@ class GameEngine:
         """Validate and submit a stop request for the active hand."""
 
         if game.state == GameState.INITIAL:
-            raise UserException("بازی فعالی برای توقف وجود ندارد.")
+            raise UserException(self.ERROR_NO_ACTIVE_GAME)
 
         if not any(player.user_id == requester_id for player in game.seated_players()):
-            raise UserException("فقط بازیکنان حاضر می‌توانند درخواست توقف بدهند.")
+            raise UserException(self.ERROR_NOT_IN_GAME)
 
         await self.request_stop(
             context=context,
@@ -496,7 +631,7 @@ class GameEngine:
             if player.state in (PlayerState.ACTIVE, PlayerState.ALL_IN)
         ]
         if not active_players:
-            raise UserException("هیچ بازیکن فعالی برای رأی‌گیری وجود ندارد.")
+            raise UserException(self.ERROR_NO_ACTIVE_PLAYERS)
 
         stop_request = context.chat_data.get(self.KEY_STOP_REQUEST)
         if not stop_request or stop_request.get("game_id") != game.id:
@@ -543,10 +678,12 @@ class GameEngine:
         keyboard = [
             [
                 InlineKeyboardButton(
-                    text="تأیید توقف", callback_data=self.STOP_CONFIRM_CALLBACK
+                    text=self.STOP_CONFIRM_BUTTON_TEXT,
+                    callback_data=self.STOP_CONFIRM_CALLBACK,
                 ),
                 InlineKeyboardButton(
-                    text="ادامه بازی", callback_data=self.STOP_RESUME_CALLBACK
+                    text=self.STOP_RESUME_BUTTON_TEXT,
+                    callback_data=self.STOP_RESUME_CALLBACK,
                 ),
             ]
         ]
@@ -597,25 +734,26 @@ class GameEngine:
             active_lines.append("—")
 
         lines = [
-            "🛑 *درخواست توقف بازی*",
-            f"درخواست توسط {initiator_text}",
+            self.STOP_TITLE_TEMPLATE,
+            self.STOP_INITIATED_BY_TEMPLATE.format(initiator=initiator_text),
             "",
-            "بازیکنان فعال:",
+            self.STOP_ACTIVE_PLAYERS_LABEL,
             *active_lines,
             "",
+            self.STOP_VOTE_COUNTS_TEMPLATE.format(
+                confirmed=confirmed_votes,
+                required=required_votes,
+            ),
         ]
-
-        if active_players:
-            lines.append(f"آراء تأیید: {confirmed_votes}/{required_votes}")
-        else:
-            lines.append("آراء تأیید: 0/0")
 
         if manager_player:
             lines.extend(
                 [
                     "",
-                    f"👤 مدیر بازی: {manager_player.mention_markdown}",
-                    "او می‌تواند به تنهایی رأی توقف را تأیید کند.",
+                    self.STOP_MANAGER_LABEL_TEMPLATE.format(
+                        manager=manager_player.mention_markdown
+                    ),
+                    self.STOP_MANAGER_OVERRIDE_HINT,
                 ]
             )
 
@@ -636,7 +774,7 @@ class GameEngine:
             lines.extend(
                 [
                     "",
-                    "رأی سایر افراد:",
+                    self.STOP_OTHER_VOTES_LABEL,
                     *voter_mentions,
                 ]
             )
@@ -690,16 +828,15 @@ class GameEngine:
 
         stop_request = context.chat_data.get(self.KEY_STOP_REQUEST)
         if not stop_request or stop_request.get("game_id") != game.id:
-            raise UserException("درخواست توقفی برای لغو وجود ندارد.")
+            raise UserException(self.ERROR_NO_REQUEST_TO_RESUME)
 
         message_id = stop_request.get("message_id")
         context.chat_data.pop(self.KEY_STOP_REQUEST, None)
 
-        resume_text = "✅ رأی به ادامه‌ی بازی داده شد. بازی ادامه می‌یابد."
         await self._telegram_ops.edit_message_text(
             chat_id,
             message_id,
-            resume_text,
+            self.STOP_RESUME_NOTICE,
             reply_markup=None,
             request_category=RequestCategory.GENERAL,
         )
@@ -734,7 +871,7 @@ class GameEngine:
     ) -> Dict[str, object]:
         stop_request = context.chat_data.get(self.KEY_STOP_REQUEST)
         if not stop_request or stop_request.get("game_id") != game.id:
-            raise UserException("درخواست توف فعالی وجود ندارد.")
+            raise UserException(self.ERROR_NO_ACTIVE_REQUEST)
         return stop_request
 
     def _validate_stop_voter(
@@ -744,7 +881,7 @@ class GameEngine:
         manager_id: Optional[UserId],
     ) -> None:
         if voter_id not in active_ids and voter_id != manager_id:
-            raise UserException("تنها بازیکنان فعال یا مدیر می‌توانند رأی دهند.")
+            raise UserException(self.ERROR_NOT_ALLOWED_TO_VOTE)
 
     async def _update_votes_and_message(
         self,
@@ -823,15 +960,17 @@ class GameEngine:
         required_votes = (len(active_ids) // 2) + 1 if active_ids else 0
 
         if manager_override:
-            summary_line = "🛑 *مدیر بازی بازی را متوقف کرد.*"
+            summary_line = self.STOP_MANAGER_OVERRIDE_SUMMARY
         else:
-            summary_line = "🛑 *بازی با رأی اکثریت متوقف شد.*"
+            summary_line = self.STOP_MAJORITY_SUMMARY
 
-        details = (
-            f"آراء تأیید: {approved_votes}/{required_votes}"
-            if active_ids
-            else "هیچ رأی فعالی ثبت نشد."
-        )
+        if active_ids:
+            details = self.STOP_VOTE_SUMMARY_TEMPLATE.format(
+                approved=approved_votes,
+                required=required_votes,
+            )
+        else:
+            details = self.STOP_NO_VOTES_TEXT
 
         return "\n".join([summary_line, details])
 
@@ -869,4 +1008,4 @@ class GameEngine:
         await self._player_manager.clear_player_anchors(game)
         game.reset()
         await self._table_manager.save_game(chat_id, game)
-        await self._view.send_message(chat_id, "🛑 بازی متوقف شد.")
+        await self._view.send_message(chat_id, self.STOPPED_NOTIFICATION)

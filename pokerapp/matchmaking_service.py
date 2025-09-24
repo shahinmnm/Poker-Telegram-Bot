@@ -6,11 +6,24 @@ import logging
 from typing import Any, Awaitable, Callable, Dict, Optional, Tuple
 
 from pokerapp.entities import ChatId, Game, GameState, Player, PlayerState
+from pokerapp.config import get_game_constants
 from pokerapp.player_manager import PlayerManager
 from pokerapp.pokerbotview import PokerBotViewer
 from pokerapp.stats_reporter import StatsReporter
 from pokerapp.utils.request_metrics import RequestMetrics
 from pokerapp.lock_manager import LockManager
+
+
+_CONSTANTS = get_game_constants()
+_REDIS_KEYS = _CONSTANTS.redis_keys
+if isinstance(_REDIS_KEYS, dict):
+    _ENGINE_KEYS = _REDIS_KEYS.get("engine", {})
+    if not isinstance(_ENGINE_KEYS, dict):
+        _ENGINE_KEYS = {}
+else:
+    _ENGINE_KEYS = {}
+
+_STAGE_LOCK_PREFIX = _ENGINE_KEYS.get("stage_lock_prefix", "stage:")
 
 
 class MatchmakingService:
@@ -286,7 +299,7 @@ class MatchmakingService:
             game.board_message_id = None
 
     def _stage_lock_key(self, chat_id: ChatId) -> str:
-        return f"stage:{self._safe_int(chat_id)}"
+        return f"{_STAGE_LOCK_PREFIX}{self._safe_int(chat_id)}"
 
     @staticmethod
     def _state_token(state: Optional[GameState]) -> str:
