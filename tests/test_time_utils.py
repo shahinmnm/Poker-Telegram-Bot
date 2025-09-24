@@ -27,6 +27,25 @@ def test_to_local_handles_european_dst_transition():
     assert after_dst.utcoffset() == dt.timedelta(hours=2)
 
 
+def test_to_local_handles_american_dst_fall_transition():
+    first = to_local(
+        dt.datetime(2024, 11, 3, 5, 30, tzinfo=dt.timezone.utc), tz_name="America/New_York"
+    )
+    second = to_local(
+        dt.datetime(2024, 11, 3, 6, 30, tzinfo=dt.timezone.utc), tz_name="America/New_York"
+    )
+
+    assert first.hour == 1
+    assert first.minute == 30
+    assert first.utcoffset() == dt.timedelta(hours=-4)
+    assert first.fold == 0
+
+    assert second.hour == 1
+    assert second.minute == 30
+    assert second.utcoffset() == dt.timedelta(hours=-5)
+    assert second.fold == 1
+
+
 def test_format_local_and_countdown_delta_use_utc_baseline():
     start = dt.datetime(2024, 1, 1, 12, 0)
     end = start + dt.timedelta(minutes=5)
@@ -45,3 +64,16 @@ def test_to_local_uses_config_default_when_timezone_missing():
     actual = to_local(base)
 
     assert actual == expected
+
+
+def test_to_local_normalizes_timezone_name_inputs():
+    base = dt.datetime(2024, 6, 1, 12, 0, tzinfo=dt.timezone.utc)
+
+    trimmed = to_local(base, tz_name="  Europe/Berlin  ")
+    explicit = to_local(base, tz_name="Europe/Berlin")
+    fallback = to_local(base, tz_name="   ")
+    default = to_local(base, tz_name=None)
+
+    assert trimmed == explicit
+    assert fallback == to_local(base, tz_name=DEFAULT_TIMEZONE_NAME)
+    assert default == to_local(base, tz_name=DEFAULT_TIMEZONE_NAME)
