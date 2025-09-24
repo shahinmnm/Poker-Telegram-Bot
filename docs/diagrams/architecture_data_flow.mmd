@@ -1,0 +1,35 @@
+flowchart LR
+    subgraph Telegram Layer
+        TG[Telegram API]
+        VIEW[PokerBotViewer]
+    end
+
+    subgraph Game Layer
+        MODEL[PokerBotModel]
+        ENGINE[GameEngine]
+        PM[PlayerManager]
+        MATCH[MatchmakingService]
+        TABLE[TableManager]
+        STATS[StatsReporter/StatsService]
+        METRIC[RequestMetrics]
+    end
+
+    subgraph Persistence
+        REDIS[(Redis)]
+        DB[(Database)]
+    end
+
+    TG <--> VIEW
+    VIEW --> MODEL : callbacks / updates
+    MODEL --> ENGINE : start_game, progress_stage, finalize_game
+    ENGINE --> MATCH : orchestration
+    MATCH --> TABLE : save_game
+    ENGINE --> TABLE
+    TABLE --> REDIS
+    ENGINE --> PM : seat/role updates
+    PM --> VIEW : join prompt & anchors
+    ENGINE --> VIEW : table snapshots
+    ENGINE --> STATS : hand_started / hand_finished
+    STATS --> DB
+    ENGINE --> METRIC : cycle tracking
+    METRIC --> REDIS : counters

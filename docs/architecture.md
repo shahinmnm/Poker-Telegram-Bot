@@ -67,6 +67,9 @@ flowchart TD
     ENGINE --> MS
 ```
 
+The Mermaid source for this dependency-injection diagram is located at
+[`docs/diagrams/architecture_di_overview.mmd`](diagrams/architecture_di_overview.mmd).
+
 `ApplicationServices` keeps factories lightweight: the `MessagingService` and
 `TelegramSafeOps` instances are created per Telegram `Application` and receive
 shared metrics/logging dependencies automatically.
@@ -111,6 +114,9 @@ flowchart LR
     METRIC --> REDIS : counters
 ```
 
+You can regenerate the component data-flow diagram from
+[`docs/diagrams/architecture_data_flow.mmd`](diagrams/architecture_data_flow.mmd).
+
 Key takeaways:
 
 - **PokerBot** (not shown) keeps only Telegram wiring; all poker logic lives in
@@ -144,6 +150,29 @@ graph TD
     D --> E[hand lock
     level 40]
 ```
+
+The lock diagram is synchronised with
+[`docs/diagrams/lock_hierarchy.mmd`](diagrams/lock_hierarchy.mmd).
+
+## Stats & reporting collaboration
+
+`StatsService` owns the database connection pool and orchestrates background
+aggregation tasks. When `bootstrap.build_services` is invoked the service either
+constructs a concrete implementation (for production) or a `NullStatsService`
+stub. Regardless of the concrete type it wires two helper caches:
+
+- **`AdaptivePlayerReportCache`** tracks the most recent statistics snapshot per
+  player and invalidates entries when hands finish. It trades memory for a
+  responsive `/stats` command even in chats with limited Redis throughput.
+- **`PlayerReportCache`** stores rendered, localised report payloads so the bot
+  can respond immediately to repeated requests within the cache TTL.
+
+`StatsService` publishes both caches via the shared `ApplicationServices`
+dataclass. `PokerBotModel` consumes the high-level interface, while
+`GameEngine.finalize_game` emits `hand_finished` events with raw payout data.
+`AdaptivePlayerReportCache` listens to those events to expire affected player
+entries, ensuring the next `/stats` call picks up the fresh totals without
+manual cache busting.
 
 Practical guidelines:
 

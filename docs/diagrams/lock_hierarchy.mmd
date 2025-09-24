@@ -1,0 +1,5 @@
+graph TD
+    A[global lock\nlevel 0] --> B[stage lock\nlevel 10]
+    B --> C[table lock\nlevel 20]
+    C --> D[player lock\nlevel 30]
+    D --> E[hand lock\nlevel 40]
