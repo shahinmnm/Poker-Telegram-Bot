@@ -1,28 +1,19 @@
-"""Player identity management utilities for PokerBot."""
+"""Lifecycle-oriented player management utilities for PokerBot."""
 
 from __future__ import annotations
 
-import inspect
 import logging
-from typing import Any, Callable, Dict, List, Optional
+from typing import Iterable, Optional
 
-from telegram import Update, User
-from telegram.ext import ContextTypes
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
-import redis.asyncio as aioredis
-
-from pokerapp.entities import ChatId, Game, Player
+from pokerapp.entities import ChatId, Game, GameState, Player, UserId
 from pokerapp.pokerbotview import PokerBotViewer
-from pokerapp.stats import BaseStatsService, NullStatsService, PlayerIdentity
 from pokerapp.table_manager import TableManager
-from pokerapp.utils.cache import AdaptivePlayerReportCache
-from pokerapp.utils.player_report_cache import (
-    PlayerReportCache as RedisPlayerReportCache,
-)
 
 
 class PlayerManager:
-    """Handle player identity bookkeeping and role labeling."""
+    """Coordinate player seating, role assignment, and anchor maintenance."""
 
     ROLE_TRANSLATIONS = {
         "dealer": "دیلر",
@@ -34,130 +25,33 @@ class PlayerManager:
     def __init__(
         self,
         *,
-        table_manager: TableManager,
-        kv: aioredis.Redis,
-        stats_service: BaseStatsService,
-        player_report_cache: AdaptivePlayerReportCache,
-        shared_report_cache: Optional[RedisPlayerReportCache],
-        shared_report_ttl: int,
         view: PokerBotViewer,
-        build_private_menu: Callable[[], object],
+        table_manager: TableManager,
         logger: logging.Logger,
     ) -> None:
-        self._table_manager = table_manager
-        self._kv = kv
-        self._stats_service = stats_service
-        self._player_report_cache = player_report_cache
-        self._shared_report_cache = shared_report_cache
-        self._shared_report_ttl = max(int(shared_report_ttl or 0), 0)
         self._view = view
-        self._build_private_menu = build_private_menu
+        self._table_manager = table_manager
         self._logger = logger
-        self._private_chat_ids: Dict[int, int] = {}
 
-    @staticmethod
-    def _safe_int(value: object) -> int:
-        try:
-            return int(value)  # type: ignore[arg-type]
-        except (TypeError, ValueError):
-            return 0
+    # ------------------------------------------------------------------
+    # Seating helpers
+    # ------------------------------------------------------------------
+    def seat_player(self, game: Game, player: Player, *, seat_index: Optional[int] = None) -> int:
+        """Place ``player`` into ``game`` at ``seat_index`` (or next available)."""
 
-    @property
-    def private_chat_ids(self) -> Dict[int, int]:
-        return self._private_chat_ids
-
-    def _stats_enabled(self) -> bool:
-        return not isinstance(self._stats_service, NullStatsService)
-
-    async def send_statistics_report(
-        self, update: Update, context: ContextTypes.DEFAULT_TYPE
-    ) -> None:
-        chat = update.effective_chat
-        user = update.effective_user
-        if chat.type != chat.PRIVATE:
-            await self._view.send_message(
-                chat.id,
-                "ℹ️ برای مشاهده آمار دقیق، لطفاً در چت خصوصی ربات از دکمه «📊 آمار بازی» استفاده کنید.",
-            )
-            return
-
-        await self.register_player_identity(user, private_chat_id=chat.id)
-
-        if not self._stats_enabled():
-            await self._view.send_message(
-                chat.id,
-                "⚙️ سیستم آمار در حال حاضر غیرفعال است. لطفاً بعداً دوباره تلاش کنید.",
-                reply_markup=self._build_private_menu(),
-            )
-            return
-
-        user_id_int = self._safe_int(user.id)
-
-        formatted_report: Optional[str] = None
-        if self._shared_report_cache is not None:
-            cached_payload = await self._shared_report_cache.get_report(user_id_int)
-            if isinstance(cached_payload, dict):
-                formatted_report = cached_payload.get("formatted")
-                if formatted_report:
-                    await self._view.send_message(
-                        chat.id,
-                        formatted_report,
-                        reply_markup=self._build_private_menu(),
-                    )
-                    return
-
-        async def _load_report() -> Optional[Any]:
-            return await self._stats_service.build_player_report(user_id_int)
-
-        report = await self._player_report_cache.get_with_context(
-            user_id_int,
-            _load_report,
+        assigned = game.add_player(player, seat_index=seat_index)
+        self._logger.debug(
+            "Player seated", extra={"user_id": getattr(player, "user_id", None), "seat": assigned}
         )
-        if report is None or (
-            report.stats.total_games <= 0 and not report.recent_games
-        ):
-            await self._view.send_message(
-                chat.id,
-                "ℹ️ هنوز داده‌ای برای نمایش وجود ندارد. پس از شرکت در چند دست بازی دوباره تلاش کنید.",
-                reply_markup=self._build_private_menu(),
-            )
-            return
+        return assigned
 
-        formatted = self._stats_service.format_report(report)
-        if self._shared_report_cache is not None:
-            await self._shared_report_cache.set_report(
-                user_id_int,
-                {"formatted": formatted},
-                ttl_seconds=self._shared_report_ttl,
-            )
-        await self._view.send_message(
-            chat.id,
-            formatted,
-            reply_markup=self._build_private_menu(),
-        )
+    def remove_player(self, game: Game, user_id: UserId) -> bool:
+        """Remove the player with ``user_id`` from ``game`` seats."""
 
-    async def send_wallet_balance(
-        self, update: Update, context: ContextTypes.DEFAULT_TYPE
-    ) -> None:
-        chat = update.effective_chat
-        user = update.effective_user
-
-        if chat.type == chat.PRIVATE:
-            await self.register_player_identity(user, private_chat_id=chat.id)
-        else:
-            await self.register_player_identity(user)
-
-        from pokerapp.pokerbotmodel import WalletManagerModel
-
-        wallet = WalletManagerModel(user.id, self._kv)
-        balance = await wallet.value()
-
-        reply_markup = self._build_private_menu() if chat.type == chat.PRIVATE else None
-        await self._view.send_message(
-            chat.id,
-            f"💰 موجودی فعلی شما: {balance}$",
-            reply_markup=reply_markup,
-        )
+        removed = game.remove_player_by_user(user_id)
+        if removed:
+            self._logger.debug("Player removed", extra={"user_id": user_id})
+        return removed
 
     def assign_role_labels(self, game: Game) -> None:
         """Assign localized role labels to players based on current blinds."""
@@ -178,7 +72,7 @@ class PlayerManager:
             is_small_blind = is_valid_seat and seat_index == small_blind_index
             is_big_blind = is_valid_seat and seat_index == big_blind_index
 
-            roles: List[str] = []
+            roles: list[str] = []
             if is_dealer:
                 roles.append(self.ROLE_TRANSLATIONS["dealer"])
             if is_small_blind:
@@ -202,127 +96,82 @@ class PlayerManager:
             )
 
             self._logger.debug(
-                "Assigned role_label: player=%s seat=%s role=%s",
-                display_name,
-                seat_number,
-                role_label,
+                "Assigned role_label", extra={"player": display_name, "seat": seat_number, "role": role_label}
             )
 
-    async def _update_private_chat_id_in_active_game(
-        self, player_id: int, private_chat_id: int
-    ) -> None:
-        """Locate active game containing player and update their private chat ID."""
+    # ------------------------------------------------------------------
+    # Anchor and prompt management
+    # ------------------------------------------------------------------
+    async def clear_player_anchors(self, game: Game) -> None:
+        """Remove all persisted player anchors for the provided ``game``."""
 
-        table_manager = self._table_manager
-        if table_manager is None:
+        clear_method = getattr(self._view, "clear_all_player_anchors", None)
+        if callable(clear_method):
+            await clear_method(game)
+            self._logger.debug("Cleared player anchors", extra={"game_id": getattr(game, "id", None)})
+
+    async def send_join_prompt(self, game: Game, chat_id: ChatId) -> None:
+        """Send the join prompt if it is not already visible."""
+
+        if game.state != GameState.INITIAL or game.ready_message_main_id:
+            return
+
+        markup = InlineKeyboardMarkup(
+            [[InlineKeyboardButton(text="نشستن سر میز", callback_data="join_game")]]
+        )
+        message_id = await self._view.send_message_return_id(
+            chat_id,
+            "برای نشستن سر میز دکمه را بزن",
+            reply_markup=markup,
+        )
+        if message_id:
+            game.ready_message_main_id = message_id
+            game.ready_message_main_text = "برای نشستن سر میز دکمه را بزن"
+            if self._table_manager is not None:
+                await self._table_manager.save_game(chat_id, game)
+
+    async def cleanup_ready_prompt(self, game: Game, chat_id: ChatId) -> None:
+        """Delete the ready message if present and reset prompt metadata."""
+
+        if not game.ready_message_main_id:
             return
 
         try:
-            game = None
-            chat_id: Optional[ChatId] = None
-
-            tables = getattr(table_manager, "_tables", None)
-            if isinstance(tables, dict):
-                for candidate_chat_id, candidate_game in tables.items():
-                    if candidate_game is None:
-                        continue
-                    for candidate_player in getattr(candidate_game, "players", []):
-                        if getattr(candidate_player, "user_id", None) == player_id:
-                            game = candidate_game
-                            chat_id = candidate_chat_id
-                            break
-                    if game is not None:
-                        break
-
-            if game is None:
-                finder = getattr(table_manager, "find_game_by_user", None)
-                if finder is not None:
-                    try:
-                        result = finder(player_id)
-                        if inspect.isawaitable(result):
-                            game, chat_id = await result
-                        elif result:
-                            game, chat_id = result
-                    except LookupError:
-                        game = None
-                        chat_id = None
-
-            if game is None:
-                return
-
-            updated = False
-            for player in getattr(game, "players", []):
-                if getattr(player, "user_id", None) == player_id:
-                    if getattr(player, "private_chat_id", None) != private_chat_id:
-                        player.private_chat_id = private_chat_id
-                        updated = True
-                    break
-
-            if updated and chat_id is not None:
-                saver = getattr(table_manager, "save_game", None)
-                if saver is not None:
-                    try:
-                        save_result = saver(chat_id, game)
-                        if inspect.isawaitable(save_result):
-                            await save_result
-                    except Exception:
-                        self._logger.exception(
-                            "Failed to persist game after updating private chat id",
-                            extra={"chat_id": chat_id, "user_id": player_id},
-                        )
-        except Exception:
-            self._logger.exception(
-                "Failed to update player private chat id in active game",
-                extra={"user_id": player_id},
+            await self._view.delete_message(chat_id, game.ready_message_main_id)
+        except Exception as exc:  # pragma: no cover - logging path
+            self._logger.warning(
+                "Failed to delete ready message",
+                extra={
+                    "chat_id": chat_id,
+                    "message_id": game.ready_message_main_id,
+                    "error_type": type(exc).__name__,
+                },
             )
+        else:
+            game.ready_message_main_id = None
+        game.ready_message_main_text = ""
 
-    async def _register_stats_identity(
-        self,
-        user: User,
-        private_chat_id: Optional[int],
-        display_name: Optional[str],
-    ) -> None:
-        """Register or update player identity in the stats service."""
+    async def clear_seat_announcement(self, game: Game, chat_id: ChatId) -> None:
+        """Remove any outstanding seat announcement message for ``game``."""
 
-        if not self._stats_enabled():
+        message_id = getattr(game, "seat_announcement_message_id", None)
+        if not message_id:
             return
 
-        identity = PlayerIdentity(
-            user_id=self._safe_int(user.id),
-            display_name=display_name
-            or user.full_name
-            or user.first_name
-            or str(user.id),
-            username=user.username,
-            full_name=user.full_name,
-            private_chat_id=private_chat_id,
-        )
-        await self._stats_service.register_player_profile(identity)
+        try:
+            await self._view.delete_message(chat_id, message_id)
+        except Exception:  # pragma: no cover - best-effort cleanup
+            self._logger.debug(
+                "Failed to delete seat announcement",
+                extra={"chat_id": chat_id, "message_id": message_id},
+            )
+        finally:
+            game.seat_announcement_message_id = None
 
-    async def register_player_identity(
-        self,
-        user: User,
-        *,
-        private_chat_id: Optional[int] = None,
-        display_name: Optional[str] = None,
-    ) -> None:
-        player_id = self._safe_int(user.id)
-
-        if private_chat_id:
-            self._private_chat_ids[player_id] = private_chat_id
-            await self._update_private_chat_id_in_active_game(player_id, private_chat_id)
-
-        await self._register_stats_identity(user, private_chat_id, display_name)
-
-    def build_identity_from_player(self, player: Player) -> PlayerIdentity:
-        display_name = getattr(player, "display_name", None) or player.mention_markdown
-        username = getattr(player, "username", None)
-        full_name = getattr(player, "full_name", None)
-        private_chat_id = getattr(player, "private_chat_id", None)
-        return PlayerIdentity(
-            user_id=self._safe_int(player.user_id),
-            display_name=display_name,
-            username=username,
-            full_name=full_name,
-            private_chat_id=private_chat_id,
-        )
+    # ------------------------------------------------------------------
+    # Convenience helpers
+    # ------------------------------------------------------------------
+    @staticmethod
+    def extract_user_ids(players: Iterable[Player]) -> Iterable[int]:
+        for player in players:
+            yield int(getattr(player, "user_id", 0) or 0)

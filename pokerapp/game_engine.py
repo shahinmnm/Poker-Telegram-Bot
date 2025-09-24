@@ -37,17 +37,12 @@ from pokerapp.entities import (
 from pokerapp.config import get_game_constants
 from pokerapp.pokerbotview import PokerBotViewer
 from pokerapp.lock_manager import LockManager
-from pokerapp.stats import (
-    BaseStatsService,
-    NullStatsService,
-    PlayerHandResult,
-    PlayerIdentity,
-)
 from pokerapp.table_manager import TableManager
 from pokerapp.utils.request_metrics import RequestCategory, RequestMetrics
-from pokerapp.utils.player_report_cache import (
-    PlayerReportCache as RedisPlayerReportCache,
-)
+from pokerapp.matchmaking_service import MatchmakingService
+from pokerapp.player_manager import PlayerManager
+from pokerapp.stats_reporter import StatsReporter
+from pokerapp.stats import PlayerIdentity
 from pokerapp.winnerdetermination import (
     HAND_NAMES_TRANSLATIONS,
     HandsOfPoker,
@@ -138,17 +133,14 @@ class GameEngine:
         winner_determination: WinnerDetermination,
         request_metrics: RequestMetrics,
         round_rate: Any,
-        stats_service: BaseStatsService,
-        assign_role_labels: Callable[[Game], None],
-        clear_player_anchors: Callable[[Game], Awaitable[None]],
-        send_turn_message: Callable[[Game, Player, ChatId], Awaitable[None]],
+        player_manager: PlayerManager,
+        matchmaking_service: MatchmakingService,
+        stats_reporter: StatsReporter,
         clear_game_messages: Callable[[Game, ChatId], Awaitable[None]],
-        send_join_prompt: Callable[[Game, ChatId], Awaitable[None]],
         build_identity_from_player: Callable[[Player], PlayerIdentity],
         safe_int: Callable[[ChatId], int],
         old_players_key: str,
         safe_edit_message_text: Callable[..., Awaitable[Optional[MessageId]]],
-        player_report_cache: RedisPlayerReportCache,
         lock_manager: LockManager,
         logger: logging.Logger,
     ) -> None:
@@ -157,31 +149,16 @@ class GameEngine:
         self._winner_determination = winner_determination
         self._request_metrics = request_metrics
         self._round_rate = round_rate
-        self._stats = stats_service
-        self._assign_role_labels = assign_role_labels
-        self._clear_player_anchors = clear_player_anchors
-        self._send_turn_message = send_turn_message
+        self._player_manager = player_manager
+        self._matchmaking_service = matchmaking_service
+        self._stats_reporter = stats_reporter
         self._clear_game_messages = clear_game_messages
-        self._send_join_prompt = send_join_prompt
         self._build_identity_from_player = build_identity_from_player
         self._safe_int = safe_int
         self._old_players_key = old_players_key
         self._safe_edit_message_text = safe_edit_message_text
-        self._player_report_cache = player_report_cache
         self._lock_manager = lock_manager
         self._logger = logger
-
-    async def _invalidate_reports(self, user_ids: Iterable[int]) -> None:
-        if not self._player_report_cache:
-            return
-        normalized_ids: Set[int] = set()
-        for user_id in user_ids:
-            normalized = self._safe_int(user_id)
-            if normalized:
-                normalized_ids.add(normalized)
-        if not normalized_ids:
-            return
-        await self._player_report_cache.invalidate(normalized_ids)
 
     @staticmethod
     def state_token(state: Any) -> str:
@@ -195,144 +172,20 @@ class GameEngine:
             return value
         return str(state)
 
-    def _stats_enabled(self) -> bool:
-        return not isinstance(self._stats, NullStatsService)
-
     def _stage_lock_key(self, chat_id: ChatId) -> str:
         return f"stage:{self._safe_int(chat_id)}"
 
     async def start_game(
         self, context: ContextTypes.DEFAULT_TYPE, game: Game, chat_id: ChatId
     ) -> None:
-        """Begin a poker hand, assigning blinds and notifying players."""
+        """Begin a poker hand, delegating to the matchmaking service."""
 
-        await self._cancel_ready_message(chat_id, game)
-
-        # Ensure dealer_index is initialized before use
-        if not hasattr(game, "dealer_index"):
-            game.dealer_index = -1
-
-        new_dealer_index = game.advance_dealer()
-        if new_dealer_index == -1:
-            new_dealer_index = game.next_occupied_seat(-1)
-            game.dealer_index = new_dealer_index
-
-        if game.dealer_index == -1:
-            self._logger.warning("Cannot start game without an occupied dealer seat")
-            return
-
-        if self._stats_enabled():
-            identities = [
-                self._build_identity_from_player(player)
-                for player in game.seated_players()
-            ]
-            await self._stats.start_hand(
-                hand_id=game.id,
-                chat_id=self._safe_int(chat_id),
-                players=identities,
-            )
-
-        await self._invalidate_reports(player.user_id for player in game.seated_players())
-
-        game.state = GameState.ROUND_PRE_FLOP
-        await self._request_metrics.start_cycle(
-            self._safe_int(chat_id), game.id
+        await self._matchmaking_service.start_game(
+            context=context,
+            game=game,
+            chat_id=chat_id,
+            build_identity_from_player=self._build_identity_from_player,
         )
-
-        if game.seat_announcement_message_id:
-            try:
-                await self._view.delete_message(
-                    chat_id, game.seat_announcement_message_id
-                )
-            except Exception as exc:  # pragma: no cover - logging path
-                self._logger.debug(
-                    "Failed to delete seat announcement",
-                    extra={
-                        "chat_id": chat_id,
-                        "message_id": game.seat_announcement_message_id,
-                        "error_type": type(exc).__name__,
-                    },
-                )
-            game.seat_announcement_message_id = None
-
-        await self._clear_player_anchors(game)
-
-        await self._divide_cards(game, chat_id)
-
-        current_player = await self._round_rate.set_blinds(game, chat_id)
-        self._assign_role_labels(game)
-
-        await self._invalidate_reports(player.user_id for player in game.players)
-
-        game.chat_id = chat_id
-
-        async with self._lock_manager.guard(
-            self._stage_lock_key(chat_id), timeout=10
-        ):
-            await self._view.send_player_role_anchors(game=game, chat_id=chat_id)
-
-        action_str = "بازی شروع شد"
-        game.last_actions.append(action_str)
-        if len(game.last_actions) > 5:
-            game.last_actions.pop(0)
-        if current_player:
-            await self._send_turn_message(
-                game,
-                current_player,
-                chat_id,
-            )
-
-        context.chat_data[self._old_players_key] = [
-            p.user_id for p in game.players
-        ]
-
-    async def _cancel_ready_message(self, chat_id: ChatId, game: Game) -> None:
-        self._logger.info(
-            "[Game] start_hand invoked",
-            extra={
-                "chat_id": chat_id,
-                "game_id": getattr(game, "id", None),
-            },
-        )
-        if not game.ready_message_main_id:
-            return
-
-        deleted_ready_message = False
-        try:
-            await self._view.delete_message(chat_id, game.ready_message_main_id)
-            deleted_ready_message = True
-        except Exception as exc:  # pragma: no cover - logging path
-            self._logger.warning(
-                "Failed to delete ready message",
-                extra={
-                    "chat_id": chat_id,
-                    "message_id": game.ready_message_main_id,
-                    "error_type": type(exc).__name__,
-                },
-            )
-        if deleted_ready_message:
-            game.ready_message_main_id = None
-        game.ready_message_main_text = ""
-
-    async def divide_cards(self, game: Game, chat_id: ChatId) -> None:
-        """Distribute hole cards to players for the upcoming hand."""
-
-        await self._divide_cards(game, chat_id)
-
-    async def _divide_cards(self, game: Game, chat_id: ChatId) -> None:
-        for player in game.seated_players():
-            if len(game.remain_cards) < 2:
-                await self._view.send_message(
-                    chat_id, "کارت‌های کافی در دسته وجود ندارد! بازی ریست می‌شود."
-                )
-                await self._request_metrics.end_cycle(
-                    self._safe_int(chat_id), cycle_token=game.id
-                )
-                game.reset()
-                return
-
-            cards = [game.remain_cards.pop(), game.remain_cards.pop()]
-            player.cards = cards
 
     def hand_type_to_label(self, hand_type: Optional[HandsOfPoker]) -> Optional[str]:
         if not hand_type:
@@ -354,47 +207,13 @@ class GameEngine:
         street_name: str,
         send_message: bool = True,
     ) -> None:
-        async with self._lock_manager.guard(
-            self._stage_lock_key(chat_id), timeout=10
-        ):
-            await self._add_cards_to_table(
-                count=count,
-                game=game,
-                chat_id=chat_id,
-                street_name=street_name,
-                send_message=send_message,
-            )
-
-    async def _add_cards_to_table(
-        self,
-        *,
-        count: int,
-        game: Game,
-        chat_id: ChatId,
-        street_name: str,
-        send_message: bool,
-    ) -> None:
-        game.chat_id = chat_id
-        should_refresh_anchors = count > 0
-        if count > 0:
-            for _ in range(count):
-                if game.remain_cards:
-                    game.cards_table.append(game.remain_cards.pop())
-
-        if should_refresh_anchors:
-            await self._view.update_player_anchors_and_keyboards(game)
-
-        if not send_message:
-            return
-
-        if game.board_message_id:
-            await self._view.delete_message(chat_id, game.board_message_id)
-            if game.board_message_id in game.message_ids_to_delete:
-                game.message_ids_to_delete.remove(game.board_message_id)
-            game.board_message_id = None
-
-    def _get_first_player_index(self, game: Game) -> int:
-        return self._round_rate._find_next_active_player_index(game, game.dealer_index)
+        await self._matchmaking_service.add_cards_to_table(
+            count=count,
+            game=game,
+            chat_id=chat_id,
+            street_name=street_name,
+            send_message=send_message,
+        )
 
     async def progress_stage(
         self,
@@ -405,95 +224,12 @@ class GameEngine:
         async with self._lock_manager.guard(
             self._stage_lock_key(chat_id), timeout=10
         ):
-            return await self._progress_stage_locked(
+            return await self._matchmaking_service.progress_stage(
                 context=context,
                 chat_id=chat_id,
                 game=game,
+                finalize_game=self.finalize_game,
             )
-
-    async def _progress_stage_locked(
-        self,
-        *,
-        context: ContextTypes.DEFAULT_TYPE,
-        chat_id: ChatId,
-        game: Game,
-    ) -> bool:
-        game.chat_id = chat_id
-
-        contenders = game.players_by(states=(PlayerState.ACTIVE, PlayerState.ALL_IN))
-        if len(contenders) <= 1:
-            await self.finalize_game(context=context, game=game, chat_id=chat_id)
-            game.current_player_index = -1
-            return False
-
-        stage_transitions: Dict[GameState, Tuple[GameState, int, str]] = {
-            GameState.ROUND_PRE_FLOP: (GameState.ROUND_FLOP, 3, "🃏 فلاپ"),
-            GameState.ROUND_FLOP: (GameState.ROUND_TURN, 1, "🃏 ترن"),
-            GameState.ROUND_TURN: (GameState.ROUND_RIVER, 1, "🃏 ریور"),
-        }
-
-        while True:
-            self._round_rate.collect_bets_for_pot(game)
-            for player in game.players:
-                player.has_acted = False
-
-            transition = stage_transitions.get(game.state)
-            if transition:
-                next_state, card_count, stage_label = transition
-                self._logger.debug(
-                    "Advancing game %s to %s",
-                    game.id,
-                    self.state_token(next_state),
-                )
-                game.state = next_state
-                await self._add_cards_to_table(
-                    count=card_count,
-                    game=game,
-                    chat_id=chat_id,
-                    street_name=stage_label,
-                    send_message=True,
-                )
-            elif game.state == GameState.ROUND_RIVER:
-                await self.finalize_game(
-                    context=context,
-                    game=game,
-                    chat_id=chat_id,
-                )
-                game.current_player_index = -1
-                return False
-            else:
-                self._logger.warning(
-                    "Unexpected state %s during stage progression", game.state
-                )
-                game.current_player_index = -1
-                return False
-
-            active_players = game.players_by(states=(PlayerState.ACTIVE,))
-            if not active_players:
-                if game.state == GameState.ROUND_RIVER:
-                    await self.finalize_game(
-                        context=context,
-                        game=game,
-                        chat_id=chat_id,
-                    )
-                    game.current_player_index = -1
-                    return False
-                continue
-
-            first_player_index = self._get_first_player_index(game)
-            game.current_player_index = first_player_index
-            if first_player_index == -1:
-                if game.state == GameState.ROUND_RIVER:
-                    await self.finalize_game(
-                        context=context,
-                        game=game,
-                        chat_id=chat_id,
-                    )
-                    game.current_player_index = -1
-                    return False
-                continue
-
-            return True
 
     async def finalize_game(
         self,
@@ -594,20 +330,13 @@ class GameEngine:
                     self._view.send_showdown_results, chat_id, game, winners_by_pot
                 )
 
-            if self._stats_enabled():
-                stats_results = self._build_hand_statistics_results(
-                    game,
-                    dict(payouts),
-                    hand_labels,
-                )
-                await self._stats.finish_hand(
-                    hand_id=hand_id,
-                    chat_id=self._safe_int(chat_id),
-                    results=stats_results,
-                    pot_total=pot_total,
-                )
-
-            await self._invalidate_reports(player.user_id for player in game.players)
+            await self._stats_reporter.hand_finished(
+                game,
+                chat_id,
+                payouts=dict(payouts),
+                hand_labels=hand_labels,
+                pot_total=pot_total,
+            )
 
             game.pot = 0
             game.state = GameState.FINISHED
@@ -623,12 +352,12 @@ class GameEngine:
             await self._request_metrics.end_cycle(
                 self._safe_int(chat_id), cycle_token=game.id
             )
-            await self._clear_player_anchors(game)
+            await self._player_manager.clear_player_anchors(game)
             game.reset()
             await self._table_manager.save_game(chat_id, game)
 
             await _send_with_retry(self._view.send_new_hand_ready_message, chat_id)
-            await self._send_join_prompt(game, chat_id)
+            await self._player_manager.send_join_prompt(game, chat_id)
 
     def _evaluate_contender_hands(
         self, game: Game, contenders: Iterable[Player]
@@ -728,41 +457,6 @@ class GameEngine:
             ]
 
         return winners_by_pot
-
-    def _build_hand_statistics_results(
-        self,
-        game: Game,
-        payouts: Dict[int, int],
-        hand_labels: Dict[int, Optional[str]],
-    ) -> List[PlayerHandResult]:
-        results: List[PlayerHandResult] = []
-        for player in game.seated_players():
-            user_id = self._safe_int(player.user_id)
-            total_bet = int(getattr(player, "total_bet", 0))
-            payout = int(payouts.get(user_id, 0))
-            net_profit = payout - total_bet
-            if net_profit > 0 or (payout > 0 and total_bet == 0):
-                result_flag = "win"
-            elif net_profit < 0:
-                result_flag = "loss"
-            else:
-                result_flag = "push"
-            label = hand_labels.get(user_id)
-            if not label and result_flag == "win" and player.state == PlayerState.ALL_IN:
-                label = "پیروزی با آل-این"
-            results.append(
-                PlayerHandResult(
-                    user_id=user_id,
-                    display_name=player.mention_markdown,
-                    total_bet=total_bet,
-                    payout=payout,
-                    net_profit=net_profit,
-                    hand_type=label,
-                    was_all_in=player.state == PlayerState.ALL_IN,
-                    result=result_flag,
-                )
-            )
-        return results
 
     async def stop_game(
         self,
@@ -1044,7 +738,7 @@ class GameEngine:
             if player.wallet:
                 await player.wallet.cancel(original_game_id)
 
-        await self._invalidate_reports(player.user_id for player in players_snapshot)
+        await self._stats_reporter.invalidate_players(players_snapshot)
 
         game.pot = 0
 
@@ -1079,7 +773,7 @@ class GameEngine:
         await self._request_metrics.end_cycle(
             self._safe_int(chat_id), cycle_token=game.id
         )
-        await self._clear_player_anchors(game)
+        await self._player_manager.clear_player_anchors(game)
         game.reset()
         await self._table_manager.save_game(chat_id, game)
         await self._view.send_message(chat_id, "🛑 بازی متوقف شد.")
