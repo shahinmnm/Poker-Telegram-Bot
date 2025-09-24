@@ -410,14 +410,16 @@ class AdaptivePlayerReportCache(PlayerReportCache):
         if removed:
             level = self._logger.info if event_type else self._logger.debug
             message = (
-                "Player report invalidated due to event"
-                if event_type
-                else "AdaptivePlayerReportCache invalidate"
+                (
+                    f"Player report invalidated due to event {event_type}"
+                    if event_type
+                    else "AdaptivePlayerReportCache invalidate"
+                )
             )
             level(message, extra=log_payload)
         elif event_type:
             self._logger.info(
-                "Player report invalidated due to event",
+                f"Player report invalidated due to event {event_type}",
                 extra=log_payload,
             )
         else:

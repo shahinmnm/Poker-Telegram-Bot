@@ -38,6 +38,7 @@ from pokerapp.lock_manager import LockManager
 from pokerapp.table_manager import TableManager
 from pokerapp.utils.request_metrics import RequestCategory, RequestMetrics
 from pokerapp.utils.telegram_safeops import TelegramSafeOps
+from pokerapp.utils.cache import AdaptivePlayerReportCache
 from pokerapp.matchmaking_service import MatchmakingService
 from pokerapp.player_manager import PlayerManager
 from pokerapp.stats_reporter import StatsReporter
@@ -185,6 +186,7 @@ class GameEngine:
         lock_manager: LockManager,
         logger: logging.Logger,
         constants: Optional[GameConstants] = None,
+        adaptive_player_report_cache: Optional[AdaptivePlayerReportCache] = None,
     ) -> None:
         self._table_manager = table_manager
         self._view = view
@@ -202,6 +204,7 @@ class GameEngine:
         self._lock_manager = lock_manager
         self._logger = logger
         self.constants = constants or _CONSTANTS
+        self._adaptive_player_report_cache = adaptive_player_report_cache
         self._initialize_stop_translations()
 
     @staticmethod
@@ -373,6 +376,32 @@ class GameEngine:
     def _stage_lock_key(self, chat_id: ChatId) -> str:
         return f"{self.STAGE_LOCK_PREFIX}{self._safe_int(chat_id)}"
 
+    def _normalize_player_ids(self, players: Iterable[Player]) -> Set[int]:
+        normalized: Set[int] = set()
+        for player in players:
+            user_id = getattr(player, "user_id", None)
+            if user_id is None:
+                continue
+            try:
+                parsed = int(user_id)
+            except (TypeError, ValueError):
+                continue
+            if parsed:
+                normalized.add(parsed)
+        return normalized
+
+    def _invalidate_adaptive_report_cache(
+        self, players: Iterable[Player], *, event_type: str
+    ) -> None:
+        if self._adaptive_player_report_cache is None:
+            return
+        player_ids = self._normalize_player_ids(players)
+        if not player_ids:
+            return
+        self._adaptive_player_report_cache.invalidate_on_event(
+            player_ids, event_type
+        )
+
     async def start_game(
         self, context: ContextTypes.DEFAULT_TYPE, game: Game, chat_id: ChatId
     ) -> None:
@@ -441,6 +470,7 @@ class GameEngine:
         ):
             contenders = game.players_by(states=(PlayerState.ACTIVE, PlayerState.ALL_IN))
             game.chat_id = chat_id
+            players_snapshot = list(game.players)
 
             await self._clear_game_messages(game, chat_id)
 
@@ -478,6 +508,10 @@ class GameEngine:
 
             await self._distribute_payouts(game, payouts)
 
+            self._invalidate_adaptive_report_cache(
+                players_snapshot, event_type="hand_finished"
+            )
+
             await self._stats_reporter.hand_finished(
                 game,
                 chat_id,
@@ -490,6 +524,7 @@ class GameEngine:
                 game,
                 context=context,
                 chat_id=chat_id,
+                send_stop_notification=False,
             )
 
             await self._telegram_ops.send_message_safe(
@@ -616,6 +651,7 @@ class GameEngine:
         *,
         context: ContextTypes.DEFAULT_TYPE,
         chat_id: ChatId,
+        send_stop_notification: bool = False,
     ) -> None:
         game.pot = 0
         game.state = GameState.FINISHED
@@ -638,6 +674,8 @@ class GameEngine:
         await self._player_manager.clear_player_anchors(game)
         game.reset()
         await self._table_manager.save_game(chat_id, game)
+        if send_stop_notification:
+            await self._view.send_message(chat_id, self.STOPPED_NOTIFICATION)
 
     def _evaluate_contender_hands(
         self, game: Game, contenders: Iterable[Player]
@@ -1101,6 +1139,10 @@ class GameEngine:
             if player.wallet:
                 await player.wallet.cancel(original_game_id)
 
+        self._invalidate_adaptive_report_cache(
+            player_list, event_type="hand_finished"
+        )
+
         await self._stats_reporter.invalidate_players(
             player_list, event_type="hand_finished"
         )
@@ -1160,5 +1202,6 @@ class GameEngine:
             game,
             context=context,
             chat_id=chat_id,
+            send_stop_notification=False,
         )
         await self._view.send_message(chat_id, self.STOPPED_NOTIFICATION)

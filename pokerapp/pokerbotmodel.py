@@ -289,6 +289,7 @@ class PokerBotModel:
             telegram_safe_ops=self._telegram_ops,
             lock_manager=self._lock_manager,
             logger=logger.getChild("game_engine"),
+            adaptive_player_report_cache=self._player_report_cache,
         )
 
     @property

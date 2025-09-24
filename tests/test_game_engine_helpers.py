@@ -23,6 +23,8 @@ def game_engine_setup():
     stats_reporter = MagicMock()
     stats_reporter.invalidate_players = AsyncMock()
 
+    adaptive_cache = MagicMock()
+
     player_manager = MagicMock()
     player_manager.clear_player_anchors = AsyncMock()
 
@@ -46,6 +48,7 @@ def game_engine_setup():
         telegram_safe_ops=telegram_safe_ops,
         lock_manager=MagicMock(),
         logger=MagicMock(),
+        adaptive_player_report_cache=adaptive_cache,
     )
 
     return SimpleNamespace(
@@ -56,6 +59,7 @@ def game_engine_setup():
         stats_reporter=stats_reporter,
         player_manager=player_manager,
         telegram_safe_ops=telegram_safe_ops,
+        adaptive_cache=adaptive_cache,
     )
 
 
@@ -85,6 +89,9 @@ async def test_refund_players_cancels_wallets_and_invalidates(game_engine_setup)
 
     wallet_a.cancel.assert_awaited_once_with("game-123")
     wallet_b.cancel.assert_awaited_once_with("game-123")
+    game_engine_setup.adaptive_cache.invalidate_on_event.assert_called_once_with(
+        {1, 2}, "hand_finished"
+    )
     game_engine_setup.stats_reporter.invalidate_players.assert_awaited_once_with(
         [player_a, player_b], event_type="hand_finished"
     )
@@ -124,7 +131,10 @@ async def test_reset_game_state_clears_pot_and_persists(game_engine_setup):
     game.pot = 300
 
     await game_engine_setup.engine._reset_game_state(
-        game=game, chat_id=-400, context=SimpleNamespace(chat_data={})
+        game=game,
+        chat_id=-400,
+        context=SimpleNamespace(chat_data={}),
+        send_stop_notification=True,
     )
 
     assert game.pot == 0
@@ -283,6 +293,8 @@ def test_game_engine_custom_stop_translations(tmp_path):
         edit_message_text=AsyncMock(return_value=None)
     )
 
+    adaptive_cache = MagicMock()
+
     engine = GameEngine(
         table_manager=table_manager,
         view=view,
@@ -300,6 +312,7 @@ def test_game_engine_custom_stop_translations(tmp_path):
         lock_manager=MagicMock(),
         logger=MagicMock(),
         constants=constants,
+        adaptive_player_report_cache=adaptive_cache,
     )
 
     game = Game()
