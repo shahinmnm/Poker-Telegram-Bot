@@ -236,6 +236,19 @@ class LockManager:
         )
         current_acquisitions = self._get_current_acquisitions()
         self._validate_lock_order(current_acquisitions, key, resolved_level, context_payload)
+        acquisition_order = self._get_current_levels()
+        acquiring_extra = self._log_extra(
+            context_payload,
+            event_type="lock_acquiring",
+            lock_key=key,
+            lock_level=resolved_level,
+            acquisition_order=acquisition_order,
+        )
+        acquiring_extra.setdefault("lock_name", context_payload.get("lock_name", key))
+        acquiring_extra.setdefault("chat_id", context_payload.get("chat_id"))
+        acquiring_extra.setdefault("lock_level", resolved_level)
+        acquiring_extra["order"] = acquisition_order
+        self._logger.info("Acquiring lock", extra=acquiring_extra)
 
         total_timeout = self._resolve_timeout(key, timeout)
         deadline: Optional[float]
