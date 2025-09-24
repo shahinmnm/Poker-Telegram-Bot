@@ -991,7 +991,7 @@ async def test_showdown_sends_new_hand_message_before_join_prompt():
         private_match_service=private_match_service,
     )
     model._game_engine._clear_game_messages = AsyncMock()
-    model._game_engine._send_join_prompt = AsyncMock(side_effect=record_join_prompt)
+    model._player_manager.send_join_prompt = AsyncMock(side_effect=record_join_prompt)
     model._game_engine._evaluate_contender_hands = MagicMock(return_value=[])
     model._game_engine._determine_winners = MagicMock(return_value=[])
 
@@ -1041,8 +1041,8 @@ async def test_start_game_assigns_blinds_to_occupied_seats():
         table_manager=table_manager,
         private_match_service=private_match_service,
     )
-    model._game_engine._divide_cards = AsyncMock()
-    model._game_engine._send_turn_message = AsyncMock()
+    model._matchmaking_service._divide_cards = AsyncMock()
+    model._matchmaking_service._send_turn_message = AsyncMock()
     model._round_rate._set_player_blind = AsyncMock()
 
     game = Game()
@@ -1092,8 +1092,8 @@ async def test_start_game_assigns_blinds_to_occupied_seats():
     view.send_player_role_anchors.assert_awaited_once_with(game=game, chat_id=chat_id)
     view.sync_player_private_keyboards.assert_not_awaited()
 
-    model._game_engine._send_turn_message.assert_awaited_once()
-    send_call = model._game_engine._send_turn_message.await_args
+    model._matchmaking_service._send_turn_message.assert_awaited_once()
+    send_call = model._matchmaking_service._send_turn_message.await_args
     assert send_call.args[1].user_id == player_b.user_id
     assert send_call.args[2] == chat_id
 
@@ -1118,7 +1118,7 @@ async def test_start_game_keeps_ready_message_id_when_deletion_fails():
         table_manager=table_manager,
         private_match_service=private_match_service,
     )
-    model._game_engine._divide_cards = AsyncMock()
+    model._matchmaking_service._divide_cards = AsyncMock()
     model._round_rate.set_blinds = AsyncMock(return_value=None)
 
     game = Game()
@@ -1144,7 +1144,7 @@ async def test_start_game_keeps_ready_message_id_when_deletion_fails():
     view.delete_message.assert_awaited_once_with(chat_id, ready_message_id)
     assert game.ready_message_main_id == ready_message_id
     assert game.ready_message_main_text == ""
-    model._game_engine._divide_cards.assert_awaited_once_with(game, chat_id)
+    model._matchmaking_service._divide_cards.assert_awaited_once_with(game, chat_id)
     model._round_rate.set_blinds.assert_awaited_once_with(game, chat_id)
     view.send_player_role_anchors.assert_awaited_once_with(game=game, chat_id=chat_id)
     view.sync_player_private_keyboards.assert_not_awaited()

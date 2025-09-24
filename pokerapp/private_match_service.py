@@ -11,7 +11,7 @@ from telegram import ReplyKeyboardMarkup, User
 from telegram.helpers import mention_markdown as format_mention_markdown
 
 from pokerapp.entities import ChatId, Player, UserId, Wallet
-from pokerapp.player_manager import PlayerManager
+from pokerapp.player_identity_manager import PlayerIdentityManager
 from pokerapp.pokerbotview import PokerBotViewer
 from pokerapp.stats import BaseStatsService, PlayerIdentity
 from pokerapp.table_manager import TableManager
@@ -101,7 +101,7 @@ class PrivateMatchService:
         self._safe_int_fn: Optional[Callable[[UserId], int]] = None
         self._build_private_menu: Optional[Callable[[], ReplyKeyboardMarkup]] = None
         self._view: Optional[PokerBotViewer] = None
-        self._player_manager: Optional[PlayerManager] = None
+        self._player_manager: Optional[PlayerIdentityManager] = None
         self._request_metrics: Optional[RequestMetrics] = None
         self._stats: Optional[BaseStatsService] = None
         self._stats_enabled: Optional[Callable[[], bool]] = None
@@ -115,7 +115,7 @@ class PrivateMatchService:
         safe_int: Callable[[UserId], int],
         build_private_menu: Callable[[], ReplyKeyboardMarkup],
         view: PokerBotViewer,
-        player_manager: PlayerManager,
+        player_manager: PlayerIdentityManager,
         request_metrics: RequestMetrics,
         stats_service: BaseStatsService,
         stats_enabled: Callable[[], bool],
@@ -449,7 +449,7 @@ class PrivateMatchService:
             raise RuntimeError("PrivateMatchService view dependency not configured")
         return self._view
 
-    def _require_player_manager(self) -> PlayerManager:
+    def _require_player_manager(self) -> PlayerIdentityManager:
         if self._player_manager is None:
             raise RuntimeError(
                 "PrivateMatchService player_manager dependency not configured"

@@ -68,7 +68,10 @@ from pokerapp.utils.player_report_cache import (
 from pokerapp.utils.request_metrics import RequestCategory, RequestMetrics
 from pokerapp.utils.redis_safeops import RedisSafeOps
 from pokerapp.lock_manager import LockManager
+from pokerapp.player_identity_manager import PlayerIdentityManager
 from pokerapp.player_manager import PlayerManager
+from pokerapp.matchmaking_service import MatchmakingService
+from pokerapp.stats_reporter import StatsReporter
 from pokerapp.game_engine import GameEngine
 
 _GAME_CONSTANTS = get_game_constants()
@@ -178,7 +181,7 @@ class PokerBotModel:
         self._timezone_name = cfg_timezone
         self._stats.bind_player_report_cache(self._player_report_cache)
         self._lock_manager = LockManager(logger=logger.getChild("lock_manager"))
-        self._player_manager = PlayerManager(
+        self._player_identity_manager = PlayerIdentityManager(
             table_manager=self._table_manager,
             kv=self._kv,
             stats_service=self._stats,
@@ -187,9 +190,20 @@ class PokerBotModel:
             shared_report_ttl=self._player_report_cache_ttl,
             view=self._view,
             build_private_menu=self._build_private_menu,
-            logger=logger.getChild("player_manager"),
+            logger=logger.getChild("player_identity"),
         )
-        self._private_chat_ids = self._player_manager.private_chat_ids
+        self._player_manager = PlayerManager(
+            view=self._view,
+            table_manager=self._table_manager,
+            logger=logger.getChild("player_lifecycle"),
+        )
+        self._stats_reporter = StatsReporter(
+            stats_service=self._stats,
+            player_report_cache=self._shared_player_report_cache,
+            safe_int=self._safe_int,
+            logger=logger.getChild("stats_reporter"),
+        )
+        self._private_chat_ids = self._player_identity_manager.private_chat_ids
         self._countdown_cache: LRUCache[int, _CountdownCacheEntry] = LRUCache(
             maxsize=64, getsizeof=lambda entry: 1
         )
@@ -198,11 +212,23 @@ class PokerBotModel:
         if not isinstance(metrics_candidate, RequestMetrics):
             raise ValueError("PokerBotViewer must expose a RequestMetrics instance")
         self._request_metrics = metrics_candidate
+        self._matchmaking_service = MatchmakingService(
+            view=self._view,
+            round_rate=self._round_rate,
+            request_metrics=self._request_metrics,
+            player_manager=self._player_manager,
+            stats_reporter=self._stats_reporter,
+            lock_manager=self._lock_manager,
+            send_turn_message=self._send_turn_message,
+            safe_int=self._safe_int,
+            old_players_key=KEY_OLD_PLAYERS,
+            logger=logger.getChild("matchmaking"),
+        )
         self._private_match_service.configure(
             safe_int=self._safe_int,
             build_private_menu=self._build_private_menu,
             view=self._view,
-            player_manager=self._player_manager,
+            player_manager=self._player_identity_manager,
             request_metrics=self._request_metrics,
             stats_service=self._stats,
             stats_enabled=self._stats_enabled,
@@ -216,17 +242,14 @@ class PokerBotModel:
             winner_determination=self._winner_determine,
             request_metrics=self._request_metrics,
             round_rate=self._round_rate,
-            stats_service=self._stats,
-            assign_role_labels=self.assign_role_labels,
-            clear_player_anchors=self._clear_player_anchors,
-            send_turn_message=self._send_turn_message,
+            player_manager=self._player_manager,
+            matchmaking_service=self._matchmaking_service,
+            stats_reporter=self._stats_reporter,
             clear_game_messages=self._clear_game_messages,
-            send_join_prompt=self._send_join_prompt,
             build_identity_from_player=self._build_identity_from_player,
             safe_int=self._safe_int,
             old_players_key=KEY_OLD_PLAYERS,
             safe_edit_message_text=self._safe_edit_message_text,
-            player_report_cache=self._shared_player_report_cache,
             lock_manager=self._lock_manager,
             logger=logger.getChild("game_engine"),
         )
@@ -256,7 +279,7 @@ class PokerBotModel:
         private_chat_id: Optional[int] = None,
         display_name: Optional[str] = None,
     ) -> None:
-        await self._player_manager.register_player_identity(
+        await self._player_identity_manager.register_player_identity(
             user,
             private_chat_id=private_chat_id,
             display_name=display_name,
@@ -295,17 +318,17 @@ class PokerBotModel:
         return decoded
 
     def _build_identity_from_player(self, player: Player) -> PlayerIdentity:
-        return self._player_manager.build_identity_from_player(player)
+        return self._player_identity_manager.build_identity_from_player(player)
 
     async def _send_statistics_report(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
     ) -> None:
-        return await self._player_manager.send_statistics_report(update, context)
+        return await self._player_identity_manager.send_statistics_report(update, context)
 
     async def _send_wallet_balance(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
     ) -> None:
-        return await self._player_manager.send_wallet_balance(update, context)
+        return await self._player_identity_manager.send_wallet_balance(update, context)
 
     async def _cancel_private_matchmaking(self, user_id: UserId) -> bool:
         state = await self._private_match_service.get_private_match_state(user_id)
@@ -532,18 +555,7 @@ class PokerBotModel:
         return self._round_rate._find_next_active_player_index(game, game.dealer_index)
 
     async def _send_join_prompt(self, game: Game, chat_id: ChatId) -> None:
-        """Send initial join prompt with inline button if not already sent."""
-        if game.state == GameState.INITIAL and not game.ready_message_main_id:
-            markup = InlineKeyboardMarkup(
-                [[InlineKeyboardButton(text="نشستن سر میز", callback_data="join_game")]]
-            )
-            msg_id = await self._view.send_message_return_id(
-                chat_id, "برای نشستن سر میز دکمه را بزن", reply_markup=markup
-            )
-            if msg_id:
-                game.ready_message_main_id = msg_id
-                game.ready_message_main_text = "برای نشستن سر میز دکمه را بزن"
-                await self._table_manager.save_game(chat_id, game)
+        await self._player_manager.send_join_prompt(game, chat_id)
 
     async def _countdown_cache_should_skip(
         self,
@@ -1031,7 +1043,7 @@ class PokerBotModel:
             player.display_name = user.full_name or user.first_name or user.username
             player.username = user.username
             player.full_name = user.full_name
-            player.private_chat_id = self._player_manager.private_chat_ids.get(
+            player.private_chat_id = self._player_identity_manager.private_chat_ids.get(
                 self._safe_int(user.id)
             )
             game.ready_users.add(user.id)
@@ -1582,9 +1594,7 @@ class PokerBotModel:
         game.message_ids.clear()
 
     async def _clear_player_anchors(self, game: Game) -> None:
-        clear_method = getattr(self._view, "clear_all_player_anchors", None)
-        if callable(clear_method):
-            await clear_method(game)
+        await self._player_manager.clear_player_anchors(game)
 
     async def _end_hand(
         self, game: Game, chat_id: ChatId, context: CallbackContext

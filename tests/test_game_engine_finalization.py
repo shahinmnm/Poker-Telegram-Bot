@@ -123,8 +123,8 @@ async def test_finalize_game_single_winner_distributes_pot_and_updates_stats():
         stats_service=stats,
     )
     model._game_engine._clear_game_messages = AsyncMock()
-    model._game_engine._clear_player_anchors = AsyncMock()
-    model._game_engine._send_join_prompt = AsyncMock()
+    model._player_manager.clear_player_anchors = AsyncMock()
+    model._player_manager.send_join_prompt = AsyncMock()
 
     game = Game()
     game.state = GameState.ROUND_RIVER
@@ -169,7 +169,7 @@ async def test_finalize_game_single_winner_distributes_pot_and_updates_stats():
     assert context.chat_data[KEY_OLD_PLAYERS] == [winner.user_id, loser.user_id]
     table_manager.save_game.assert_awaited()
     view.send_new_hand_ready_message.assert_awaited_once_with(chat_id)
-    model._game_engine._send_join_prompt.assert_awaited_once()
+    model._player_manager.send_join_prompt.assert_awaited_once()
 
 
 @pytest.mark.asyncio
@@ -193,8 +193,8 @@ async def test_finalize_game_split_pot_between_tied_winners():
         stats_service=stats,
     )
     model._game_engine._clear_game_messages = AsyncMock()
-    model._game_engine._clear_player_anchors = AsyncMock()
-    model._game_engine._send_join_prompt = AsyncMock()
+    model._player_manager.clear_player_anchors = AsyncMock()
+    model._player_manager.send_join_prompt = AsyncMock()
 
     game = Game()
     game.state = GameState.ROUND_RIVER
