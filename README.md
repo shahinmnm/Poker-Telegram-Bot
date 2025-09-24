@@ -27,17 +27,20 @@ The production bot is split into three cooperating layers:
   `MessagingService` facade.
 
 The new dependency-injection centric architecture is documented in depth inside
-[`docs/game_flow.md`](docs/game_flow.md), including ASCII and PlantUML diagrams
-that illustrate how bootstrap code constructs the bot.
+[`docs/architecture.md`](docs/architecture.md), including Mermaid diagrams that
+illustrate how `bootstrap.py` wires shared services. For a visual walkthrough of
+the per-hand lifecycle consult [`docs/game_flow.md`](docs/game_flow.md), which
+contains sequence and swimlane diagrams of the round progression.
 
 ## Game flow reference
 
 For a detailed walkthrough of the startup sequence, per-stage lifecycle, and the
 `GameState` transitions (`ROUND_PRE_FLOP` → `ROUND_FLOP` → `ROUND_TURN` →
-`ROUND_RIVER` → `FINISHED`), consult the [Game Flow & Architecture guide](docs/game_flow.md).
-The document expands on the high-level rules below by mapping them back to the
-actual async functions that drive table updates, statistics, and message
-rendering.
+`ROUND_RIVER` → `FINISHED`), consult the [Game Flow guide](docs/game_flow.md).
+High-level dependency injection, data flow, and lock hierarchy information lives
+in the [Architecture overview](docs/architecture.md). Both documents expand on
+the high-level rules below by mapping them back to the actual async functions
+that drive table updates, statistics, and message rendering.
 
 **Here is the brief instruction of Texas Poker**\
 Every player has two private cards and on the table has five community cards which are dealt face up in the three stages.
