@@ -5,6 +5,7 @@ from copy import deepcopy
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import urljoin
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import yaml
 
@@ -74,6 +75,7 @@ _DEFAULT_SYSTEM_CONSTANTS_DATA: Dict[str, Any] = {
     "default_webhook_path": "/telegram/webhook-poker2025",
     "default_rate_limit_per_second": 1,
     "default_rate_limit_per_minute": 20,
+    "default_timezone_name": "Asia/Tehran",
 }
 
 
@@ -247,6 +249,7 @@ DEFAULT_WEBHOOK_PATH = _SYSTEM_CONSTANTS["default_webhook_path"]
 # second in a chat and limits groups to 20 messages per minute.
 DEFAULT_RATE_LIMIT_PER_SECOND = _SYSTEM_CONSTANTS["default_rate_limit_per_second"]
 DEFAULT_RATE_LIMIT_PER_MINUTE = _SYSTEM_CONSTANTS["default_rate_limit_per_minute"]
+DEFAULT_TIMEZONE_NAME = _SYSTEM_CONSTANTS["default_timezone_name"]
 
 
 GAME_CONSTANTS = GameConstants()
@@ -408,6 +411,23 @@ class Config:
             self.RATE_LIMIT_PER_SECOND: int = DEFAULT_RATE_LIMIT_PER_SECOND
         else:
             self.RATE_LIMIT_PER_SECOND = parsed_rate_limit_per_second
+
+        timezone_env = os.getenv("POKERBOT_TIMEZONE", "").strip()
+        timezone_candidate = timezone_env or DEFAULT_TIMEZONE_NAME
+        try:
+            ZoneInfo(timezone_candidate)
+        except ZoneInfoNotFoundError:
+            logger.warning(
+                "Configured timezone %s is invalid; falling back to default",
+                timezone_candidate,
+                extra={
+                    "category": "config",
+                    "stage": "timezone_configuration",
+                    "error_type": "InvalidTimezone",
+                },
+            )
+            timezone_candidate = DEFAULT_TIMEZONE_NAME
+        self.TIMEZONE_NAME: str = timezone_candidate
 
     @staticmethod
     def _normalize_webhook_path(path: str) -> str:

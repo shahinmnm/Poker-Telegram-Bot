@@ -186,6 +186,21 @@ async def test_statistics_command_formats_report(tmp_path):
         assert "📝 پنج دست اخیر:" in message
         assert "👤 نام: user\\_\\[test]" in message
         assert kwargs.get("reply_markup") is not None
+
+        player_report = await service.build_player_report(identity.user_id)
+        assert player_report is not None
+        if player_report.stats.last_game_at is not None:
+            tzinfo = player_report.stats.last_game_at.tzinfo
+            assert tzinfo is not None
+            assert tzinfo.utcoffset(player_report.stats.last_game_at) == dt.timedelta(0)
+        if player_report.stats.last_bonus_at is not None:
+            tzinfo = player_report.stats.last_bonus_at.tzinfo
+            assert tzinfo is not None
+            assert tzinfo.utcoffset(player_report.stats.last_bonus_at) == dt.timedelta(0)
+        for row in player_report.recent_games:
+            if row.finished_at is not None:
+                assert row.finished_at.tzinfo is not None
+                assert row.finished_at.tzinfo.utcoffset(row.finished_at) == dt.timedelta(0)
     finally:
         await service.close()
 

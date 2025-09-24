@@ -1,4 +1,3 @@
-import datetime
 from types import SimpleNamespace
 from typing import Tuple
 from unittest.mock import AsyncMock, MagicMock
@@ -14,6 +13,7 @@ from pokerapp.stats import BaseStatsService
 from pokerapp.table_manager import TableManager
 from pokerapp.private_match_service import PrivateMatchService
 from pokerapp.utils.request_metrics import RequestMetrics
+from pokerapp.utils.time_utils import now_utc
 
 
 def _build_update(
@@ -136,7 +136,7 @@ async def test_private_matchmaking_timeout_notifies_user():
 
     await kv.zadd(
         model._private_match_service.queue_key,
-        {str(404): int(datetime.datetime.now().timestamp()) - 1000},
+        {str(404): int(now_utc().timestamp()) - 1000},
     )
 
     view.send_message.reset_mock()
