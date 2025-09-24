@@ -315,7 +315,11 @@ async def test_process_showdown_results_handles_empty_winners():
     )
 
     view.send_message.assert_awaited_once()
-    send_message_safe.assert_awaited_once()
+    assert send_message_safe.await_count == 2
+    assert [
+        recorded_call.kwargs.get("operation")
+        for recorded_call in send_message_safe.await_args_list
+    ] == ["announce_showdown_warning", "send_showdown_results"]
 
 
 @pytest.mark.asyncio
