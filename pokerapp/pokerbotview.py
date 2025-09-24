@@ -70,6 +70,92 @@ debug_trace_logger = logging.getLogger("pokerbot.debug_trace")
 _CARD_SPACER = "     "
 
 
+_CONSTANTS = get_game_constants()
+_EMOJI_DATA = _CONSTANTS.emojis
+_ROLES_DATA = _CONSTANTS.roles
+
+
+def _emoji_section(name: str) -> Dict[str, Any]:
+    if isinstance(_EMOJI_DATA, dict):
+        section = _EMOJI_DATA.get(name, {})
+        if isinstance(section, dict):
+            return section
+    return {}
+
+
+_CHIP_EMOJIS = _emoji_section("chips")
+_DICE_EMOJIS = _emoji_section("dice")
+_SUIT_EMOJIS = _emoji_section("suits")
+
+
+def _chip_emoji(key: str, default: str) -> str:
+    value = _CHIP_EMOJIS.get(key)
+    if isinstance(value, str) and value:
+        return value
+    return default
+
+
+def _build_suit_mapping() -> Dict[str, str]:
+    mapping: Dict[str, str] = {}
+    for key, value in _SUIT_EMOJIS.items():
+        if isinstance(key, str) and isinstance(value, str) and key and value:
+            mapping[key] = value
+    if not mapping:
+        mapping = {
+            "♠": "♠\ufe0f",
+            "♥": "♥\ufe0f",
+            "♦": "♦\ufe0f",
+            "♣": "♣\ufe0f",
+        }
+    return mapping
+
+
+def _load_role_labels() -> Dict[str, str]:
+    default_language = "fa"
+    raw_roles: Dict[str, Any] = {}
+    if isinstance(_ROLES_DATA, dict):
+        raw_roles = _ROLES_DATA.get("roles", {})
+        if not isinstance(raw_roles, dict):
+            raw_roles = {}
+        candidate = _ROLES_DATA.get("default_language")
+        if isinstance(candidate, str) and candidate:
+            default_language = candidate
+    language_order = tuple(dict.fromkeys([default_language, "fa", "en"]))
+    fallbacks = {
+        "dealer": "دیلر",
+        "small_blind": "بلایند کوچک",
+        "big_blind": "بلایند بزرگ",
+        "player": "بازیکن",
+    }
+    labels: Dict[str, str] = {}
+    for key, fallback in fallbacks.items():
+        entry = raw_roles.get(key, {})
+        label = fallback
+        if isinstance(entry, dict):
+            for lang in language_order:
+                text = entry.get(lang)
+                if isinstance(text, str) and text:
+                    label = text
+                    break
+        elif isinstance(entry, str) and entry:
+            label = entry
+        labels[key] = label
+    return labels
+
+
+_SUIT_EMOJI_MAP = _build_suit_mapping()
+_DICE_ROLL_EMOJI = (
+    _DICE_EMOJIS.get("roll")
+    if isinstance(_DICE_EMOJIS.get("roll"), str)
+    else "🎲"
+)
+_POT_EMOJI = _chip_emoji("pot", "💰")
+_STACK_EMOJI = _chip_emoji("stack", "💵")
+_BET_EMOJI = _chip_emoji("bet", _DICE_ROLL_EMOJI)
+_ROLE_LABELS = _load_role_labels()
+_PLAYER_ROLE_FALLBACK = _ROLE_LABELS.get("player", "بازیکن")
+
+
 def _load_stage_constants():
     ui_constants = get_game_constants().ui
     stages = ui_constants.get(
@@ -343,12 +429,7 @@ class PokerBotViewer:
         GameState.ROUND_TURN,
         GameState.ROUND_RIVER,
     }
-    _SUIT_EMOJI = {
-        "♠": "♠\ufe0f",
-        "♥": "♥\ufe0f",
-        "♦": "♦\ufe0f",
-        "♣": "♣\ufe0f",
-    }
+    _SUIT_EMOJI = _SUIT_EMOJI_MAP
 
     @classmethod
     def _format_card_symbol(cls, card_value: Any) -> str:
@@ -2414,7 +2495,7 @@ class PokerBotViewer:
                     getattr(player, "display_name", None)
                     or getattr(player, "full_name", None)
                     or getattr(player, "username", None)
-                    or getattr(player, "mention_markdown", "بازیکن")
+                    or getattr(player, "mention_markdown", _PLAYER_ROLE_FALLBACK)
                 )
 
                 hole_cards = self._extract_player_hole_cards(player)
@@ -2538,13 +2619,13 @@ class PokerBotViewer:
         seat_index = player.seat_index if player.seat_index is not None else -1
         roles: List[str] = []
         if seat_index == getattr(game, "dealer_index", -1):
-            roles.append("دیلر")
+            roles.append(_ROLE_LABELS.get("dealer", "دیلر"))
         if seat_index == getattr(game, "small_blind_index", -1):
-            roles.append("بلایند کوچک")
+            roles.append(_ROLE_LABELS.get("small_blind", "بلایند کوچک"))
         if seat_index == getattr(game, "big_blind_index", -1):
-            roles.append("بلایند بزرگ")
+            roles.append(_ROLE_LABELS.get("big_blind", "بلایند بزرگ"))
         if not roles:
-            roles.append("بازیکن")
+            roles.append(_ROLE_LABELS.get("player", "بازیکن"))
         # Preserve insertion order while removing duplicates.
         return "، ".join(dict.fromkeys(roles))
 
@@ -2822,7 +2903,7 @@ class PokerBotViewer:
             getattr(player, "display_name", None)
             or getattr(player, "full_name", None)
             or getattr(player, "username", None)
-            or getattr(player, "mention_markdown", "بازیکن")
+            or getattr(player, "mention_markdown", _PLAYER_ROLE_FALLBACK)
         )
         resolved_display_name = str(resolved_display_name)
 
@@ -3389,7 +3470,7 @@ class PokerBotViewer:
                 seat_index = player.seat_index if player.seat_index is not None else -1
                 seat_number = seat_index + 1 if seat_index >= 0 else "?"
                 role_label = getattr(player, "role_label", None) or getattr(
-                    player, "anchor_role", "بازیکن"
+                    player, "anchor_role", _PLAYER_ROLE_FALLBACK
                 )
                 display_name = (
                     getattr(player, "display_name", None)
@@ -3952,7 +4033,7 @@ class PokerBotViewer:
             )
 
     async def send_dice_reply(
-        self, chat_id: ChatId, message_id: MessageId, emoji='🎲'
+        self, chat_id: ChatId, message_id: MessageId, emoji=_DICE_ROLL_EMOJI
     ) -> Optional[Message]:
         context = self._build_context(
             "send_dice_reply", chat_id=chat_id, message_id=message_id
@@ -4448,9 +4529,9 @@ class PokerBotViewer:
                 f"🎰 **مرحله بازی:** {stage_name}",
                 "",
                 board_line,
-                f"💰 **پات فعلی:** `{game.pot}$`",
-                f"💵 **موجودی شما:** `{money}$`",
-                f"🎲 **بِت فعلی شما:** `{player.round_rate}$`",
+                f"{_POT_EMOJI} **پات فعلی:** `{game.pot}$`",
+                f"{_STACK_EMOJI} **موجودی شما:** `{money}$`",
+                f"{_BET_EMOJI} **بِت فعلی شما:** `{player.round_rate}$`",
                 f"📈 **حداکثر شرط این دور:** `{game.max_round_rate}$`",
                 "",
                 "⬇️ **از دکمه‌های زیر برای اقدام استفاده کنید.**",
@@ -4704,7 +4785,7 @@ class PokerBotViewer:
                 
                 # انتخاب نام پات بر اساس ترتیب آن
                 pot_name = pot_names[i] if i < len(pot_names) else f"*پات فرعی {i}*"
-                final_message += f"💰 {pot_name}: {pot_amount}$\n"
+                final_message += f"{_POT_EMOJI} {pot_name}: {pot_amount}$\n"
                 
                 win_amount_per_player = pot_amount // len(winners_info)
 

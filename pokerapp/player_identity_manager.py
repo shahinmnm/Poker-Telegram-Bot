@@ -11,6 +11,7 @@ from telegram.ext import ContextTypes
 
 import redis.asyncio as aioredis
 
+from pokerapp.config import get_game_constants
 from pokerapp.entities import ChatId, Game, Player
 from pokerapp.pokerbotview import PokerBotViewer
 from pokerapp.stats import BaseStatsService, NullStatsService, PlayerIdentity
@@ -19,6 +20,22 @@ from pokerapp.utils.cache import AdaptivePlayerReportCache
 from pokerapp.utils.player_report_cache import (
     PlayerReportCache as RedisPlayerReportCache,
 )
+
+_CONSTANTS = get_game_constants()
+_EMOJI_DATA = _CONSTANTS.emojis
+
+
+def _chip_emoji(key: str, default: str) -> str:
+    if isinstance(_EMOJI_DATA, dict):
+        chips = _EMOJI_DATA.get("chips", {})
+        if isinstance(chips, dict):
+            value = chips.get(key)
+            if isinstance(value, str) and value:
+                return value
+    return default
+
+
+_BALANCE_EMOJI = _chip_emoji("stack", _chip_emoji("profit", "💰"))
 
 
 class PlayerIdentityManager:
@@ -148,7 +165,7 @@ class PlayerIdentityManager:
         reply_markup = self._build_private_menu() if chat.type == chat.PRIVATE else None
         await self._view.send_message(
             chat.id,
-            f"💰 موجودی فعلی شما: {balance}$",
+            f"{_BALANCE_EMOJI} موجودی فعلی شما: {balance}$",
             reply_markup=reply_markup,
         )
 

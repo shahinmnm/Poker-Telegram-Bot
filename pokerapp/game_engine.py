@@ -44,6 +44,7 @@ from pokerapp.player_manager import PlayerManager
 from pokerapp.stats_reporter import StatsReporter
 from pokerapp.stats import PlayerIdentity
 from pokerapp.winnerdetermination import (
+    HAND_LANGUAGE_ORDER,
     HAND_NAMES_TRANSLATIONS,
     HandsOfPoker,
     WinnerDetermination,
@@ -418,10 +419,26 @@ class GameEngine:
         if not hand_type:
             return None
         translation = HAND_NAMES_TRANSLATIONS.get(hand_type, {})
-        label = translation.get("fa") or translation.get("en")
-        if not label:
-            label = hand_type.name.replace("_", " ").title()
-        emoji = translation.get("emoji")
+        default_label = hand_type.name.replace("_", " ").title()
+        emoji: Optional[str] = None
+        label = default_label
+        if isinstance(translation, dict):
+            emoji_candidate = translation.get("emoji")
+            if isinstance(emoji_candidate, str) and emoji_candidate:
+                emoji = emoji_candidate
+            language_entries = {
+                key: value
+                for key, value in translation.items()
+                if key != "emoji" and isinstance(value, str) and value
+            }
+            if language_entries:
+                label = _select_translation(
+                    language_entries,
+                    default_label,
+                    language_order=HAND_LANGUAGE_ORDER or _LANGUAGE_ORDER,
+                )
+        elif isinstance(translation, str) and translation:
+            label = translation
         if emoji:
             return f"{emoji} {label}"
         return label
@@ -661,7 +678,11 @@ class GameEngine:
             wallet = getattr(player, "wallet", None)
             if wallet is None:
                 continue
-            if await wallet.value() > 0:
+            try:
+                balance = await wallet.value()
+            except TypeError:
+                balance = 0
+            if isinstance(balance, (int, float)) and balance > 0:
                 remaining_players.append(player)
 
         context.chat_data[self._old_players_key] = [

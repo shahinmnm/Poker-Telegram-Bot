@@ -6,8 +6,23 @@ import json
 import logging
 from typing import Iterable, Optional, Sequence
 
+from pokerapp.config import get_game_constants
 from pokerapp.utils.logging_helpers import add_context
 from pokerapp.utils.redis_safeops import RedisSafeOps
+
+
+_CONSTANTS = get_game_constants()
+_REDIS_KEYS = _CONSTANTS.redis_keys
+if isinstance(_REDIS_KEYS, dict):
+    _PLAYER_REPORT_SECTION = _REDIS_KEYS.get("player_report", {})
+    if not isinstance(_PLAYER_REPORT_SECTION, dict):
+        _PLAYER_REPORT_SECTION = {}
+else:
+    _PLAYER_REPORT_SECTION = {}
+
+_DEFAULT_PLAYER_REPORT_PREFIX = _PLAYER_REPORT_SECTION.get(
+    "cache_prefix", "pokerbot:player_report:"
+)
 
 
 class PlayerReportCache:
@@ -17,7 +32,7 @@ class PlayerReportCache:
         self,
         redis_ops: RedisSafeOps,
         *,
-        key_prefix: str = "pokerbot:player_report:",
+        key_prefix: str = _DEFAULT_PLAYER_REPORT_PREFIX,
         logger: Optional[logging.Logger] = None,
     ) -> None:
         base_logger = logger or logging.getLogger(__name__)

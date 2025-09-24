@@ -30,6 +30,8 @@ from aiogram.exceptions import TelegramBadRequest
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, Message
 from cachetools import LRUCache, TTLCache
 
+from pokerapp.config import get_game_constants
+from pokerapp.player_manager import PlayerManager
 from pokerapp.utils.debug_trace import trace_telegram_api_call
 
 
@@ -38,6 +40,35 @@ logger = logging.getLogger(__name__)
 
 _CARD_SPACER = "     "  # five spaces to visually separate board cards
 _DEFAULT_TURN_NOTICE = "دکمه‌های نوبت شما در پیام اختصاصی فعال شده‌اند."
+
+
+_CONSTANTS = get_game_constants()
+_EMOJI_DATA = _CONSTANTS.emojis
+
+
+def _emoji_section(name: str) -> Dict[str, str]:
+    if isinstance(_EMOJI_DATA, dict):
+        section = _EMOJI_DATA.get(name, {})
+        if isinstance(section, dict):
+            return section
+    return {}
+
+
+_CHIP_EMOJIS = _emoji_section("chips")
+_DICE_EMOJIS = _emoji_section("dice")
+
+
+def _chip_emoji(key: str, default: str) -> str:
+    value = _CHIP_EMOJIS.get(key)
+    if isinstance(value, str) and value:
+        return value
+    return default
+
+
+_POT_EMOJI = _chip_emoji("pot", "💰")
+_STACK_EMOJI = _chip_emoji("stack", "💵")
+_BET_EMOJI = _chip_emoji("bet", _DICE_EMOJIS.get("roll", "🎲"))
+_PLAYER_ROLE_FALLBACK = PlayerManager.ROLE_TRANSLATIONS.get("player", "Player")
 _INVISIBLE_CHARS = {
     "\u200b",
     "\u200c",
@@ -778,9 +809,9 @@ class PokerMessagingOrchestrator:
         lines.extend(
             [
                 f"🃏 Board: {board}",
-                f"💰 Pot: {self._turn_state.pot}",
-                f"💵 Stack: {self._turn_state.stack}",
-                f"🎲 Bet: {self._turn_state.current_bet}",
+                f"{_POT_EMOJI} Pot: {self._turn_state.pot}",
+                f"{_STACK_EMOJI} Stack: {self._turn_state.stack}",
+                f"{_BET_EMOJI} Bet: {self._turn_state.current_bet}",
                 f"📈 Max bet this round: {self._turn_state.max_bet}",
             ]
         )
@@ -795,7 +826,7 @@ class PokerMessagingOrchestrator:
         return "\n".join(lines)
 
     def _format_anchor_text(self, player: PlayerInfo) -> str:
-        roles = "، ".join(player.roles) if player.roles else "بازیکن"
+        roles = "، ".join(player.roles) if player.roles else _PLAYER_ROLE_FALLBACK
         return "\n".join(
             [
                 f"🎮 {player.name}",
