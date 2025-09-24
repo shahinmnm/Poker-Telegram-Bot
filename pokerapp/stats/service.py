@@ -1009,12 +1009,12 @@ class StatsService(BaseStatsService):
             lines.append(f"📐 بازده سرمایه (ROI): {roi:.1f}%")
         if stats.last_game_at:
             last_game = format_local(
-                stats.last_game_at, "%Y-%m-%d %H:%M %Z", tz_name=self._timezone_name
+                stats.last_game_at, self._timezone_name, fmt="%Y-%m-%d %H:%M %Z"
             )
             lines.append(f"🕰️ آخرین بازی: {last_game}")
         if stats.last_bonus_at:
             last_bonus = format_local(
-                stats.last_bonus_at, "%Y-%m-%d %H:%M %Z", tz_name=self._timezone_name
+                stats.last_bonus_at, self._timezone_name, fmt="%Y-%m-%d %H:%M %Z"
             )
             lines.append(f"🎯 آخرین بونوس: {last_bonus}")
 
@@ -1037,7 +1037,7 @@ class StatsService(BaseStatsService):
                     prefix = "🤝 مساوی"
                 if game.finished_at:
                     timestamp = format_local(
-                        game.finished_at, "%Y-%m-%d %H:%M", tz_name=self._timezone_name
+                        game.finished_at, self._timezone_name, fmt="%Y-%m-%d %H:%M"
                     )
                 else:
                     timestamp = "-"
