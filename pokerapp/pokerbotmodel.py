@@ -733,7 +733,7 @@ class PokerBotModel:
                 anchor = anchor.replace(tzinfo=datetime.timezone.utc)
             target_time = anchor + datetime.timedelta(seconds=countdown)
             localized = format_local(
-                target_time, "%H:%M:%S", tz_name=self._timezone_name
+                target_time, self._timezone_name, fmt="%H:%M:%S"
             )
             lines.append(f"🕒 زمان تقریبی شروع: {localized}")
             lines.append("🚀 برای شروع سریع‌تر بازی /start را بزنید یا صبر کنید.")

@@ -21,26 +21,26 @@ def test_to_local_applies_tehran_offset():
     assert local.utcoffset() == timedelta(hours=3, minutes=30)
 
 
-def test_to_local_handles_dst_transition():
+def test_to_local_handles_tehran_dst_transition():
     before = to_local(
-        datetime(2024, 3, 10, 6, 30, tzinfo=ZoneInfo("UTC")), tz_name="America/New_York"
+        datetime(2022, 3, 21, 20, 0, tzinfo=ZoneInfo("UTC")), tz_name="Asia/Tehran"
     )
     after = to_local(
-        datetime(2024, 3, 10, 7, 30, tzinfo=ZoneInfo("UTC")), tz_name="America/New_York"
+        datetime(2022, 3, 21, 21, 0, tzinfo=ZoneInfo("UTC")), tz_name="Asia/Tehran"
     )
 
-    assert before.hour == 1
-    assert before.utcoffset() == timedelta(hours=-5)
+    assert before.hour == 23
+    assert before.utcoffset() == timedelta(hours=3, minutes=30)
 
-    assert after.hour == 3
-    assert after.utcoffset() == timedelta(hours=-4)
+    assert after.hour == 1
+    assert after.utcoffset() == timedelta(hours=4, minutes=30)
 
 
 def test_format_local_uses_configured_timezone():
     cfg = Config()
     base = datetime(2024, 1, 1, 12, 0, tzinfo=ZoneInfo("UTC"))
 
-    formatted = format_local(base, "%Y-%m-%d %H:%M", tz_name=cfg.TIMEZONE_NAME)
+    formatted = format_local(base, cfg.TIMEZONE_NAME, fmt="%Y-%m-%d %H:%M")
     expected = to_local(base, tz_name=cfg.TIMEZONE_NAME).strftime("%Y-%m-%d %H:%M")
 
     assert formatted == expected

@@ -1,56 +1,23 @@
 """Timezone helpers for consistently handling user-facing timestamps."""
 
-from __future__ import annotations
-
-from datetime import datetime
-from typing import Optional
-from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
-
-from pokerapp.config import DEFAULT_TIMEZONE_NAME
-
-
-_UTC_ZONE = ZoneInfo("UTC")
+from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
 
 
 def now_utc() -> datetime:
-    """Return the current time as an aware ``datetime`` in UTC."""
+    """Return the current UTC time as an aware ``datetime`` object."""
 
-    return datetime.now(tz=_UTC_ZONE)
-
-
-def _normalize_timezone_name(tz_name: Optional[str]) -> str:
-    if isinstance(tz_name, str):
-        candidate = tz_name.strip()
-        if candidate:
-            return candidate
-    return DEFAULT_TIMEZONE_NAME
+    return datetime.now(tz=ZoneInfo("UTC"))
 
 
-def _resolve_zone(tz_name: Optional[str]) -> ZoneInfo:
-    name = _normalize_timezone_name(tz_name)
-    try:
-        return ZoneInfo(name)
-    except ZoneInfoNotFoundError:
-        if name != DEFAULT_TIMEZONE_NAME:
-            return _resolve_zone(DEFAULT_TIMEZONE_NAME)
-        return _UTC_ZONE
+def to_local(dt: datetime, tz_name: str) -> datetime:
+    """Convert ``dt`` into the timezone identified by ``tz_name``."""
+
+    return dt.astimezone(ZoneInfo(tz_name))
 
 
-def to_local(dt: datetime, tz_name: Optional[str] = DEFAULT_TIMEZONE_NAME) -> datetime:
-    """Convert ``dt`` from UTC into ``tz_name`` (defaulting to the configured zone)."""
-
-    zone = _resolve_zone(tz_name)
-    if dt.tzinfo is None or dt.tzinfo.utcoffset(dt) is None:
-        dt = dt.replace(tzinfo=_UTC_ZONE)
-    return dt.astimezone(zone)
-
-
-def format_local(
-    dt: datetime,
-    fmt: str,
-    tz_name: Optional[str] = DEFAULT_TIMEZONE_NAME,
-) -> str:
-    """Format ``dt`` in ``tz_name`` using ``fmt`` (defaults to the configured zone)."""
+def format_local(dt: datetime, tz_name: str, fmt: str = "%Y-%m-%d %H:%M:%S") -> str:
+    """Format ``dt`` for ``tz_name`` using ``fmt``."""
 
     return to_local(dt, tz_name).strftime(fmt)
 
