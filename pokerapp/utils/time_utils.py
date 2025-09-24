@@ -1,94 +1,58 @@
-"""Timezone-aware datetime helpers used across the poker application."""
+"""Timezone helpers for consistently handling user-facing timestamps."""
 
 from __future__ import annotations
 
-import datetime as dt
-import logging
-from functools import lru_cache
+from datetime import datetime
 from typing import Optional
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from pokerapp.config import DEFAULT_TIMEZONE_NAME as CONFIG_DEFAULT_TIMEZONE_NAME
+from pokerapp.config import DEFAULT_TIMEZONE_NAME
 
 
-logger = logging.getLogger(__name__)
-
-DEFAULT_TIMEZONE_NAME = CONFIG_DEFAULT_TIMEZONE_NAME
-UTC = dt.timezone.utc
+_UTC_ZONE = ZoneInfo("UTC")
 
 
-def now_utc() -> dt.datetime:
+def now_utc() -> datetime:
     """Return the current time as an aware ``datetime`` in UTC."""
 
-    return dt.datetime.now(UTC)
+    return datetime.now(tz=_UTC_ZONE)
 
 
-def _ensure_aware_utc(value: dt.datetime) -> dt.datetime:
-    """Coerce ``value`` to an aware UTC datetime without altering the instant."""
-
-    if value.tzinfo is None or value.tzinfo.utcoffset(value) is None:
-        return value.replace(tzinfo=UTC)
-    return value.astimezone(UTC)
-
-
-def _normalize_timezone_name(candidate: Optional[str]) -> str:
-    """Return a sanitized timezone name or the configured default."""
-
-    if isinstance(candidate, str):
-        stripped = candidate.strip()
-        if stripped:
-            return stripped
+def _normalize_timezone_name(tz_name: Optional[str]) -> str:
+    if isinstance(tz_name, str):
+        candidate = tz_name.strip()
+        if candidate:
+            return candidate
     return DEFAULT_TIMEZONE_NAME
 
 
-@lru_cache(maxsize=32)
-def _resolve_zoneinfo(name: Optional[str]) -> dt.tzinfo:
-    """Return a ``tzinfo`` for ``name`` falling back to UTC on failure."""
-
-    candidate = _normalize_timezone_name(name)
+def _resolve_zone(tz_name: Optional[str]) -> ZoneInfo:
+    name = _normalize_timezone_name(tz_name)
     try:
-        return ZoneInfo(candidate)
+        return ZoneInfo(name)
     except ZoneInfoNotFoundError:
-        if candidate != DEFAULT_TIMEZONE_NAME:
-            logger.warning(
-                "Unknown timezone %s; falling back to %s", candidate, DEFAULT_TIMEZONE_NAME
-            )
-            return _resolve_zoneinfo(DEFAULT_TIMEZONE_NAME)
-        logger.warning("Unknown timezone %s; falling back to UTC", candidate)
-        return UTC
+        if name != DEFAULT_TIMEZONE_NAME:
+            return _resolve_zone(DEFAULT_TIMEZONE_NAME)
+        return _UTC_ZONE
 
 
-def to_local(value: dt.datetime, tz_name: Optional[str] = DEFAULT_TIMEZONE_NAME) -> dt.datetime:
-    """Convert ``value`` to the target timezone, assuming UTC when naive."""
+def to_local(dt: datetime, tz_name: Optional[str] = DEFAULT_TIMEZONE_NAME) -> datetime:
+    """Convert ``dt`` from UTC into ``tz_name`` (defaulting to the configured zone)."""
 
-    aware_utc = _ensure_aware_utc(value)
-    zone = _resolve_zoneinfo(tz_name)
-    return aware_utc.astimezone(zone)
+    zone = _resolve_zone(tz_name)
+    if dt.tzinfo is None or dt.tzinfo.utcoffset(dt) is None:
+        dt = dt.replace(tzinfo=_UTC_ZONE)
+    return dt.astimezone(zone)
 
 
 def format_local(
-    value: dt.datetime, fmt: str, tz_name: Optional[str] = DEFAULT_TIMEZONE_NAME
+    dt: datetime,
+    fmt: str,
+    tz_name: Optional[str] = DEFAULT_TIMEZONE_NAME,
 ) -> str:
-    """Return ``value`` formatted in the requested timezone using ``fmt``."""
+    """Format ``dt`` in ``tz_name`` using ``fmt`` (defaults to the configured zone)."""
 
-    localized = to_local(value, tz_name=tz_name)
-    return localized.strftime(fmt)
-
-
-def countdown_delta(end_time: dt.datetime, start_time: dt.datetime) -> dt.timedelta:
-    """Return the timedelta between ``end_time`` and ``start_time`` in UTC."""
-
-    end_utc = _ensure_aware_utc(end_time)
-    start_utc = _ensure_aware_utc(start_time)
-    return end_utc - start_utc
+    return to_local(dt, tz_name).strftime(fmt)
 
 
-__all__ = [
-    "DEFAULT_TIMEZONE_NAME",
-    "UTC",
-    "now_utc",
-    "to_local",
-    "format_local",
-    "countdown_delta",
-]
-
+__all__ = ["now_utc", "to_local", "format_local"]
