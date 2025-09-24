@@ -92,6 +92,73 @@ class MatchmakingService:
         self._logger = logger
         self._config = config or Config()
 
+    def _log_extra(
+        self,
+        *,
+        stage: str,
+        game: Optional[Game] = None,
+        chat_id: Optional[ChatId] = None,
+        env_config_missing: Optional[Any] = None,
+        **extra_fields: Any,
+    ) -> Dict[str, Any]:
+        resolved_chat_id: Optional[int]
+        if chat_id is not None:
+            try:
+                resolved_chat_id = self._safe_int(chat_id)
+            except Exception:  # pragma: no cover - defensive fallback
+                resolved_chat_id = chat_id  # type: ignore[assignment]
+        elif game is not None and getattr(game, "chat_id", None) is not None:
+            resolved_chat_id = getattr(game, "chat_id")  # type: ignore[assignment]
+        else:
+            resolved_chat_id = None
+
+        dealer_index = -1
+        players_ready = 0
+        if game is not None:
+            dealer_index = getattr(game, "dealer_index", -1)
+            if hasattr(game, "seated_players"):
+                try:
+                    players_ready = len(game.seated_players())
+                except Exception:  # pragma: no cover - defensive fallback
+                    players_ready = getattr(game, "seated_count", lambda: 0)()
+
+        extra: Dict[str, Any] = {
+            "category": "matchmaking",
+            "stage": stage,
+            "chat_id": resolved_chat_id,
+            "game_id": getattr(game, "id", None) if game is not None else None,
+            "dealer_index": dealer_index,
+            "players_ready": players_ready,
+            "env_config_missing": list(env_config_missing or []),
+        }
+
+        if self._logger.isEnabledFor(logging.DEBUG) and game is not None:
+            snapshot = []
+            try:
+                players = game.seated_players()
+            except Exception:  # pragma: no cover - fallback to attribute access
+                players = list(getattr(game, "players", []))
+            for player in players:
+                snapshot.append(
+                    {
+                        "user_id": getattr(player, "user_id", None),
+                        "seat_index": getattr(player, "seat_index", None),
+                        "stack": getattr(player, "stack", None),
+                        "total_bet": getattr(player, "total_bet", None),
+                        "state": getattr(getattr(player, "state", None), "name", None),
+                    }
+                )
+            extra.update(
+                {
+                    "debug_stage": getattr(getattr(game, "state", None), "name", None),
+                    "debug_pot": getattr(game, "pot", None),
+                    "debug_player_snapshot": snapshot,
+                }
+            )
+
+        extra.update(extra_fields)
+        return extra
+
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
@@ -178,7 +245,16 @@ class MatchmakingService:
                 game.current_player_index = -1
                 return False
             else:
-                self._logger.warning("Unexpected state %s during stage progression", game.state)
+                self._logger.warning(
+                    "Unexpected state %s during stage progression",
+                    game.state,
+                    extra=self._log_extra(
+                        stage="progress-stage",
+                        game=game,
+                        chat_id=chat_id,
+                        unexpected_state=getattr(game.state, "name", game.state),
+                    ),
+                )
                 game.current_player_index = -1
                 return False
 
@@ -258,7 +334,14 @@ class MatchmakingService:
                     bool(fallback_player),
                 )
                 return True
-            self._logger.warning("Cannot start game without an occupied dealer seat")
+            self._logger.warning(
+                "Cannot start game without an occupied dealer seat",
+                extra=self._log_extra(
+                    stage="dealer-check",
+                    game=game,
+                    chat_id=getattr(game, "chat_id", None),
+                ),
+            )
             return False
         return True
 
