@@ -22,7 +22,7 @@ async def test_lock_manager_acquire_when_free() -> None:
     logger = logging.getLogger("lock_manager_test_free")
     manager = LockManager(logger=logger, default_timeout_seconds=1)
 
-    key = "engine_stage:free"
+    key = "stage:1"
     acquired = await manager.acquire(key, timeout=0.5)
     assert acquired
     manager.release(key)
@@ -41,7 +41,7 @@ async def test_lock_manager_retries_before_acquire() -> None:
         retry_backoff_seconds=0.05,
     )
 
-    key = "engine_stage:retry"
+    key = "stage:retry"
 
     async def holder() -> None:
         async with manager.guard(key, timeout=1):
@@ -57,7 +57,7 @@ async def test_lock_manager_retries_before_acquire() -> None:
         await hold_task
 
         assert any(
-            "Timeout acquiring lock" in record.getMessage()
+            "Timeout acquiring Lock" in record.getMessage()
             for record in handler.records
         )
     finally:
@@ -76,7 +76,7 @@ async def test_lock_manager_guard_timeout() -> None:
         retry_backoff_seconds=0.05,
     )
 
-    key = "engine_stage:timeout"
+    key = "stage:timeout"
 
     async def holder() -> None:
         async with manager.guard(key, timeout=1):
@@ -100,20 +100,29 @@ async def test_lock_manager_context_logging() -> None:
     logger.setLevel(logging.INFO)
     manager = LockManager(logger=logger, default_timeout_seconds=1)
 
-    context = {"chat_id": 42}
+    context = {"request_category": "test"}
     context_extra = {"game_id": "abc"}
-    async with manager.guard(
-        "engine_stage:context", context=context, context_extra=context_extra
-    ):
+    async with manager.guard("stage:42", context=context, context_extra=context_extra):
         pass
 
     messages = [record.getMessage() for record in handler.records]
-    expected_fragment = (
-        "[context: chat_id=42, game_id='abc', lock_key='engine_stage:context',"
-        " lock_level=1]"
+    identity_fragment = "Lock 'stage:42' (level=1, chat_id=42, game_id=abc)"
+    context_fragment = (
+        "[context: chat_id=42, game_id='abc', lock_category='stage', lock_key='stage:42',"
+        " lock_level=1, lock_name='stage:42', request_category='test']"
     )
-    assert any("acquired" in message and expected_fragment in message for message in messages)
-    assert any("released" in message and expected_fragment in message for message in messages)
+    assert any(
+        "acquired" in message
+        and identity_fragment in message
+        and context_fragment in message
+        for message in messages
+    )
+    assert any(
+        "released" in message
+        and identity_fragment in message
+        and context_fragment in message
+        for message in messages
+    )
 
     logger.removeHandler(handler)
 
@@ -126,10 +135,10 @@ async def test_lock_manager_category_timeout_override() -> None:
         default_timeout_seconds=5,
         max_retries=0,
         retry_backoff_seconds=0.01,
-        category_timeouts={"engine_stage": 0.05},
+        category_timeouts={"stage": 0.05},
     )
 
-    key = "engine_stage:category-timeout"
+    key = "stage:category-timeout"
 
     async def holder() -> None:
         async with manager.guard(key, timeout=0.2):
@@ -153,10 +162,10 @@ async def test_lock_manager_metrics_recording() -> None:
         default_timeout_seconds=0.5,
         max_retries=0,
         retry_backoff_seconds=0.01,
-        category_timeouts={"engine_stage": 0.1},
+        category_timeouts={"stage": 0.1},
     )
 
-    key = "engine_stage:metrics"
+    key = "stage:metrics"
 
     async def holder() -> None:
         async with manager.guard(key, timeout=0.2):
@@ -181,15 +190,18 @@ async def test_lock_manager_enforces_lock_hierarchy() -> None:
     logger = logging.getLogger("lock_manager_test_hierarchy")
     manager = LockManager(logger=logger, default_timeout_seconds=1)
 
-    async with manager.guard("engine_stage:hierarchy", context={"order": "stage"}):
+    async with manager.guard("stage:hierarchy", context={"order": "stage"}):
         async with manager.guard(
-            "player_report:hierarchy", context={"order": "player"}
+            "wallet:hierarchy", context={"order": "wallet"}
         ):
-            pass
+            async with manager.guard(
+                "stats:hierarchy", context={"order": "stats"}
+            ):
+                pass
 
-    async with manager.guard("player_report:reverse", context={"order": "player"}):
+    async with manager.guard("wallet:reverse", context={"order": "wallet"}):
         with pytest.raises(RuntimeError):
-            await manager.acquire("engine_stage:reverse", context={"order": "stage"})
+            await manager.acquire("stage:reverse", context={"order": "stage"})
 
 
 @pytest.mark.asyncio
@@ -208,7 +220,7 @@ async def test_detect_deadlock_cycle_detection() -> None:
 
     async def task_one() -> None:
         async with manager.guard(
-            "engine_stage:cycle",
+            "stage:cycle",
             timeout=5,
             context={"task": "one"},
             level=5,
@@ -217,19 +229,19 @@ async def test_detect_deadlock_cycle_detection() -> None:
             await start_cycle.wait()
             try:
                 acquired = await manager.acquire(
-                    "player_report:cycle",
+                    "wallet:cycle",
                     timeout=5,
                     context={"task": "one"},
                     level=5,
                 )
                 if acquired:
-                    manager.release("player:cycle")
+                    manager.release("wallet:cycle")
             except asyncio.CancelledError:
                 raise
 
     async def task_two() -> None:
         async with manager.guard(
-            "player_report:cycle",
+            "wallet:cycle",
             timeout=5,
             context={"task": "two"},
             level=5,
@@ -238,7 +250,7 @@ async def test_detect_deadlock_cycle_detection() -> None:
             await start_cycle.wait()
             try:
                 acquired = await manager.acquire(
-                    "engine_stage:cycle",
+                    "stage:cycle",
                     timeout=5,
                     context={"task": "two"},
                     level=5,
