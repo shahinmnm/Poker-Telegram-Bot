@@ -1,5 +1,6 @@
 import datetime as dt
 
+from pokerapp.config import DEFAULT_TIMEZONE_NAME
 from pokerapp.utils.time_utils import countdown_delta, format_local, now_utc, to_local
 
 
@@ -35,3 +36,12 @@ def test_format_local_and_countdown_delta_use_utc_baseline():
 
     formatted = format_local(start, "%H:%M", tz_name="Asia/Tehran")
     assert formatted == "15:30"
+
+
+def test_to_local_uses_config_default_when_timezone_missing():
+    base = dt.datetime(2024, 6, 1, 12, 0, tzinfo=dt.timezone.utc)
+
+    expected = to_local(base, tz_name=DEFAULT_TIMEZONE_NAME)
+    actual = to_local(base)
+
+    assert actual == expected

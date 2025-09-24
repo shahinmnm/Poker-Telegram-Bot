@@ -7,10 +7,12 @@ import logging
 from functools import lru_cache
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
+from pokerapp.config import DEFAULT_TIMEZONE_NAME as CONFIG_DEFAULT_TIMEZONE_NAME
+
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_TIMEZONE_NAME = "Asia/Tehran"
+DEFAULT_TIMEZONE_NAME = CONFIG_DEFAULT_TIMEZONE_NAME
 UTC = dt.timezone.utc
 
 
