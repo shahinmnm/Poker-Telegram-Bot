@@ -1,12 +1,16 @@
 import json
+import logging
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from telegram.error import RetryAfter
 
-from pokerapp.entities import Game, GameState, Player, PlayerState
 from pokerapp.config import GameConstants
+from pokerapp.entities import Game, GameState, Player, PlayerState
 from pokerapp.game_engine import GameEngine
+from pokerapp.utils.request_metrics import RequestCategory
+from pokerapp.utils.telegram_safeops import TelegramSafeOps
 
 
 @pytest.fixture
@@ -105,17 +109,19 @@ async def test_refund_players_cancels_wallets_and_invalidates(game_engine_setup)
 async def test_finalize_stop_request_updates_message_and_clears_context(
     game_engine_setup,
 ):
-    context = SimpleNamespace(chat_data={"stop_request": "keep"})
-    context.chat_data[game_engine_setup.engine.KEY_STOP_REQUEST] = {
-        "game_id": "game-1"
-    }
-
     stop_request = {
+        "game_id": "game-1",
         "message_id": 42,
         "active_players": {1},
         "votes": {1},
         "manager_override": False,
     }
+
+    context = SimpleNamespace(
+        chat_data={
+            game_engine_setup.engine.KEY_STOP_REQUEST: dict(stop_request),
+        }
+    )
 
     await game_engine_setup.engine._finalize_stop_request(
         context=context,
@@ -124,6 +130,15 @@ async def test_finalize_stop_request_updates_message_and_clears_context(
     )
 
     game_engine_setup.telegram_safe_ops.edit_message_text.assert_awaited_once()
+    call_kwargs = (
+        game_engine_setup.telegram_safe_ops.edit_message_text.await_args.kwargs
+    )
+    log_extra = call_kwargs["log_extra"]
+    assert log_extra["chat_id"] == -500
+    assert log_extra["message_id"] == 42
+    assert log_extra["game_id"] == "game-1"
+    assert log_extra["operation"] == "stop_vote_finalize_message"
+    assert log_extra["request_category"] == RequestCategory.GENERAL.value
     assert (
         game_engine_setup.engine.KEY_STOP_REQUEST not in context.chat_data
     )
@@ -187,10 +202,11 @@ def test_render_stop_request_message_uses_translations(game_engine_setup):
 async def test_update_votes_and_message_tracks_manager_override(game_engine_setup):
     context = SimpleNamespace(chat_data={})
     stop_request = {"message_id": 5, "votes": set(), "active_players": {1}}
+    game = Game()
 
     updated = await game_engine_setup.engine._update_votes_and_message(
         context=context,
-        game=Game(),
+        game=game,
         chat_id=-10,
         stop_request=stop_request,
         voter_id="manager",
@@ -203,6 +219,43 @@ async def test_update_votes_and_message_tracks_manager_override(game_engine_setu
     assert (
         context.chat_data[game_engine_setup.engine.KEY_STOP_REQUEST] is updated
     )
+    call_kwargs = (
+        game_engine_setup.telegram_safe_ops.edit_message_text.await_args.kwargs
+    )
+    log_extra = call_kwargs["log_extra"]
+    assert log_extra["chat_id"] == -10
+    assert log_extra["message_id"] == 5
+    assert log_extra["game_id"] == game.id
+    assert log_extra["operation"] == "stop_vote_request_message"
+    assert log_extra["request_category"] == RequestCategory.GENERAL.value
+
+
+@pytest.mark.asyncio
+async def test_resume_stop_vote_uses_safe_ops_log_extra(game_engine_setup):
+    engine = game_engine_setup.engine
+    game = Game()
+    stop_request = {"game_id": game.id, "message_id": 77}
+    context = SimpleNamespace(
+        chat_data={engine.KEY_STOP_REQUEST: dict(stop_request)}
+    )
+
+    await engine.resume_stop_vote(
+        context=context,
+        game=game,
+        chat_id=-20,
+    )
+
+    game_engine_setup.telegram_safe_ops.edit_message_text.assert_awaited_once()
+    call_kwargs = (
+        game_engine_setup.telegram_safe_ops.edit_message_text.await_args.kwargs
+    )
+    log_extra = call_kwargs["log_extra"]
+    assert log_extra["chat_id"] == -20
+    assert log_extra["message_id"] == 77
+    assert log_extra["game_id"] == game.id
+    assert log_extra["operation"] == "stop_vote_resume_message"
+    assert log_extra["request_category"] == RequestCategory.GENERAL.value
+    assert engine.KEY_STOP_REQUEST not in context.chat_data
 
 
 @pytest.mark.asyncio
@@ -224,6 +277,103 @@ async def test_check_if_stop_passes_triggers_cancel(game_engine_setup):
     )
 
     engine.cancel_hand.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_finalize_stop_request_logs_retry_details(caplog):
+    class FlakyView:
+        def __init__(self):
+            self.edit_attempts = 0
+
+        async def edit_message_text(
+            self,
+            *,
+            chat_id,
+            message_id,
+            text,
+            reply_markup,
+            request_category,
+            parse_mode,
+            suppress_exceptions,
+        ):
+            self.edit_attempts += 1
+            if self.edit_attempts == 1:
+                raise RetryAfter(0)
+            return message_id
+
+        async def delete_message(self, chat_id, message_id, suppress_exceptions=False):
+            return True
+
+    view = FlakyView()
+    table_manager = MagicMock()
+    table_manager.save_game = AsyncMock()
+    request_metrics = MagicMock()
+    request_metrics.end_cycle = AsyncMock()
+    stats_reporter = MagicMock()
+    stats_reporter.invalidate_players = AsyncMock()
+    player_manager = MagicMock()
+    player_manager.clear_player_anchors = AsyncMock()
+    logger = logging.getLogger("test.game_engine.safeops")
+
+    telegram_safe_ops = TelegramSafeOps(
+        view,
+        logger=logger,
+        max_retries=2,
+        base_delay=0.05,
+        max_delay=0.05,
+        backoff_multiplier=2.0,
+    )
+
+    engine = GameEngine(
+        table_manager=table_manager,
+        view=view,
+        winner_determination=MagicMock(),
+        request_metrics=request_metrics,
+        round_rate=MagicMock(),
+        player_manager=player_manager,
+        matchmaking_service=MagicMock(),
+        stats_reporter=stats_reporter,
+        clear_game_messages=AsyncMock(),
+        build_identity_from_player=lambda player: player,
+        safe_int=int,
+        old_players_key="old_players",
+        telegram_safe_ops=telegram_safe_ops,
+        lock_manager=MagicMock(),
+        logger=logger,
+    )
+
+    stop_request = {
+        "game_id": "game-1",
+        "message_id": 55,
+        "active_players": set(),
+        "votes": set(),
+        "manager_override": False,
+    }
+    context = SimpleNamespace(
+        chat_data={engine.KEY_STOP_REQUEST: dict(stop_request)}
+    )
+    chat_id = -320
+
+    with caplog.at_level(logging.WARNING, logger=logger.name):
+        await engine._finalize_stop_request(
+            context=context,
+            chat_id=chat_id,
+            stop_request=stop_request,
+        )
+
+    assert view.edit_attempts == 2
+    warning_records = [
+        record
+        for record in caplog.records
+        if record.levelno == logging.WARNING
+        and "RetryAfter" in record.getMessage()
+    ]
+    assert warning_records
+    warning_record = warning_records[0]
+    assert warning_record.chat_id == chat_id
+    assert warning_record.message_id == 55
+    assert warning_record.request_category == RequestCategory.GENERAL.value
+    assert engine.KEY_STOP_REQUEST not in context.chat_data
 
 
 def test_game_engine_custom_stop_translations(tmp_path):
