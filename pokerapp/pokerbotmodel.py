@@ -26,9 +26,9 @@ from telegram.helpers import mention_markdown as format_mention_markdown
 
 import logging
 
-from pokerapp.config import Config, get_game_constants
+from pokerapp.config import Config, DEFAULT_TIMEZONE_NAME, get_game_constants
 from pokerapp.utils.datetime_utils import utc_isoformat
-from pokerapp.utils.time_utils import DEFAULT_TIMEZONE_NAME, format_local, now_utc
+from pokerapp.utils.time_utils import format_local, now_utc
 from pokerapp.winnerdetermination import WinnerDetermination
 from pokerapp.cards import Cards
 from pokerapp.entities import (

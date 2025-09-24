@@ -29,9 +29,9 @@ from sqlalchemy.ext.asyncio import (
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 from sqlalchemy.pool import StaticPool
 
-from pokerapp.config import get_game_constants
+from pokerapp.config import DEFAULT_TIMEZONE_NAME, get_game_constants
 from pokerapp.utils.datetime_utils import ensure_utc
-from pokerapp.utils.time_utils import DEFAULT_TIMEZONE_NAME, format_local, now_utc
+from pokerapp.utils.time_utils import format_local, now_utc
 from pokerapp.utils.markdown import escape_markdown_v1
 
 if TYPE_CHECKING:
