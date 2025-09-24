@@ -430,6 +430,8 @@ async def test_finalize_game_single_winner_distributes_pot_and_updates_stats():
     model._game_engine._clear_game_messages = AsyncMock()
     model._player_manager.clear_player_anchors = AsyncMock()
     model._player_manager.send_join_prompt = AsyncMock()
+    adaptive_cache_mock = MagicMock()
+    model._game_engine._adaptive_player_report_cache = adaptive_cache_mock
 
     game = Game()
     game.state = GameState.ROUND_RIVER
@@ -455,6 +457,9 @@ async def test_finalize_game_single_winner_distributes_pot_and_updates_stats():
 
     await model._game_engine.finalize_game(context=context, game=game, chat_id=chat_id)
 
+    adaptive_cache_mock.invalidate_on_event.assert_called_once_with(
+        {1, 2}, "hand_finished"
+    )
     winner_wallet.inc.assert_awaited_once_with(100)
     loser_wallet.inc.assert_not_awaited()
 
@@ -500,6 +505,8 @@ async def test_finalize_game_split_pot_between_tied_winners():
     model._game_engine._clear_game_messages = AsyncMock()
     model._player_manager.clear_player_anchors = AsyncMock()
     model._player_manager.send_join_prompt = AsyncMock()
+    adaptive_cache_mock = MagicMock()
+    model._game_engine._adaptive_player_report_cache = adaptive_cache_mock
 
     game = Game()
     game.state = GameState.ROUND_RIVER
@@ -525,6 +532,9 @@ async def test_finalize_game_split_pot_between_tied_winners():
 
     await model._game_engine.finalize_game(context=context, game=game, chat_id=chat_id)
 
+    adaptive_cache_mock.invalidate_on_event.assert_called_once_with(
+        {10, 20}, "hand_finished"
+    )
     wallet_a.inc.assert_awaited_once_with(50)
     wallet_b.inc.assert_awaited_once_with(50)
 

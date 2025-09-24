@@ -100,6 +100,28 @@ async def test_bonus_event_applies_shorter_ttl(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_invalidate_on_event_records_event_specific_ttls(monkeypatch):
+    cache = AdaptivePlayerReportCache(default_ttl=120, bonus_ttl=45, post_hand_ttl=15)
+    time_state = {"value": 0.0}
+    monkeypatch.setattr(cache, "_timer", lambda: time_state["value"])
+
+    async def loader() -> Dict[str, int]:
+        return {"value": 1}
+
+    cache.invalidate_on_event([11], event_type="hand_finished")
+    cache.invalidate_on_event([12], event_type="bonus_claimed")
+
+    assert cache._next_ttl[11] == ("hand_finished", 15)
+    assert cache._next_ttl[12] == ("bonus_claimed", 45)
+
+    await cache.get_with_context(11, loader)
+    await cache.get_with_context(12, loader)
+
+    assert cache._expiry_map[11] - time_state["value"] == pytest.approx(15)
+    assert cache._expiry_map[12] - time_state["value"] == pytest.approx(45)
+
+
+@pytest.mark.asyncio
 async def test_player_report_cache_roundtrip_and_invalidate():
     redis = fakeredis.aioredis.FakeRedis()
     redis_ops = RedisSafeOps(redis, max_retries=0, timeout_seconds=0.1)
@@ -285,3 +307,18 @@ async def test_cache_entry_expires_from_memory_and_persistent_store(monkeypatch)
     refreshed = await cache.get_with_context(7, loader)
     assert refreshed == {"value": 2}
     assert calls["count"] == 2
+
+
+@pytest.mark.asyncio
+async def test_unknown_event_type_falls_back_to_default_ttl(monkeypatch):
+    cache = AdaptivePlayerReportCache(default_ttl=90, bonus_ttl=20, post_hand_ttl=10)
+    time_state = {"value": 0.0}
+    monkeypatch.setattr(cache, "_timer", lambda: time_state["value"])
+
+    async def loader() -> Dict[str, int]:
+        return {"value": 5}
+
+    cache.invalidate_on_event([99], event_type="unexpected")
+    await cache.get_with_context(99, loader)
+
+    assert cache._expiry_map[99] - time_state["value"] == pytest.approx(90)
