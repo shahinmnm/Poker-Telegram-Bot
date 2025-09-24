@@ -327,7 +327,17 @@ class PokerBotModel:
         """Serialize stateful operations for a chat while allowing nesting."""
 
         key = f"chat:{self._safe_int(chat_id)}"
-        async with self._lock_manager.guard(key, timeout=10, level=0):
+        try:
+            async with self._lock_manager.guard(key, timeout=10, level=0):
+                yield
+                return
+        except TimeoutError:
+            logger.warning(
+                "Chat guard timed out after 10s for chat %s; retrying without timeout",
+                self._safe_int(chat_id),
+            )
+
+        async with self._lock_manager.guard(key, timeout=None, level=0):
             yield
 
     def assign_role_labels(self, game: Game) -> None:
