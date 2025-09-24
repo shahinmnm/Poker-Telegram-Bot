@@ -8,6 +8,7 @@ import pytest
 from pokerapp.logging_config import ContextJsonFormatter
 from pokerapp.utils.messaging_service import MessagingService
 from pokerapp.utils.request_metrics import RequestCategory, RequestMetrics
+from pokerapp.utils.logging_helpers import STANDARD_CONTEXT_KEYS, add_context
 
 
 class _DummyBot:
@@ -47,6 +48,32 @@ def test_context_json_formatter_includes_common_fields():
     assert payload["message"] == "structured message"
     assert "timestamp" in payload
     assert payload["timestamp"].endswith("+00:00") or payload["timestamp"].endswith("Z")
+
+
+def test_logger_adapter_injects_standard_context_fields():
+    stream = io.StringIO()
+    handler = logging.StreamHandler(stream)
+    handler.setFormatter(ContextJsonFormatter())
+
+    base_logger = logging.getLogger("test.logging.adapter")
+    base_logger.addHandler(handler)
+    base_logger.propagate = False
+    base_logger.setLevel(logging.INFO)
+
+    adapter = add_context(base_logger, event_type="unit_test")
+    adapter.info("adapter message", extra={"chat_id": 101})
+
+    handler.flush()
+    output = stream.getvalue().strip()
+    base_logger.removeHandler(handler)
+    assert output, "log output should not be empty"
+
+    payload = json.loads(output)
+    for key in STANDARD_CONTEXT_KEYS:
+        assert key in payload
+    assert payload["event_type"] == "unit_test"
+    assert payload["chat_id"] == 101
+    assert payload["message"] == "adapter message"
 
 
 @pytest.mark.asyncio

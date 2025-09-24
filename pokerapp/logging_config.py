@@ -50,6 +50,8 @@ class ContextJsonFormatter(logging.Formatter):
         "delay",
         "category",
         "action",
+        "request_category",
+        "event_type",
     )
 
     def _coerce_value(self, value: Any) -> Any:
@@ -101,10 +103,14 @@ def setup_logging(level: int = logging.INFO, debug_mode: bool = False) -> None:
     """Initialise root logging with the structured JSON formatter."""
 
     root_logger = logging.getLogger()
+    formatter = ContextJsonFormatter()
     if not root_logger.handlers:
         handler = logging.StreamHandler()
-        handler.setFormatter(ContextJsonFormatter())
+        handler.setFormatter(formatter)
         root_logger.addHandler(handler)
+    else:
+        for handler in root_logger.handlers:
+            handler.setFormatter(ContextJsonFormatter())
 
     root_logger.setLevel(logging.DEBUG if debug_mode else level)
 
@@ -113,5 +119,15 @@ def setup_logging(level: int = logging.INFO, debug_mode: bool = False) -> None:
         debug_handler = logging.StreamHandler()
         debug_handler.setFormatter(ContextJsonFormatter())
         debug_trace_logger.addHandler(debug_handler)
+    else:
+        for handler in debug_trace_logger.handlers:
+            handler.setFormatter(ContextJsonFormatter())
     debug_trace_logger.setLevel(logging.DEBUG if debug_mode else level)
     debug_trace_logger.propagate = False
+
+    for name, logger_obj in list(logging.root.manager.loggerDict.items()):
+        if not isinstance(logger_obj, logging.Logger):
+            continue
+        if name.startswith(("pokerapp", "pokerbot")):
+            for handler in logger_obj.handlers:
+                handler.setFormatter(ContextJsonFormatter())

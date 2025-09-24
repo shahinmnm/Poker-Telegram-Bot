@@ -6,6 +6,7 @@ import json
 import logging
 from typing import Iterable, Optional, Sequence
 
+from pokerapp.utils.logging_helpers import add_context
 from pokerapp.utils.redis_safeops import RedisSafeOps
 
 
@@ -20,7 +21,7 @@ class PlayerReportCache:
         logger: Optional[logging.Logger] = None,
     ) -> None:
         base_logger = logger or logging.getLogger(__name__)
-        self._logger = base_logger.getChild("player_report_cache")
+        self._logger = add_context(base_logger).getChild("player_report_cache")
         self._redis_ops = redis_ops
         self._key_prefix = key_prefix.rstrip(":") + ":"
 
@@ -42,19 +43,31 @@ class PlayerReportCache:
         try:
             payload = await self._redis_ops.safe_get(
                 key,
-                log_extra={"user_id": normalized_id, "ttl": None},
+                log_extra=self._log_extra(
+                    user_id=normalized_id,
+                    ttl=None,
+                    event_type="player_report_cache_get",
+                ),
             )
         except Exception:
             self._logger.exception(
                 "Failed to load player report from Redis",
-                extra={"user_id": normalized_id, "ttl": None},
+                extra=self._log_extra(
+                    user_id=normalized_id,
+                    ttl=None,
+                    event_type="player_report_cache_get_error",
+                ),
             )
             return None
 
         if not payload:
             self._logger.debug(
                 "Player report cache miss",
-                extra={"user_id": normalized_id, "ttl": None},
+                extra=self._log_extra(
+                    user_id=normalized_id,
+                    ttl=None,
+                    event_type="player_report_cache_miss",
+                ),
             )
             return None
 
@@ -66,20 +79,32 @@ class PlayerReportCache:
         except json.JSONDecodeError:
             self._logger.warning(
                 "Invalid JSON payload encountered when loading player report",
-                extra={"user_id": normalized_id, "ttl": None},
+                extra=self._log_extra(
+                    user_id=normalized_id,
+                    ttl=None,
+                    event_type="player_report_cache_invalid_json",
+                ),
             )
             return None
 
         if not isinstance(data, dict):
             self._logger.debug(
                 "Discarded non-dict cached player report",
-                extra={"user_id": normalized_id, "ttl": None},
+                extra=self._log_extra(
+                    user_id=normalized_id,
+                    ttl=None,
+                    event_type="player_report_cache_invalid_type",
+                ),
             )
             return None
 
         self._logger.debug(
             "Player report cache hit",
-            extra={"user_id": normalized_id, "ttl": None},
+            extra=self._log_extra(
+                user_id=normalized_id,
+                ttl=None,
+                event_type="player_report_cache_hit",
+            ),
         )
         return data
 
@@ -94,7 +119,11 @@ class PlayerReportCache:
         except (TypeError, ValueError):
             self._logger.warning(
                 "Failed to serialise player report for caching",
-                extra={"user_id": normalized_id, "ttl": ttl},
+                extra=self._log_extra(
+                    user_id=normalized_id,
+                    ttl=ttl,
+                    event_type="player_report_cache_serialise_error",
+                ),
             )
             return False
 
@@ -103,18 +132,30 @@ class PlayerReportCache:
                 key,
                 payload,
                 expire=ttl or None,
-                log_extra={"user_id": normalized_id, "ttl": ttl},
+                log_extra=self._log_extra(
+                    user_id=normalized_id,
+                    ttl=ttl,
+                    event_type="player_report_cache_set",
+                ),
             )
         except Exception:
             self._logger.exception(
                 "Failed to persist player report in Redis",
-                extra={"user_id": normalized_id, "ttl": ttl},
+                extra=self._log_extra(
+                    user_id=normalized_id,
+                    ttl=ttl,
+                    event_type="player_report_cache_set_error",
+                ),
             )
             return False
 
         self._logger.debug(
             "Player report stored",
-            extra={"user_id": normalized_id, "ttl": ttl},
+            extra=self._log_extra(
+                user_id=normalized_id,
+                ttl=ttl,
+                event_type="player_report_cache_stored",
+            ),
         )
         return bool(result)
 
@@ -133,17 +174,48 @@ class PlayerReportCache:
         try:
             removed = await self._redis_ops.safe_delete(
                 *keys,
-                log_extra={"user_id": list(normalized), "ttl": None},
+                log_extra=self._log_extra(
+                    user_id=list(normalized),
+                    ttl=None,
+                    event_type="player_report_cache_invalidate",
+                ),
             )
         except Exception:
             self._logger.exception(
                 "Failed to invalidate player reports in Redis",
-                extra={"user_id": list(normalized), "ttl": None},
+                extra=self._log_extra(
+                    user_id=list(normalized),
+                    ttl=None,
+                    event_type="player_report_cache_invalidate_error",
+                ),
             )
             return 0
 
         self._logger.debug(
             "Invalidated player reports",
-            extra={"user_id": list(normalized), "ttl": None},
+            extra=self._log_extra(
+                user_id=list(normalized),
+                ttl=None,
+                event_type="player_report_cache_invalidated",
+            ),
         )
         return int(removed)
+
+    def _log_extra(
+        self,
+        *,
+        user_id: object,
+        ttl: Optional[int],
+        event_type: str,
+        **extra: object,
+    ) -> dict[str, object]:
+        payload: dict[str, object] = {
+            "game_id": None,
+            "chat_id": None,
+            "user_id": user_id,
+            "request_category": None,
+            "event_type": event_type,
+            "cache_ttl": ttl,
+        }
+        payload.update(extra)
+        return payload

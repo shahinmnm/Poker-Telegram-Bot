@@ -21,6 +21,7 @@ from pokerapp.utils.redis_safeops import RedisSafeOps
 from pokerapp.utils.request_metrics import RequestMetrics
 from pokerapp.utils.player_report_cache import PlayerReportCache
 from pokerapp.utils.cache import AdaptivePlayerReportCache
+from pokerapp.utils.logging_helpers import ContextLoggerAdapter, add_context
 
 
 @dataclass(frozen=True)
@@ -55,7 +56,7 @@ class PokerBot:
         token: str,
         cfg: Config,
         *,
-        logger: logging.Logger,
+        logger: ContextLoggerAdapter,
         kv_async: aioredis.Redis,
         table_manager: TableManager,
         stats_service: BaseStatsService,
@@ -69,7 +70,7 @@ class PokerBot:
     ):
         self._cfg = cfg
         self._token = token
-        self._logger = logger
+        self._logger = add_context(logger)
         self._webhook_settings = WebhookSettings(
             secret_token=cfg.WEBHOOK_SECRET or None,
             max_connections=getattr(
