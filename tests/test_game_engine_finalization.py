@@ -1,7 +1,7 @@
 import logging
 from collections import defaultdict
 from types import SimpleNamespace
-from typing import Dict, Optional
+from typing import Any, Dict, List, Optional
 from unittest.mock import AsyncMock, MagicMock
 
 import fakeredis.aioredis
@@ -150,7 +150,7 @@ async def test_process_fold_win_assigns_payout_and_announces_winner():
     hand_labels: Dict[int, Optional[str]] = {}
     chat_id = -321
 
-    await model._game_engine._process_fold_win(
+    announcements = await model._game_engine._process_fold_win(
         game,
         [folded.user_id],
         payouts=payouts,
@@ -161,6 +161,13 @@ async def test_process_fold_win_assigns_payout_and_announces_winner():
     assert payouts[winner.user_id] == 200
     assert hand_labels[winner.user_id] == "پیروزی با فولد رقبا"
     winner_wallet.inc.assert_not_awaited()
+    assert len(announcements) == 1
+    announcement = announcements[0]
+    assert announcement["operation"] == "announce_fold_win_message"
+    assert callable(announcement["call"])
+    assert announcement["log_extra"]["operation"] == "announce_fold_win_message"
+    view.send_message.assert_not_awaited()
+    await announcement["call"]()
     view.send_message.assert_awaited_once()
     message_args, _ = view.send_message.await_args
     assert str(game.pot) in message_args[1]
@@ -217,12 +224,6 @@ async def test_process_showdown_results_populates_payouts_and_labels():
     hand_labels: Dict[int, Optional[str]] = {}
     chat_id = -654
 
-    async def _passthrough_send_message_safe(*, call, **_kwargs):
-        return await call()
-
-    send_message_safe = AsyncMock(side_effect=_passthrough_send_message_safe)
-    model._game_engine._telegram_ops.send_message_safe = send_message_safe
-
     winner_data = {
         "contender_details": [
             {"player": winner, "hand_type": HandsOfPoker.FLUSH},
@@ -238,7 +239,7 @@ async def test_process_showdown_results_populates_payouts_and_labels():
         ],
     }
 
-    await model._game_engine._process_showdown_results(
+    announcements = await model._game_engine._process_showdown_results(
         game,
         winner_data,
         payouts=payouts,
@@ -249,14 +250,15 @@ async def test_process_showdown_results_populates_payouts_and_labels():
     assert payouts[winner.user_id] == 120
     assert hand_labels[winner.user_id]
     assert hand_labels[loser.user_id]
-    send_message_safe.assert_awaited_once()
-    _, send_kwargs = send_message_safe.await_args
-    assert send_kwargs["chat_id"] == chat_id
-    assert send_kwargs["operation"] == "send_showdown_results"
-    assert callable(send_kwargs["call"])
-    assert send_kwargs["log_extra"]["operation"] == "send_showdown_results"
-    assert send_kwargs["log_extra"]["game_id"] == "test-game-showdown"
+    assert any(ann["operation"] == "send_showdown_results" for ann in announcements)
     view.send_message.assert_not_awaited()
+    for announcement in announcements:
+        await announcement["call"]()
+    view.send_showdown_results.assert_awaited_once()
+    send_args, _ = view.send_showdown_results.await_args
+    assert send_args[0] == chat_id
+    assert send_args[1] is game
+    assert send_args[2][0]["winners"][0]["player"] is winner
 
 
 @pytest.mark.asyncio
@@ -294,11 +296,6 @@ async def test_process_showdown_results_handles_empty_winners():
     payouts = defaultdict(int)
     hand_labels: Dict[int, Optional[str]] = {}
 
-    async def _passthrough_send_message_safe(*, call, **_kwargs):
-        return await call()
-
-    send_message_safe = AsyncMock(side_effect=_passthrough_send_message_safe)
-    model._game_engine._telegram_ops.send_message_safe = send_message_safe
     chat_id = -111
 
     winner_data = {
@@ -306,7 +303,7 @@ async def test_process_showdown_results_handles_empty_winners():
         "winners_by_pot": [],
     }
 
-    await model._game_engine._process_showdown_results(
+    announcements = await model._game_engine._process_showdown_results(
         game,
         winner_data,
         payouts=payouts,
@@ -314,12 +311,21 @@ async def test_process_showdown_results_handles_empty_winners():
         chat_id=chat_id,
     )
 
+    warning_calls = [
+        ann for ann in announcements if ann["operation"] == "announce_showdown_warning"
+    ]
+    result_calls = [
+        ann for ann in announcements if ann["operation"] == "send_showdown_results"
+    ]
+    assert warning_calls and result_calls
+    view.send_message.assert_not_awaited()
+    await warning_calls[0]["call"]()
     view.send_message.assert_awaited_once()
-    assert send_message_safe.await_count == 2
-    assert [
-        recorded_call.kwargs.get("operation")
-        for recorded_call in send_message_safe.await_args_list
-    ] == ["announce_showdown_warning", "send_showdown_results"]
+    message_args, _ = view.send_message.await_args
+    assert "ℹ️" in message_args[1]
+    view.send_showdown_results.assert_not_awaited()
+    await result_calls[0]["call"]()
+    view.send_showdown_results.assert_awaited_once_with(chat_id, game, [])
 
 
 @pytest.mark.asyncio
@@ -366,6 +372,8 @@ async def test_handle_winners_returns_payouts_and_labels_for_showdown():
     game.add_player(active_player, seat_index=0)
     game.add_player(folded_player, seat_index=1)
 
+    announcement_stub = {"operation": "announce", "call": AsyncMock()}
+
     async def fake_showdown(
         game: Game,
         winner_data: Dict[str, object],
@@ -373,20 +381,24 @@ async def test_handle_winners_returns_payouts_and_labels_for_showdown():
         payouts: Dict[int, int],
         hand_labels: Dict[int, Optional[str]],
         chat_id: int,
-    ) -> None:
+    ) -> List[Dict[str, Any]]:
         payouts[active_player.user_id] += 75
         hand_labels[active_player.user_id] = "label"
+        return [announcement_stub]
 
     engine._process_showdown_results = AsyncMock(side_effect=fake_showdown)
 
     chat_id = -1234
-    payouts, hand_labels = await engine._handle_winners(game=game, chat_id=chat_id)
+    payouts, hand_labels, announcements = await engine._handle_winners(
+        game=game, chat_id=chat_id
+    )
 
     assert payouts[active_player.user_id] == 75
     assert hand_labels[active_player.user_id] == "label"
     engine._evaluate_contender_hands.assert_called_once()
     engine._determine_winners.assert_called_once()
     engine._process_showdown_results.assert_awaited_once()
+    assert announcements == [announcement_stub]
 
 
 @pytest.mark.asyncio
@@ -411,7 +423,7 @@ async def test_handle_winners_invokes_fold_processor_when_no_contenders():
     )
 
     engine = model._game_engine
-    engine._process_fold_win = AsyncMock()
+    engine._process_fold_win = AsyncMock(return_value=[{"operation": "fold"}])
 
     folded_player = Player(
         user_id=2000,
@@ -424,12 +436,15 @@ async def test_handle_winners_invokes_fold_processor_when_no_contenders():
     game = Game()
     game.add_player(folded_player, seat_index=0)
 
-    payouts, hand_labels = await engine._handle_winners(game=game, chat_id=-4321)
+    payouts, hand_labels, announcements = await engine._handle_winners(
+        game=game, chat_id=-4321
+    )
 
     engine._process_fold_win.assert_awaited_once()
     assert isinstance(payouts, defaultdict)
     assert dict(payouts) == {}
     assert hand_labels == {}
+    assert announcements == [{"operation": "fold"}]
 
 
 @pytest.mark.asyncio
@@ -470,7 +485,56 @@ async def test_payout_delegates_to_distribute_payouts():
 
 
 @pytest.mark.asyncio
-async def test_announce_results_updates_cache_and_stats():
+async def test_announce_results_sends_all_announcements():
+    view = _build_view_mock()
+    bot = MagicMock()
+    cfg = MagicMock(DEBUG=False)
+    cfg.constants = get_game_constants()
+    kv = fakeredis.aioredis.FakeRedis()
+    table_manager = MagicMock()
+    stats = _build_stats_service()
+
+    private_match_service = _make_private_match_service(kv, table_manager)
+    model = PokerBotModel(
+        view=view,
+        bot=bot,
+        cfg=cfg,
+        kv=kv,
+        table_manager=table_manager,
+        private_match_service=private_match_service,
+        stats_service=stats,
+    )
+
+    engine = model._game_engine
+    engine._telegram_ops.send_message_safe = AsyncMock()
+
+    announcements = [
+        {
+            "call": AsyncMock(),
+            "operation": "op-a",
+            "log_extra": {"operation": "op-a"},
+        },
+        {
+            "call": AsyncMock(),
+            "operation": "op-b",
+            "log_extra": {"operation": "op-b"},
+        },
+    ]
+
+    await engine._announce_results(chat_id=-99, announcements=announcements)
+
+    assert engine._telegram_ops.send_message_safe.await_count == 2
+    sent_calls = engine._telegram_ops.send_message_safe.await_args_list
+    for idx, ann in enumerate(announcements):
+        call_args, call_kwargs = sent_calls[idx]
+        assert call_kwargs["operation"] == ann["operation"]
+        assert call_kwargs["log_extra"] == ann["log_extra"]
+        assert call_kwargs["chat_id"] == -99
+        assert call_kwargs["call"] is ann["call"]
+
+
+@pytest.mark.asyncio
+async def test_record_hand_results_updates_cache_and_stats():
     view = _build_view_mock()
     bot = MagicMock()
     cfg = MagicMock(DEBUG=False)
@@ -505,7 +569,7 @@ async def test_announce_results_updates_cache_and_stats():
     payouts = {7: 40}
     hand_labels = {7: "label"}
 
-    await engine._announce_results(
+    await engine._record_hand_results(
         game=game,
         chat_id=-99,
         payouts=payouts,
