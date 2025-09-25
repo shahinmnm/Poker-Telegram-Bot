@@ -151,7 +151,7 @@ async def test_voting_flow_updates_message():
     assert "✔️ Ali" in bot.edit_message_text.await_args.kwargs["text"]
 
     await orchestrator.vote_join("Sara")
-    last_markup = bot.edit_message_reply_markup.await_args.kwargs["reply_markup"]
+    last_markup = bot.edit_message_text.await_args_list[-1].kwargs["reply_markup"]
     assert any(
         button.callback_data == "seat:join"
         for row in last_markup.inline_keyboard
