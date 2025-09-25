@@ -32,6 +32,7 @@ from cachetools import LRUCache, TTLCache
 
 from pokerapp.config import get_game_constants
 from pokerapp.player_manager import PlayerManager
+from pokerapp.utils.messaging_service import MessagingService
 from pokerapp.utils.debug_trace import trace_telegram_api_call
 
 
@@ -155,40 +156,39 @@ def _has_visible_text(text: Optional[str]) -> bool:
     return False
 
 
+def _canonicalise_markup(markup: Any) -> Any:
+    """Return a canonical representation with sorted mappings."""
+
+    serialized = MessagingService._serialize_markup(markup)
+    if serialized is None:
+        return None
+    return _sort_markup(serialized)
+
+
+def _sort_markup(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {key: _sort_markup(value[key]) for key in sorted(value)}
+    if isinstance(value, list):
+        return [_sort_markup(item) for item in value]
+    if isinstance(value, tuple):
+        return [_sort_markup(item) for item in value]
+    return value
+
+
 def _serialize_markup(markup: Any) -> str:
     """Return a deterministic string representation of ``markup``."""
 
-    if markup is None:
+    canonical = _canonicalise_markup(markup)
+    if canonical is None:
         return ""
-    serializer = getattr(markup, "model_dump", None)
-    if callable(serializer):
-        try:
-            return json.dumps(serializer(), sort_keys=True, ensure_ascii=False)
-        except TypeError:
-            pass
-    serializer = getattr(markup, "to_python", None)
-    if callable(serializer):
-        try:
-            return json.dumps(serializer(), sort_keys=True, ensure_ascii=False)
-        except TypeError:
-            pass
-    serializer = getattr(markup, "to_dict", None)
-    if callable(serializer):
-        try:
-            return json.dumps(serializer(), sort_keys=True, ensure_ascii=False)
-        except TypeError:
-            pass
-    try:
-        return json.dumps(markup, sort_keys=True, ensure_ascii=False, default=str)
-    except TypeError:
-        return repr(markup)
+    return json.dumps(canonical, ensure_ascii=False)
 
 
 def _content_hash(text: Optional[str], reply_markup: Any) -> str:
     payload = json.dumps(
         {
             "text": text or "",
-            "reply_markup": _serialize_markup(reply_markup),
+            "reply_markup": _canonicalise_markup(reply_markup),
         },
         sort_keys=True,
         ensure_ascii=False,
