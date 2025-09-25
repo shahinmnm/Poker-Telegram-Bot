@@ -3,10 +3,11 @@
 import asyncio
 import datetime
 import inspect
+import json
 import random
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
-from typing import Any, Dict, Iterable, List, Optional, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Set, Tuple
 
 from cachetools import LRUCache
 
@@ -131,6 +132,28 @@ STAGE_LOCK_PREFIX = _ENGINE_REDIS_KEYS.get(
     GameEngine.STAGE_LOCK_PREFIX,
 )
 
+_LOCKS_SECTION = _GAME_CONSTANTS.section("locks")
+_CATEGORY_TIMEOUTS = {}
+if isinstance(_LOCKS_SECTION, dict):
+    candidate_timeouts = _LOCKS_SECTION.get("category_timeouts_seconds")
+    if isinstance(candidate_timeouts, dict):
+        _CATEGORY_TIMEOUTS = candidate_timeouts
+
+
+def _coerce_positive_float(value: Any, default: float) -> float:
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return default
+    if parsed <= 0:
+        return default
+    return parsed
+
+
+_CHAT_GUARD_TIMEOUT_SECONDS = _coerce_positive_float(
+    _CATEGORY_TIMEOUTS.get("chat"), 15.0
+)
+
 # MAX_PLAYERS = 8 (Defined in entities)
 # MIN_PLAYERS = 2 (Defined in entities)
 # SMALL_BLIND = 5 (Defined in entities)
@@ -231,6 +254,7 @@ class PokerBotModel:
             category_timeouts=getattr(cfg, "LOCK_TIMEOUTS", None),
             config=cfg,
         )
+        self._chat_guard_timeout_seconds = _CHAT_GUARD_TIMEOUT_SECONDS
         self._player_identity_manager = PlayerIdentityManager(
             table_manager=self._table_manager,
             kv=self._kv,
@@ -315,6 +339,8 @@ class PokerBotModel:
             adaptive_player_report_cache=self._player_report_cache,
         )
 
+        self._log_lock_snapshot(stage="startup", level=logging.INFO)
+
     @property
     def _min_players(self):
         return 1 if self._cfg.DEBUG else MIN_PLAYERS
@@ -322,18 +348,42 @@ class PokerBotModel:
     def _stats_enabled(self) -> bool:
         return not isinstance(self._stats, NullStatsService)
 
+    def _log_lock_snapshot(self, stage: str, *, level: int = logging.DEBUG) -> None:
+        try:
+            snapshot = self._lock_manager.detect_deadlock()
+        except Exception:
+            logger.exception(
+                "Failed to capture lock snapshot", extra={"stage": stage}
+            )
+            return
+
+        if not snapshot.get("tasks") and not snapshot.get("waiting"):
+            level = logging.DEBUG if level > logging.DEBUG else level
+
+        logger.log(
+            level,
+            "Lock snapshot (%s): %s",
+            stage,
+            json.dumps(snapshot, ensure_ascii=False, default=str),
+            extra={"stage": stage, "event_type": "lock_snapshot"},
+        )
+
     @asynccontextmanager
     async def _chat_guard(self, chat_id: ChatId):
         """Serialize stateful operations for a chat while allowing nesting."""
 
         key = f"chat:{self._safe_int(chat_id)}"
+        timeout_seconds = self._chat_guard_timeout_seconds
         try:
-            async with self._lock_manager.guard(key, timeout=10, level=0):
+            async with self._lock_manager.guard(
+                key, timeout=timeout_seconds, level=0
+            ):
                 yield
                 return
         except TimeoutError:
             logger.warning(
-                "Chat guard timed out after 10s for chat %s; retrying without timeout",
+                "Chat guard timed out after %.1fs for chat %s; retrying without timeout",
+                timeout_seconds,
                 self._safe_int(chat_id),
             )
 
@@ -1560,12 +1610,14 @@ class PokerBotModel:
                 [user_id_int], event_type="bonus_claimed"
             )
 
-    async def _clear_game_messages(self, game: Game, chat_id: ChatId) -> None:
+    async def _clear_game_messages(
+        self, game: Game, chat_id: ChatId, *, collect_only: bool = False
+    ) -> Optional[Set[MessageId]]:
         """Deletes all temporary messages related to the current hand."""
         async with self._chat_guard(chat_id):
             logger.debug("Clearing game messages", extra={"chat_id": chat_id})
 
-            ids_to_delete = set(game.message_ids_to_delete)
+            ids_to_delete: Set[MessageId] = set(game.message_ids_to_delete)
 
             if game.board_message_id:
                 ids_to_delete.add(game.board_message_id)
@@ -1584,6 +1636,12 @@ class PokerBotModel:
                 if anchor_message_id:
                     ids_to_delete.discard(anchor_message_id)
 
+            game.message_ids_to_delete.clear()
+            game.message_ids.clear()
+
+        if collect_only:
+            return ids_to_delete
+
         for message_id in ids_to_delete:
             try:
                 await self._view.delete_message(chat_id, message_id)
@@ -1597,8 +1655,7 @@ class PokerBotModel:
                     },
                 )
 
-        game.message_ids_to_delete.clear()
-        game.message_ids.clear()
+        return None
 
     async def _clear_player_anchors(self, game: Game) -> None:
         await self._player_manager.clear_player_anchors(game)

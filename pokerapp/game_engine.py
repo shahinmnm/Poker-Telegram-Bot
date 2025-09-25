@@ -15,8 +15,10 @@ from __future__ import annotations
 
 import asyncio
 import datetime
+import json
 import logging
 from collections import defaultdict
+from dataclasses import dataclass
 from typing import (
     Any,
     Awaitable,
@@ -74,6 +76,13 @@ if isinstance(_REDIS_KEY_SECTIONS, dict):
         _ENGINE_REDIS_KEYS = {}
 else:
     _ENGINE_REDIS_KEYS = {}
+
+_LOCKS_SECTION = _CONSTANTS.section("locks")
+_CATEGORY_TIMEOUTS = {}
+if isinstance(_LOCKS_SECTION, dict):
+    candidate_timeouts = _LOCKS_SECTION.get("category_timeouts_seconds")
+    if isinstance(candidate_timeouts, dict):
+        _CATEGORY_TIMEOUTS = candidate_timeouts
 
 
 def _compute_language_order(translations_root: Any) -> Tuple[str, ...]:
@@ -141,6 +150,25 @@ def _non_negative_float(value: Any, default: float) -> float:
     )
 
 
+@dataclass(frozen=True)
+class _ResetNotifications:
+    chat_id: ChatId
+    game_id: Optional[int]
+
+
+@dataclass(frozen=True)
+class _GameStatsSnapshot:
+    id: Optional[int]
+    _players: Tuple[Player, ...]
+
+    def seated_players(self) -> List[Player]:
+        return list(self._players)
+
+    @property
+    def players(self) -> List[Player]:
+        return list(self._players)
+
+
 class GameEngine:
     """Coordinates game-level constants and helpers."""
 
@@ -167,6 +195,10 @@ class GameEngine:
             _AUTO_START_DEFAULTS.get("min_update_interval_seconds"),
             _AUTO_START_INTERVAL_DEFAULT,
         )
+    )
+    STAGE_LOCK_TIMEOUT_SECONDS = _non_negative_float(
+        _CATEGORY_TIMEOUTS.get("engine_stage"),
+        25.0,
     )
     KEY_START_COUNTDOWN_LAST_TEXT = _ENGINE_CONSTANTS.get(
         "key_start_countdown_last_text",
@@ -231,7 +263,28 @@ class GameEngine:
         self._logger = logger
         self.constants = constants or _CONSTANTS
         self._adaptive_player_report_cache = adaptive_player_report_cache
+        self._stage_lock_timeout = self.STAGE_LOCK_TIMEOUT_SECONDS
         self._initialize_stop_translations()
+
+    def _log_lock_snapshot(self, *, stage: str, level: int = logging.DEBUG) -> None:
+        try:
+            snapshot = self._lock_manager.detect_deadlock()
+        except Exception:
+            self._logger.exception(
+                "Failed to capture lock snapshot", extra={"stage": stage}
+            )
+            return
+
+        if not snapshot.get("tasks") and not snapshot.get("waiting"):
+            level = logging.DEBUG if level > logging.DEBUG else level
+
+        self._logger.log(
+            level,
+            "Lock snapshot (%s): %s",
+            stage,
+            json.dumps(snapshot, ensure_ascii=False, default=str),
+            extra={"stage": stage, "event_type": "lock_snapshot"},
+        )
 
     def _log_extra(
         self,
@@ -525,6 +578,8 @@ class GameEngine:
     ) -> None:
         """Begin a poker hand, delegating to the matchmaking service."""
 
+        self._log_lock_snapshot(stage="before_start_game", level=logging.INFO)
+
         await self._matchmaking_service.start_game(
             context=context,
             game=game,
@@ -583,7 +638,7 @@ class GameEngine:
         game: Game,
     ) -> bool:
         async with self._lock_manager.guard(
-            self._stage_lock_key(chat_id), timeout=10
+            self._stage_lock_key(chat_id), timeout=self._stage_lock_timeout
         ):
             return await self._matchmaking_service.progress_stage(
                 context=context,
@@ -599,13 +654,22 @@ class GameEngine:
         game: Game,
         chat_id: ChatId,
     ) -> None:
+        message_cleanup_ids: Set[MessageId] = set()
+        announcements: List[Dict[str, Any]] = []
+        record_kwargs: Optional[Dict[str, Any]] = None
+        reset_notifications: Optional[_ResetNotifications] = None
+
         async with self._lock_manager.guard(
-            self._stage_lock_key(chat_id), timeout=10
+            self._stage_lock_key(chat_id), timeout=self._stage_lock_timeout
         ):
             game.chat_id = chat_id
             players_snapshot = list(game.players)
 
-            await self._clear_game_messages(game, chat_id)
+            collected_ids = await self._clear_game_messages(
+                game, chat_id, collect_only=True
+            )
+            if collected_ids:
+                message_cleanup_ids = set(collected_ids)
 
             pot_total = game.pot
             game_id = getattr(game, "id", None)
@@ -617,26 +681,43 @@ class GameEngine:
 
             await self._execute_payouts(game=game, payouts=payouts)
 
+            record_kwargs = {
+                "game": game,
+                "chat_id": chat_id,
+                "payouts": dict(payouts),
+                "hand_labels": hand_labels,
+                "pot_total": pot_total,
+                "players_snapshot": players_snapshot,
+                "game_id": game_id,
+            }
+
+            reset_notifications = await self._reset_game_state(
+                game=game,
+                context=context,
+                chat_id=chat_id,
+                game_id=game_id,
+                defer_notifications=True,
+            )
+
+        if message_cleanup_ids:
+            await self._delete_chat_messages(chat_id, message_cleanup_ids)
+
+        if announcements:
             await self._notify_results(
                 chat_id=chat_id,
                 announcements=announcements,
             )
 
-            await self._record_hand_results(
-                game=game,
-                chat_id=chat_id,
-                payouts=dict(payouts),
-                hand_labels=hand_labels,
-                pot_total=pot_total,
-                players_snapshot=players_snapshot,
+        if record_kwargs is not None:
+            await self._record_hand_results(**record_kwargs)
+
+        if reset_notifications is not None:
+            await self._announce_new_hand_ready(
+                chat_id=reset_notifications.chat_id,
+                game_id=reset_notifications.game_id,
             )
 
-            await self._reset_game_state(
-                game=game,
-                context=context,
-                chat_id=chat_id,
-                game_id=game_id,
-            )
+        await self._player_manager.send_join_prompt(game, chat_id)
 
     async def _determine_winners(
         self,
@@ -694,6 +775,38 @@ class GameEngine:
     ) -> None:
         await self._distribute_payouts(game, payouts)
 
+    async def _delete_chat_messages(
+        self, chat_id: ChatId, message_ids: Iterable[MessageId]
+    ) -> None:
+        for message_id in message_ids:
+            try:
+                await self._view.delete_message(chat_id, message_id)
+            except Exception as error:
+                self._logger.debug(
+                    "Failed to delete message",
+                    extra={
+                        "chat_id": chat_id,
+                        "message_id": message_id,
+                        "error_type": type(error).__name__,
+                    },
+                )
+
+    async def _announce_new_hand_ready(
+        self, *, chat_id: ChatId, game_id: Optional[int]
+    ) -> None:
+        await self._telegram_ops.send_message_safe(
+            call=lambda: self._view.send_new_hand_ready_message(chat_id),
+            chat_id=chat_id,
+            operation="send_new_hand_ready_message",
+            log_extra=self._build_telegram_log_extra(
+                chat_id=chat_id,
+                message_id=None,
+                game_id=game_id,
+                operation="send_new_hand_ready_message",
+                request_category=RequestCategory.GENERAL,
+            ),
+        )
+
     async def _notify_results(
         self,
         *,
@@ -720,13 +833,17 @@ class GameEngine:
         hand_labels: Dict[int, Optional[str]],
         pot_total: int,
         players_snapshot: Iterable[Player],
+        game_id: Optional[int],
     ) -> None:
+        players_list = list(players_snapshot)
         self._invalidate_adaptive_report_cache(
-            players_snapshot, event_type="hand_finished"
+            players_list, event_type="hand_finished"
         )
 
+        stats_game = _GameStatsSnapshot(game_id, tuple(players_list))
+
         await self._stats_reporter.hand_finished(
-            game,
+            stats_game,
             chat_id,
             payouts=payouts,
             hand_labels=hand_labels,
@@ -740,7 +857,8 @@ class GameEngine:
         context: ContextTypes.DEFAULT_TYPE,
         chat_id: ChatId,
         game_id: Optional[int],
-    ) -> None:
+        defer_notifications: bool = False,
+    ) -> Optional[_ResetNotifications]:
         await self._reset_core_game_state(
             game,
             context=context,
@@ -748,19 +866,12 @@ class GameEngine:
             send_stop_notification=False,
         )
 
-        await self._telegram_ops.send_message_safe(
-            call=lambda: self._view.send_new_hand_ready_message(chat_id),
-            chat_id=chat_id,
-            operation="send_new_hand_ready_message",
-            log_extra=self._build_telegram_log_extra(
-                chat_id=chat_id,
-                message_id=None,
-                game_id=game_id,
-                operation="send_new_hand_ready_message",
-                request_category=RequestCategory.GENERAL,
-            ),
-        )
+        if defer_notifications:
+            return _ResetNotifications(chat_id=chat_id, game_id=game_id)
+
+        await self._announce_new_hand_ready(chat_id=chat_id, game_id=game_id)
         await self._player_manager.send_join_prompt(game, chat_id)
+        return None
 
     async def _process_fold_win(
         self,

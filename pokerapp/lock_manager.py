@@ -33,11 +33,13 @@ LOCK_LEVELS: Dict[str, int] = {
     "engine_stage": 1,
     "player_report": 2,
     "wallet": 3,
+    "chat": 4,
 }
 
 _LOCK_PREFIX_LEVELS: Tuple[Tuple[str, str], ...] = (
     ("stage:", "engine_stage"),
     ("engine_stage:", "engine_stage"),
+    ("chat:", "chat"),
     ("pokerbot:player_report", "player_report"),
     ("player_report:", "player_report"),
     ("wallet:", "wallet"),
