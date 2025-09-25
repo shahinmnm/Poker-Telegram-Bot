@@ -25,6 +25,28 @@ else:
 
 _STAGE_LOCK_PREFIX = _ENGINE_KEYS.get("stage_lock_prefix", "stage:")
 
+_LOCKS_SECTION = _CONSTANTS.section("locks")
+_CATEGORY_TIMEOUTS = {}
+if isinstance(_LOCKS_SECTION, dict):
+    candidate_timeouts = _LOCKS_SECTION.get("category_timeouts_seconds")
+    if isinstance(candidate_timeouts, dict):
+        _CATEGORY_TIMEOUTS = candidate_timeouts
+
+
+def _positive_float(value: Any, default: float) -> float:
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return default
+    if parsed <= 0:
+        return default
+    return parsed
+
+
+_STAGE_LOCK_TIMEOUT_SECONDS = _positive_float(
+    _CATEGORY_TIMEOUTS.get("engine_stage"), 25.0
+)
+
 
 class _DebugWallet(Wallet):
     async def add_daily(self, amount: Money) -> Money:
@@ -91,6 +113,7 @@ class MatchmakingService:
         self._old_players_key = old_players_key
         self._logger = logger
         self._config = config or Config()
+        self._stage_lock_timeout = _STAGE_LOCK_TIMEOUT_SECONDS
 
     def _log_extra(
         self,
@@ -289,7 +312,9 @@ class MatchmakingService:
         street_name: str,
         send_message: bool,
     ) -> None:
-        async with self._lock_manager.guard(self._stage_lock_key(chat_id), timeout=10):
+        async with self._lock_manager.guard(
+            self._stage_lock_key(chat_id), timeout=self._stage_lock_timeout
+        ):
             await self._add_cards_to_table(
                 count=count,
                 game=game,
@@ -405,7 +430,9 @@ class MatchmakingService:
     ) -> None:
         game.chat_id = chat_id
 
-        async with self._lock_manager.guard(self._stage_lock_key(chat_id), timeout=10):
+        async with self._lock_manager.guard(
+            self._stage_lock_key(chat_id), timeout=self._stage_lock_timeout
+        ):
             await self._view.send_player_role_anchors(game=game, chat_id=chat_id)
 
         self._record_game_start_action(game)

@@ -578,18 +578,25 @@ async def test_record_hand_results_updates_cache_and_stats():
         hand_labels=hand_labels,
         pot_total=150,
         players_snapshot=players_snapshot,
+        game_id=game.id,
     )
 
-    engine._invalidate_adaptive_report_cache.assert_called_once_with(
-        players_snapshot, event_type="hand_finished"
-    )
-    engine._stats_reporter.hand_finished.assert_awaited_once_with(
-        game,
-        -99,
-        payouts=payouts,
-        hand_labels=hand_labels,
-        pot_total=150,
-    )
+    engine._invalidate_adaptive_report_cache.assert_called_once()
+    cache_args, cache_kwargs = engine._invalidate_adaptive_report_cache.call_args
+    assert list(cache_args[0]) == players_snapshot
+    assert cache_kwargs == {"event_type": "hand_finished"}
+
+    engine._stats_reporter.hand_finished.assert_awaited_once()
+    stats_args, stats_kwargs = engine._stats_reporter.hand_finished.await_args
+    stats_game, stats_chat_id = stats_args
+    assert stats_chat_id == -99
+    assert stats_game.id == game.id
+    assert stats_game.seated_players() == players_snapshot
+    assert stats_kwargs == {
+        "payouts": payouts,
+        "hand_labels": hand_labels,
+        "pot_total": 150,
+    }
 
 
 @pytest.mark.asyncio
@@ -790,6 +797,11 @@ async def test_finalize_game_single_winner_distributes_pot_and_updates_stats():
 
     await model._game_engine.finalize_game(context=context, game=game, chat_id=chat_id)
 
+    model._game_engine._clear_game_messages.assert_awaited_once_with(
+        game, chat_id, collect_only=True
+    )
+
+
     adaptive_cache_mock.invalidate_on_event.assert_called_once_with(
         {1, 2}, "hand_finished"
     )
@@ -864,6 +876,11 @@ async def test_finalize_game_split_pot_between_tied_winners():
     chat_id = -777
 
     await model._game_engine.finalize_game(context=context, game=game, chat_id=chat_id)
+
+    model._game_engine._clear_game_messages.assert_awaited_once_with(
+        game, chat_id, collect_only=True
+    )
+
 
     adaptive_cache_mock.invalidate_on_event.assert_called_once_with(
         {10, 20}, "hand_finished"
