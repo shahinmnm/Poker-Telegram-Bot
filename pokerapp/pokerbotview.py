@@ -61,6 +61,7 @@ from pokerapp.entities import (
 from pokerapp.telegram_validation import TelegramPayloadValidator
 from pokerapp.utils.debug_trace import trace_telegram_api_call
 from pokerapp.utils.messaging_service import MessagingService
+from pokerapp.utils.message_updates import safe_edit_message
 from pokerapp.utils.request_metrics import RequestCategory, RequestMetrics
 
 
@@ -2316,7 +2317,8 @@ class PokerBotViewer:
                             callback_throttle_key
                         ] = callback_id
                         callback_token_registered = True
-                    result = await self._messenger.edit_message_text(
+                    result = await safe_edit_message(
+                        self._messenger,
                         chat_id=chat_id,
                         message_id=message_id,
                         text=normalized_text,
@@ -3109,7 +3111,8 @@ class PokerBotViewer:
                 )
                 return False
             try:
-                result = await self._messenger.edit_message_text(
+                result = await safe_edit_message(
+                    self._messenger,
                     chat_id=chat_id,
                     message_id=message_id,
                     text=normalized_text,
@@ -4140,7 +4143,8 @@ class PokerBotViewer:
             self._log_skip_empty(chat_id, message_id)
             return None
         try:
-            result = await self._messenger.edit_message_text(
+            result = await safe_edit_message(
+                self._messenger,
                 chat_id=chat_id,
                 message_id=message_id,
                 text=normalized_text,
