@@ -11,6 +11,7 @@ from pokerapp.entities import ChatId, Game, GameState, Player, UserId
 from pokerapp.config import get_game_constants
 from pokerapp.pokerbotview import PokerBotViewer
 from pokerapp.table_manager import TableManager
+from pokerapp.utils.request_metrics import RequestCategory
 
 
 _CONSTANTS = get_game_constants()
@@ -155,6 +156,7 @@ class PlayerManager:
             chat_id,
             "برای نشستن سر میز دکمه را بزن",
             reply_markup=markup,
+            request_category=RequestCategory.START_GAME,
         )
         if message_id:
             game.ready_message_main_id = message_id

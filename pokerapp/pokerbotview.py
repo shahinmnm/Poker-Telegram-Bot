@@ -3862,7 +3862,7 @@ class PokerBotViewer:
             reply_markup=None,
             parse_mode=ParseMode.MARKDOWN,
             disable_notification=True,
-            request_category=RequestCategory.STAGE,
+            request_category=RequestCategory.STAGE_PROGRESS,
         )
 
     async def notify_admin(self, log_data: Dict[str, Any]) -> None:
@@ -4891,6 +4891,7 @@ class PokerBotViewer:
                 disable_notification=True,
                 disable_web_page_preview=True,
                 reply_markup=reply_keyboard,
+                request_category=RequestCategory.START_GAME,
                 context=context,
             )
         except Exception as e:
