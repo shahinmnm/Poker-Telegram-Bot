@@ -502,6 +502,47 @@ class RequestManager:
         await self.start()
         return await future
 
+    async def safe_edit_message(
+        self,
+        *,
+        chat_id: int,
+        message_id: Optional[int],
+        text: Optional[str],
+        reply_markup: Any = None,
+        skip_cache: bool = False,
+        **params: Any,
+    ) -> Optional[int]:
+        """Edit message text and markup together while avoiding duplicates."""
+
+        if message_id is None:
+            return None
+
+        payload_hash = _content_hash(text, reply_markup)
+        if not skip_cache:
+            cached = await self._is_cached(chat_id, message_id, payload_hash)
+            if cached:
+                logger.info(
+                    "SKIP EDIT: identical content for %s, msg %s",
+                    chat_id,
+                    message_id,
+                    extra=self._log_extra(
+                        stage="safe-edit-message",
+                        chat_id=chat_id,
+                        message_id=message_id,
+                        reason="cache-hit",
+                    ),
+                )
+                return message_id
+
+        return await self.edit_message_text(
+            chat_id=chat_id,
+            message_id=message_id,
+            text=text,
+            reply_markup=reply_markup,
+            skip_cache=skip_cache,
+            **params,
+        )
+
     async def delete_message(
         self,
         *,
@@ -766,9 +807,10 @@ class PokerMessagingOrchestrator:
                 buttons=tuple(buttons),
             )
         markup = self._build_anchor_markup(anchor.player.buttons, active=active)
-        await self._request_manager.edit_message_reply_markup(
+        await self._request_manager.safe_edit_message(
             chat_id=self.chat_id,
             message_id=anchor.message_id,
+            text=anchor.base_text,
             reply_markup=markup,
         )
 
@@ -870,7 +912,7 @@ class PokerMessagingOrchestrator:
                     key = (self.chat_id, message_id, pending.payload_hash)
                     if not pending.countdown_tick and key in self._turn_update_cache:
                         continue
-                    await self._request_manager.edit_message_text(
+                    await self._request_manager.safe_edit_message(
                         chat_id=self.chat_id,
                         message_id=message_id,
                         text=pending.text,
@@ -1013,15 +1055,11 @@ class PokerMessagingOrchestrator:
         if self._voting_message_id is None:
             return
         text = self._render_voting_text()
-        await self._request_manager.edit_message_text(
+        markup = self._build_voting_markup()
+        await self._request_manager.safe_edit_message(
             chat_id=self.chat_id,
             message_id=self._voting_message_id,
             text=text,
-        )
-        markup = self._build_voting_markup()
-        await self._request_manager.edit_message_reply_markup(
-            chat_id=self.chat_id,
-            message_id=self._voting_message_id,
             reply_markup=markup,
         )
 
