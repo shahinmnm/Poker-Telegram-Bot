@@ -788,11 +788,14 @@ class PokerBotModel:
         elif countdown <= 0:
             lines.append("🚀 بازی در حال شروع است...")
         else:
-            lines.append(f"⏳ بازی تا {countdown} ثانیه دیگر شروع می‌شود.")
+            static_seconds = 60
+            lines.append(
+                "⏳ بازی دقیقا ۶۰ ثانیه پس از ارسال این پیام شروع می‌شود."
+            )
             anchor = anchor_time or now_utc()
             if anchor.tzinfo is None or anchor.tzinfo.utcoffset(anchor) is None:
                 anchor = anchor.replace(tzinfo=datetime.timezone.utc)
-            target_time = anchor + datetime.timedelta(seconds=countdown)
+            target_time = anchor + datetime.timedelta(seconds=static_seconds)
             localized = format_local(
                 target_time, self._timezone_name, fmt="%H:%M:%S"
             )
@@ -811,9 +814,8 @@ class PokerBotModel:
                     InlineKeyboardButton(text="شروع بازی", callback_data="start_game")
                 )
         else:
-            start_label = "شروع بازی (اکنون)" if countdown <= 0 else f"شروع بازی ({countdown})"
             keyboard_buttons[0].append(
-                InlineKeyboardButton(text=start_label, callback_data="start_game")
+                InlineKeyboardButton(text="شروع بازی", callback_data="start_game")
             )
 
         keyboard = InlineKeyboardMarkup(keyboard_buttons)
@@ -868,11 +870,12 @@ class PokerBotModel:
             text, keyboard = self._build_ready_message(
                 game, countdown_value, anchor_time=now
             )
+            previous_text = countdown_ctx.get(KEY_START_COUNTDOWN_LAST_TEXT)
             countdown_ctx[KEY_START_COUNTDOWN_LAST_TEXT] = text
             countdown_ctx[KEY_START_COUNTDOWN_LAST_TIMESTAMP] = now
-            game.ready_message_main_text = text
 
             message_id = game.ready_message_main_id
+            current_text = getattr(game, "ready_message_main_text", "")
             if message_id is None:
                 new_message_id = await self._view.send_message_return_id(
                     chat_id,
@@ -887,49 +890,17 @@ class PokerBotModel:
                 else:
                     await self._view._cancel_prestart_countdown(chat_id, game_identifier)
                     countdown_ctx["seconds"] = countdown_value
-                    countdown_ctx["active"] = False
                     return
-
-            previous_seconds = countdown_ctx.get("last_seconds")
-            countdown_active = bool(countdown_ctx.get("active"))
-
-            def payload_fn(seconds_left: int) -> Tuple[str, InlineKeyboardMarkup]:
-                anchor = now_utc()
-                payload_text, payload_keyboard = self._build_ready_message(
-                    game, max(seconds_left, 0), anchor_time=anchor
+            elif text and text != current_text and text != previous_text:
+                await self._telegram_ops.edit_message_text(
+                    chat_id,
+                    message_id,
+                    text,
+                    reply_markup=keyboard,
+                    request_category=RequestCategory.COUNTDOWN,
                 )
-                game.ready_message_main_text = payload_text
-                countdown_ctx[KEY_START_COUNTDOWN_LAST_TEXT] = payload_text
-                countdown_ctx[KEY_START_COUNTDOWN_LAST_TIMESTAMP] = anchor
-                return payload_text, payload_keyboard
 
-            should_start_countdown = False
-            if message_id is not None:
-                if not countdown_active:
-                    should_start_countdown = True
-                elif previous_seconds is None:
-                    should_start_countdown = True
-                elif countdown_value > int(previous_seconds):
-                    should_start_countdown = True
-
-            if should_start_countdown:
-                async def _on_countdown_complete() -> None:
-                    await self._handle_countdown_expiry(
-                        context, chat_id, game_identifier
-                    )
-
-                await self._view.start_prestart_countdown(
-                    chat_id=chat_id,
-                    game_id=game_identifier,
-                    anchor_message_id=message_id,
-                    seconds=countdown_value,
-                    payload_fn=payload_fn,
-                    on_complete=_on_countdown_complete,
-                )
-                countdown_active = True
-
-            countdown_ctx["active"] = countdown_active
-            countdown_ctx["last_seconds"] = countdown_value
+            game.ready_message_main_text = text or current_text
             countdown_ctx["seconds"] = max(countdown_value - 1, 0)
 
     async def _schedule_auto_start(
