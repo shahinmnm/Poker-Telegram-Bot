@@ -27,6 +27,8 @@ from typing import Any, Awaitable, Callable, Dict, List, Mapping, Optional, Set,
 
 from cachetools import TTLCache
 
+from pokerapp.utils.cache import MessageStateCache
+
 try:  # pragma: no cover - prometheus_client optional
     from prometheus_client import Counter
 except Exception:  # pragma: no cover - optional dependency missing
@@ -177,6 +179,9 @@ class MessagingService:
         self._global_last_send_time = 0.0
         self._last_edit_failures: Dict[CacheKey, str] = {}
         self._last_edit_failure_lock = asyncio.Lock()
+        self.message_state_cache = MessageStateCache(
+            logger_=self._logger.getChild("message_state")
+        )
 
     @staticmethod
     def _coerce_context_value(value: Any) -> Any:
@@ -610,6 +615,19 @@ class MessagingService:
         state = self._pending_edits.setdefault(key, _PendingEditState())
 
         async with state.guard:
+            if (
+                not payload.force
+                and state.pending_payload is not None
+                and state.pending_payload.content_hash == payload.content_hash
+            ):
+                self._logger.debug(
+                    "Duplicate edit prevented in MessagingService for chat_id=%s, message_id=%s",
+                    chat_id,
+                    message_id,
+                )
+                if not waiter.future.done():
+                    waiter.future.set_result(message_id)
+                return
             if state.pending_payload is None:
                 if (
                     not payload.force
