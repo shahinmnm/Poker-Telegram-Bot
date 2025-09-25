@@ -14,7 +14,7 @@ from pokerapp.stats import BaseStatsService
 from pokerapp.winnerdetermination import HandsOfPoker
 from pokerapp.private_match_service import PrivateMatchService
 from pokerapp.config import get_game_constants
-from pokerapp.utils.request_metrics import RequestMetrics
+from pokerapp.utils.request_metrics import RequestCategory, RequestMetrics
 
 
 def _make_wallet_mock(value: Optional[int] = None) -> MagicMock:
@@ -649,6 +649,10 @@ async def test_reset_game_state_resets_game_and_prompts_players():
     assert kwargs["operation"] == "send_new_hand_ready_message"
     assert callable(kwargs["call"])
     assert kwargs["log_extra"]["game_id"] == game_id
+    assert (
+        kwargs["log_extra"]["request_category"]
+        == RequestCategory.START_GAME.value
+    )
     engine._player_manager.send_join_prompt.assert_awaited_once_with(game, chat_id)
 
 

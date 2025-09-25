@@ -803,7 +803,7 @@ class GameEngine:
                 message_id=None,
                 game_id=game_id,
                 operation="send_new_hand_ready_message",
-                request_category=RequestCategory.GENERAL,
+                request_category=RequestCategory.START_GAME,
             ),
         )
 
@@ -1133,7 +1133,7 @@ class GameEngine:
                     stage="payout-resolution",
                     game=game,
                     chat_id=chat_identifier,
-                    request_category="engine",
+                    request_category=RequestCategory.ENGINE_CRITICAL,
                     event_type="pot_calculation_mismatch",
                     request_params={
                         "game_pot": game.pot,

@@ -1555,7 +1555,11 @@ class MessagingService:
         message_id: Optional[int],
         category: RequestCategory,
     ) -> bool:
-        if self._metrics is None:
+        if (
+            self._metrics is None
+            or category.value
+            in {"engine_critical", "start_game", "stage_progress"}
+        ):
             return True
         allowed = await self._metrics.consume(
             chat_id=chat_id,
