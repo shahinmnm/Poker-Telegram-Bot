@@ -26,7 +26,19 @@ async def safe_edit_message(
     if message_id is None:
         return None
 
+    params = dict(params)
     force = bool(params.pop("force", False))
+
+    safe_method = getattr(messaging_service, "safe_edit_message", None)
+    if callable(safe_method):
+        return await safe_method(
+            chat_id=chat_id,
+            message_id=message_id,
+            text=text,
+            reply_markup=reply_markup,
+            force=force,
+            **params,
+        )
 
     cache = getattr(messaging_service, "message_state_cache", None)
     service_logger: logging.Logger = getattr(
