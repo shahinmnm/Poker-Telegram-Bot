@@ -27,7 +27,7 @@ from typing import Any, Awaitable, Callable, Dict, List, Mapping, Optional, Set,
 
 from cachetools import TTLCache
 
-from pokerapp.utils.cache import MessageStateCache
+from pokerapp.utils.cache import MessagePayload, MessageStateCache
 
 try:  # pragma: no cover - prometheus_client optional
     from prometheus_client import Counter
@@ -916,6 +916,131 @@ class MessagingService:
             return result
         return message_id
 
+    async def safe_edit_message(
+        self,
+        *,
+        chat_id: int,
+        message_id: int,
+        text: Optional[str],
+        reply_markup: Any = None,
+        force: bool = False,
+        request_category: RequestCategory = RequestCategory.GENERAL,
+        context: Optional[Mapping[str, Any]] = None,
+        **params: Any,
+    ) -> Optional[int]:
+        """Coalesce text and markup edits using the message state cache."""
+
+        if message_id is None:
+            return None
+
+        existing_payload = await self.message_state_cache.get(chat_id, message_id)
+        parse_mode = params.get("parse_mode")
+        if parse_mode is None and existing_payload is not None:
+            parse_mode = existing_payload.parse_mode
+
+        markup_hash = self._compute_markup_hash(reply_markup)
+        payload = MessagePayload(
+            text=text,
+            markup_hash=markup_hash,
+            parse_mode=parse_mode,
+        )
+
+        base_context = self._merge_context(
+            context,
+            chat_id=chat_id,
+            message_id=message_id,
+            category=request_category,
+            method="editMessageText",
+        )
+
+        if (
+            not force
+            and await self.message_state_cache.matches(chat_id, message_id, payload)
+        ):
+            await self._log_skip(
+                chat_id=chat_id,
+                message_id=message_id,
+                category=request_category,
+                reason="duplicate_text_markup",
+                context=base_context,
+            )
+            return None
+
+        result = await self.edit_message_text(
+            chat_id=chat_id,
+            message_id=message_id,
+            text=text,
+            reply_markup=reply_markup,
+            force=force,
+            request_category=request_category,
+            context=base_context,
+            **params,
+        )
+
+        await self.message_state_cache.update(chat_id, message_id, payload)
+
+        return result
+
+    async def safe_edit_reply_markup(
+        self,
+        *,
+        chat_id: int,
+        message_id: int,
+        reply_markup: Any = None,
+        force: bool = False,
+        request_category: RequestCategory = RequestCategory.INLINE,
+        context: Optional[Mapping[str, Any]] = None,
+        **params: Any,
+    ) -> bool:
+        """Skip redundant markup edits by considering the full message payload."""
+
+        if message_id is None:
+            return False
+
+        existing_payload = await self.message_state_cache.get(chat_id, message_id)
+        markup_hash = self._compute_markup_hash(reply_markup)
+        payload = MessagePayload(
+            text=existing_payload.text if existing_payload else None,
+            markup_hash=markup_hash,
+            parse_mode=existing_payload.parse_mode if existing_payload else None,
+        )
+
+        base_context = self._merge_context(
+            context,
+            chat_id=chat_id,
+            message_id=message_id,
+            category=request_category,
+            method="editMessageReplyMarkup",
+        )
+
+        if (
+            not force
+            and await self.message_state_cache.matches(chat_id, message_id, payload)
+        ):
+            await self._log_skip(
+                chat_id=chat_id,
+                message_id=message_id,
+                category=request_category,
+                reason="duplicate_text_markup",
+                context=base_context,
+            )
+            return True
+
+        result = await self.edit_message_reply_markup(
+            chat_id=chat_id,
+            message_id=message_id,
+            reply_markup=reply_markup,
+            force=force,
+            request_category=request_category,
+            context=base_context,
+            **params,
+        )
+
+        if result:
+            await self.message_state_cache.update(chat_id, message_id, payload)
+
+        return result
+
     async def edit_message_reply_markup(
         self,
         *,
@@ -1350,6 +1475,24 @@ class MessagingService:
         )
         return hashlib.md5(payload.encode("utf-8")).hexdigest()
 
+    def _compute_markup_hash(self, reply_markup: Any) -> Optional[str]:
+        if reply_markup is None:
+            return None
+        try:
+            serialized = self._serialize_markup(reply_markup)
+            payload = json.dumps(
+                serialized,
+                sort_keys=True,
+                ensure_ascii=False,
+            )
+        except Exception:
+            self._logger.debug(
+                "Failed to serialise reply markup for hashing; skipping hash",
+                exc_info=True,
+            )
+            return None
+        return hashlib.md5(payload.encode("utf-8")).hexdigest()
+
     @staticmethod
     def _serialize_markup(markup: Any) -> Any:
         if markup is None:
@@ -1366,9 +1509,12 @@ class MessagingService:
         except Exception:
             pass
         if isinstance(markup, dict):
-            return markup
+            return {
+                key: MessagingService._serialize_markup(markup[key])
+                for key in sorted(markup)
+            }
         if isinstance(markup, (list, tuple)):
-            return list(markup)
+            return [MessagingService._serialize_markup(item) for item in markup]
         return repr(markup)
 
     def _log_api_call(

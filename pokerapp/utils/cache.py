@@ -119,6 +119,13 @@ class MessageStateCache:
                 ),
             )
 
+    async def get(self, chat_id: int, message_id: int) -> Optional[MessagePayload]:
+        """Return the cached payload for ``(chat_id, message_id)`` if available."""
+
+        key = self._key(chat_id, message_id)
+        async with self._lock:
+            return self._cache.get(key)
+
     async def forget(self, chat_id: int, message_id: int) -> None:
         """Remove a cached entry when the message is deleted."""
 
