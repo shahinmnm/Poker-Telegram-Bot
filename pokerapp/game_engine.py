@@ -935,19 +935,29 @@ class GameEngine:
                 reset_notifications_local,
             )
 
-        (
-            message_cleanup_ids,
-            announcements,
-            record_kwargs,
-            reset_notifications,
-        ) = await self._with_stage_guard_retry(
-            chat_id=chat_id,
-            game=game,
-            operation=_run_locked,
-            timeout_seconds=self._stage_lock_timeout,
-            stage_label="chat_guard_timeout:finalize_game",
-            event_stage_label="game_finalize",
-        )
+        lock_key = self._stage_lock_key(chat_id)
+        try:
+            (
+                message_cleanup_ids,
+                announcements,
+                record_kwargs,
+                reset_notifications,
+            ) = await self._with_stage_guard_retry(
+                chat_id=chat_id,
+                game=game,
+                operation=_run_locked,
+                timeout_seconds=self._stage_lock_timeout,
+                stage_label="chat_guard_timeout:finalize_game",
+                event_stage_label="game_finalize",
+            )
+        except TimeoutError:
+            self._log_engine_event_lock_failure(
+                lock_key=lock_key,
+                event_stage_label="finalize_game",
+                chat_id=chat_id,
+                game=game,
+            )
+            raise
 
         if message_cleanup_ids:
             await self._delete_chat_messages(chat_id, message_cleanup_ids)
