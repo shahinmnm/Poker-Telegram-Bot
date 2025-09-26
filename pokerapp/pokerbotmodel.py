@@ -205,6 +205,7 @@ class PokerBotModel:
         self._view: PokerBotViewer = view
         self._bot: Bot = bot
         self._cfg: Config = cfg
+        self._logger = logger.getChild("model")
         self._constants = cfg.constants
         self._kv = kv
         self._redis_ops = redis_ops or RedisSafeOps(
