@@ -844,7 +844,7 @@ class GameEngine:
         except TimeoutError:
             self._log_engine_event_lock_failure(
                 lock_key=lock_key,
-                event_stage_label="add_cards_to_table",
+                event_stage_label="deal_cards_to_players",
                 chat_id=chat_id,
                 game=game,
             )
@@ -872,12 +872,12 @@ class GameEngine:
                 operation=_run_locked,
                 timeout_seconds=self._stage_lock_timeout,
                 stage_label="chat_guard_timeout:progress_stage",
-                event_stage_label="progress_stage",
+                event_stage_label="stage_progress",
             )
         except TimeoutError:
             self._log_engine_event_lock_failure(
                 lock_key=lock_key,
-                event_stage_label="progress_stage",
+                event_stage_label="stage_progress",
                 chat_id=chat_id,
                 game=game,
             )
@@ -958,7 +958,7 @@ class GameEngine:
                 operation=_run_locked,
                 timeout_seconds=self._stage_lock_timeout,
                 stage_label="chat_guard_timeout:finalize_game",
-                event_stage_label="finalize_game",
+                event_stage_label="game_finalize",
             )
         except TimeoutError:
             self._log_engine_event_lock_failure(
