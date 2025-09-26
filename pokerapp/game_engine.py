@@ -27,6 +27,7 @@ from typing import (
     Dict,
     Iterable,
     List,
+    Mapping,
     Optional,
     Set,
     Tuple,
@@ -602,7 +603,25 @@ class GameEngine:
             )
 
     def _stage_lock_key(self, chat_id: ChatId) -> str:
-        return f"{self.STAGE_LOCK_PREFIX}{self._safe_int(chat_id)}"
+        prefix = self.STAGE_LOCK_PREFIX
+        if not isinstance(prefix, str) or not prefix.startswith("stage:"):
+            prefix = "stage:"
+        return f"{prefix}{self._safe_int(chat_id)}"
+
+    def _build_lock_context(
+        self,
+        *,
+        chat_id: ChatId,
+        game: Optional[Game],
+        base: Optional[Mapping[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        context: Dict[str, Any] = dict(base or {})
+        context.setdefault("chat_id", self._safe_int(chat_id))
+        if game is not None:
+            game_id = getattr(game, "id", None)
+            if game_id is not None:
+                context.setdefault("game_id", game_id)
+        return context
 
     async def _with_stage_guard_retry(
         self,
@@ -614,10 +633,7 @@ class GameEngine:
         stage_label: str,
     ) -> T:
         lock_key = self._stage_lock_key(chat_id)
-        lock_context = {
-            "chat_id": self._safe_int(chat_id),
-            "game_id": getattr(game, "id", None) if game is not None else None,
-        }
+        lock_context = self._build_lock_context(chat_id=chat_id, game=game)
         try:
             async with self._lock_manager.guard(
                 lock_key, timeout=timeout_seconds, context=lock_context
