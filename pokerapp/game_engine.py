@@ -1926,8 +1926,7 @@ class GameEngine:
         chat_id: ChatId,
         context: ContextTypes.DEFAULT_TYPE,
     ) -> None:
-        lock_key = self._stage_lock_key(chat_id)
-        try:
+        async def _run_locked() -> None:
             await self._player_manager.cleanup_ready_prompt(
                 game, chat_id, persist=False
             )
@@ -1951,11 +1950,12 @@ class GameEngine:
                     request_category=RequestCategory.GENERAL,
                 ),
             )
-        except TimeoutError:
-            self._log_engine_event_lock_failure(
-                lock_key=lock_key,
-                event_stage_label="reset_game_state_after_stop",
-                chat_id=chat_id,
-                game=game,
-            )
-            raise
+
+        await self._with_stage_guard_retry(
+            chat_id=chat_id,
+            game=game,
+            operation=_run_locked,
+            timeout_seconds=self._stage_lock_timeout,
+            stage_label="chat_guard_timeout:reset_game_state_after_round",
+            event_stage_label="reset_game_state_after_round",
+        )
