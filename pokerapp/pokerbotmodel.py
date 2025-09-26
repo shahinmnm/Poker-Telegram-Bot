@@ -1626,29 +1626,53 @@ class PokerBotModel:
         chat_id: ChatId,
     ):
         """پیام نوبت را ارسال کرده و شناسه آن را برای حذف در آینده ذخیره می‌کند."""
+        lock_key = f"{STAGE_LOCK_PREFIX}{self._safe_int(chat_id)}"
+        money: Optional[Money] = None
+        recent_actions: List[str] = []
+        previous_message_id: Optional[MessageId] = None
+
         async with self._chat_guard(chat_id):
-            async with self._lock_manager.guard(
-                f"{STAGE_LOCK_PREFIX}{self._safe_int(chat_id)}", timeout=10
-            ):
+            async with self._lock_manager.guard(lock_key, timeout=10):
                 game.chat_id = chat_id
                 await self._view.update_player_anchors_and_keyboards(game)
 
                 money = await player.wallet.value()
                 recent_actions = list(game.last_actions)
+                previous_message_id = game.turn_message_id
 
-                turn_update = await self._view.update_turn_message(
-                    chat_id=chat_id,
-                    game=game,
-                    player=player,
-                    money=money,
-                    message_id=game.turn_message_id,
-                    recent_actions=recent_actions,
-                )
+            assert money is not None
 
-                if turn_update.message_id:
+            turn_update = await self._view.update_turn_message(
+                chat_id=chat_id,
+                game=game,
+                player=player,
+                money=money,
+                message_id=previous_message_id,
+                recent_actions=recent_actions,
+            )
+
+            now_value = now_utc()
+            async with self._lock_manager.guard(lock_key, timeout=10):
+                if (
+                    turn_update.message_id
+                    and game.turn_message_id == previous_message_id
+                ):
                     game.turn_message_id = turn_update.message_id
+                elif (
+                    turn_update.message_id
+                    and game.turn_message_id != previous_message_id
+                ):
+                    logger.debug(
+                        "Skipping turn message id update due to concurrent change",
+                        extra={
+                            "chat_id": chat_id,
+                            "previous_turn_message_id": previous_message_id,
+                            "current_turn_message_id": game.turn_message_id,
+                            "new_turn_message_id": turn_update.message_id,
+                        },
+                    )
 
-                game.last_turn_time = now_utc()
+                game.last_turn_time = now_value
 
                 logger.debug(
                     "Turn message refreshed",
