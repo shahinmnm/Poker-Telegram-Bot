@@ -375,7 +375,13 @@ class PokerBotModel:
         )
 
     @asynccontextmanager
-    async def _chat_guard(self, chat_id: ChatId):
+    async def _chat_guard(
+        self,
+        chat_id: ChatId,
+        *,
+        event_stage_label: str = "chat_guard",
+        game: Optional[Game] = None,
+    ):
         """Serialize stateful operations for a chat while allowing nesting."""
 
         key = f"chat:{self._safe_int(chat_id)}"
@@ -387,6 +393,12 @@ class PokerBotModel:
                 yield
                 return
         except TimeoutError:
+            self._game_engine._log_engine_event_lock_failure(
+                lock_key=key,
+                event_stage_label=event_stage_label,
+                chat_id=chat_id,
+                game=game,
+            )
             logger.warning(
                 "Chat guard timed out after %.1fs for chat %s; retrying without timeout",
                 timeout_seconds,
@@ -799,7 +811,9 @@ class PokerBotModel:
     async def _handle_countdown_expiry(
         self, context: CallbackContext, chat_id: ChatId, game_id: int | str
     ) -> None:
-        async with self._chat_guard(chat_id):
+        async with self._chat_guard(
+            chat_id, event_stage_label="countdown_expiry"
+        ):
             game = await self._table_manager.get_game(chat_id)
             if str(getattr(game, "id", None)) != str(game_id):
                 return
@@ -916,7 +930,9 @@ class PokerBotModel:
         game_for_start: Optional[Game] = None
         early_exit = False
 
-        async with self._chat_guard(chat_id):
+        async with self._chat_guard(
+            chat_id, event_stage_label="auto_start_tick"
+        ):
             game = await self._table_manager.get_game(chat_id)
             context.chat_data[KEY_CHAT_DATA_GAME] = game
             current_state_token = self._state_token(game.state)
@@ -1526,7 +1542,9 @@ class PokerBotModel:
             await self._game_engine.start_game(context, game, chat_id)
 
         if require_guard:
-            async with self._chat_guard(chat_id):
+            async with self._chat_guard(
+                chat_id, event_stage_label="start_game", game=game
+            ):
                 await _run_start()
         else:
             await _run_start()
@@ -1630,7 +1648,9 @@ class PokerBotModel:
         recent_actions: List[str] = []
         previous_message_id: Optional[MessageId] = None
 
-        async with self._chat_guard(chat_id):
+        async with self._chat_guard(
+            chat_id, event_stage_label="send_turn_message", game=game
+        ):
             async with self._lock_manager.guard(lock_key, timeout=10):
                 game.chat_id = chat_id
                 await self._view.update_player_anchors_and_keyboards(game)
@@ -1847,7 +1867,9 @@ class PokerBotModel:
         street_name: str,
         send_message: bool = True,
     ) -> None:
-        async with self._chat_guard(chat_id):
+        async with self._chat_guard(
+            chat_id, event_stage_label="add_cards_to_table", game=game
+        ):
             await self._game_engine.add_cards_to_table(
                 count=count,
                 game=game,
@@ -1901,7 +1923,9 @@ class PokerBotModel:
         self, game: Game, chat_id: ChatId, *, collect_only: bool = False
     ) -> Optional[Set[MessageId]]:
         """Deletes all temporary messages related to the current hand."""
-        async with self._chat_guard(chat_id):
+        async with self._chat_guard(
+            chat_id, event_stage_label="clear_game_messages", game=game
+        ):
             logger.debug("Clearing game messages", extra={"chat_id": chat_id})
 
             ids_to_delete: Set[MessageId] = set(game.message_ids_to_delete)
