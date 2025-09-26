@@ -936,6 +936,7 @@ class PokerBotModel:
                     text,
                     reply_markup=keyboard,
                     request_category=RequestCategory.COUNTDOWN,
+                    current_game_id=getattr(game, "id", None),
                 )
 
             anchor_message_id = game.ready_message_main_id
@@ -1064,6 +1065,7 @@ class PokerBotModel:
         parse_mode: str = ParseMode.MARKDOWN,
         log_context: Optional[str] = None,
         request_category: RequestCategory = RequestCategory.GENERAL,
+        current_game_id: Optional[str] = None,
     ) -> Optional[MessageId]:
         return await self._telegram_ops.edit_message_text(
             chat_id,
@@ -1073,6 +1075,7 @@ class PokerBotModel:
             parse_mode=parse_mode,
             log_context=log_context,
             request_category=request_category,
+            current_game_id=current_game_id,
         )
 
     async def show_table(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1185,6 +1188,7 @@ class PokerBotModel:
                     text,
                     reply_markup=keyboard,
                     request_category=RequestCategory.COUNTDOWN,
+                    current_game_id=getattr(game, "id", None),
                 )
                 if new_id is None:
                     if message_id and message_id in game.message_ids_to_delete:

@@ -60,6 +60,7 @@ class TelegramSafeOps:
         log_context: Optional[str] = None,
         request_category: RequestCategory = RequestCategory.GENERAL,
         log_extra: Optional[Mapping[str, Any]] = None,
+        current_game_id: Optional[str] = None,
     ) -> Optional[MessageId]:
         """Safely edit a message, retrying transient failures when required."""
 
@@ -84,6 +85,7 @@ class TelegramSafeOps:
                     request_category=request_category,
                     parse_mode=parse_mode,
                     suppress_exceptions=False,
+                    current_game_id=current_game_id,
                 ),
                 log_extra=log_extra,
             )

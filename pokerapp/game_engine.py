@@ -1282,6 +1282,7 @@ class GameEngine:
                 operation="stop_vote_request_message",
                 request_category=RequestCategory.GENERAL,
             ),
+            current_game_id=getattr(game, "id", None),
         )
         stop_request["message_id"] = message_id
         context.chat_data[self.KEY_STOP_REQUEST] = stop_request
@@ -1465,6 +1466,7 @@ class GameEngine:
                 operation="stop_vote_resume_message",
                 request_category=RequestCategory.GENERAL,
             ),
+            current_game_id=getattr(game, "id", None),
         )
 
     async def cancel_hand(
@@ -1548,6 +1550,7 @@ class GameEngine:
                 operation="stop_vote_request_message",
                 request_category=RequestCategory.GENERAL,
             ),
+            current_game_id=getattr(game, "id", None),
         )
         stop_request["message_id"] = message_id
         context.chat_data[self.KEY_STOP_REQUEST] = stop_request
@@ -1637,6 +1640,7 @@ class GameEngine:
                 operation="stop_vote_finalize_message",
                 request_category=RequestCategory.GENERAL,
             ),
+            current_game_id=stop_request.get("game_id"),
         )
 
         context.chat_data.pop(self.KEY_STOP_REQUEST, None)

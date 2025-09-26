@@ -53,6 +53,7 @@ def _inject_viewer_dependencies(monkeypatch):
                     deleted_messages_lock=deleted_messages_lock,
                     last_message_hash=last_message_hash,
                     last_message_hash_lock=last_message_hash_lock,
+                    table_manager=None,
                 )
 
             kwargs["messaging_service_factory"] = _factory

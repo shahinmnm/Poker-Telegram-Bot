@@ -84,6 +84,7 @@ async def test_messaging_service_logs_include_context(caplog):
         _DummyBot(),
         logger_=logger,
         request_metrics=metrics,
+        table_manager=None,
     )
 
     context = {"game_id": "game-123", "stage": "TURN"}
@@ -114,6 +115,7 @@ async def test_messaging_service_logs_errors_with_context(caplog):
         _FailingBot(),
         logger_=logger,
         request_metrics=metrics,
+        table_manager=None,
     )
 
     with pytest.raises(ValueError):

@@ -360,6 +360,7 @@ async def test_finalize_stop_request_logs_retry_details(caplog):
             request_category,
             parse_mode,
             suppress_exceptions,
+            current_game_id=None,
         ):
             self.edit_attempts += 1
             if self.edit_attempts == 1:
