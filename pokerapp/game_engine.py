@@ -330,6 +330,55 @@ class GameEngine:
             extra={"stage": stage, "event_type": "lock_snapshot"},
         )
 
+    def _log_engine_event_lock_failure(
+        self,
+        *,
+        lock_key: str,
+        event_stage_label: str,
+        chat_id: Optional[ChatId] = None,
+        game: Optional[Game] = None,
+    ) -> None:
+        resolved_chat_id: Optional[int]
+        if chat_id is not None:
+            try:
+                resolved_chat_id = self._safe_int(chat_id)
+            except Exception:  # pragma: no cover - defensive fallback
+                resolved_chat_id = chat_id  # type: ignore[assignment]
+        elif game is not None and getattr(game, "chat_id", None) is not None:
+            chat_candidate = getattr(game, "chat_id")
+            try:
+                resolved_chat_id = self._safe_int(chat_candidate)
+            except Exception:  # pragma: no cover - defensive fallback
+                resolved_chat_id = chat_candidate  # type: ignore[assignment]
+        else:
+            resolved_chat_id = None
+
+        game_id = getattr(game, "id", None) if game is not None else None
+        lock_level = self._lock_manager._resolve_level(lock_key, override=None)
+        payload = self._lock_manager._build_context_payload(
+            lock_key,
+            lock_level,
+            additional={"chat_id": resolved_chat_id, "game_id": game_id},
+        )
+        payload.setdefault("lock_key", lock_key)
+        payload.setdefault("lock_level", lock_level)
+        payload.setdefault("chat_id", resolved_chat_id)
+        payload.setdefault("game_id", game_id)
+
+        stage_parts = ["game_event_lock_failure", event_stage_label, lock_key]
+        if resolved_chat_id is not None:
+            stage_parts.append(f"chat={resolved_chat_id}")
+        if game_id is not None:
+            stage_parts.append(f"game={game_id}")
+        stage_label = ":".join(str(part) for part in stage_parts if part)
+
+        self._lock_manager._log_lock_snapshot_on_timeout(
+            stage_label,
+            level=logging.ERROR,
+            minimum_level=logging.ERROR,
+            extra=payload,
+        )
+
     def _log_extra(
         self,
         *,
@@ -631,6 +680,7 @@ class GameEngine:
         operation: Callable[[], Awaitable[T]],
         timeout_seconds: Optional[float],
         stage_label: str,
+        event_stage_label: str,
     ) -> T:
         lock_key = self._stage_lock_key(chat_id)
         lock_context = self._build_lock_context(chat_id=chat_id, game=game)
@@ -640,6 +690,12 @@ class GameEngine:
             ):
                 return await operation()
         except TimeoutError:
+            self._log_engine_event_lock_failure(
+                lock_key=lock_key,
+                event_stage_label=event_stage_label,
+                chat_id=chat_id,
+                game=game,
+            )
             lock_level = self._lock_manager._resolve_level(lock_key, override=None)
             snapshot_context: Dict[str, Any] = dict(lock_context)
             snapshot_context.setdefault("lock_key", lock_key)
@@ -788,6 +844,7 @@ class GameEngine:
             operation=_run_locked,
             timeout_seconds=self._stage_lock_timeout,
             stage_label="chat_guard_timeout:progress_stage",
+            event_stage_label="stage_progress",
         )
 
     async def finalize_game(
@@ -863,6 +920,7 @@ class GameEngine:
             operation=_run_locked,
             timeout_seconds=self._stage_lock_timeout,
             stage_label="chat_guard_timeout:finalize_game",
+            event_stage_label="game_finalize",
         )
 
         if message_cleanup_ids:
