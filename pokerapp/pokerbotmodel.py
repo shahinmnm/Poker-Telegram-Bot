@@ -388,7 +388,10 @@ class PokerBotModel:
         timeout_seconds = self._chat_guard_timeout_seconds
         try:
             async with self._lock_manager.guard(
-                key, timeout=timeout_seconds, level=0
+                key,
+                timeout=timeout_seconds,
+                level=0,
+                failure_log_level=logging.WARNING,
             ):
                 yield
                 return
@@ -398,6 +401,7 @@ class PokerBotModel:
                 event_stage_label=event_stage_label,
                 chat_id=chat_id,
                 game=game,
+                log_level=logging.WARNING,
             )
             logger.warning(
                 "Chat guard timed out after %.1fs for chat %s; retrying without timeout",

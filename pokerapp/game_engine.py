@@ -337,6 +337,7 @@ class GameEngine:
         event_stage_label: str,
         chat_id: Optional[ChatId] = None,
         game: Optional[Game] = None,
+        log_level: int = logging.ERROR,
     ) -> None:
         resolved_chat_id: Optional[int]
         if chat_id is not None:
@@ -372,10 +373,11 @@ class GameEngine:
             stage_parts.append(f"game={game_id}")
         stage_label = ":".join(str(part) for part in stage_parts if part)
 
+        effective_level = max(log_level, logging.WARNING)
         self._lock_manager._log_lock_snapshot_on_timeout(
             stage_label,
-            level=logging.ERROR,
-            minimum_level=logging.ERROR,
+            level=effective_level,
+            minimum_level=effective_level,
             extra=payload,
         )
 
@@ -686,7 +688,10 @@ class GameEngine:
         lock_context = self._build_lock_context(chat_id=chat_id, game=game)
         try:
             async with self._lock_manager.guard(
-                lock_key, timeout=timeout_seconds, context=lock_context
+                lock_key,
+                timeout=timeout_seconds,
+                context=lock_context,
+                failure_log_level=logging.WARNING,
             ):
                 return await operation()
         except TimeoutError:
@@ -695,6 +700,7 @@ class GameEngine:
                 event_stage_label=event_stage_label,
                 chat_id=chat_id,
                 game=game,
+                log_level=logging.WARNING,
             )
             lock_level = self._lock_manager._resolve_level(lock_key, override=None)
             snapshot_context: Dict[str, Any] = dict(lock_context)
@@ -717,8 +723,8 @@ class GameEngine:
             failure_stage = ":".join(str(part) for part in failure_stage_parts if part)
             self._lock_manager._log_lock_snapshot_on_timeout(
                 failure_stage,
-                level=logging.ERROR,
-                minimum_level=logging.ERROR,
+                level=logging.WARNING,
+                minimum_level=logging.WARNING,
                 extra=snapshot_context,
             )
 

@@ -226,6 +226,8 @@ class LockManager:
         *,
         context: Optional[Mapping[str, Any]] = None,
         level: Optional[int] = None,
+        timeout_log_level: Optional[int] = logging.WARNING,
+        failure_log_level: Optional[int] = logging.ERROR,
     ) -> bool:
         """Attempt to acquire the lock identified by ``key``."""
 
@@ -339,39 +341,43 @@ class LockManager:
                 if game_id is not None:
                     stage_label_parts.append(f"game={game_id}")
                 stage_label = ":".join(str(part) for part in stage_label_parts if part)
-                self._log_lock_snapshot_on_timeout(
-                    stage_label,
-                    level=logging.WARNING,
-                    extra={
-                        "lock_key": key,
-                        "lock_level": resolved_level,
-                        "chat_id": diagnostic_context.get("chat_id"),
-                        "game_id": diagnostic_context.get("game_id"),
-                        "attempt": attempt + 1,
-                    },
-                )
-                owner_suffix = ""
-                holders = diagnostics.get("held_by_tasks")
-                if holders:
-                    owner_suffix = f"; held_by={', '.join(holders)}"
-                self._logger.warning(
-                    "Timeout acquiring %s on attempt %d (remaining %.3fs)%s%s",
-                    lock_identity,
-                    attempt + 1,
-                    remaining if remaining is not None else float("inf"),
-                    owner_suffix,
-                    self._format_context(diagnostic_context),
-                    extra=self._log_extra(
-                        diagnostic_context,
-                        event_type="lock_timeout",
-                        lock_key=key,
-                        lock_level=resolved_level,
-                        attempts=attempt + 1,
-                        remaining_time=remaining,
-                        held_by_tasks=diagnostics.get("held_by_tasks"),
-                        waiting_tasks=diagnostics.get("waiting_tasks"),
-                    ),
-                )
+                if timeout_log_level is not None:
+                    effective_timeout_level = max(timeout_log_level, logging.WARNING)
+                    self._log_lock_snapshot_on_timeout(
+                        stage_label,
+                        level=effective_timeout_level,
+                        minimum_level=effective_timeout_level,
+                        extra={
+                            "lock_key": key,
+                            "lock_level": resolved_level,
+                            "chat_id": diagnostic_context.get("chat_id"),
+                            "game_id": diagnostic_context.get("game_id"),
+                            "attempt": attempt + 1,
+                        },
+                    )
+                    owner_suffix = ""
+                    holders = diagnostics.get("held_by_tasks")
+                    if holders:
+                        owner_suffix = f"; held_by={', '.join(holders)}"
+                    self._logger.log(
+                        effective_timeout_level,
+                        "Timeout acquiring %s on attempt %d (remaining %.3fs)%s%s",
+                        lock_identity,
+                        attempt + 1,
+                        remaining if remaining is not None else float("inf"),
+                        owner_suffix,
+                        self._format_context(diagnostic_context),
+                        extra=self._log_extra(
+                            diagnostic_context,
+                            event_type="lock_timeout",
+                            lock_key=key,
+                            lock_level=resolved_level,
+                            attempts=attempt + 1,
+                            remaining_time=remaining,
+                            held_by_tasks=diagnostics.get("held_by_tasks"),
+                            waiting_tasks=diagnostics.get("waiting_tasks"),
+                        ),
+                    )
             except asyncio.CancelledError:
                 self._logger.warning(
                     "Lock acquisition for %s cancelled on attempt %d%s",
@@ -415,36 +421,40 @@ class LockManager:
         if game_id is not None:
             stage_parts.append(f"game={game_id}")
         stage_label = ":".join(str(part) for part in stage_parts if part)
-        self._log_lock_snapshot_on_timeout(
-            stage_label,
-            level=logging.ERROR,
-            extra={
-                "lock_key": key,
-                "lock_level": resolved_level,
-                "chat_id": failure_context.get("chat_id"),
-                "game_id": failure_context.get("game_id"),
-            },
-        )
-        owner_suffix = ""
-        holders = diagnostics.get("held_by_tasks")
-        if holders:
-            owner_suffix = f"; held_by={', '.join(holders)}"
-        self._logger.error(
-            "Failed to acquire %s after %d attempts%s%s",
-            lock_identity,
-            attempts,
-            owner_suffix,
-            self._format_context(failure_context),
-            extra=self._log_extra(
-                failure_context,
-                event_type="lock_failure",
-                lock_key=key,
-                lock_level=resolved_level,
-                attempts=attempts,
-                held_by_tasks=diagnostics.get("held_by_tasks"),
-                waiting_tasks=diagnostics.get("waiting_tasks"),
-            ),
-        )
+        if failure_log_level is not None:
+            effective_failure_level = max(failure_log_level, logging.WARNING)
+            self._log_lock_snapshot_on_timeout(
+                stage_label,
+                level=effective_failure_level,
+                minimum_level=effective_failure_level,
+                extra={
+                    "lock_key": key,
+                    "lock_level": resolved_level,
+                    "chat_id": failure_context.get("chat_id"),
+                    "game_id": failure_context.get("game_id"),
+                },
+            )
+            owner_suffix = ""
+            holders = diagnostics.get("held_by_tasks")
+            if holders:
+                owner_suffix = f"; held_by={', '.join(holders)}"
+            self._logger.log(
+                effective_failure_level,
+                "Failed to acquire %s after %d attempts%s%s",
+                lock_identity,
+                attempts,
+                owner_suffix,
+                self._format_context(failure_context),
+                extra=self._log_extra(
+                    failure_context,
+                    event_type="lock_failure",
+                    lock_key=key,
+                    lock_level=resolved_level,
+                    attempts=attempts,
+                    held_by_tasks=diagnostics.get("held_by_tasks"),
+                    waiting_tasks=diagnostics.get("waiting_tasks"),
+                ),
+            )
         return False
 
     @asynccontextmanager
@@ -456,12 +466,19 @@ class LockManager:
         context: Optional[Mapping[str, Any]] = None,
         context_extra: Optional[Mapping[str, Any]] = None,
         level: Optional[int] = None,
+        timeout_log_level: Optional[int] = logging.WARNING,
+        failure_log_level: Optional[int] = logging.ERROR,
     ) -> AsyncIterator[None]:
         combined_context: Dict[str, Any] = dict(context or {})
         if context_extra:
             combined_context.update(context_extra)
         acquired = await self.acquire(
-            key, timeout=timeout, context=combined_context, level=level
+            key,
+            timeout=timeout,
+            context=combined_context,
+            level=level,
+            timeout_log_level=timeout_log_level,
+            failure_log_level=failure_log_level,
         )
         if not acquired:
             resolved_level = self._resolve_level(key, override=level)
@@ -487,12 +504,14 @@ class LockManager:
             failure_snapshot_extra = dict(failure_context)
             failure_snapshot_extra.setdefault("lock_key", key)
             failure_snapshot_extra.setdefault("lock_level", resolved_level)
-            self._log_lock_snapshot_on_timeout(
-                guard_failure_stage,
-                level=logging.ERROR,
-                minimum_level=logging.ERROR,
-                extra=failure_snapshot_extra,
-            )
+            if failure_log_level is not None:
+                effective_failure_level = max(failure_log_level, logging.WARNING)
+                self._log_lock_snapshot_on_timeout(
+                    guard_failure_stage,
+                    level=effective_failure_level,
+                    minimum_level=effective_failure_level,
+                    extra=failure_snapshot_extra,
+                )
             guard_stage_parts = ["guard_timeout", key]
             if chat_id is not None:
                 guard_stage_parts.append(f"chat={chat_id}")
