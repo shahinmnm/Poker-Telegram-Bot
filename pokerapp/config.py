@@ -77,7 +77,7 @@ _DEFAULT_GAME_CONSTANTS_DATA: Dict[str, Any] = {
     "locks": {
         "category_timeouts_seconds": {
             "engine_stage": 25.0,
-            "chat": 15.0,
+            "chat": 8.0,
             "player_report": 5.0,
             "wallet": 5.0,
         }

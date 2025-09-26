@@ -327,19 +327,29 @@ class LockManager:
                 remaining = None
                 if deadline is not None:
                     remaining = max(0.0, deadline - loop.time())
+                diagnostics = self._lock_diagnostics(key)
+                diagnostic_context = dict(context_payload)
+                diagnostic_context.update(diagnostics)
+                owner_suffix = ""
+                holders = diagnostics.get("held_by_tasks")
+                if holders:
+                    owner_suffix = f"; held_by={', '.join(holders)}"
                 self._logger.warning(
-                    "Timeout acquiring %s on attempt %d (remaining %.3fs)%s",
+                    "Timeout acquiring %s on attempt %d (remaining %.3fs)%s%s",
                     lock_identity,
                     attempt + 1,
                     remaining if remaining is not None else float("inf"),
-                    self._format_context(context_payload),
+                    owner_suffix,
+                    self._format_context(diagnostic_context),
                     extra=self._log_extra(
-                        context_payload,
+                        diagnostic_context,
                         event_type="lock_timeout",
                         lock_key=key,
                         lock_level=resolved_level,
                         attempts=attempt + 1,
                         remaining_time=remaining,
+                        held_by_tasks=diagnostics.get("held_by_tasks"),
+                        waiting_tasks=diagnostics.get("waiting_tasks"),
                     ),
                 )
             except asyncio.CancelledError:
@@ -371,18 +381,30 @@ class LockManager:
                             break
                         await asyncio.sleep(min(backoff, remaining_sleep))
 
-        lock_identity = self._format_lock_identity(key, resolved_level, context_payload)
+        diagnostics = self._lock_diagnostics(key)
+        failure_context = dict(context_payload)
+        failure_context.update(diagnostics)
+        lock_identity = self._format_lock_identity(
+            key, resolved_level, failure_context
+        )
+        owner_suffix = ""
+        holders = diagnostics.get("held_by_tasks")
+        if holders:
+            owner_suffix = f"; held_by={', '.join(holders)}"
         self._logger.error(
-            "Failed to acquire %s after %d attempts%s",
+            "Failed to acquire %s after %d attempts%s%s",
             lock_identity,
             attempts,
-            self._format_context(context_payload),
+            owner_suffix,
+            self._format_context(failure_context),
             extra=self._log_extra(
-                context_payload,
+                failure_context,
                 event_type="lock_failure",
                 lock_key=key,
                 lock_level=resolved_level,
                 attempts=attempts,
+                held_by_tasks=diagnostics.get("held_by_tasks"),
+                waiting_tasks=diagnostics.get("waiting_tasks"),
             ),
         )
         return False
@@ -722,6 +744,35 @@ class LockManager:
                 dfs(node)
 
         return cycles
+
+    def _lock_diagnostics(self, key: str) -> Dict[str, Any]:
+        diagnostics: Dict[str, Any] = {}
+        try:
+            snapshot = self.detect_deadlock()
+        except Exception:  # pragma: no cover - defensive logging path
+            self._logger.exception(
+                "Failed to capture lock diagnostics for %s", key
+            )
+            return diagnostics
+
+        holders: List[str] = []
+        for task_entry in snapshot.get("tasks", []):
+            locks = task_entry.get("locks") or []
+            if any(lock.get("key") == key for lock in locks):
+                holders.append(task_entry.get("task", "unknown"))
+
+        waiters: List[str] = [
+            item.get("task", "unknown")
+            for item in snapshot.get("waiting", [])
+            if item.get("key") == key
+        ]
+
+        if holders:
+            diagnostics["held_by_tasks"] = holders
+        if waiters:
+            diagnostics["waiting_tasks"] = waiters
+
+        return diagnostics
 
     def _format_context(self, context: Dict[str, Any]) -> str:
         if not context:
