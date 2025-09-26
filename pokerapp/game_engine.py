@@ -645,8 +645,17 @@ class GameEngine:
             if game_id is not None:
                 stage_parts.append(f"game={game_id}")
             stage_name = ":".join(str(part) for part in stage_parts if part)
+            snapshot_stage_parts = [
+                "chat_guard_timeout",
+                f"chat={self._safe_int(chat_id)}",
+            ]
+            if game_id is not None:
+                snapshot_stage_parts.append(f"game={game_id}")
+            snapshot_stage = ":".join(
+                str(part) for part in snapshot_stage_parts if part
+            )
             self._log_lock_snapshot(
-                stage=stage_name,
+                stage=snapshot_stage,
                 level=logging.WARNING,
                 minimum_level=logging.WARNING,
             )
