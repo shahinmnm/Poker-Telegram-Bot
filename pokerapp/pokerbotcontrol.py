@@ -158,7 +158,50 @@ class PokerBotCotroller:
             await self._model.add_cards_to_table(0, game, chat_id, "🃏 ریور")
 
     async def _handle_ready(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        await self._model.join_game(update, context)
+        chat_id = None
+        message_id = None
+
+        if update.callback_query:
+            msg = update.callback_query.message
+            if msg:
+                chat = getattr(msg, "chat", None)
+                chat_id = getattr(chat, "id", getattr(msg, "chat_id", None))
+                message_id = getattr(msg, "message_id", None)
+        elif update.message:
+            chat = getattr(update.message, "chat", None)
+            chat_id = getattr(chat, "id", getattr(update.message, "chat_id", None))
+            message_id = getattr(update.message, "message_id", None)
+
+        if chat_id is not None and message_id is not None:
+            game = await self._model._table_manager.get_game(chat_id)
+            current_game_id = getattr(game, "id", None)
+            messaging_service = getattr(self._view, "_messaging_service", None)
+            if messaging_service is None:
+                messaging_service = getattr(self._view, "_messenger", None)
+            if messaging_service is None:
+                logger.info(
+                    "Skipping /ready: messaging service unavailable",
+                    extra={
+                        "chat_id": chat_id,
+                        "message_id": message_id,
+                        "current_game_id": current_game_id,
+                    },
+                )
+                return
+            if not await messaging_service.is_message_id_active(
+                chat_id, message_id, current_game_id
+            ):
+                logger.info(
+                    "Skipping /ready: inactive or stale message",
+                    extra={
+                        "chat_id": chat_id,
+                        "message_id": message_id,
+                        "current_game_id": current_game_id,
+                    },
+                )
+                return
+
+        await self._model.ready(update, context)
 
     async def _handle_start(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if update.callback_query:
