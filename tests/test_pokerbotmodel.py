@@ -630,8 +630,10 @@ async def test_auto_start_tick_starts_prestart_countdown_and_updates_state():
     kv = MagicMock()
     table_manager = MagicMock()
     game = Game()
-    game.ready_message_main_id = 111
     game.id = "game-42"
+    game.ready_message_main_id = 111
+    game.ready_message_game_id = game.id
+    game.ready_message_stage = game.state
     game.ready_message_main_text = "prompt"
     table_manager.get_game = AsyncMock(return_value=game)
     table_manager.save_game = AsyncMock()
@@ -688,8 +690,10 @@ async def test_auto_start_tick_does_not_restart_on_regular_tick():
     kv = MagicMock()
     table_manager = MagicMock()
     game = Game()
-    game.ready_message_main_id = 321
     game.id = "game-43"
+    game.ready_message_main_id = 321
+    game.ready_message_game_id = game.id
+    game.ready_message_stage = game.state
     table_manager.get_game = AsyncMock(return_value=game)
     table_manager.save_game = AsyncMock()
 
@@ -732,8 +736,10 @@ async def test_auto_start_tick_restarts_when_countdown_increases():
     kv = MagicMock()
     table_manager = MagicMock()
     game = Game()
-    game.ready_message_main_id = 555
     game.id = "game-44"
+    game.ready_message_main_id = 555
+    game.ready_message_game_id = game.id
+    game.ready_message_stage = game.state
     table_manager.get_game = AsyncMock(return_value=game)
     table_manager.save_game = AsyncMock()
 
@@ -1056,6 +1062,8 @@ async def test_start_game_assigns_blinds_to_occupied_seats():
     game = Game()
     ready_message_id = 444
     game.ready_message_main_id = ready_message_id
+    game.ready_message_game_id = game.id
+    game.ready_message_stage = game.state
     game.ready_message_main_text = "prompt"
     game.dealer_index = 0
 
@@ -1133,6 +1141,8 @@ async def test_start_game_keeps_ready_message_id_when_deletion_fails():
     game = Game()
     ready_message_id = 321
     game.ready_message_main_id = ready_message_id
+    game.ready_message_game_id = game.id
+    game.ready_message_stage = game.state
     game.ready_message_main_text = "prompt"
     game.dealer_index = -1
 

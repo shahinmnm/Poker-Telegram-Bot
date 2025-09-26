@@ -168,7 +168,10 @@ class Game:
         self.ready_message_main_id: Optional[MessageId] = None
         # متن آخرین پیام آماده‌باش برای جلوگیری از ویرایش‌های تکراری
         self.ready_message_main_text: str = ""
-    
+        # Metadata to ensure prompt edits apply to the right game context
+        self.ready_message_game_id: Optional[str] = None
+        self.ready_message_stage: Optional[GameState] = None
+
         # 🆕 اضافه شده: آرایه پیام‌هایی که باید پاک شوند
         self.message_ids_to_delete: List[MessageId] = []
 
@@ -304,6 +307,10 @@ class Game:
         # persisted state.
         if "board_message_id" not in state:
             self.board_message_id = None
+        if "ready_message_game_id" not in state:
+            self.ready_message_game_id = None
+        if "ready_message_stage" not in state:
+            self.ready_message_stage = None
 
     def __repr__(self):
         return "{}({!r})".format(self.__class__.__name__, self.__dict__)
