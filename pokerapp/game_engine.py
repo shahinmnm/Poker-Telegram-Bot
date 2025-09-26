@@ -65,6 +65,24 @@ from pokerapp.winnerdetermination import (
 )
 
 
+def clear_all_message_ids(game: Game) -> None:
+    """Reset cached message identifiers for ``game`` and its players."""
+
+    for player in getattr(game, "players", []):
+        if hasattr(player, "ready_message_id"):
+            player.ready_message_id = None
+
+    if hasattr(game, "anchor_message_id"):
+        game.anchor_message_id = None
+
+    if hasattr(game, "board_message_id"):
+        game.board_message_id = None
+
+    message_ids = getattr(game, "message_ids_to_delete", None)
+    if message_ids is not None and hasattr(message_ids, "clear"):
+        message_ids.clear()
+
+
 _CONSTANTS = get_game_constants()
 _GAME_CONSTANTS = _CONSTANTS.game
 _ENGINE_CONSTANTS = _CONSTANTS.engine
@@ -1042,6 +1060,7 @@ class GameEngine:
         await self._request_metrics.end_cycle(
             self._safe_int(chat_id), cycle_token=game.id
         )
+        clear_all_message_ids(game)
         await self._player_manager.clear_player_anchors(game)
         game.reset()
         await self._table_manager.save_game(chat_id, game)
@@ -1187,6 +1206,8 @@ class GameEngine:
         """Validate and submit a stop request for the active hand."""
 
         if game.state == GameState.INITIAL:
+            clear_all_message_ids(game)
+            await self._table_manager.save_game(chat_id, game)
             raise UserException(self.ERROR_NO_ACTIVE_GAME)
 
         if not any(player.user_id == requester_id for player in game.seated_players()):
