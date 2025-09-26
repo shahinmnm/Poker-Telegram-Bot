@@ -1116,7 +1116,7 @@ async def test_start_game_assigns_blinds_to_occupied_seats():
 
 
 @pytest.mark.asyncio
-async def test_start_game_keeps_ready_message_id_when_deletion_fails():
+async def test_start_game_clears_ready_message_id_even_when_deletion_fails():
     view = _prepare_view_mock(MagicMock())
     view.send_message = AsyncMock()
     view.delete_message = AsyncMock(side_effect=BadRequest("not found"))
@@ -1162,7 +1162,7 @@ async def test_start_game_keeps_ready_message_id_when_deletion_fails():
 
     delete_calls = {call.args for call in view.delete_message.await_args_list}
     assert (chat_id, ready_message_id) in delete_calls
-    assert game.ready_message_main_id == ready_message_id
+    assert game.ready_message_main_id is None
     assert game.ready_message_main_text == ""
     model._matchmaking_service._divide_cards.assert_awaited_once_with(game, chat_id)
     model._round_rate.set_blinds.assert_awaited_once_with(game, chat_id)

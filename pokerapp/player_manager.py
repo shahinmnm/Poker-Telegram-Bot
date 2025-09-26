@@ -170,41 +170,47 @@ class PlayerManager:
     async def cleanup_ready_prompt(self, game: Game, chat_id: ChatId) -> None:
         """Delete the ready message if present and reset prompt metadata."""
 
-        if not game.ready_message_main_id:
-            return
-
-        try:
-            await self._view.delete_message(chat_id, game.ready_message_main_id)
-        except Exception as exc:  # pragma: no cover - logging path
-            self._logger.warning(
-                "Failed to delete ready message",
-                extra={
-                    "chat_id": chat_id,
-                    "message_id": game.ready_message_main_id,
-                    "error_type": type(exc).__name__,
-                },
-            )
-        else:
-            game.ready_message_main_id = None
-        game.ready_message_game_id = None
-        game.ready_message_stage = None
-        game.ready_message_main_text = ""
+        message_id = getattr(game, "ready_message_main_id", None)
+        if message_id:
+            try:
+                await self._view.delete_message(chat_id, message_id)
+            except Exception as exc:  # pragma: no cover - logging path
+                self._logger.warning(
+                    "Failed to delete ready message",
+                    extra={
+                        "chat_id": chat_id,
+                        "message_id": message_id,
+                        "error_type": type(exc).__name__,
+                    },
+                )
 
         for player in getattr(game, "players", []):
-            message_id = getattr(player, "ready_message_id", None)
-            if message_id:
+            player_message_id = getattr(player, "ready_message_id", None)
+            if player_message_id:
                 try:
-                    await self._view.delete_message(chat_id, message_id)
+                    await self._view.delete_message(chat_id, player_message_id)
                 except Exception:  # pragma: no cover - best-effort cleanup
                     self._logger.debug(
                         "Failed to delete ready prompt for player",
                         extra={
                             "chat_id": chat_id,
-                            "message_id": message_id,
+                            "message_id": player_message_id,
                             "player_id": getattr(player, "user_id", None),
                         },
                     )
             player.ready_message_id = None
+
+        game.ready_message_main_id = None
+        game.ready_message_game_id = None
+        game.ready_message_stage = None
+        game.ready_message_main_text = ""
+
+        game_id = getattr(game, "id", None)
+        self._logger.info(
+            "Cleared ready prompt IDs for game %s",
+            game_id,
+            extra={"chat_id": chat_id, "game_id": game_id},
+        )
 
         if self._table_manager is not None:
             save_method = getattr(self._table_manager, "save_game", None)
