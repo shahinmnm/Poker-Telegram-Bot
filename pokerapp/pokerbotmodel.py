@@ -1078,8 +1078,7 @@ class PokerBotModel:
 
                         await self._view.start_prestart_countdown(
                             chat_id=chat_id,
-                            game_id=
-                            str(game_identifier) if game_identifier is not None else None,
+                            game_id=str(game_identifier) if game_identifier is not None else None,
                             anchor_message_id=anchor_message_id,
                             seconds=countdown_value,
                             payload_fn=_countdown_payload,
