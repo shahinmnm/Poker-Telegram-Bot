@@ -177,6 +177,7 @@ class PokerBotCotroller:
             }
             if message_text in cleanup_messages:
                 game = await self._model._table_manager.get_game(chat_id)
+                await self._model._player_manager.cleanup_ready_prompt(game, chat_id)
                 clear_all_message_ids(game)
                 logger.info(
                     "Cleared all message IDs after stop",
