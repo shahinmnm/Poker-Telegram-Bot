@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 
 import asyncio
+import datetime
 import logging
 import logging
 import unittest
@@ -22,6 +23,8 @@ from pokerapp.pokerbotmodel import (
     KEY_CHAT_DATA_GAME,
     KEY_START_COUNTDOWN_LAST_TEXT,
     KEY_START_COUNTDOWN_CONTEXT,
+    KEY_START_COUNTDOWN_INITIAL_SECONDS,
+    KEY_START_COUNTDOWN_ANCHOR,
     KEY_STOP_REQUEST,
     STOP_CONFIRM_CALLBACK,
     STOP_RESUME_CALLBACK,
@@ -674,10 +677,62 @@ async def test_auto_start_tick_starts_prestart_countdown_and_updates_state():
     assert state["active"] is True
     assert state["last_seconds"] == 5
     assert state[KEY_START_COUNTDOWN_LAST_TEXT] == preview_text
+    assert state[KEY_START_COUNTDOWN_INITIAL_SECONDS] == 5
+    assert isinstance(state[KEY_START_COUNTDOWN_ANCHOR], datetime.datetime)
     assert context.chat_data[KEY_CHAT_DATA_GAME] is game
     assert game.ready_message_main_text == preview_text
     assert view._cancel_prestart_countdown.await_count == 0
     table_manager.save_game.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_auto_start_tick_keeps_approx_start_time_stable():
+    chat_id = -7781
+    view = _prepare_view_mock(MagicMock())
+    bot = MagicMock()
+    cfg = MagicMock(DEBUG=False)
+    cfg.constants = get_game_constants()
+    kv = MagicMock()
+    table_manager = MagicMock()
+    game = Game()
+    game.id = "game-approx"
+    game.ready_message_main_id = 222
+    game.ready_message_game_id = game.id
+    game.ready_message_stage = game.state
+    table_manager.get_game = AsyncMock(return_value=game)
+    table_manager.save_game = AsyncMock()
+
+    private_match_service = _make_private_match_service(kv, table_manager)
+    model = PokerBotModel(
+        view=view,
+        bot=bot,
+        cfg=cfg,
+        kv=kv,
+        table_manager=table_manager,
+        private_match_service=private_match_service,
+    )
+
+    job = SimpleNamespace(chat_id=chat_id)
+    job.schedule_removal = MagicMock()
+    countdown_state = {(chat_id, str(game.id)): {"seconds": 6}}
+    context = SimpleNamespace(
+        job=job,
+        chat_data={KEY_START_COUNTDOWN_CONTEXT: countdown_state},
+    )
+
+    def _approx_line(value: str) -> str:
+        for line in value.splitlines():
+            if line.startswith("🕒"):
+                return line
+        return ""
+
+    await model._auto_start_tick(context)
+    first_line = _approx_line(game.ready_message_main_text)
+    assert first_line
+
+    await model._auto_start_tick(context)
+    second_line = _approx_line(game.ready_message_main_text)
+    assert second_line == first_line
 
 
 @pytest.mark.asyncio
@@ -818,7 +873,9 @@ async def test_auto_start_tick_triggers_game_start_when_zero():
 
     await model._auto_start_tick(context)
 
-    model._start_game.assert_awaited_once_with(context, game, chat_id)
+    model._start_game.assert_awaited_once_with(
+        context, game, chat_id, require_guard=False
+    )
     table_manager.save_game.assert_awaited_once_with(chat_id, game)
     job.schedule_removal.assert_called_once()
     assert KEY_START_COUNTDOWN_CONTEXT not in context.chat_data

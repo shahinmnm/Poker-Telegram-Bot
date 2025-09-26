@@ -231,6 +231,14 @@ class GameEngine:
         "key_start_countdown_context",
         "start_countdown_context",
     )
+    KEY_START_COUNTDOWN_ANCHOR = _ENGINE_CONSTANTS.get(
+        "key_start_countdown_anchor",
+        "start_countdown_anchor",
+    )
+    KEY_START_COUNTDOWN_INITIAL_SECONDS = _ENGINE_CONSTANTS.get(
+        "key_start_countdown_initial_seconds",
+        "start_countdown_initial_seconds",
+    )
     STAGE_LOCK_PREFIX = _ENGINE_REDIS_KEYS.get("stage_lock_prefix", "stage:")
     KEY_STOP_REQUEST = _ENGINE_REDIS_KEYS.get(
         "stop_request",

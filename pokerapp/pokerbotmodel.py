@@ -119,6 +119,10 @@ KEY_START_COUNTDOWN_LAST_TIMESTAMP = (
     GameEngine.KEY_START_COUNTDOWN_LAST_TIMESTAMP
 )
 KEY_START_COUNTDOWN_CONTEXT = GameEngine.KEY_START_COUNTDOWN_CONTEXT
+KEY_START_COUNTDOWN_ANCHOR = GameEngine.KEY_START_COUNTDOWN_ANCHOR
+KEY_START_COUNTDOWN_INITIAL_SECONDS = (
+    GameEngine.KEY_START_COUNTDOWN_INITIAL_SECONDS
+)
 
 # legacy keys kept for backward compatibility but unused
 KEY_OLD_PLAYERS = _ENGINE_SECTION.get("key_old_players", "old_players")
@@ -805,7 +809,7 @@ class PokerBotModel:
             logger.info(
                 "[Countdown] Expired for chat %s game %s", chat_id, game_id
             )
-            await self._start_game(context, game, chat_id)
+            await self._start_game(context, game, chat_id, require_guard=False)
             await self._table_manager.save_game(chat_id, game)
 
     def _build_ready_message(
@@ -814,6 +818,7 @@ class PokerBotModel:
         countdown: Optional[int],
         *,
         anchor_time: Optional[datetime.datetime] = None,
+        total_seconds: Optional[int | float] = None,
         ready_players: Optional[List[Player]] = None,
     ) -> Tuple[str, InlineKeyboardMarkup]:
         resolved_ready_players = ready_players or [
@@ -839,12 +844,16 @@ class PokerBotModel:
         elif countdown <= 0:
             lines.append("🚀 بازی در حال شروع است...")
         else:
-            static_seconds = 60
             lines.append(f"⏳ بازی در {countdown} ثانیه شروع می‌شود.")
             anchor = anchor_time or now_utc()
             if anchor.tzinfo is None or anchor.tzinfo.utcoffset(anchor) is None:
                 anchor = anchor.replace(tzinfo=datetime.timezone.utc)
-            target_time = anchor + datetime.timedelta(seconds=static_seconds)
+            seconds_total = (
+                int(total_seconds)
+                if isinstance(total_seconds, (int, float)) and total_seconds > 0
+                else max(int(countdown), 0)
+            )
+            target_time = anchor + datetime.timedelta(seconds=seconds_total)
             localized = format_local(
                 target_time, self._timezone_name, fmt="%H:%M:%S"
             )
@@ -941,17 +950,32 @@ class PokerBotModel:
                 await self._view._cancel_prestart_countdown(chat_id, game_identifier)
                 self._clear_countdown_context(context, chat_id, game_identifier)
                 if remaining <= 0 and game.state == GameState.INITIAL:
-                    await self._start_game(context, game, chat_id)
+                    await self._start_game(
+                        context, game, chat_id, require_guard=False
+                    )
                     await self._table_manager.save_game(chat_id, game)
                 return
 
             countdown_value = max(int(remaining), 0)
             now = now_utc()
+            anchor_time = countdown_ctx.get(KEY_START_COUNTDOWN_ANCHOR)
+            if not isinstance(anchor_time, datetime.datetime):
+                anchor_time = now
+                countdown_ctx[KEY_START_COUNTDOWN_ANCHOR] = anchor_time
+            total_seconds_value = countdown_ctx.get(
+                KEY_START_COUNTDOWN_INITIAL_SECONDS
+            )
+            if not isinstance(total_seconds_value, (int, float)) or total_seconds_value <= 0:
+                total_seconds_value = countdown_value
+                countdown_ctx[KEY_START_COUNTDOWN_INITIAL_SECONDS] = (
+                    total_seconds_value
+                )
             ready_players = self._prune_ready_seats(game)
             text, keyboard = self._build_ready_message(
                 game,
                 countdown_value,
-                anchor_time=now,
+                anchor_time=anchor_time,
+                total_seconds=total_seconds_value,
                 ready_players=ready_players,
             )
             previous_text = countdown_ctx.get(KEY_START_COUNTDOWN_LAST_TEXT)
@@ -1008,16 +1032,31 @@ class PokerBotModel:
                 countdown_ctx["last_seconds"] = countdown_value
 
                 def _countdown_payload(seconds: int) -> Tuple[str, InlineKeyboardMarkup]:
-                    anchor = now_utc()
+                    anchor = countdown_ctx.get(KEY_START_COUNTDOWN_ANCHOR)
+                    if not isinstance(anchor, datetime.datetime):
+                        anchor = now_utc()
+                        countdown_ctx[KEY_START_COUNTDOWN_ANCHOR] = anchor
+                    payload_total_seconds = countdown_ctx.get(
+                        KEY_START_COUNTDOWN_INITIAL_SECONDS
+                    )
+                    if (
+                        not isinstance(payload_total_seconds, (int, float))
+                        or payload_total_seconds <= 0
+                    ):
+                        payload_total_seconds = seconds
+                        countdown_ctx[KEY_START_COUNTDOWN_INITIAL_SECONDS] = (
+                            payload_total_seconds
+                        )
                     current_ready_players = self._prune_ready_seats(game)
                     preview_text, preview_markup = self._build_ready_message(
                         game,
                         seconds,
                         anchor_time=anchor,
+                        total_seconds=payload_total_seconds,
                         ready_players=current_ready_players,
                     )
                     countdown_ctx[KEY_START_COUNTDOWN_LAST_TEXT] = preview_text
-                    countdown_ctx[KEY_START_COUNTDOWN_LAST_TIMESTAMP] = anchor
+                    countdown_ctx[KEY_START_COUNTDOWN_LAST_TIMESTAMP] = now_utc()
                     game.ready_message_main_text = preview_text
                     return preview_text, preview_markup
 
@@ -1049,6 +1088,8 @@ class PokerBotModel:
 
         countdown_ctx = self._get_countdown_context(context, chat_id, game)
         countdown_ctx["seconds"] = 60
+        countdown_ctx[KEY_START_COUNTDOWN_INITIAL_SECONDS] = 60
+        countdown_ctx[KEY_START_COUNTDOWN_ANCHOR] = now_utc()
         countdown_ctx[KEY_START_COUNTDOWN_LAST_TEXT] = game.ready_message_main_text
         countdown_ctx.pop(KEY_START_COUNTDOWN_LAST_TIMESTAMP, None)
         countdown_ctx.pop("last_seconds", None)
@@ -1225,15 +1266,30 @@ class PokerBotModel:
 
         countdown_ctx = self._get_countdown_context(context, chat_id, game)
         countdown_value = countdown_ctx.get("seconds")
-        anchor = now_utc()
+        now = now_utc()
+        anchor = countdown_ctx.get(KEY_START_COUNTDOWN_ANCHOR)
+        if isinstance(countdown_value, (int, float)) and countdown_value >= 0:
+            if not isinstance(anchor, datetime.datetime):
+                anchor = now
+                countdown_ctx[KEY_START_COUNTDOWN_ANCHOR] = anchor
+        else:
+            anchor = None
+        total_seconds_value = countdown_ctx.get(KEY_START_COUNTDOWN_INITIAL_SECONDS)
+        if not isinstance(total_seconds_value, (int, float)) or total_seconds_value <= 0:
+            total_seconds_value = countdown_value
+            if isinstance(total_seconds_value, (int, float)) and total_seconds_value > 0:
+                countdown_ctx[KEY_START_COUNTDOWN_INITIAL_SECONDS] = (
+                    total_seconds_value
+                )
         text, keyboard = self._build_ready_message(
             game,
             countdown_value,
-            anchor_time=anchor,
+            anchor_time=anchor or now,
+            total_seconds=total_seconds_value,
             ready_players=ready_players,
         )
         countdown_ctx[KEY_START_COUNTDOWN_LAST_TEXT] = text
-        countdown_ctx[KEY_START_COUNTDOWN_LAST_TIMESTAMP] = anchor
+        countdown_ctx[KEY_START_COUNTDOWN_LAST_TIMESTAMP] = now
         current_text = getattr(game, "ready_message_main_text", "")
 
         message_id = game.ready_message_main_id
@@ -1430,13 +1486,24 @@ class PokerBotModel:
         )
 
     async def _start_game(
-        self, context: CallbackContext, game: Game, chat_id: ChatId
+        self,
+        context: CallbackContext,
+        game: Game,
+        chat_id: ChatId,
+        *,
+        require_guard: bool = True,
     ) -> None:
         """مراحل شروع یک دست جدید بازی را انجام می‌دهد."""
 
-        async with self._chat_guard(chat_id):
+        async def _run_start() -> None:
             await self._cancel_auto_start(context, chat_id, game)
             await self._game_engine.start_game(context, game, chat_id)
+
+        if require_guard:
+            async with self._chat_guard(chat_id):
+                await _run_start()
+        else:
+            await _run_start()
 
     def _is_betting_round_over(self, game: Game) -> bool:
         """
