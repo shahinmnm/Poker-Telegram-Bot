@@ -162,6 +162,8 @@ class PlayerManager:
         if message_id:
             game.ready_message_main_id = message_id
             game.ready_message_main_text = "برای نشستن سر میز دکمه را بزن"
+            game.ready_message_game_id = getattr(game, "id", None)
+            game.ready_message_stage = game.state
             if self._table_manager is not None:
                 await self._table_manager.save_game(chat_id, game)
 
@@ -184,6 +186,8 @@ class PlayerManager:
             )
         else:
             game.ready_message_main_id = None
+        game.ready_message_game_id = None
+        game.ready_message_stage = None
         game.ready_message_main_text = ""
 
         for player in getattr(game, "players", []):

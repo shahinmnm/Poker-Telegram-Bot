@@ -789,9 +789,7 @@ class PokerBotModel:
             lines.append("🚀 بازی در حال شروع است...")
         else:
             static_seconds = 60
-            lines.append(
-                "⏳ بازی دقیقا ۶۰ ثانیه پس از ارسال این پیام شروع می‌شود."
-            )
+            lines.append(f"⏳ بازی در {countdown} ثانیه شروع می‌شود.")
             anchor = anchor_time or now_utc()
             if anchor.tzinfo is None or anchor.tzinfo.utcoffset(anchor) is None:
                 anchor = anchor.replace(tzinfo=datetime.timezone.utc)
@@ -821,6 +819,36 @@ class PokerBotModel:
         keyboard = InlineKeyboardMarkup(keyboard_buttons)
         return text, keyboard
 
+    @staticmethod
+    def _ready_prompt_is_current(game: Game) -> bool:
+        """Return ``True`` if the cached ready prompt belongs to ``game``."""
+
+        message_id = getattr(game, "ready_message_main_id", None)
+        if not message_id:
+            return False
+
+        current_game_id = getattr(game, "id", None)
+        stored_game_id = getattr(game, "ready_message_game_id", None)
+        current_stage = getattr(game, "state", None)
+        stored_stage = getattr(game, "ready_message_stage", None)
+
+        if not current_game_id or not stored_game_id:
+            return False
+        if stored_game_id != current_game_id:
+            return False
+        if stored_stage != current_stage:
+            return False
+
+        waiting_without_preflop = (
+            current_stage == GameState.INITIAL
+            and not getattr(game, "cards_table", None)
+            and stored_stage not in (GameState.INITIAL,)
+        )
+        if waiting_without_preflop:
+            return False
+
+        return True
+
     async def _auto_start_tick(self, context: CallbackContext) -> None:
         job = context.job
         chat_id = job.chat_id
@@ -846,6 +874,7 @@ class PokerBotModel:
                 return
 
             countdown_ctx = self._get_countdown_context(context, chat_id, game)
+            countdown_ctx.setdefault("active", False)
             game_identifier = getattr(game, "id", None)
             remaining = countdown_ctx.get("seconds")
             if remaining is None:
@@ -876,6 +905,13 @@ class PokerBotModel:
 
             message_id = game.ready_message_main_id
             current_text = getattr(game, "ready_message_main_text", "")
+            if message_id is not None and not self._ready_prompt_is_current(game):
+                message_id = None
+                current_text = ""
+                game.ready_message_main_id = None
+                game.ready_message_main_text = ""
+                game.ready_message_game_id = None
+                game.ready_message_stage = None
             if message_id is None:
                 new_message_id = await self._view.send_message_return_id(
                     chat_id,
@@ -885,6 +921,8 @@ class PokerBotModel:
                 )
                 if new_message_id:
                     game.ready_message_main_id = new_message_id
+                    game.ready_message_game_id = getattr(game, "id", None)
+                    game.ready_message_stage = game.state
                     await self._table_manager.save_game(chat_id, game)
                     message_id = new_message_id
                 else:
@@ -899,6 +937,42 @@ class PokerBotModel:
                     reply_markup=keyboard,
                     request_category=RequestCategory.COUNTDOWN,
                 )
+
+            anchor_message_id = game.ready_message_main_id
+            last_seconds = countdown_ctx.get("last_seconds")
+            should_restart = False
+            if isinstance(last_seconds, (int, float)):
+                should_restart = (
+                    bool(countdown_ctx.get("active"))
+                    and int(countdown_value) > int(last_seconds)
+                )
+
+            if anchor_message_id and (not countdown_ctx.get("active") or should_restart):
+                countdown_ctx["active"] = True
+                countdown_ctx["last_seconds"] = countdown_value
+
+                def _countdown_payload(seconds: int) -> Tuple[str, InlineKeyboardMarkup]:
+                    anchor = now_utc()
+                    preview_text, preview_markup = self._build_ready_message(
+                        game, seconds, anchor_time=anchor
+                    )
+                    countdown_ctx[KEY_START_COUNTDOWN_LAST_TEXT] = preview_text
+                    countdown_ctx[KEY_START_COUNTDOWN_LAST_TIMESTAMP] = anchor
+                    game.ready_message_main_text = preview_text
+                    return preview_text, preview_markup
+
+                await self._view.start_prestart_countdown(
+                    chat_id=chat_id,
+                    game_id=str(game_identifier) if game_identifier is not None else None,
+                    anchor_message_id=anchor_message_id,
+                    seconds=countdown_value,
+                    payload_fn=_countdown_payload,
+                )
+            elif anchor_message_id:
+                countdown_ctx["last_seconds"] = countdown_value
+            else:
+                countdown_ctx.pop("active", None)
+                countdown_ctx.pop("last_seconds", None)
 
             game.ready_message_main_text = text or current_text
             countdown_ctx["seconds"] = max(countdown_value - 1, 0)
@@ -1092,20 +1166,32 @@ class PokerBotModel:
         countdown_ctx[KEY_START_COUNTDOWN_LAST_TIMESTAMP] = anchor
         current_text = getattr(game, "ready_message_main_text", "")
 
-        if game.ready_message_main_id:
+        message_id = game.ready_message_main_id
+        if message_id and not self._ready_prompt_is_current(game):
+            if message_id and message_id in game.message_ids_to_delete:
+                game.message_ids_to_delete.remove(message_id)
+            message_id = None
+            current_text = ""
+            game.ready_message_main_id = None
+            game.ready_message_main_text = ""
+            game.ready_message_game_id = None
+            game.ready_message_stage = None
+
+        if message_id:
             if text != current_text:
                 new_id = await self._telegram_ops.edit_message_text(
                     chat_id,
-                    game.ready_message_main_id,
+                    message_id,
                     text,
                     reply_markup=keyboard,
                     request_category=RequestCategory.COUNTDOWN,
                 )
                 if new_id is None:
-                    old_id = game.ready_message_main_id
-                    if old_id and old_id in game.message_ids_to_delete:
-                        game.message_ids_to_delete.remove(old_id)
+                    if message_id and message_id in game.message_ids_to_delete:
+                        game.message_ids_to_delete.remove(message_id)
                     game.ready_message_main_id = None
+                    game.ready_message_game_id = None
+                    game.ready_message_stage = None
                     msg = await self._view.send_message_return_id(
                         chat_id,
                         text,
@@ -1115,9 +1201,13 @@ class PokerBotModel:
                     if msg:
                         game.ready_message_main_id = msg
                         game.ready_message_main_text = text
+                        game.ready_message_game_id = getattr(game, "id", None)
+                        game.ready_message_stage = game.state
                 elif new_id:
                     game.ready_message_main_id = new_id
                     game.ready_message_main_text = text
+                    game.ready_message_game_id = getattr(game, "id", None)
+                    game.ready_message_stage = game.state
             else:
                 game.ready_message_main_text = current_text
         else:
@@ -1130,6 +1220,8 @@ class PokerBotModel:
             if msg:
                 game.ready_message_main_id = msg
                 game.ready_message_main_text = text
+                game.ready_message_game_id = getattr(game, "id", None)
+                game.ready_message_stage = game.state
 
         await self._table_manager.save_game(chat_id, game)
 
