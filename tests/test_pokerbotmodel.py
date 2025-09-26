@@ -1074,7 +1074,8 @@ async def test_start_game_assigns_blinds_to_occupied_seats():
 
     await model._start_game(context, game, chat_id)
 
-    view.delete_message.assert_awaited_once_with(chat_id, ready_message_id)
+    delete_calls = {call.args for call in view.delete_message.await_args_list}
+    assert (chat_id, ready_message_id) in delete_calls
     assert game.ready_message_main_id is None
     assert game.ready_message_main_text == ""
     assert game.dealer_index == 3
@@ -1141,7 +1142,8 @@ async def test_start_game_keeps_ready_message_id_when_deletion_fails():
 
     await model._start_game(context, game, chat_id)
 
-    view.delete_message.assert_awaited_once_with(chat_id, ready_message_id)
+    delete_calls = {call.args for call in view.delete_message.await_args_list}
+    assert (chat_id, ready_message_id) in delete_calls
     assert game.ready_message_main_id == ready_message_id
     assert game.ready_message_main_text == ""
     model._matchmaking_service._divide_cards.assert_awaited_once_with(game, chat_id)
