@@ -207,9 +207,12 @@ class PlayerManager:
             if self._table_manager is not None:
                 await self._table_manager.save_game(chat_id, game)
 
-    async def cleanup_ready_prompt(self, game: Game, chat_id: ChatId) -> None:
+    async def cleanup_ready_prompt(
+        self, game: Game, chat_id: ChatId, *, persist: bool = True
+    ) -> None:
         """Delete the ready message if present and reset prompt metadata."""
 
+        state_changed = False
         message_id = getattr(game, "ready_message_main_id", None)
         if message_id:
             try:
@@ -224,7 +227,10 @@ class PlayerManager:
                     },
                 )
 
-        for player in getattr(game, "players", []):
+            state_changed = True
+
+        players = getattr(game, "players", [])
+        for player in players:
             player_message_id = getattr(player, "ready_message_id", None)
             if player_message_id:
                 try:
@@ -238,11 +244,20 @@ class PlayerManager:
                             "player_id": getattr(player, "user_id", None),
                         },
                     )
+                state_changed = True
             player.ready_message_id = None
 
+        if getattr(game, "ready_message_main_id", None) is not None:
+            state_changed = True
         game.ready_message_main_id = None
+        if getattr(game, "ready_message_game_id", None) is not None:
+            state_changed = True
         game.ready_message_game_id = None
+        if getattr(game, "ready_message_stage", None) is not None:
+            state_changed = True
         game.ready_message_stage = None
+        if getattr(game, "ready_message_main_text", None):
+            state_changed = True
         game.ready_message_main_text = ""
 
         game_id = getattr(game, "id", None)
@@ -252,7 +267,7 @@ class PlayerManager:
             extra={"chat_id": chat_id, "game_id": game_id},
         )
 
-        if self._table_manager is not None:
+        if persist and state_changed and self._table_manager is not None:
             save_method = getattr(self._table_manager, "save_game", None)
             if callable(save_method):
                 maybe_coro = save_method(chat_id, game)
