@@ -168,6 +168,17 @@ class PlayerManager:
             for player in players:
                 player.ready_message_id = None
 
+            if getattr(game, "ready_users", None):
+                game.ready_users.clear()
+            remover = getattr(game, "remove_player_by_user", None)
+            if callable(remover):
+                for player in players:
+                    if player is None:
+                        continue
+                    user_id = getattr(player, "user_id", None)
+                    if user_id is not None:
+                        remover(user_id)
+
             game.ready_message_main_id = None
             game.ready_message_main_text = ""
             game.ready_message_game_id = None

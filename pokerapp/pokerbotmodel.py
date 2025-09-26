@@ -4,6 +4,7 @@ import asyncio
 import datetime
 import inspect
 import json
+import math
 import random
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
@@ -388,7 +389,9 @@ class PokerBotModel:
                 self._safe_int(chat_id),
             )
 
-        async with self._lock_manager.guard(key, timeout=None, level=0):
+        async with self._lock_manager.guard(
+            key, timeout=math.inf, level=0
+        ):
             yield
 
     def assign_role_labels(self, game: Game) -> None:
@@ -744,6 +747,40 @@ class PokerBotModel:
             store[key] = state
         return state
 
+    def _prune_ready_seats(self, game: Game) -> List[Player]:
+        """Remove players from ``game`` whose ready state is stale and return the active list."""
+
+        if game.state != GameState.INITIAL:
+            return list(game.players)
+
+        ready_message_id = getattr(game, "ready_message_main_id", None)
+        ready_users: Set[int] = set(getattr(game, "ready_users", set()))
+
+        if not ready_message_id or not ready_users:
+            if ready_users:
+                game.ready_users.clear()
+            for player in list(game.players):
+                game.remove_player_by_user(player.user_id)
+            return []
+
+        valid_players: List[Player] = []
+        valid_ids: Set[int] = set()
+
+        for player in list(game.players):
+            if getattr(player, "ready_message_id", None) != ready_message_id:
+                game.remove_player_by_user(player.user_id)
+                continue
+            if player.user_id not in ready_users:
+                game.remove_player_by_user(player.user_id)
+                continue
+            valid_players.append(player)
+            valid_ids.add(player.user_id)
+
+        if valid_ids != ready_users:
+            game.ready_users.intersection_update(valid_ids)
+
+        return valid_players
+
     def _clear_countdown_context(
         self, context: CallbackContext, chat_id: ChatId, game_id: Optional[object]
     ) -> None:
@@ -777,16 +814,24 @@ class PokerBotModel:
         countdown: Optional[int],
         *,
         anchor_time: Optional[datetime.datetime] = None,
+        ready_players: Optional[List[Player]] = None,
     ) -> Tuple[str, InlineKeyboardMarkup]:
+        resolved_ready_players = ready_players or [
+            player
+            for player in game.players
+            if player and player.user_id in getattr(game, "ready_users", set())
+        ]
+        ready_user_ids = {player.user_id for player in resolved_ready_players}
+
         ready_items = [
-            f"{idx+1}. (صندلی {idx+1}) {p.mention_markdown} 🟢"
-            for idx, p in enumerate(game.seats)
-            if p
+            f"{idx+1}. (صندلی {idx+1}) {player.mention_markdown} 🟢"
+            for idx, player in enumerate(game.seats)
+            if player and player.user_id in ready_user_ids
         ]
         ready_list = "\n".join(ready_items) if ready_items else "هنوز بازیکنی آماده نیست."
 
         lines: List[str] = ["👥 *لیست بازیکنان آماده*", "", ready_list, ""]
-        lines.append(f"📊 {game.seated_count()}/{MAX_PLAYERS} بازیکن آماده")
+        lines.append(f"📊 {len(ready_user_ids)}/{MAX_PLAYERS} بازیکن آماده")
         lines.append("")
 
         if countdown is None:
@@ -902,8 +947,12 @@ class PokerBotModel:
 
             countdown_value = max(int(remaining), 0)
             now = now_utc()
+            ready_players = self._prune_ready_seats(game)
             text, keyboard = self._build_ready_message(
-                game, countdown_value, anchor_time=now
+                game,
+                countdown_value,
+                anchor_time=now,
+                ready_players=ready_players,
             )
             previous_text = countdown_ctx.get(KEY_START_COUNTDOWN_LAST_TEXT)
             countdown_ctx[KEY_START_COUNTDOWN_LAST_TEXT] = text
@@ -960,8 +1009,12 @@ class PokerBotModel:
 
                 def _countdown_payload(seconds: int) -> Tuple[str, InlineKeyboardMarkup]:
                     anchor = now_utc()
+                    current_ready_players = self._prune_ready_seats(game)
                     preview_text, preview_markup = self._build_ready_message(
-                        game, seconds, anchor_time=anchor
+                        game,
+                        seconds,
+                        anchor_time=anchor,
+                        ready_players=current_ready_players,
                     )
                     countdown_ctx[KEY_START_COUNTDOWN_LAST_TEXT] = preview_text
                     countdown_ctx[KEY_START_COUNTDOWN_LAST_TIMESTAMP] = anchor
@@ -1000,6 +1053,7 @@ class PokerBotModel:
         countdown_ctx.pop(KEY_START_COUNTDOWN_LAST_TIMESTAMP, None)
         countdown_ctx.pop("last_seconds", None)
         countdown_ctx["active"] = False
+        self._prune_ready_seats(game)
         job = context.job_queue.run_repeating(
             self._auto_start_tick,
             interval=1,
@@ -1122,11 +1176,13 @@ class PokerBotModel:
 
         await self._register_player_identity(user)
 
+        ready_players = self._prune_ready_seats(game)
+
         if game.state != GameState.INITIAL:
             await self._view.send_message(chat_id, "⚠️ بازی قبلاً شروع شده است، لطفاً صبر کنید!")
             return
 
-        if game.seated_count() >= MAX_PLAYERS:
+        if len(ready_players) >= MAX_PLAYERS:
             await self._view.send_message(chat_id, "🚪 اتاق پر است!")
             return
 
@@ -1160,7 +1216,9 @@ class PokerBotModel:
                 await self._view.send_message(chat_id, "🚪 اتاق پر است!")
                 return
 
-        if game.seated_count() >= self._min_players:
+        ready_players = self._prune_ready_seats(game)
+
+        if len(ready_players) >= self._min_players:
             await self._schedule_auto_start(context, game, chat_id)
         else:
             await self._cancel_auto_start(context, chat_id, game)
@@ -1169,7 +1227,10 @@ class PokerBotModel:
         countdown_value = countdown_ctx.get("seconds")
         anchor = now_utc()
         text, keyboard = self._build_ready_message(
-            game, countdown_value, anchor_time=anchor
+            game,
+            countdown_value,
+            anchor_time=anchor,
+            ready_players=ready_players,
         )
         countdown_ctx[KEY_START_COUNTDOWN_LAST_TEXT] = text
         countdown_ctx[KEY_START_COUNTDOWN_LAST_TIMESTAMP] = anchor
@@ -1245,6 +1306,15 @@ class PokerBotModel:
             for player in getattr(game, "players", []):
                 setattr(player, "ready_message_id", None)
 
+            if getattr(game, "ready_users", None):
+                game.ready_users.clear()
+            remover = getattr(game, "remove_player_by_user", None)
+            if callable(remover):
+                for player in list(getattr(game, "players", [])):
+                    user_id = getattr(player, "user_id", None)
+                    if user_id is not None:
+                        remover(user_id)
+
             game.ready_message_main_id = None
             game.ready_message_game_id = None
             game.ready_message_stage = None
@@ -1303,7 +1373,9 @@ class PokerBotModel:
             # Re-add players logic would go here if needed.
             # For now, just resetting allows new players to join.
 
-        if game.seated_count() >= self._min_players:
+        ready_players = self._prune_ready_seats(game)
+
+        if len(ready_players) >= self._min_players:
             await self._start_game(context, game, chat_id)
         else:
             await self._view.send_message(
