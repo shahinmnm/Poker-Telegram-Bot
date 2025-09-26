@@ -844,7 +844,7 @@ class GameEngine:
         except TimeoutError:
             self._log_engine_event_lock_failure(
                 lock_key=lock_key,
-                event_stage_label="deal_cards_to_players",
+                event_stage_label="add_cards_to_table",
                 chat_id=chat_id,
                 game=game,
             )
@@ -864,14 +864,24 @@ class GameEngine:
                 finalize_game=self.finalize_game,
             )
 
-        return await self._with_stage_guard_retry(
-            chat_id=chat_id,
-            game=game,
-            operation=_run_locked,
-            timeout_seconds=self._stage_lock_timeout,
-            stage_label="chat_guard_timeout:progress_stage",
-            event_stage_label="stage_progress",
-        )
+        lock_key = self._stage_lock_key(chat_id)
+        try:
+            return await self._with_stage_guard_retry(
+                chat_id=chat_id,
+                game=game,
+                operation=_run_locked,
+                timeout_seconds=self._stage_lock_timeout,
+                stage_label="chat_guard_timeout:progress_stage",
+                event_stage_label="progress_stage",
+            )
+        except TimeoutError:
+            self._log_engine_event_lock_failure(
+                lock_key=lock_key,
+                event_stage_label="progress_stage",
+                chat_id=chat_id,
+                game=game,
+            )
+            raise
 
     async def finalize_game(
         self,
@@ -948,7 +958,7 @@ class GameEngine:
                 operation=_run_locked,
                 timeout_seconds=self._stage_lock_timeout,
                 stage_label="chat_guard_timeout:finalize_game",
-                event_stage_label="game_finalize",
+                event_stage_label="finalize_game",
             )
         except TimeoutError:
             self._log_engine_event_lock_failure(
