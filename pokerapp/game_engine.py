@@ -827,18 +827,24 @@ class GameEngine:
         send_message: bool = True,
     ) -> None:
         lock_key = self._stage_lock_key(chat_id)
+        lock_context = self._build_lock_context(chat_id=chat_id, game=game)
         try:
-            await self._matchmaking_service.add_cards_to_table(
-                count=count,
-                game=game,
-                chat_id=chat_id,
-                street_name=street_name,
-                send_message=send_message,
-            )
+            async with self._lock_manager.guard(
+                lock_key,
+                timeout=self._stage_lock_timeout,
+                context=lock_context,
+            ):
+                await self._matchmaking_service.add_cards_to_table(
+                    count=count,
+                    game=game,
+                    chat_id=chat_id,
+                    street_name=street_name,
+                    send_message=send_message,
+                )
         except TimeoutError:
             self._log_engine_event_lock_failure(
                 lock_key=lock_key,
-                event_stage_label="add_cards_to_table",
+                event_stage_label="deal_cards_to_players",
                 chat_id=chat_id,
                 game=game,
             )

@@ -312,16 +312,13 @@ class MatchmakingService:
         street_name: str,
         send_message: bool,
     ) -> None:
-        async with self._lock_manager.guard(
-            self._stage_lock_key(chat_id), timeout=self._stage_lock_timeout
-        ):
-            await self._add_cards_to_table(
-                count=count,
-                game=game,
-                chat_id=chat_id,
-                street_name=street_name,
-                send_message=send_message,
-            )
+        await self._add_cards_to_table(
+            count=count,
+            game=game,
+            chat_id=chat_id,
+            street_name=street_name,
+            send_message=send_message,
+        )
 
     # ------------------------------------------------------------------
     # Internal helpers
