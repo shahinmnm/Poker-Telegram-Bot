@@ -837,20 +837,20 @@ class LockManager:
         level: int = logging.WARNING,
         extra: Optional[Mapping[str, Any]] = None,
     ) -> None:
+        payload: Dict[str, Any] = {
+            "stage": stage,
+            "event_type": "lock_snapshot",
+        }
+        if extra:
+            payload.update(extra)
+
         try:
             snapshot = self.detect_deadlock()
         except Exception:  # pragma: no cover - defensive logging path
             self._logger.exception(
-                "Failed to capture lock snapshot", extra={"stage": stage, "event_type": "lock_snapshot"}
+                "Failed to capture lock snapshot during %s", stage, extra=payload
             )
             return
-
-        payload: Dict[str, Any] = {"event_type": "lock_snapshot", "stage": stage}
-        if extra:
-            for key, value in extra.items():
-                if key == "event_type":
-                    continue
-                payload[key] = value
 
         effective_level = level if level >= logging.WARNING else logging.WARNING
         self._logger.log(
