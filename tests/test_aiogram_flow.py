@@ -3,6 +3,9 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+import logging
+from types import SimpleNamespace
+
 from pokerapp.aiogram_flow import (
     ActionButton,
     GameState,
@@ -162,6 +165,139 @@ async def test_voting_flow_updates_message():
     assert set(approved) == {"Ali", "Reza", "Sara"}
     bot.delete_message.assert_awaited()
     await orchestrator.request_manager.close()
+
+
+@pytest.mark.asyncio
+async def test_ready_prompt_edit_passes_current_game_id():
+    bot = AsyncMock()
+    messaging_service = AsyncMock()
+    table_manager = AsyncMock()
+    orchestrator = PokerMessagingOrchestrator(
+        bot=bot,
+        chat_id=222,
+        queue_delay=0,
+    )
+
+    game = SimpleNamespace(
+        id="game-1",
+        ready_message_main_id=51,
+        ready_message_game_id="game-1",
+        state=SimpleNamespace(name="RUNNING"),
+        seated_players=lambda: [1],
+    )
+
+    table_manager.get_game = AsyncMock(return_value=game)
+    table_manager.save_game = AsyncMock()
+    messaging_service.edit_message_text = AsyncMock(return_value=51)
+
+    send_new = AsyncMock()
+
+    await orchestrator.edit_ready_prompt(
+        messaging_service=messaging_service,
+        table_manager=table_manager,
+        game=game,
+        text="Ready players",
+        send_new_prompt=send_new,
+    )
+
+    messaging_service.edit_message_text.assert_awaited_once()
+    kwargs = messaging_service.edit_message_text.await_args.kwargs
+    assert kwargs["current_game_id"] == "game-1"
+    table_manager.save_game.assert_not_awaited()
+    send_new.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_ready_prompt_sends_new_when_stale(caplog):
+    bot = AsyncMock()
+    messaging_service = AsyncMock()
+    table_manager = AsyncMock()
+    orchestrator = PokerMessagingOrchestrator(
+        bot=bot,
+        chat_id=333,
+        queue_delay=0,
+    )
+
+    game = SimpleNamespace(
+        id="game-2",
+        ready_message_main_id=77,
+        ready_message_game_id="old-game",
+        ready_message_main_text="old",
+        ready_message_stage=None,
+        state=SimpleNamespace(name="RUNNING"),
+        seated_players=lambda: [1],
+    )
+
+    table_manager.get_game = AsyncMock(return_value=game)
+    table_manager.save_game = AsyncMock()
+    messaging_service.edit_message_text = AsyncMock()
+    send_new = AsyncMock(return_value=88)
+
+    caplog.set_level(logging.INFO)
+
+    new_id = await orchestrator.edit_ready_prompt(
+        messaging_service=messaging_service,
+        table_manager=table_manager,
+        game=game,
+        text="new",
+        send_new_prompt=send_new,
+    )
+
+    assert new_id == 88
+    messaging_service.edit_message_text.assert_not_awaited()
+    send_new.assert_awaited_once()
+    table_manager.save_game.assert_awaited()
+    assert game.ready_message_main_id == 88
+    assert game.ready_message_game_id == "game-2"
+    assert any(
+        "Sent new ready prompt due to stale message ID" in record.message
+        for record in caplog.records
+    )
+
+
+@pytest.mark.asyncio
+async def test_ready_prompt_waiting_without_players(caplog):
+    bot = AsyncMock()
+    messaging_service = AsyncMock()
+    table_manager = AsyncMock()
+    orchestrator = PokerMessagingOrchestrator(
+        bot=bot,
+        chat_id=444,
+        queue_delay=0,
+    )
+
+    game = SimpleNamespace(
+        id="game-3",
+        ready_message_main_id=90,
+        ready_message_game_id="game-3",
+        ready_message_main_text="text",
+        ready_message_stage=None,
+        state=SimpleNamespace(name="WAITING"),
+        seated_players=lambda: [],
+    )
+
+    table_manager.get_game = AsyncMock(return_value=game)
+    table_manager.save_game = AsyncMock()
+    send_new = AsyncMock(return_value=91)
+
+    caplog.set_level(logging.INFO)
+
+    new_id = await orchestrator.edit_ready_prompt(
+        messaging_service=messaging_service,
+        table_manager=table_manager,
+        game=game,
+        text="updated",
+        send_new_prompt=send_new,
+    )
+
+    assert new_id == 91
+    send_new.assert_awaited_once()
+    table_manager.save_game.assert_awaited()
+    assert game.ready_message_main_id == 91
+    assert any(
+        "Sent new ready prompt due to stale message ID" in record.message
+        for record in caplog.records
+    )
 
 
 @pytest.mark.asyncio
