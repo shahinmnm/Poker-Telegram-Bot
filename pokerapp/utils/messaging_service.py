@@ -670,7 +670,7 @@ class MessagingService:
                 chat_id,
                 extra={"chat_id": chat_id, "message_id": message_id},
             )
-            return message_id
+            return message_id  # Skip editing entirely
 
         if not await self.is_message_id_active(chat_id, message_id, current_game_id):
             self._logger.info(
@@ -1196,7 +1196,7 @@ class MessagingService:
                 chat_id,
                 extra={"chat_id": chat_id, "message_id": message_id},
             )
-            return True
+            return message_id  # Skip editing entirely
 
         if not await self.is_message_id_active(chat_id, message_id, current_game_id):
             self._logger.info(
