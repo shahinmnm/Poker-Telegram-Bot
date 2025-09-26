@@ -281,6 +281,31 @@ class MessagingService:
 
         return True
 
+    async def _is_message_id_valid_for_game(self, chat_id: int, message_id: int) -> bool:
+        """
+        Return True only if the message_id belongs to the active game in TableManager for this chat_id.
+        This checks:
+            • game.ready_message_main_id == message_id OR
+            • any player in game.players has ready_message_id == message_id
+        Otherwise returns False.
+        """
+
+        if self._table_manager is None:
+            return True  # Cannot validate without table_manager; allow
+
+        game = await self._table_manager.get_game(chat_id)
+        if game is None:
+            return False
+
+        if getattr(game, "ready_message_main_id", None) == message_id:
+            return True
+
+        for player in getattr(game, "players", []):
+            if getattr(player, "ready_message_id", None) == message_id:
+                return True
+
+        return False
+
     def _record_event_metric(
         self,
         action: str,
@@ -637,6 +662,15 @@ class MessagingService:
 
         if message_id is None:
             return None
+
+        if not await self._is_message_id_valid_for_game(chat_id, message_id):
+            self._logger.info(
+                "Skipping edit for stale message_id %s in chat %s",
+                message_id,
+                chat_id,
+                extra={"chat_id": chat_id, "message_id": message_id},
+            )
+            return message_id
 
         if not await self.is_message_id_active(chat_id, message_id, current_game_id):
             self._logger.info(
@@ -1154,6 +1188,15 @@ class MessagingService:
 
         if message_id is None:
             return False
+
+        if not await self._is_message_id_valid_for_game(chat_id, message_id):
+            self._logger.info(
+                "Skipping edit for stale message_id %s in chat %s",
+                message_id,
+                chat_id,
+                extra={"chat_id": chat_id, "message_id": message_id},
+            )
+            return True
 
         if not await self.is_message_id_active(chat_id, message_id, current_game_id):
             self._logger.info(
