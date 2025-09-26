@@ -773,12 +773,22 @@ class GameEngine:
 
         self._log_lock_snapshot(stage="before_start_game", level=logging.INFO)
 
-        await self._matchmaking_service.start_game(
-            context=context,
-            game=game,
-            chat_id=chat_id,
-            build_identity_from_player=self._build_identity_from_player,
-        )
+        lock_key = self._stage_lock_key(chat_id)
+        try:
+            await self._matchmaking_service.start_game(
+                context=context,
+                game=game,
+                chat_id=chat_id,
+                build_identity_from_player=self._build_identity_from_player,
+            )
+        except TimeoutError:
+            self._log_engine_event_lock_failure(
+                lock_key=lock_key,
+                event_stage_label="start_game",
+                chat_id=chat_id,
+                game=game,
+            )
+            raise
 
     def hand_type_to_label(self, hand_type: Optional[HandsOfPoker]) -> Optional[str]:
         if not hand_type:
@@ -816,13 +826,23 @@ class GameEngine:
         street_name: str,
         send_message: bool = True,
     ) -> None:
-        await self._matchmaking_service.add_cards_to_table(
-            count=count,
-            game=game,
-            chat_id=chat_id,
-            street_name=street_name,
-            send_message=send_message,
-        )
+        lock_key = self._stage_lock_key(chat_id)
+        try:
+            await self._matchmaking_service.add_cards_to_table(
+                count=count,
+                game=game,
+                chat_id=chat_id,
+                street_name=street_name,
+                send_message=send_message,
+            )
+        except TimeoutError:
+            self._log_engine_event_lock_failure(
+                lock_key=lock_key,
+                event_stage_label="add_cards_to_table",
+                chat_id=chat_id,
+                game=game,
+            )
+            raise
 
     async def progress_stage(
         self,
