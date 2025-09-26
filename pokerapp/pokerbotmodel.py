@@ -678,6 +678,11 @@ class PokerBotModel:
     async def _send_join_prompt(self, game: Game, chat_id: ChatId) -> None:
         await self._player_manager.send_join_prompt(game, chat_id)
 
+    async def send_new_ready_prompt(self, game: Game, chat_id: ChatId) -> None:
+        """Public helper to request a refreshed ready prompt."""
+
+        await self._player_manager.send_join_prompt(game, chat_id)
+
     async def _countdown_cache_should_skip(
         self,
         chat_id: ChatId,
@@ -1230,6 +1235,31 @@ class PokerBotModel:
         await self._table_manager.save_game(chat_id, game)
 
     async def ready(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        game, chat_id = await self._get_game(update, context)
+
+        current_game_id = getattr(game, "id", None)
+        stored_game_id = getattr(game, "ready_message_game_id", None)
+
+        if not stored_game_id or stored_game_id != current_game_id:
+            for player in getattr(game, "players", []):
+                setattr(player, "ready_message_id", None)
+
+            game.ready_message_main_id = None
+            game.ready_message_game_id = None
+            game.ready_message_stage = None
+            game.ready_message_main_text = ""
+
+            if self._table_manager is not None:
+                await self._table_manager.save_game(chat_id, game)
+
+            self._logger.info(
+                "Sent new ready prompt due to stale message",
+                extra={"chat_id": chat_id, "game_id": current_game_id},
+            )
+
+            await self.send_new_ready_prompt(game, chat_id)
+            return
+
         await self.join_game(update, context)
 
     async def start(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
