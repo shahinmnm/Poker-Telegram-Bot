@@ -4119,6 +4119,7 @@ class PokerBotViewer:
         request_category: RequestCategory = RequestCategory.GENERAL,
         *,
         suppress_exceptions: bool = True,
+        current_game_id: Optional[str] = None,
     ) -> Optional[MessageId]:
         """Edit a message using the central ``MessagingService``.
 
@@ -4149,6 +4150,7 @@ class PokerBotViewer:
                 message_id=message_id,
                 text=normalized_text,
                 reply_markup=reply_markup,
+                current_game_id=current_game_id,
                 request_category=request_category,
                 context=context,
                 parse_mode=parse_mode,

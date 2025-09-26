@@ -19,6 +19,7 @@ async def safe_edit_message(
     message_id: Optional[int],
     text: Optional[str],
     reply_markup: Optional[Any] = None,
+    current_game_id: Optional[str] = None,
     **params: Any,
 ):
     """Edit a Telegram message only when the payload has changed."""
@@ -37,6 +38,7 @@ async def safe_edit_message(
             text=text,
             reply_markup=reply_markup,
             force=force,
+            current_game_id=current_game_id,
             **params,
         )
 
@@ -112,6 +114,7 @@ async def safe_edit_message(
             text=text,
             reply_markup=reply_markup,
             force=force,
+            current_game_id=current_game_id,
             **params,
         )
     except Exception:

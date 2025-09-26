@@ -143,6 +143,7 @@ def build_services(cfg: Config) -> ApplicationServices:
             deleted_messages_lock=deleted_messages_lock,
             last_message_hash=last_message_hash,
             last_message_hash_lock=last_message_hash_lock,
+            table_manager=table_manager,
         )
 
     def telegram_safeops_factory(*, view) -> TelegramSafeOps:

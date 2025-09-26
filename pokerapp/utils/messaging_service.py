@@ -23,10 +23,22 @@ import time
 import datetime
 from collections import defaultdict, deque
 from dataclasses import dataclass, field
-from typing import Any, Awaitable, Callable, Dict, List, Mapping, Optional, Set, Tuple
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    Awaitable,
+    Callable,
+    Dict,
+    List,
+    Mapping,
+    Optional,
+    Set,
+    Tuple,
+)
 
 from cachetools import TTLCache
 
+from pokerapp.entities import GameState
 from pokerapp.utils.cache import MessagePayload, MessageStateCache
 
 try:  # pragma: no cover - prometheus_client optional
@@ -34,9 +46,12 @@ try:  # pragma: no cover - prometheus_client optional
 except Exception:  # pragma: no cover - optional dependency missing
     Counter = None  # type: ignore[assignment]
 
-from pokerapp.utils.time_utils import now_utc
 from pokerapp.utils.debug_trace import trace_telegram_api_call
 from pokerapp.utils.request_metrics import RequestCategory, RequestMetrics
+from pokerapp.utils.time_utils import now_utc
+
+if TYPE_CHECKING:  # pragma: no cover - import for type checking only
+    from pokerapp.table_manager import TableManager
 
 try:  # pragma: no cover - aiogram is optional at runtime
     from aiogram.exceptions import TelegramBadRequest, TelegramRetryAfter
@@ -151,6 +166,7 @@ class MessagingService:
         deleted_messages_lock: Optional[asyncio.Lock] = None,
         last_message_hash: Optional[Dict[int, str]] = None,
         last_message_hash_lock: Optional[asyncio.Lock] = None,
+        table_manager: Optional["TableManager"] = None,
     ) -> None:
         self._bot = bot
         if logger_ is None:
@@ -182,6 +198,7 @@ class MessagingService:
         self.message_state_cache = MessageStateCache(
             logger_=self._logger.getChild("message_state")
         )
+        self._table_manager = table_manager
 
     @staticmethod
     def _coerce_context_value(value: Any) -> Any:
@@ -207,6 +224,62 @@ class MessagingService:
         if "service" not in merged:
             merged["service"] = "MessagingService"
         return merged
+
+    async def is_message_id_active(
+        self,
+        chat_id: int,
+        message_id: int,
+        current_game_id: Optional[str],
+    ) -> bool:
+        """Return ``True`` if ``message_id`` should still be edited for ``chat_id``."""
+
+        if message_id is None:
+            return False
+        if current_game_id is None:
+            return True
+        table_manager = getattr(self, "_table_manager", None)
+        if table_manager is None:
+            return True
+
+        try:
+            game = await table_manager.get_game(chat_id)
+        except Exception:  # pragma: no cover - defensive logging path
+            self._logger.debug(
+                "Failed to load game state while validating message %s in chat %s",
+                message_id,
+                chat_id,
+                exc_info=True,
+            )
+            return True
+
+        active_game_id = getattr(game, "id", None)
+        if not active_game_id or active_game_id != current_game_id:
+            return False
+
+        ready_message_id = getattr(game, "ready_message_main_id", None)
+        if ready_message_id is None or ready_message_id != message_id:
+            return True
+
+        stored_ready_game_id = getattr(game, "ready_message_game_id", None)
+        stored_ready_stage = getattr(game, "ready_message_stage", None)
+        current_stage = getattr(game, "state", None)
+
+        if not stored_ready_game_id or stored_ready_game_id != current_game_id:
+            return False
+        if stored_ready_stage is None or current_stage is None:
+            return False
+        if stored_ready_stage != current_stage:
+            return False
+
+        waiting_without_preflop = (
+            current_stage == GameState.INITIAL
+            and not getattr(game, "cards_table", None)
+            and stored_ready_stage not in (GameState.INITIAL,)
+        )
+        if waiting_without_preflop:
+            return False
+
+        return True
 
     def _record_event_metric(
         self,
@@ -555,6 +628,7 @@ class MessagingService:
         text: Optional[str],
         reply_markup: Any = None,
         force: bool = False,
+        current_game_id: Optional[str] = None,
         request_category: RequestCategory = RequestCategory.GENERAL,
         context: Optional[Mapping[str, Any]] = None,
         **params: Any,
@@ -563,6 +637,14 @@ class MessagingService:
 
         if message_id is None:
             return None
+
+        if not await self.is_message_id_active(chat_id, message_id, current_game_id):
+            self._logger.info(
+                "Invalidated stale message_id %s for chat %s",
+                message_id,
+                chat_id,
+            )
+            return message_id
 
         loop = asyncio.get_running_loop()
         content_hash = self._content_hash(text, reply_markup)
@@ -573,6 +655,7 @@ class MessagingService:
             message_id=message_id,
             category=request_category,
             method=telegram_method,
+            game_id=current_game_id,
         )
 
         payload = _EditPayload(
@@ -924,6 +1007,7 @@ class MessagingService:
         text: Optional[str],
         reply_markup: Any = None,
         force: bool = False,
+        current_game_id: Optional[str] = None,
         request_category: RequestCategory = RequestCategory.GENERAL,
         context: Optional[Mapping[str, Any]] = None,
         **params: Any,
@@ -932,6 +1016,14 @@ class MessagingService:
 
         if message_id is None:
             return None
+
+        if not await self.is_message_id_active(chat_id, message_id, current_game_id):
+            self._logger.info(
+                "Invalidated stale message_id %s for chat %s",
+                message_id,
+                chat_id,
+            )
+            return message_id
 
         existing_payload = await self.message_state_cache.get(chat_id, message_id)
         parse_mode = params.get("parse_mode")
@@ -951,6 +1043,7 @@ class MessagingService:
             message_id=message_id,
             category=request_category,
             method="editMessageText",
+            game_id=current_game_id,
         )
 
         if (
@@ -972,6 +1065,7 @@ class MessagingService:
             text=text,
             reply_markup=reply_markup,
             force=force,
+            current_game_id=current_game_id,
             request_category=request_category,
             context=base_context,
             **params,
@@ -988,6 +1082,7 @@ class MessagingService:
         message_id: int,
         reply_markup: Any = None,
         force: bool = False,
+        current_game_id: Optional[str] = None,
         request_category: RequestCategory = RequestCategory.INLINE,
         context: Optional[Mapping[str, Any]] = None,
         **params: Any,
@@ -1011,6 +1106,7 @@ class MessagingService:
             message_id=message_id,
             category=request_category,
             method="editMessageReplyMarkup",
+            game_id=current_game_id,
         )
 
         if (
@@ -1031,6 +1127,7 @@ class MessagingService:
             message_id=message_id,
             reply_markup=reply_markup,
             force=force,
+            current_game_id=current_game_id,
             request_category=request_category,
             context=base_context,
             **params,
@@ -1048,6 +1145,7 @@ class MessagingService:
         message_id: int,
         reply_markup: Any = None,
         force: bool = False,
+        current_game_id: Optional[str] = None,
         request_category: RequestCategory = RequestCategory.INLINE,
         context: Optional[Mapping[str, Any]] = None,
         **params: Any,
@@ -1057,6 +1155,14 @@ class MessagingService:
         if message_id is None:
             return False
 
+        if not await self.is_message_id_active(chat_id, message_id, current_game_id):
+            self._logger.info(
+                "Invalidated stale message_id %s for chat %s",
+                message_id,
+                chat_id,
+            )
+            return True
+
         content_hash = self._content_hash(None, reply_markup)
         telegram_method = "editMessageReplyMarkup"
         base_context = self._merge_context(
@@ -1065,6 +1171,7 @@ class MessagingService:
             message_id=message_id,
             category=request_category,
             method=telegram_method,
+            game_id=current_game_id,
         )
         if not force and await self._should_skip(chat_id, message_id, content_hash):
             await self._log_skip(

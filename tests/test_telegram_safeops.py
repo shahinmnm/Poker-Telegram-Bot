@@ -32,6 +32,7 @@ class _DummyView:
         request_category,
         parse_mode,
         suppress_exceptions,
+        current_game_id=None,
     ):
         self.calls.edit += 1
         if self._edit_side_effects:
