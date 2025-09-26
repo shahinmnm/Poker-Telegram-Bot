@@ -1656,7 +1656,25 @@ class PokerBotModel:
                     game.chat_id = chat_id
                     await self._view.update_player_anchors_and_keyboards(game)
 
-                    money = await player.wallet.value()
+                    wallet = getattr(player, "wallet", None)
+                    money = None
+                    if wallet is not None:
+                        try:
+                            money = await wallet.value()
+                        except Exception:
+                            logger.exception(
+                                "Failed to fetch wallet value", extra={"chat_id": chat_id, "player_id": getattr(player, "user_id", None)}
+                            )
+                    if money is None:
+                        logger.debug(
+                            "Defaulting missing wallet value to zero",
+                            extra={
+                                "chat_id": chat_id,
+                                "player_id": getattr(player, "user_id", None),
+                                "wallet_present": wallet is not None,
+                            },
+                        )
+                        money = 0
                     recent_actions = list(game.last_actions)
                     previous_message_id = game.turn_message_id
             except TimeoutError:
@@ -1667,8 +1685,6 @@ class PokerBotModel:
                     game=game,
                 )
                 raise
-
-            assert money is not None
 
             turn_update = await self._view.update_turn_message(
                 chat_id=chat_id,
