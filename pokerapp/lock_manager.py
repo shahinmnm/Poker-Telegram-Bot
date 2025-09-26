@@ -474,11 +474,28 @@ class LockManager:
                 key, resolved_level, failure_context
             )
             message = f"Timeout acquiring {failure_identity}"
-            guard_stage_parts = ["guard_timeout", key]
+            guard_failure_stage_parts = ["guard_failure", key]
             chat_id = failure_context.get("chat_id")
             if chat_id is not None:
-                guard_stage_parts.append(f"chat={chat_id}")
+                guard_failure_stage_parts.append(f"chat={chat_id}")
             game_id = failure_context.get("game_id")
+            if game_id is not None:
+                guard_failure_stage_parts.append(f"game={game_id}")
+            guard_failure_stage = ":".join(
+                str(part) for part in guard_failure_stage_parts if part
+            )
+            failure_snapshot_extra = dict(failure_context)
+            failure_snapshot_extra.setdefault("lock_key", key)
+            failure_snapshot_extra.setdefault("lock_level", resolved_level)
+            self._log_lock_snapshot_on_timeout(
+                guard_failure_stage,
+                level=logging.ERROR,
+                minimum_level=logging.ERROR,
+                extra=failure_snapshot_extra,
+            )
+            guard_stage_parts = ["guard_timeout", key]
+            if chat_id is not None:
+                guard_stage_parts.append(f"chat={chat_id}")
             if game_id is not None:
                 guard_stage_parts.append(f"game={game_id}")
             guard_stage = ":".join(str(part) for part in guard_stage_parts if part)
@@ -835,6 +852,7 @@ class LockManager:
         stage: str,
         *,
         level: int = logging.WARNING,
+        minimum_level: int = logging.WARNING,
         extra: Optional[Mapping[str, Any]] = None,
     ) -> None:
         payload: Dict[str, Any] = {
@@ -852,7 +870,7 @@ class LockManager:
             )
             return
 
-        effective_level = level if level >= logging.WARNING else logging.WARNING
+        effective_level = max(level, minimum_level, logging.WARNING)
         self._logger.log(
             effective_level,
             "Lock snapshot (%s): %s",
