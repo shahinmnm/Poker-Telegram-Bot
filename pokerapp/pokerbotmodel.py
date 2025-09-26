@@ -1651,13 +1651,22 @@ class PokerBotModel:
         async with self._chat_guard(
             chat_id, event_stage_label="send_turn_message", game=game
         ):
-            async with self._lock_manager.guard(lock_key, timeout=10):
-                game.chat_id = chat_id
-                await self._view.update_player_anchors_and_keyboards(game)
+            try:
+                async with self._lock_manager.guard(lock_key, timeout=10):
+                    game.chat_id = chat_id
+                    await self._view.update_player_anchors_and_keyboards(game)
 
-                money = await player.wallet.value()
-                recent_actions = list(game.last_actions)
-                previous_message_id = game.turn_message_id
+                    money = await player.wallet.value()
+                    recent_actions = list(game.last_actions)
+                    previous_message_id = game.turn_message_id
+            except TimeoutError:
+                self._game_engine._log_engine_event_lock_failure(
+                    lock_key=lock_key,
+                    event_stage_label="send_turn_message",
+                    chat_id=chat_id,
+                    game=game,
+                )
+                raise
 
             assert money is not None
 
@@ -1671,35 +1680,44 @@ class PokerBotModel:
             )
 
             now_value = now_utc()
-            async with self._lock_manager.guard(lock_key, timeout=10):
-                if (
-                    turn_update.message_id
-                    and game.turn_message_id == previous_message_id
-                ):
-                    game.turn_message_id = turn_update.message_id
-                elif (
-                    turn_update.message_id
-                    and game.turn_message_id != previous_message_id
-                ):
+            try:
+                async with self._lock_manager.guard(lock_key, timeout=10):
+                    if (
+                        turn_update.message_id
+                        and game.turn_message_id == previous_message_id
+                    ):
+                        game.turn_message_id = turn_update.message_id
+                    elif (
+                        turn_update.message_id
+                        and game.turn_message_id != previous_message_id
+                    ):
+                        logger.debug(
+                            "Skipping turn message id update due to concurrent change",
+                            extra={
+                                "chat_id": chat_id,
+                                "previous_turn_message_id": previous_message_id,
+                                "current_turn_message_id": game.turn_message_id,
+                                "new_turn_message_id": turn_update.message_id,
+                            },
+                        )
+
+                    game.last_turn_time = now_value
+
                     logger.debug(
-                        "Skipping turn message id update due to concurrent change",
+                        "Turn message refreshed",
                         extra={
                             "chat_id": chat_id,
-                            "previous_turn_message_id": previous_message_id,
-                            "current_turn_message_id": game.turn_message_id,
-                            "new_turn_message_id": turn_update.message_id,
+                            "turn_message_id": game.turn_message_id,
                         },
                     )
-
-                game.last_turn_time = now_value
-
-                logger.debug(
-                    "Turn message refreshed",
-                    extra={
-                        "chat_id": chat_id,
-                        "turn_message_id": game.turn_message_id,
-                    },
+            except TimeoutError:
+                self._game_engine._log_engine_event_lock_failure(
+                    lock_key=lock_key,
+                    event_stage_label="send_turn_message",
+                    chat_id=chat_id,
+                    game=game,
                 )
+                raise
 
     # --- Player Action Handlers ---
     # این بخش تمام حرکات ممکن بازیکنان در نوبتشان را مدیریت می‌کند.
