@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import inspect
 import logging
 from typing import Iterable, Optional
 
@@ -184,6 +185,29 @@ class PlayerManager:
         else:
             game.ready_message_main_id = None
         game.ready_message_main_text = ""
+
+        for player in getattr(game, "players", []):
+            message_id = getattr(player, "ready_message_id", None)
+            if message_id:
+                try:
+                    await self._view.delete_message(chat_id, message_id)
+                except Exception:  # pragma: no cover - best-effort cleanup
+                    self._logger.debug(
+                        "Failed to delete ready prompt for player",
+                        extra={
+                            "chat_id": chat_id,
+                            "message_id": message_id,
+                            "player_id": getattr(player, "user_id", None),
+                        },
+                    )
+            player.ready_message_id = None
+
+        if self._table_manager is not None:
+            save_method = getattr(self._table_manager, "save_game", None)
+            if callable(save_method):
+                maybe_coro = save_method(chat_id, game)
+                if inspect.isawaitable(maybe_coro):
+                    await maybe_coro
 
     async def clear_seat_announcement(self, game: Game, chat_id: ChatId) -> None:
         """Remove any outstanding seat announcement message for ``game``."""
