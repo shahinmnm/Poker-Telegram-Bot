@@ -30,6 +30,7 @@ from typing import (
     Optional,
     Set,
     Tuple,
+    TypeVar,
 )
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes
@@ -188,6 +189,9 @@ class _GameStatsSnapshot:
         return list(self._players)
 
 
+T = TypeVar("T")
+
+
 class GameEngine:
     """Coordinates game-level constants and helpers."""
 
@@ -293,7 +297,13 @@ class GameEngine:
         self._stage_lock_timeout = self.STAGE_LOCK_TIMEOUT_SECONDS
         self._initialize_stop_translations()
 
-    def _log_lock_snapshot(self, *, stage: str, level: int = logging.DEBUG) -> None:
+    def _log_lock_snapshot(
+        self,
+        *,
+        stage: str,
+        level: int = logging.DEBUG,
+        minimum_level: int = logging.DEBUG,
+    ) -> None:
         try:
             snapshot = self._lock_manager.detect_deadlock()
         except Exception:
@@ -302,11 +312,17 @@ class GameEngine:
             )
             return
 
-        if not snapshot.get("tasks") and not snapshot.get("waiting"):
-            level = logging.DEBUG if level > logging.DEBUG else level
+        effective_level = max(level, minimum_level)
+        if (
+            not snapshot.get("tasks")
+            and not snapshot.get("waiting")
+            and minimum_level <= logging.DEBUG
+            and effective_level > logging.DEBUG
+        ):
+            effective_level = logging.DEBUG
 
         self._logger.log(
-            level,
+            effective_level,
             "Lock snapshot (%s): %s",
             stage,
             json.dumps(snapshot, ensure_ascii=False, default=str),
@@ -588,6 +604,57 @@ class GameEngine:
     def _stage_lock_key(self, chat_id: ChatId) -> str:
         return f"{self.STAGE_LOCK_PREFIX}{self._safe_int(chat_id)}"
 
+    async def _with_stage_guard_retry(
+        self,
+        *,
+        chat_id: ChatId,
+        game: Optional[Game],
+        operation: Callable[[], Awaitable[T]],
+        timeout_seconds: Optional[float],
+        stage_label: str,
+    ) -> T:
+        lock_key = self._stage_lock_key(chat_id)
+        lock_context = {
+            "chat_id": self._safe_int(chat_id),
+            "game_id": getattr(game, "id", None) if game is not None else None,
+        }
+        try:
+            async with self._lock_manager.guard(
+                lock_key, timeout=timeout_seconds, context=lock_context
+            ):
+                return await operation()
+        except TimeoutError:
+            stage_parts = [stage_label, f"chat={self._safe_int(chat_id)}"]
+            game_id = lock_context.get("game_id")
+            if game_id is not None:
+                stage_parts.append(f"game={game_id}")
+            stage_name = ":".join(str(part) for part in stage_parts if part)
+            self._log_lock_snapshot(
+                stage=stage_name,
+                level=logging.WARNING,
+                minimum_level=logging.WARNING,
+            )
+            log_extra = self._log_extra(
+                stage=stage_name,
+                chat_id=chat_id,
+                game=game,
+                event_type="chat_guard_timeout",
+                timeout_seconds=timeout_seconds,
+            )
+            timeout_value = (
+                float("inf") if timeout_seconds is None else float(timeout_seconds)
+            )
+            self._logger.warning(
+                "Chat guard timed out after %.1fs for chat %s; retrying without timeout",
+                timeout_value,
+                self._safe_int(chat_id),
+                extra=log_extra,
+            )
+            async with self._lock_manager.guard(
+                lock_key, timeout=None, context=lock_context
+            ):
+                return await operation()
+
     def _invalidate_adaptive_report_cache(
         self, players: Iterable[Player], *, event_type: str
     ) -> None:
@@ -664,15 +731,21 @@ class GameEngine:
         chat_id: ChatId,
         game: Game,
     ) -> bool:
-        async with self._lock_manager.guard(
-            self._stage_lock_key(chat_id), timeout=self._stage_lock_timeout
-        ):
+        async def _run_locked() -> bool:
             return await self._matchmaking_service.progress_stage(
                 context=context,
                 chat_id=chat_id,
                 game=game,
                 finalize_game=self.finalize_game,
             )
+
+        return await self._with_stage_guard_retry(
+            chat_id=chat_id,
+            game=game,
+            operation=_run_locked,
+            timeout_seconds=self._stage_lock_timeout,
+            stage_label="chat_guard_timeout:progress_stage",
+        )
 
     async def finalize_game(
         self,
@@ -681,14 +754,17 @@ class GameEngine:
         game: Game,
         chat_id: ChatId,
     ) -> None:
-        message_cleanup_ids: Set[MessageId] = set()
-        announcements: List[Dict[str, Any]] = []
-        record_kwargs: Optional[Dict[str, Any]] = None
-        reset_notifications: Optional[_ResetNotifications] = None
+        async def _run_locked() -> Tuple[
+            Set[MessageId],
+            List[Dict[str, Any]],
+            Optional[Dict[str, Any]],
+            Optional[_ResetNotifications],
+        ]:
+            message_cleanup_local: Set[MessageId] = set()
+            announcements_local: List[Dict[str, Any]] = []
+            record_kwargs_local: Optional[Dict[str, Any]] = None
+            reset_notifications_local: Optional[_ResetNotifications] = None
 
-        async with self._lock_manager.guard(
-            self._stage_lock_key(chat_id), timeout=self._stage_lock_timeout
-        ):
             game.chat_id = chat_id
             players_snapshot = list(game.players)
 
@@ -696,19 +772,19 @@ class GameEngine:
                 game, chat_id, collect_only=True
             )
             if collected_ids:
-                message_cleanup_ids = set(collected_ids)
+                message_cleanup_local = set(collected_ids)
 
             pot_total = game.pot
             game_id = getattr(game, "id", None)
 
-            payouts, hand_labels, announcements = await self._determine_winners(
+            payouts, hand_labels, announcements_local = await self._determine_winners(
                 game=game,
                 chat_id=chat_id,
             )
 
             await self._execute_payouts(game=game, payouts=payouts)
 
-            record_kwargs = {
+            record_kwargs_local = {
                 "game": game,
                 "chat_id": chat_id,
                 "payouts": dict(payouts),
@@ -718,13 +794,33 @@ class GameEngine:
                 "game_id": game_id,
             }
 
-            reset_notifications = await self._reset_game_state(
+            reset_notifications_local = await self._reset_game_state(
                 game=game,
                 context=context,
                 chat_id=chat_id,
                 game_id=game_id,
                 defer_notifications=True,
             )
+
+            return (
+                message_cleanup_local,
+                announcements_local,
+                record_kwargs_local,
+                reset_notifications_local,
+            )
+
+        (
+            message_cleanup_ids,
+            announcements,
+            record_kwargs,
+            reset_notifications,
+        ) = await self._with_stage_guard_retry(
+            chat_id=chat_id,
+            game=game,
+            operation=_run_locked,
+            timeout_seconds=self._stage_lock_timeout,
+            stage_label="chat_guard_timeout:finalize_game",
+        )
 
         if message_cleanup_ids:
             await self._delete_chat_messages(chat_id, message_cleanup_ids)

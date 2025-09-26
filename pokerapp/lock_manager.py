@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import math
 from contextlib import asynccontextmanager
@@ -330,6 +331,25 @@ class LockManager:
                 diagnostics = self._lock_diagnostics(key)
                 diagnostic_context = dict(context_payload)
                 diagnostic_context.update(diagnostics)
+                stage_label_parts = ["acquire_timeout", key, f"attempt={attempt + 1}"]
+                chat_id = diagnostic_context.get("chat_id")
+                if chat_id is not None:
+                    stage_label_parts.append(f"chat={chat_id}")
+                game_id = diagnostic_context.get("game_id")
+                if game_id is not None:
+                    stage_label_parts.append(f"game={game_id}")
+                stage_label = ":".join(str(part) for part in stage_label_parts if part)
+                self._log_lock_snapshot_on_timeout(
+                    stage_label,
+                    level=logging.WARNING,
+                    extra={
+                        "lock_key": key,
+                        "lock_level": resolved_level,
+                        "chat_id": diagnostic_context.get("chat_id"),
+                        "game_id": diagnostic_context.get("game_id"),
+                        "attempt": attempt + 1,
+                    },
+                )
                 owner_suffix = ""
                 holders = diagnostics.get("held_by_tasks")
                 if holders:
@@ -387,6 +407,24 @@ class LockManager:
         lock_identity = self._format_lock_identity(
             key, resolved_level, failure_context
         )
+        stage_parts = ["acquire_failure", key]
+        chat_id = failure_context.get("chat_id")
+        if chat_id is not None:
+            stage_parts.append(f"chat={chat_id}")
+        game_id = failure_context.get("game_id")
+        if game_id is not None:
+            stage_parts.append(f"game={game_id}")
+        stage_label = ":".join(str(part) for part in stage_parts if part)
+        self._log_lock_snapshot_on_timeout(
+            stage_label,
+            level=logging.ERROR,
+            extra={
+                "lock_key": key,
+                "lock_level": resolved_level,
+                "chat_id": failure_context.get("chat_id"),
+                "game_id": failure_context.get("game_id"),
+            },
+        )
         owner_suffix = ""
         holders = diagnostics.get("held_by_tasks")
         if holders:
@@ -436,6 +474,24 @@ class LockManager:
                 key, resolved_level, failure_context
             )
             message = f"Timeout acquiring {failure_identity}"
+            guard_stage_parts = ["guard_timeout", key]
+            chat_id = failure_context.get("chat_id")
+            if chat_id is not None:
+                guard_stage_parts.append(f"chat={chat_id}")
+            game_id = failure_context.get("game_id")
+            if game_id is not None:
+                guard_stage_parts.append(f"game={game_id}")
+            guard_stage = ":".join(str(part) for part in guard_stage_parts if part)
+            self._log_lock_snapshot_on_timeout(
+                guard_stage,
+                level=logging.WARNING,
+                extra={
+                    "chat_id": failure_context.get("chat_id"),
+                    "game_id": failure_context.get("game_id"),
+                    "lock_key": key,
+                    "lock_level": failure_context.get("lock_level"),
+                },
+            )
             self._logger.warning(
                 "%s%s",
                 message,
@@ -773,6 +829,37 @@ class LockManager:
             diagnostics["waiting_tasks"] = waiters
 
         return diagnostics
+
+    def _log_lock_snapshot_on_timeout(
+        self,
+        stage: str,
+        *,
+        level: int = logging.WARNING,
+        extra: Optional[Mapping[str, Any]] = None,
+    ) -> None:
+        try:
+            snapshot = self.detect_deadlock()
+        except Exception:  # pragma: no cover - defensive logging path
+            self._logger.exception(
+                "Failed to capture lock snapshot", extra={"stage": stage, "event_type": "lock_snapshot"}
+            )
+            return
+
+        payload: Dict[str, Any] = {"event_type": "lock_snapshot", "stage": stage}
+        if extra:
+            for key, value in extra.items():
+                if key == "event_type":
+                    continue
+                payload[key] = value
+
+        effective_level = level if level >= logging.WARNING else logging.WARNING
+        self._logger.log(
+            effective_level,
+            "Lock snapshot (%s): %s",
+            stage,
+            json.dumps(snapshot, ensure_ascii=False, default=str),
+            extra=payload,
+        )
 
     def _format_context(self, context: Dict[str, Any]) -> str:
         if not context:
