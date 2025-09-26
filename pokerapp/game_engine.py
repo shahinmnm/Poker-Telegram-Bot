@@ -1207,6 +1207,7 @@ class GameEngine:
         """Validate and submit a stop request for the active hand."""
 
         if game.state == GameState.INITIAL:
+            await self._player_manager.cleanup_ready_prompt(game, chat_id)
             clear_all_message_ids(game)
             await self._table_manager.save_game(chat_id, game)
             raise UserException(self.ERROR_NO_ACTIVE_GAME)
