@@ -7,7 +7,7 @@ import pytest
 from telegram.error import RetryAfter
 
 from pokerapp.config import GameConstants
-from pokerapp.entities import Game, GameState, Player, PlayerState
+from pokerapp.entities import Game, GameState, Player, PlayerState, UserException
 from pokerapp.game_engine import GameEngine
 from pokerapp.utils.request_metrics import RequestCategory
 from pokerapp.utils.telegram_safeops import TelegramSafeOps
@@ -148,6 +148,16 @@ async def test_finalize_stop_request_updates_message_and_clears_context(
 async def test_reset_game_state_clears_pot_and_persists(game_engine_setup):
     game = Game()
     game.pot = 300
+    player = Player(
+        user_id=1,
+        mention_markdown="@one",
+        wallet=None,
+        ready_message_id="ready",
+    )
+    game.add_player(player, seat_index=0)
+    game.board_message_id = 777
+    game.message_ids_to_delete.extend([101, 202])
+    game.anchor_message_id = 555
 
     await game_engine_setup.engine._reset_core_game_state(
         game=game,
@@ -158,12 +168,47 @@ async def test_reset_game_state_clears_pot_and_persists(game_engine_setup):
 
     assert game.pot == 0
     assert game.state == GameState.INITIAL
+    assert player.ready_message_id is None
+    assert getattr(game, "anchor_message_id", None) is None
+    assert game.board_message_id is None
+    assert game.message_ids_to_delete == []
     game_engine_setup.request_metrics.end_cycle.assert_awaited_once()
     game_engine_setup.player_manager.clear_player_anchors.assert_awaited_once_with(game)
     game_engine_setup.table_manager.save_game.assert_awaited_once_with(-400, game)
     game_engine_setup.view.send_message.assert_awaited_once_with(
         -400, game_engine_setup.engine.STOPPED_NOTIFICATION
     )
+
+
+@pytest.mark.asyncio
+async def test_stop_game_initial_state_clears_messages(game_engine_setup):
+    game = Game()
+    player = Player(
+        user_id=5,
+        mention_markdown="@player",
+        wallet=None,
+        ready_message_id="ready",
+    )
+    game.add_player(player, seat_index=0)
+    game.board_message_id = 123
+    game.message_ids_to_delete.extend([10, 20])
+    game.anchor_message_id = 456
+
+    context = SimpleNamespace(chat_data={})
+
+    with pytest.raises(UserException):
+        await game_engine_setup.engine.stop_game(
+            context=context,
+            game=game,
+            chat_id=-123,
+            requester_id=player.user_id,
+        )
+
+    assert player.ready_message_id is None
+    assert getattr(game, "anchor_message_id", None) is None
+    assert game.board_message_id is None
+    assert game.message_ids_to_delete == []
+    game_engine_setup.table_manager.save_game.assert_awaited_once_with(-123, game)
 
 
 def test_render_stop_request_message_uses_translations(game_engine_setup):

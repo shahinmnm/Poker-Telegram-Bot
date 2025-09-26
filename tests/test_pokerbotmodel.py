@@ -489,6 +489,9 @@ async def test_cancel_hand_refunds_wallets_and_announces():
     )
     game.add_player(player_b, seat_index=1)
     game.pot = 300
+    game.board_message_id = 404
+    game.message_ids_to_delete.extend([77, 88])
+    game.anchor_message_id = 909
 
     stop_request = {
         "game_id": game.id,
@@ -512,6 +515,11 @@ async def test_cancel_hand_refunds_wallets_and_announces():
     assert view.send_message.await_count == 1
     table_manager.save_game.assert_awaited_once_with(chat_id, game)
     assert game.state == GameState.INITIAL
+    assert player_a.ready_message_id is None
+    assert player_b.ready_message_id is None
+    assert getattr(game, "anchor_message_id", None) is None
+    assert game.board_message_id is None
+    assert game.message_ids_to_delete == []
 
 
 
