@@ -640,15 +640,14 @@ class GameEngine:
             ):
                 return await operation()
         except TimeoutError:
-            stage_parts = [stage_label, f"chat={self._safe_int(chat_id)}"]
+            safe_chat_id = self._safe_int(chat_id)
+            stage_parts = [stage_label, f"chat={safe_chat_id}"]
             game_id = lock_context.get("game_id")
             if game_id is not None:
                 stage_parts.append(f"game={game_id}")
             stage_name = ":".join(str(part) for part in stage_parts if part)
-            snapshot_stage_parts = [
-                "chat_guard_timeout",
-                f"chat={self._safe_int(chat_id)}",
-            ]
+
+            snapshot_stage_parts = ["chat_guard_timeout", f"chat={safe_chat_id}"]
             if game_id is not None:
                 snapshot_stage_parts.append(f"game={game_id}")
             snapshot_stage = ":".join(
