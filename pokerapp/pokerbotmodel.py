@@ -382,7 +382,10 @@ class PokerBotModel:
         timeout_seconds = self._chat_guard_timeout_seconds
         try:
             async with self._lock_manager.guard(
-                key, timeout=timeout_seconds, level=0
+                key,
+                timeout=timeout_seconds,
+                level=0,
+                suppress_timeout_logs=True,
             ):
                 yield
                 return
@@ -392,9 +395,13 @@ class PokerBotModel:
                 timeout_seconds,
                 self._safe_int(chat_id),
             )
+            self._log_lock_snapshot("chat_guard_timeout", level=logging.WARNING)
 
         async with self._lock_manager.guard(
-            key, timeout=math.inf, level=0
+            key,
+            timeout=math.inf,
+            level=0,
+            suppress_timeout_logs=True,
         ):
             yield
 

@@ -225,6 +225,7 @@ class LockManager:
         *,
         context: Optional[Mapping[str, Any]] = None,
         level: Optional[int] = None,
+        suppress_timeout_logs: bool = False,
     ) -> bool:
         """Attempt to acquire the lock identified by ``key``."""
 
@@ -327,7 +328,11 @@ class LockManager:
                 remaining = None
                 if deadline is not None:
                     remaining = max(0.0, deadline - loop.time())
-                self._logger.warning(
+                if suppress_timeout_logs:
+                    log_method = self._logger.debug
+                else:
+                    log_method = self._logger.warning
+                log_method(
                     "Timeout acquiring %s on attempt %d (remaining %.3fs)%s",
                     lock_identity,
                     attempt + 1,
@@ -372,7 +377,11 @@ class LockManager:
                         await asyncio.sleep(min(backoff, remaining_sleep))
 
         lock_identity = self._format_lock_identity(key, resolved_level, context_payload)
-        self._logger.error(
+        if suppress_timeout_logs:
+            log_method = self._logger.debug
+        else:
+            log_method = self._logger.error
+        log_method(
             "Failed to acquire %s after %d attempts%s",
             lock_identity,
             attempts,
@@ -396,12 +405,17 @@ class LockManager:
         context: Optional[Mapping[str, Any]] = None,
         context_extra: Optional[Mapping[str, Any]] = None,
         level: Optional[int] = None,
+        suppress_timeout_logs: bool = False,
     ) -> AsyncIterator[None]:
         combined_context: Dict[str, Any] = dict(context or {})
         if context_extra:
             combined_context.update(context_extra)
         acquired = await self.acquire(
-            key, timeout=timeout, context=combined_context, level=level
+            key,
+            timeout=timeout,
+            context=combined_context,
+            level=level,
+            suppress_timeout_logs=suppress_timeout_logs,
         )
         if not acquired:
             resolved_level = self._resolve_level(key, override=level)
