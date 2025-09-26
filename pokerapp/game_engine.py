@@ -1652,6 +1652,7 @@ class GameEngine:
         chat_id: ChatId,
         context: ContextTypes.DEFAULT_TYPE,
     ) -> None:
+        await self._player_manager.cleanup_ready_prompt(game, chat_id)
         await self._reset_core_game_state(
             game,
             context=context,
