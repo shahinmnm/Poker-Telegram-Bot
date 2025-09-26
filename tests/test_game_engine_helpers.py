@@ -158,6 +158,11 @@ async def test_reset_game_state_clears_pot_and_persists(game_engine_setup):
     game.board_message_id = 777
     game.message_ids_to_delete.extend([101, 202])
     game.anchor_message_id = 555
+    game.ready_message_main_id = 999
+    game.ready_message_game_id = "game-token"
+    game.ready_message_stage = GameState.ROUND_FLOP
+    game.ready_message_main_text = "Ready list"
+    game.seat_announcement_message_id = 313
 
     await game_engine_setup.engine._reset_core_game_state(
         game=game,
@@ -171,6 +176,11 @@ async def test_reset_game_state_clears_pot_and_persists(game_engine_setup):
     assert player.ready_message_id is None
     assert getattr(game, "anchor_message_id", None) is None
     assert game.board_message_id is None
+    assert game.ready_message_main_id is None
+    assert game.ready_message_game_id is None
+    assert game.ready_message_stage is None
+    assert game.ready_message_main_text == ""
+    assert game.seat_announcement_message_id is None
     assert game.message_ids_to_delete == []
     game_engine_setup.request_metrics.end_cycle.assert_awaited_once()
     game_engine_setup.player_manager.clear_player_anchors.assert_awaited_once_with(game)
@@ -193,6 +203,11 @@ async def test_stop_game_initial_state_clears_messages(game_engine_setup):
     game.board_message_id = 123
     game.message_ids_to_delete.extend([10, 20])
     game.anchor_message_id = 456
+    game.ready_message_main_id = 321
+    game.ready_message_game_id = "stop-game"
+    game.ready_message_stage = GameState.ROUND_TURN
+    game.ready_message_main_text = "Stop?"
+    game.seat_announcement_message_id = 212
 
     context = SimpleNamespace(chat_data={})
 
@@ -207,6 +222,11 @@ async def test_stop_game_initial_state_clears_messages(game_engine_setup):
     assert player.ready_message_id is None
     assert getattr(game, "anchor_message_id", None) is None
     assert game.board_message_id is None
+    assert game.ready_message_main_id is None
+    assert game.ready_message_game_id is None
+    assert game.ready_message_stage is None
+    assert game.ready_message_main_text == ""
+    assert game.seat_announcement_message_id is None
     assert game.message_ids_to_delete == []
     game_engine_setup.table_manager.save_game.assert_awaited_once_with(-123, game)
 

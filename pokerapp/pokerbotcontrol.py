@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
 
+import logging
+
 from telegram import Update
 from telegram.error import BadRequest
 from telegram.ext import (
@@ -18,6 +20,10 @@ from pokerapp.pokerbotmodel import (
     STOP_CONFIRM_CALLBACK,
     STOP_RESUME_CALLBACK,
 )
+from pokerapp.game_engine import clear_all_message_ids
+
+
+logger = logging.getLogger(__name__)
 
 class PokerBotCotroller:
     def __init__(self, model: PokerBotModel, application: Application):
@@ -163,7 +169,24 @@ class PokerBotCotroller:
         try:
             await self._model.stop(update, context)
         except UserException as ex:
-            await self._view.send_message(update.effective_chat.id, str(ex))
+            chat_id = update.effective_chat.id
+            message_text = str(ex)
+            cleanup_messages = {
+                getattr(self._model._game_engine, "ERROR_NO_ACTIVE_GAME", None),
+                getattr(self._model._game_engine, "STOPPED_NOTIFICATION", None),
+            }
+            if message_text in cleanup_messages:
+                game = await self._model._table_manager.get_game(chat_id)
+                clear_all_message_ids(game)
+                logger.info(
+                    "Cleared all message IDs after stop",
+                    extra={
+                        "chat_id": chat_id,
+                        "game_id": getattr(game, "id", None),
+                    },
+                )
+                await self._model._table_manager.save_game(chat_id, game)
+            await self._view.send_message(chat_id, message_text)
 
     async def _handle_stop_vote(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE

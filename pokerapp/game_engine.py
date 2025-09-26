@@ -68,19 +68,20 @@ from pokerapp.winnerdetermination import (
 def clear_all_message_ids(game: Game) -> None:
     """Reset cached message identifiers for ``game`` and its players."""
 
-    for player in getattr(game, "players", []):
-        if hasattr(player, "ready_message_id"):
-            player.ready_message_id = None
-
-    if hasattr(game, "anchor_message_id"):
-        game.anchor_message_id = None
-
-    if hasattr(game, "board_message_id"):
-        game.board_message_id = None
+    game.ready_message_main_id = None
+    game.ready_message_game_id = None
+    game.ready_message_stage = None
+    game.ready_message_main_text = ""
+    game.anchor_message_id = None
+    game.board_message_id = None
+    game.seat_announcement_message_id = None
 
     message_ids = getattr(game, "message_ids_to_delete", None)
     if message_ids is not None and hasattr(message_ids, "clear"):
         message_ids.clear()
+
+    for player in getattr(game, "players", []):
+        player.ready_message_id = None
 
 
 _CONSTANTS = get_game_constants()
