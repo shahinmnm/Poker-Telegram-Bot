@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
 from contextlib import asynccontextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
@@ -589,6 +590,10 @@ class LockManager:
         self, key: str, override: Optional[float]
     ) -> Optional[float]:
         if override is not None:
+            if isinstance(override, (int, float)) and (
+                override < 0 or math.isinf(override)
+            ):
+                return None
             return override
         category = self._resolve_lock_category(key)
         category_timeout = None
