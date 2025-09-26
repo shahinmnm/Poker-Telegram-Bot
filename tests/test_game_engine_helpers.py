@@ -31,6 +31,7 @@ def game_engine_setup():
 
     player_manager = MagicMock()
     player_manager.clear_player_anchors = AsyncMock()
+    player_manager.cleanup_ready_prompt = AsyncMock()
 
     async def _passthrough_send_message_safe(*, call, **_kwargs):
         return await call()
