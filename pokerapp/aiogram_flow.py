@@ -23,7 +23,18 @@ import logging
 from collections import deque
 from dataclasses import dataclass, field
 from enum import Enum, auto
-from typing import Any, Deque, Dict, List, Mapping, Optional, Sequence
+from typing import (
+    Any,
+    Awaitable,
+    Callable,
+    Deque,
+    Dict,
+    List,
+    Mapping,
+    Optional,
+    Sequence,
+    TYPE_CHECKING,
+)
 
 from aiogram import Bot
 from aiogram.exceptions import TelegramBadRequest
@@ -33,6 +44,10 @@ from cachetools import LRUCache, TTLCache
 from pokerapp.config import get_game_constants
 from pokerapp.player_manager import PlayerManager
 from pokerapp.utils.messaging_service import MessagingService
+from pokerapp.utils.request_metrics import RequestCategory
+
+if TYPE_CHECKING:  # pragma: no cover - used only for static analysis
+    from pokerapp.table_manager import TableManager
 from pokerapp.utils.debug_trace import trace_telegram_api_call
 
 
@@ -677,6 +692,151 @@ class PokerMessagingOrchestrator:
     @property
     def request_manager(self) -> RequestManager:
         return self._request_manager
+
+    @staticmethod
+    def _has_seated_players(game: Any) -> bool:
+        """Return ``True`` if ``game`` reports any seated players."""
+
+        count_getters = ("seated_count", "player_count", "active_player_count")
+        for attr in count_getters:
+            candidate = getattr(game, attr, None)
+            if callable(candidate):
+                try:
+                    value = candidate()
+                except TypeError:
+                    value = candidate
+            else:
+                value = candidate
+            if isinstance(value, int):
+                return value > 0
+
+        collections = ("seated_players", "players")
+        for attr in collections:
+            candidate = getattr(game, attr, None)
+            if candidate is None:
+                continue
+            if callable(candidate):
+                try:
+                    collection = candidate()
+                except TypeError:
+                    collection = candidate
+            else:
+                collection = candidate
+            if collection is None:
+                continue
+            if isinstance(collection, (list, tuple, set, frozenset)):
+                return len(collection) > 0
+            try:
+                iterator = iter(collection)
+            except TypeError:
+                continue
+            return any(True for _ in iterator)
+        return False
+
+    @classmethod
+    def _waiting_without_players(cls, game: Any) -> bool:
+        state = getattr(game, "state", None)
+        state_name = getattr(state, "name", None)
+        if state_name != "WAITING":
+            return False
+        return not cls._has_seated_players(game)
+
+    async def edit_ready_prompt(
+        self,
+        *,
+        messaging_service: MessagingService,
+        table_manager: "TableManager",
+        game: Any,
+        text: Optional[str],
+        reply_markup: Any = None,
+        player: Optional[Any] = None,
+        request_category: RequestCategory = RequestCategory.GENERAL,
+        context: Optional[Mapping[str, Any]] = None,
+        force: bool = False,
+        send_new_prompt: Optional[Callable[[], Awaitable[Optional[int]]]] = None,
+    ) -> Optional[int]:
+        """Edit the ready prompt while guarding against stale message IDs."""
+
+        if messaging_service is None:
+            raise ValueError("messaging_service dependency is required")
+        if table_manager is None:
+            raise ValueError("table_manager dependency is required")
+
+        message_id: Optional[int]
+        if player is not None:
+            message_id = getattr(player, "ready_message_id", None)
+        else:
+            message_id = getattr(game, "ready_message_main_id", None)
+
+        try:
+            active_game = await table_manager.get_game(self.chat_id)
+        except Exception:  # pragma: no cover - defensive path
+            logger.debug(
+                "Failed to refresh game state before editing ready prompt",
+                exc_info=True,
+                extra={"chat_id": self.chat_id},
+            )
+            active_game = game
+
+        current_game_id = getattr(active_game, "id", None)
+        persist_game = active_game if active_game is not None else game
+        update_targets: List[Any] = [game]
+        if active_game is not None and active_game is not game:
+            update_targets.append(active_game)
+        stored_game_id = getattr(game, "ready_message_game_id", None)
+        waiting_without_players = self._waiting_without_players(active_game)
+
+        should_replace = message_id is None
+        if not should_replace and current_game_id is not None:
+            if stored_game_id is None or stored_game_id != current_game_id:
+                should_replace = True
+        if not should_replace and waiting_without_players:
+            should_replace = True
+
+        if should_replace:
+            if player is not None:
+                setattr(player, "ready_message_id", None)
+            else:
+                for target in update_targets:
+                    setattr(target, "ready_message_main_id", None)
+            await table_manager.save_game(self.chat_id, persist_game)
+            logger.info(
+                "Sent new ready prompt due to stale message ID",
+                extra={
+                    "chat_id": self.chat_id,
+                    "message_id": message_id,
+                    "stored_game_id": stored_game_id,
+                    "active_game_id": current_game_id,
+                },
+            )
+            if send_new_prompt is None:
+                return None
+            new_message_id = await send_new_prompt()
+            if new_message_id is not None:
+                if player is not None:
+                    setattr(player, "ready_message_id", new_message_id)
+                else:
+                    for target in update_targets:
+                        setattr(target, "ready_message_main_id", new_message_id)
+                        if current_game_id is not None:
+                            setattr(target, "ready_message_game_id", current_game_id)
+                        if hasattr(target, "ready_message_stage"):
+                            setattr(target, "ready_message_stage", getattr(target, "state", None))
+                        if hasattr(target, "ready_message_main_text") and text is not None:
+                            setattr(target, "ready_message_main_text", text)
+                await table_manager.save_game(self.chat_id, persist_game)
+            return new_message_id
+
+        return await messaging_service.edit_message_text(
+            chat_id=self.chat_id,
+            message_id=message_id,
+            text=text,
+            reply_markup=reply_markup,
+            force=force,
+            current_game_id=current_game_id,
+            request_category=request_category,
+            context=context,
+        )
 
     async def start_voting(self, players: Sequence[str]) -> Optional[int]:
         """Begin the seating vote after a hand concludes."""
