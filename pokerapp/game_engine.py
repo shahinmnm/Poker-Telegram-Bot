@@ -640,12 +640,31 @@ class GameEngine:
             ):
                 return await operation()
         except TimeoutError:
+            lock_level = self._lock_manager._resolve_level(lock_key, override=None)
+            snapshot_context: Dict[str, Any] = dict(lock_context)
+            snapshot_context.setdefault("lock_key", lock_key)
+            snapshot_context.setdefault("lock_level", lock_level)
             safe_chat_id = self._safe_int(chat_id)
-            stage_parts = [stage_label, f"chat={safe_chat_id}"]
+            snapshot_context.setdefault("chat_id", safe_chat_id)
             game_id = lock_context.get("game_id")
+            snapshot_context.setdefault("game_id", game_id)
+            stage_parts = [stage_label, f"chat={safe_chat_id}"]
             if game_id is not None:
                 stage_parts.append(f"game={game_id}")
             stage_name = ":".join(str(part) for part in stage_parts if part)
+
+            failure_stage_parts = ["engine_lock_failure", lock_key]
+            if safe_chat_id is not None:
+                failure_stage_parts.append(f"chat={safe_chat_id}")
+            if game_id is not None:
+                failure_stage_parts.append(f"game={game_id}")
+            failure_stage = ":".join(str(part) for part in failure_stage_parts if part)
+            self._lock_manager._log_lock_snapshot_on_timeout(
+                failure_stage,
+                level=logging.ERROR,
+                minimum_level=logging.ERROR,
+                extra=snapshot_context,
+            )
 
             snapshot_stage_parts = ["chat_guard_timeout", f"chat={safe_chat_id}"]
             if game_id is not None:
