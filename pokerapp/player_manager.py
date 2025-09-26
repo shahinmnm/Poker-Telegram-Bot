@@ -147,7 +147,47 @@ class PlayerManager:
     async def send_join_prompt(self, game: Game, chat_id: ChatId) -> None:
         """Send the join prompt if it is not already visible."""
 
-        if game.state != GameState.INITIAL or game.ready_message_main_id:
+        ready_message_id = getattr(game, "ready_message_main_id", None)
+        players = list(getattr(game, "players", []))
+        player_ready_ids = [
+            getattr(player, "ready_message_id", None) for player in players
+        ]
+        has_player_ready = any(player_ready_ids)
+
+        stored_game_id = getattr(game, "ready_message_game_id", None)
+        current_game_id = getattr(game, "id", None)
+        stale_prompt = False
+
+        if ready_message_id is not None or has_player_ready:
+            if stored_game_id is None or current_game_id is None:
+                stale_prompt = True
+            elif stored_game_id != current_game_id:
+                stale_prompt = True
+
+        if stale_prompt:
+            for player in players:
+                player.ready_message_id = None
+
+            game.ready_message_main_id = None
+            game.ready_message_main_text = ""
+            game.ready_message_game_id = None
+            game.ready_message_stage = None
+
+            if self._table_manager is not None:
+                save_method = getattr(self._table_manager, "save_game", None)
+                if callable(save_method):
+                    maybe_coro = save_method(chat_id, game)
+                    if inspect.isawaitable(maybe_coro):
+                        await maybe_coro
+
+            self._logger.info(
+                "Sent new ready prompt due to stale message",
+                extra={"chat_id": chat_id, "game_id": current_game_id},
+            )
+
+            ready_message_id = None
+
+        if not stale_prompt and (game.state != GameState.INITIAL or ready_message_id):
             return
 
         markup = InlineKeyboardMarkup(
