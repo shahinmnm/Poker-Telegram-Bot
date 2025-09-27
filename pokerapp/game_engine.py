@@ -919,6 +919,7 @@ class GameEngine:
         stage_label: str,
         timeout_seconds: Optional[float],
         context: Optional[Mapping[str, Any]] = None,
+        **guard_kwargs: Any,
     ) -> AsyncIterator[None]:
         loop = asyncio.get_running_loop()
         start_time = loop.time()
@@ -954,6 +955,7 @@ class GameEngine:
                 lock_key,
                 timeout=timeout_seconds,
                 context=context,
+                **guard_kwargs,
             ):
                 entered = True
                 yield
