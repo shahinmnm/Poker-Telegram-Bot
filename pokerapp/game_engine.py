@@ -966,7 +966,6 @@ class GameEngine:
         lock_key = self._stage_lock_key(chat_id)
         stage_label = "stage_lock:start_game"
         event_stage_label = "start_game"
-        retry_stage_label: Optional[str] = None
         try:
             async with self._trace_lock_guard(
                 lock_key=lock_key,
@@ -976,7 +975,6 @@ class GameEngine:
                 event_stage_label=event_stage_label,
                 timeout=self._stage_lock_timeout,
                 retry_without_timeout=False,
-                retry_stage_label=retry_stage_label,
             ):
                 await self._matchmaking_service.start_game(
                     context=context,
@@ -1032,7 +1030,6 @@ class GameEngine:
         lock_key = self._stage_lock_key(chat_id)
         stage_label = "stage_lock:add_cards_to_table"
         event_stage_label = "add_cards_to_table"
-        retry_stage_label: Optional[str] = None
         try:
             async with self._trace_lock_guard(
                 lock_key=lock_key,
@@ -1042,7 +1039,6 @@ class GameEngine:
                 event_stage_label=event_stage_label,
                 timeout=self._stage_lock_timeout,
                 retry_without_timeout=False,
-                retry_stage_label=retry_stage_label,
             ):
                 await self._matchmaking_service.add_cards_to_table(
                     count=count,
@@ -1888,7 +1884,6 @@ class GameEngine:
         lock_key = self._stage_lock_key(chat_id)
         stage_label = "stage_lock:confirm_stop_vote"
         event_stage_label = "confirm_stop_vote"
-        retry_stage_label: Optional[str] = None
         try:
             async with self._trace_lock_guard(
                 lock_key=lock_key,
@@ -1898,7 +1893,6 @@ class GameEngine:
                 event_stage_label=event_stage_label,
                 timeout=self._stage_lock_timeout,
                 retry_without_timeout=False,
-                retry_stage_label=retry_stage_label,
             ):
                 stop_request = self._validate_stop_request(context=context, game=game)
 
@@ -1946,7 +1940,6 @@ class GameEngine:
         lock_key = self._stage_lock_key(chat_id)
         stage_label = "stage_lock:resume_stop_vote"
         event_stage_label = "resume_stop_vote"
-        retry_stage_label: Optional[str] = None
         try:
             async with self._trace_lock_guard(
                 lock_key=lock_key,
@@ -1956,7 +1949,6 @@ class GameEngine:
                 event_stage_label=event_stage_label,
                 timeout=self._stage_lock_timeout,
                 retry_without_timeout=False,
-                retry_stage_label=retry_stage_label,
             ):
                 stop_request = context.chat_data.get(self.KEY_STOP_REQUEST)
                 if not stop_request or stop_request.get("game_id") != game.id:
@@ -2001,7 +1993,6 @@ class GameEngine:
         lock_key = self._stage_lock_key(chat_id)
         stage_label = "stage_lock:cancel_hand"
         event_stage_label = "cancel_hand"
-        retry_stage_label: Optional[str] = None
         try:
             async with self._trace_lock_guard(
                 lock_key=lock_key,
@@ -2011,7 +2002,6 @@ class GameEngine:
                 event_stage_label=event_stage_label,
                 timeout=self._stage_lock_timeout,
                 retry_without_timeout=False,
-                retry_stage_label=retry_stage_label,
             ):
                 original_game_id = game.id
                 players_snapshot = list(game.seated_players())
@@ -2172,7 +2162,6 @@ class GameEngine:
         lock_key = self._stage_lock_key(chat_id)
         stage_label = "stage_lock:finalize_stop_request"
         event_stage_label = "finalize_stop_request"
-        retry_stage_label: Optional[str] = None
         try:
             async with self._trace_lock_guard(
                 lock_key=lock_key,
@@ -2182,7 +2171,6 @@ class GameEngine:
                 event_stage_label=event_stage_label,
                 timeout=self._stage_lock_timeout,
                 retry_without_timeout=False,
-                retry_stage_label=retry_stage_label,
             ):
                 message_text = self._build_stop_cancellation_message(stop_request)
 
@@ -2223,7 +2211,6 @@ class GameEngine:
         lock_key = self._stage_lock_key(chat_id)
         stage_label = "stage_lock:reset_game_state_after_stop"
         event_stage_label = "reset_game_state_after_stop"
-        retry_stage_label: Optional[str] = None
         try:
             async with self._trace_lock_guard(
                 lock_key=lock_key,
@@ -2233,7 +2220,6 @@ class GameEngine:
                 event_stage_label=event_stage_label,
                 timeout=self._stage_lock_timeout,
                 retry_without_timeout=False,
-                retry_stage_label=retry_stage_label,
             ):
                 await self._player_manager.cleanup_ready_prompt(
                     game, chat_id, persist=False
