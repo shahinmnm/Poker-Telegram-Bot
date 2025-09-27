@@ -330,6 +330,20 @@ class MatchmakingService:
                 # Reinitialize the deck using the same logic as a new hand, which
                 # also shuffles the cards to keep gameplay continuity.
                 game.remain_cards = get_cards()
+                try:
+                    resolved_chat_id = self._safe_int(chat_id)
+                except Exception:  # pragma: no cover - defensive fallback
+                    resolved_chat_id = chat_id
+                try:
+                    seated_count = len(game.seated_players())
+                except Exception:  # pragma: no cover - defensive fallback
+                    seated_count = len(getattr(game, "players", []))
+                self._logger.debug(
+                    "Refilled deck mid-hand for chat %s with %s cards remaining (seated_players=%s)",
+                    resolved_chat_id,
+                    len(game.remain_cards),
+                    seated_count,
+                )
 
             cards = [game.remain_cards.pop(), game.remain_cards.pop()]
             player.cards = cards
