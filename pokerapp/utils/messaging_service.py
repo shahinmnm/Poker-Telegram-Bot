@@ -311,64 +311,54 @@ class MessagingService:
         *,
         admin_chat_id: int,
         chat_id: int,
-        detailed: bool = False,
+        detailed: bool = False
     ) -> None:
-        """Send the last recorded save error for ``chat_id`` to ``admin_chat_id``."""
-
+        """
+        Retrieve the last save error from Redis for the given chat_id and send it to admin_chat_id.
+        """
         if self._table_manager is None:
             await self.send_message(
                 chat_id=admin_chat_id,
-                text="TableManager not available, cannot fetch save error.",
+                text=f"[SaveError] TableManager not available for chat {chat_id}",
                 request_category=RequestCategory.GENERAL,
-                context={"admin_chat_id": admin_chat_id, "chat_id": chat_id, "detailed": detailed},
+                context={"chat_id": chat_id},
             )
             return
 
         key = (
             f"chat:{chat_id}:last_save_error_detailed"
-            if detailed
-            else f"chat:{chat_id}:last_save_error"
+            if detailed else f"chat:{chat_id}:last_save_error"
         )
 
         try:
             payload_raw = await self._table_manager._redis_ops.safe_get(
-                key,
-                log_extra={"chat_id": chat_id},
+                key, log_extra={"chat_id": chat_id}
             )
-        except Exception as exc:  # pragma: no cover - defensive logging
+        except Exception as exc:
             await self.send_message(
                 chat_id=admin_chat_id,
-                text=f"Error fetching from Redis: {exc}",
+                text=f"[SaveError] Redis get failed: {type(exc).__name__}: {exc}",
                 request_category=RequestCategory.GENERAL,
-                context={
-                    "chat_id": chat_id,
-                    "detailed": detailed,
-                    "error_type": type(exc).__name__,
-                },
+                context={"chat_id": chat_id},
             )
             return
 
         if not payload_raw:
             await self.send_message(
                 chat_id=admin_chat_id,
-                text=f"No save error found for chat {chat_id}",
+                text=f"[SaveError] No error found for chat {chat_id}",
                 request_category=RequestCategory.GENERAL,
-                context={"chat_id": chat_id, "detailed": detailed},
+                context={"chat_id": chat_id},
             )
             return
 
-        if isinstance(payload_raw, bytes):
-            payload_text = payload_raw.decode("utf-8", errors="replace")
-        else:
-            payload_text = str(payload_raw)
-
         try:
-            payload = json.loads(payload_text)
+            import json
+            payload = json.loads(
+                payload_raw.decode() if isinstance(payload_raw, bytes) else payload_raw
+            )
         except Exception:
-            payload = {"raw": payload_text}
-
-        if not isinstance(payload, dict):
-            payload = {"raw": payload}
+            payload = {"raw": payload_raw.decode() if isinstance(payload_raw, bytes) else str(payload_raw)}
 
         if detailed:
             lines = [
@@ -377,28 +367,17 @@ class MessagingService:
                 f"Game State: {payload.get('game_state')}",
                 f"Exception: {payload.get('exception')}",
                 f"Pickle Size: {payload.get('pickle_size')}",
-                f"Players ({payload.get('player_count')}):",
+                f"Players ({payload.get('player_count')}):"
             ]
-            players = payload.get("players") or []
-            if not isinstance(players, list):
-                players = [players]
-            for player in players:
-                if isinstance(player, dict):
-                    lines.append(
-                        " - "
-                        f"User {player.get('user_id')} seat {player.get('seat_index')} "
-                        f"role {player.get('role')}"
-                    )
-                else:
-                    lines.append(f" - {player}")
+            for p in payload.get("players", []):
+                lines.append(
+                    f" - User {p.get('user_id')} seat {p.get('seat_index')} role {p.get('role')}"
+                )
         else:
             lines = [
                 f"Error: {payload.get('error')}",
-                f"Time: {payload.get('timestamp')}",
+                f"Time: {payload.get('timestamp')}"
             ]
-            raw_value = payload.get("raw")
-            if raw_value:
-                lines.append(f"Raw: {raw_value}")
 
         await self.send_message(
             chat_id=admin_chat_id,
