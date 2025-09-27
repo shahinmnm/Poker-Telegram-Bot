@@ -2036,22 +2036,31 @@ class GameEngine:
         """Cancel the current hand, refund players, and reset the game."""
 
         lock_key = self._stage_lock_key(chat_id)
+        lock_context = self._build_lock_context(chat_id=chat_id, game=game)
         try:
-            original_game_id = game.id
-            players_snapshot = list(game.seated_players())
-
-            await self._refund_players(players_snapshot, original_game_id)
-
-            await self._finalize_stop_request(
-                context=context,
+            async with self._trace_lock_guard(
+                lock_key=lock_key,
                 chat_id=chat_id,
-                stop_request=stop_request,
                 game=game,
-            )
+                stage_label="stage_lock:cancel_hand",
+                timeout_seconds=self._stage_lock_timeout,
+                context=lock_context,
+            ):
+                original_game_id = game.id
+                players_snapshot = list(game.seated_players())
 
-            await self._reset_game_state_after_stop(
-                game=game, chat_id=chat_id, context=context
-            )
+                await self._refund_players(players_snapshot, original_game_id)
+
+                await self._finalize_stop_request(
+                    context=context,
+                    chat_id=chat_id,
+                    stop_request=stop_request,
+                    game=game,
+                )
+
+                await self._reset_game_state_after_stop(
+                    game=game, chat_id=chat_id, context=context
+                )
         except TimeoutError:
             self._log_engine_event_lock_failure(
                 lock_key=lock_key,
