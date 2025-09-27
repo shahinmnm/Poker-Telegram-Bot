@@ -2249,36 +2249,45 @@ class GameEngine:
         chat_id: ChatId,
         context: ContextTypes.DEFAULT_TYPE,
     ) -> None:
-        async def _run_locked() -> None:
-            await self._player_manager.cleanup_ready_prompt(
-                game, chat_id, persist=False
-            )
-            await self._reset_core_game_state(
-                game,
-                context=context,
+        lock_key = self._stage_lock_key(chat_id)
+        lock_context = self._build_lock_context(chat_id=chat_id, game=game)
+        try:
+            async with self._trace_lock_guard(
+                lock_key=lock_key,
                 chat_id=chat_id,
-                send_stop_notification=False,
-            )
-            await self._telegram_ops.send_message_safe(
-                call=lambda text=self.STOPPED_NOTIFICATION: self._view.send_message(
-                    chat_id, text
-                ),
-                chat_id=chat_id,
-                operation="send_stop_notification",
-                log_extra=self._build_telegram_log_extra(
+                game=game,
+                stage_label="stage_lock:reset_game_state_after_stop",
+                timeout_seconds=self._stage_lock_timeout,
+                context=lock_context,
+            ):
+                await self._player_manager.cleanup_ready_prompt(
+                    game, chat_id, persist=False
+                )
+                await self._reset_core_game_state(
+                    game,
+                    context=context,
                     chat_id=chat_id,
-                    message_id=None,
-                    game_id=getattr(game, "id", None),
+                    send_stop_notification=False,
+                )
+                await self._telegram_ops.send_message_safe(
+                    call=lambda text=self.STOPPED_NOTIFICATION: self._view.send_message(
+                        chat_id, text
+                    ),
+                    chat_id=chat_id,
                     operation="send_stop_notification",
-                    request_category=RequestCategory.GENERAL,
-                ),
+                    log_extra=self._build_telegram_log_extra(
+                        chat_id=chat_id,
+                        message_id=None,
+                        game_id=getattr(game, "id", None),
+                        operation="send_stop_notification",
+                        request_category=RequestCategory.GENERAL,
+                    ),
+                )
+        except TimeoutError:
+            self._log_engine_event_lock_failure(
+                lock_key=lock_key,
+                event_stage_label="reset_game_state_after_stop",
+                chat_id=chat_id,
+                game=game,
             )
-
-        await self._with_stage_guard_retry(
-            chat_id=chat_id,
-            game=game,
-            operation=_run_locked,
-            timeout_seconds=self._stage_lock_timeout,
-            stage_label="chat_guard_timeout:reset_game_state_after_round",
-            event_stage_label="reset_game_state_after_round",
-        )
+            raise
