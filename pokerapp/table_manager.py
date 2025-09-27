@@ -125,9 +125,10 @@ class TableManager:
     # Internal -----------------------------------------------------------
     async def _save(self, chat_id: ChatId, game: Game) -> None:
         try:
+            data = pickle.dumps(game)
             await self._redis_ops.safe_set(
                 self._game_key(chat_id),
-                pickle.dumps(game),
+                data,
                 log_extra={"chat_id": chat_id},
             )
             await self._update_player_index(chat_id, game)
@@ -190,6 +191,41 @@ class TableManager:
                 logger.exception(
                     "Failed to record last save error",
                     extra={"chat_id": chat_id},
+                )
+
+            detailed_error_payload = {
+                "chat_id": chat_id,
+                "players": [
+                    {
+                        "user_id": getattr(player, "user_id", None),
+                        "seat_index": getattr(player, "seat_index", None),
+                        "role": (
+                            getattr(player, "role_label", None)
+                            or getattr(player, "role", None)
+                        ),
+                    }
+                    for player in players_list
+                ],
+                "player_count": len(players_list),
+                "game_state": (
+                    getattr(getattr(game, "state", None), "name", None)
+                    or str(getattr(game, "state", None))
+                ),
+                "exception": str(exc),
+                "pickle_size": len(data) if "data" in locals() else None,
+                "timestamp": datetime.utcnow().isoformat() + "Z",
+            }
+
+            try:
+                await self._redis_ops.safe_set(
+                    f"chat:{chat_id}:last_save_error_detailed",
+                    json.dumps(detailed_error_payload),
+                    log_extra={"chat_id": chat_id},
+                )
+            except Exception as redis_exc:
+                logger.warning(
+                    "Failed to record last_save_error_detailed",
+                    extra={"chat_id": chat_id, "error": str(redis_exc)},
                 )
 
             raise
