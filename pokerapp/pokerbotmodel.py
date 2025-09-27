@@ -455,10 +455,14 @@ class PokerBotModel:
 
         key = f"chat:{self._safe_int(chat_id)}"
         timeout_seconds = self._chat_guard_timeout_seconds
+        stage_label = f"chat_lock:{event_stage_label}"
         try:
-            async with self._lock_manager.guard(
-                key,
-                timeout=timeout_seconds,
+            async with self._game_engine._trace_lock_guard(
+                lock_key=key,
+                chat_id=chat_id,
+                game=game,
+                stage_label=stage_label,
+                timeout_seconds=timeout_seconds,
                 level=0,
                 failure_log_level=logging.WARNING,
             ):
@@ -478,8 +482,13 @@ class PokerBotModel:
                 self._safe_int(chat_id),
             )
 
-        async with self._lock_manager.guard(
-            key, timeout=math.inf, level=0
+        async with self._game_engine._trace_lock_guard(
+            lock_key=key,
+            chat_id=chat_id,
+            game=game,
+            stage_label=f"{stage_label}:retry_without_timeout",
+            timeout_seconds=math.inf,
+            level=0,
         ):
             yield
 
@@ -1720,12 +1729,22 @@ class PokerBotModel:
         money: Optional[Money] = None
         recent_actions: List[str] = []
         previous_message_id: Optional[MessageId] = None
+        lock_context = self._game_engine._build_lock_context(
+            chat_id=chat_id, game=game
+        )
 
         async with self._chat_guard(
             chat_id, event_stage_label="send_turn_message", game=game
         ):
             try:
-                async with self._lock_manager.guard(lock_key, timeout=10):
+                async with self._game_engine._trace_lock_guard(
+                    lock_key=lock_key,
+                    chat_id=chat_id,
+                    game=game,
+                    stage_label="stage_lock:send_turn_message:prepare",
+                    timeout_seconds=10,
+                    context=lock_context,
+                ):
                     game.chat_id = chat_id
                     await self._view.update_player_anchors_and_keyboards(game)
 
@@ -1770,7 +1789,14 @@ class PokerBotModel:
 
             now_value = now_utc()
             try:
-                async with self._lock_manager.guard(lock_key, timeout=10):
+                async with self._game_engine._trace_lock_guard(
+                    lock_key=lock_key,
+                    chat_id=chat_id,
+                    game=game,
+                    stage_label="stage_lock:send_turn_message:update_state",
+                    timeout_seconds=10,
+                    context=lock_context,
+                ):
                     if (
                         turn_update.message_id
                         and game.turn_message_id == previous_message_id
