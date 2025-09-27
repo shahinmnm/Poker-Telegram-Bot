@@ -374,6 +374,112 @@ class PokerBotModel:
             extra={"stage": stage, "event_type": "lock_snapshot"},
         )
 
+    async def handle_admin_command(self, command: str, args: list[str]) -> None:
+        """Handle administrative commands issued via the configured admin chat."""
+
+        admin_chat_id = getattr(self._view, "_admin_chat_id", None)
+        if admin_chat_id is None:
+            return
+
+        if command != "/get_save_error":
+            return
+
+        if not args:
+            await self._view.send_message(
+                admin_chat_id,
+                "Usage: /get_save_error <chat_id> [detailed]",
+            )
+            return
+
+        try:
+            chat_id = int(args[0])
+        except (TypeError, ValueError):
+            await self._view.send_message(
+                admin_chat_id,
+                f"Invalid chat_id: {args[0]}",
+            )
+            return
+
+        detailed_flag = False
+        if len(args) > 1:
+            flag = args[1]
+            if not isinstance(flag, str):
+                flag = str(flag)
+            detailed_flag = flag.lower() == "detailed"
+
+        key = (
+            f"chat:{chat_id}:last_save_error_detailed"
+            if detailed_flag
+            else f"chat:{chat_id}:last_save_error"
+        )
+
+        try:
+            payload_raw = await self._table_manager._redis_ops.safe_get(
+                key,
+                log_extra={"chat_id": chat_id},
+            )
+        except Exception:
+            self._logger.exception(
+                "Failed to fetch save error payload",
+                extra={"chat_id": chat_id, "admin_command": command},
+            )
+            await self._view.send_message(
+                admin_chat_id,
+                f"Unable to fetch save error for chat {chat_id}",
+            )
+            return
+
+        if not payload_raw:
+            await self._view.send_message(
+                admin_chat_id,
+                f"No save error found for chat {chat_id}",
+            )
+            return
+
+        if isinstance(payload_raw, bytes):
+            payload_text = payload_raw.decode("utf-8", errors="replace")
+        else:
+            payload_text = str(payload_raw)
+
+        try:
+            payload = json.loads(payload_text)
+        except Exception:
+            payload = {"raw": payload_text}
+
+        if not isinstance(payload, dict):
+            payload = {"raw": payload}
+
+        if detailed_flag:
+            lines = [
+                f"Chat ID: {payload.get('chat_id')}",
+                f"Time: {payload.get('timestamp')}",
+                f"Game State: {payload.get('game_state')}",
+                f"Exception: {payload.get('exception')}",
+                f"Players ({payload.get('player_count')}):",
+            ]
+            players = payload.get("players") or []
+            if not isinstance(players, list):
+                players = [players]
+            for player in players:
+                if isinstance(player, dict):
+                    lines.append(
+                        " - "
+                        f"{player.get('user_id')} seat {player.get('seat_index')} "
+                        f"role {player.get('role')}"
+                    )
+                else:
+                    lines.append(f" - {player}")
+        else:
+            lines = [
+                f"Error: {payload.get('error')}",
+                f"Time: {payload.get('timestamp')}",
+            ]
+            raw_value = payload.get("raw")
+            if raw_value:
+                lines.append(f"Raw: {raw_value}")
+
+        await self._view.send_message(admin_chat_id, "\n".join(lines))
+
     @asynccontextmanager
     async def _chat_guard(
         self,

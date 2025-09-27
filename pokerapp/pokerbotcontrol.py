@@ -35,6 +35,7 @@ class PokerBotCotroller:
         application.add_handler(CommandHandler('stop', self._handle_stop))
         application.add_handler(CommandHandler('money', self._handle_money))
         application.add_handler(CommandHandler('ban', self._handle_ban))
+        application.add_handler(CommandHandler('get_save_error', self._handle_get_save_error))
 
         # game management command
         application.add_handler(CommandHandler('newgame', self._handle_create_game))
@@ -156,6 +157,17 @@ class PokerBotCotroller:
         elif normalized == "ریور":
             game, chat_id = await self._model._get_game(update, context)
             await self._model.add_cards_to_table(0, game, chat_id, "🃏 ریور")
+
+    async def _handle_get_save_error(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        chat = update.effective_chat
+        admin_chat_id = getattr(self._view, "_admin_chat_id", None)
+        if admin_chat_id is None or chat is None or chat.id != admin_chat_id:
+            return
+
+        args = list(getattr(context, "args", []) or [])
+        await self._model.handle_admin_command("/get_save_error", args)
 
     async def _handle_ready(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         chat_id = None
