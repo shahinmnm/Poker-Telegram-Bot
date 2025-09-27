@@ -185,6 +185,26 @@ async def test_lock_manager_metrics_recording() -> None:
     assert metrics["lock_contention"] >= 1
 
 
+def test_lock_manager_empty_snapshot_logs_debug() -> None:
+    logger = logging.getLogger("lock_manager_test_empty_snapshot")
+    handler = _ListHandler()
+    logger.addHandler(handler)
+    logger.setLevel(logging.DEBUG)
+    manager = LockManager(logger=logger, default_timeout_seconds=1)
+
+    manager._log_lock_snapshot_on_timeout("empty_stage")
+
+    snapshot_records = [
+        record
+        for record in handler.records
+        if record.getMessage().startswith("Lock snapshot (empty_stage)")
+    ]
+    assert snapshot_records, "Expected lock snapshot log to be emitted"
+    assert all(record.levelno < logging.WARNING for record in snapshot_records)
+
+    logger.removeHandler(handler)
+
+
 @pytest.mark.asyncio
 async def test_lock_manager_respects_lock_order_levels() -> None:
     logger = logging.getLogger("lock_manager_test_hierarchy")
