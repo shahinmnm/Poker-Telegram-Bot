@@ -8,11 +8,12 @@ from typing import Iterable, Optional
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
-from pokerapp.entities import ChatId, Game, GameState, Player, UserId
+from pokerapp.entities import ChatId, Game, GameState, Player, UserException, UserId
 from pokerapp.config import get_game_constants
 from pokerapp.pokerbotview import PokerBotViewer
 from pokerapp.table_manager import TableManager
 from pokerapp.utils.request_metrics import RequestCategory
+from pokerapp.pokerbotmodel import WalletManagerModel
 
 
 _CONSTANTS = get_game_constants()
@@ -73,9 +74,80 @@ class PlayerManager:
     def seat_player(self, game: Game, player: Player, *, seat_index: Optional[int] = None) -> int:
         """Place ``player`` into ``game`` at ``seat_index`` (or next available)."""
 
-        assigned = game.add_player(player, seat_index=seat_index)
+        user_id = getattr(player, "user_id", None)
+        chat_id = getattr(game, "chat_id", None)
+
+        if user_id is None or (isinstance(user_id, str) and user_id == ""):
+            self._logger.warning(
+                "Cannot seat player without valid user_id",
+                extra={
+                    "user_id": user_id,
+                    "seat": seat_index,
+                    "chat_id": chat_id,
+                },
+            )
+            return -1
+
+        existing_players = list(getattr(game, "players", []))
+        if any(getattr(existing, "user_id", None) == user_id for existing in existing_players):
+            self._logger.warning(
+                "Duplicate player join attempt ignored",
+                extra={
+                    "user_id": user_id,
+                    "seat": seat_index,
+                    "chat_id": chat_id,
+                },
+            )
+            return -1
+
+        if getattr(player, "wallet", None) is None:
+            wallet_redis = getattr(self._table_manager, "_wallet_redis", None)
+            try:
+                player.wallet = WalletManagerModel(user_id, wallet_redis)
+            except Exception as exc:  # noqa: BLE001 - ensure wallet failures are surfaced
+                self._logger.error(
+                    "Failed to create wallet for player",
+                    extra={
+                        "user_id": user_id,
+                        "seat": seat_index,
+                        "chat_id": chat_id,
+                        "exception": str(exc),
+                    },
+                    exc_info=True,
+                )
+                raise
+
+        try:
+            assigned = game.add_player(player, seat_index=seat_index)
+        except UserException as exc:
+            self._logger.error(
+                "Failed to seat player due to user error",
+                extra={
+                    "user_id": user_id,
+                    "seat": seat_index,
+                    "seated_count": getattr(game, "seated_count", lambda: None)(),
+                    "chat_id": chat_id,
+                    "exception": str(exc),
+                },
+                exc_info=True,
+            )
+            raise
+        except Exception as exc:  # noqa: BLE001 - propagate unexpected errors with context
+            self._logger.error(
+                "Unexpected error while seating player",
+                extra={
+                    "user_id": user_id,
+                    "seat": seat_index,
+                    "seated_count": getattr(game, "seated_count", lambda: None)(),
+                    "chat_id": chat_id,
+                    "exception": str(exc),
+                },
+                exc_info=True,
+            )
+            raise
+
         self._logger.debug(
-            "Player seated", extra={"user_id": getattr(player, "user_id", None), "seat": assigned}
+            "Player seated", extra={"user_id": user_id, "seat": assigned}
         )
         return assigned
 
