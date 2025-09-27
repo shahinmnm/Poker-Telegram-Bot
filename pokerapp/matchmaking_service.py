@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from contextlib import asynccontextmanager
 from typing import Any, Awaitable, Callable, Dict, Optional, Tuple
 
 from pokerapp.cards import get_cards
@@ -438,8 +439,13 @@ class MatchmakingService:
     ) -> None:
         game.chat_id = chat_id
 
-        async with self._lock_manager.guard(
-            self._stage_lock_key(chat_id), timeout=self._stage_lock_timeout
+        async with self._trace_lock_guard(
+            lock_key=self._stage_lock_key(chat_id),
+            chat_id=chat_id,
+            game=game,
+            stage_label="stage_lock:send_player_role_anchors",
+            event_stage_label="send_player_role_anchors",
+            timeout=self._stage_lock_timeout,
         ):
             await self._view.send_player_role_anchors(game=game, chat_id=chat_id)
 
@@ -495,6 +501,74 @@ class MatchmakingService:
 
     def _stage_lock_key(self, chat_id: ChatId) -> str:
         return f"{_STAGE_LOCK_PREFIX}{self._safe_int(chat_id)}"
+
+    @asynccontextmanager
+    async def _trace_lock_guard(
+        self,
+        *,
+        lock_key: str,
+        chat_id: ChatId,
+        stage_label: str,
+        event_stage_label: str,
+        timeout: float,
+        game: Optional[Game] = None,
+    ):
+        """Serialize stage work with structured tracing metadata."""
+
+        try:
+            resolved_chat = self._safe_int(chat_id)
+        except Exception:  # pragma: no cover - defensive fallback
+            resolved_chat = None
+
+        lock_manager = self._lock_manager
+        resolve_level = getattr(lock_manager, "_resolve_level", None)
+        if callable(resolve_level):
+            lock_level = resolve_level(lock_key, override=None)
+        else:  # pragma: no cover - compatibility fallback
+            lock_level = None
+
+        context_payload: Optional[Dict[str, Any]]
+        build_context = getattr(lock_manager, "_build_context_payload", None)
+        if callable(build_context):
+            context_payload = build_context(  # type: ignore[misc]
+                lock_key,
+                lock_level,
+                additional={
+                    "chat_id": resolved_chat,
+                    "game_id": getattr(game, "id", None) if game else None,
+                    "stage_label": stage_label,
+                    "event_stage_label": event_stage_label,
+                },
+            )
+        else:  # pragma: no cover - compatibility fallback
+            context_payload = {
+                "chat_id": resolved_chat,
+                "game_id": getattr(game, "id", None) if game else None,
+                "stage_label": stage_label,
+                "event_stage_label": event_stage_label,
+                "lock_level": lock_level,
+            }
+
+        trace_kwargs = {"timeout": timeout}
+        if context_payload is not None:
+            trace_kwargs["context"] = context_payload
+
+        guard_method = getattr(lock_manager, "trace_guard", None)
+        if not callable(guard_method):  # pragma: no cover - compatibility fallback
+            guard_method = getattr(lock_manager, "guard")
+
+        try:
+            async with guard_method(lock_key, **trace_kwargs):
+                yield
+                return
+        except TypeError as exc:
+            if "unexpected keyword argument 'context'" not in str(exc) or "context" not in trace_kwargs:
+                raise
+
+        fallback_kwargs = dict(trace_kwargs)
+        fallback_kwargs.pop("context", None)
+        async with guard_method(lock_key, **fallback_kwargs):
+            yield
 
     @staticmethod
     def _state_token(state: Optional[GameState]) -> str:
