@@ -750,7 +750,7 @@ class GameEngine:
             self._lock_manager._resolve_lock_category(lock_key) or "unknown"
         )
         event_stage = event_stage_label or stage_label
-        guard_context_manager = self._lock_manager.guard
+        guard_context_manager = self._lock_manager.trace_guard
 
         def _resolve_chat_and_game_ids() -> Tuple[Optional[int], Optional[int]]:
             resolved_chat: Optional[int] = None
