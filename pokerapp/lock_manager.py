@@ -889,7 +889,23 @@ class LockManager:
             )
             return
 
-        effective_level = max(level, minimum_level, logging.WARNING)
+        if not any(snapshot.get(key) for key in ("tasks", "waiting", "cycles")):
+            # When there is no diagnostic information we downgrade to DEBUG to
+            # avoid noisy warning logs that do not help with troubleshooting.
+            self._logger.debug(
+                "Lock snapshot (%s): %s",
+                stage,
+                json.dumps(snapshot, ensure_ascii=False, default=str),
+                extra=payload,
+            )
+            return
+
+        levels_to_consider = [logging.WARNING]
+        if level is not None:
+            levels_to_consider.append(level)
+        if minimum_level is not None:
+            levels_to_consider.append(minimum_level)
+        effective_level = max(levels_to_consider)
         self._logger.log(
             effective_level,
             "Lock snapshot (%s): %s",
