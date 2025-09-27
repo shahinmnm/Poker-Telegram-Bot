@@ -339,6 +339,7 @@ class MatchmakingService:
             player.cards = cards
 
     def _ensure_dealer_position(self, game: Game) -> bool:
+        self._config.ALLOW_EMPTY_DEALER = True
         if not hasattr(game, "dealer_index"):
             game.dealer_index = -1
 
