@@ -682,7 +682,7 @@ class GameEngine:
         game: Optional[Game],
         lock_key: str,
         elapsed: float,
-        timeout_seconds: Optional[float],
+        timeout: Optional[float],
     ) -> None:
         snapshot_stage = f"lock_snapshot_long_hold_{lock_category}" if lock_category else "lock_snapshot_long_hold_unknown"
         try:
@@ -696,7 +696,7 @@ class GameEngine:
                 lock_key=lock_key,
                 lock_category=lock_category,
                 elapsed=elapsed,
-                timeout_seconds=timeout_seconds,
+                timeout=timeout,
                 operation_stage=stage_label,
             )
             self._logger.exception(
@@ -712,7 +712,7 @@ class GameEngine:
             lock_key=lock_key,
             lock_category=lock_category,
             elapsed=elapsed,
-            timeout_seconds=timeout_seconds,
+            timeout=timeout,
             operation_stage=stage_label,
         )
         self._logger.warning(
@@ -832,7 +832,7 @@ class GameEngine:
                 chat_id=chat_id,
                 game=game,
                 event_type="chat_guard_timeout",
-                timeout_seconds=timeout,
+                timeout=timeout,
             )
             timeout_value = float("inf") if timeout is None else float(timeout)
             self._logger.warning(
@@ -863,7 +863,7 @@ class GameEngine:
                 event_type="critical_section_start",
                 lock_key=lock_key,
                 lock_category=lock_category,
-                timeout_seconds=current_timeout,
+                timeout=current_timeout,
             )
             self._logger.debug(
                 "[LOCK_TRACE] START critical_section lock=%s stage=%s timeout=%s",
@@ -906,7 +906,7 @@ class GameEngine:
                     lock_key=lock_key,
                     lock_category=lock_category,
                     elapsed=elapsed,
-                    timeout_seconds=current_timeout,
+                    timeout=current_timeout,
                 )
                 self._logger.debug(
                     "[LOCK_TRACE] END critical_section lock=%s stage=%s elapsed=%.3fs",
@@ -924,7 +924,7 @@ class GameEngine:
                         lock_key=lock_key,
                         lock_category=lock_category,
                         elapsed=elapsed,
-                        timeout_seconds=current_timeout,
+                        timeout=current_timeout,
                     )
                     self._logger.warning(
                         "[LOCK_TRACE] LONG HOLD critical_section lock=%s stage=%s elapsed=%.3fs",
@@ -940,7 +940,7 @@ class GameEngine:
                         game=game,
                         lock_key=lock_key,
                         elapsed=elapsed,
-                        timeout_seconds=current_timeout,
+                        timeout=current_timeout,
                     )
         return
 
