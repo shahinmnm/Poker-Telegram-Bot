@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 from typing import Any, Awaitable, Callable, Dict, Optional, Tuple
 
+from pokerapp.cards import get_cards
 from pokerapp.entities import ChatId, Game, GameState, Money, Player, PlayerState, Wallet
 from pokerapp.config import Config, get_game_constants
 from pokerapp.player_manager import PlayerManager
@@ -326,14 +327,9 @@ class MatchmakingService:
     async def _divide_cards(self, game: Game, chat_id: ChatId) -> None:
         for player in game.seated_players():
             if len(game.remain_cards) < 2:
-                await self._view.send_message(
-                    chat_id, "کارت‌های کافی در دسته وجود ندارد! بازی ریست می‌شود."
-                )
-                await self._request_metrics.end_cycle(
-                    self._safe_int(chat_id), cycle_token=game.id
-                )
-                game.reset()
-                return
+                # Reinitialize the deck using the same logic as a new hand, which
+                # also shuffles the cards to keep gameplay continuity.
+                game.remain_cards = get_cards()
 
             cards = [game.remain_cards.pop(), game.remain_cards.pop()]
             player.cards = cards
