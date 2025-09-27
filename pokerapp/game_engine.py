@@ -974,7 +974,8 @@ class GameEngine:
                 stage_label=stage_label,
                 event_stage_label=event_stage_label,
                 timeout=self._stage_lock_timeout,
-                retry_without_timeout=False,
+                retry_without_timeout=True,
+                retry_stage_label="chat_guard_timeout:start_game",
             ):
                 await self._matchmaking_service.start_game(
                     context=context,
