@@ -382,7 +382,7 @@ class PokerBotModel:
     ) -> None:
         """Handle administrative commands issued via the configured admin chat."""
 
-        if admin_chat_id is None or command != "/get_save_error":
+        if admin_chat_id is None:
             return
 
         messaging_service = getattr(self, "_messaging_service", None)
@@ -391,53 +391,57 @@ class PokerBotModel:
         if messaging_service is None:
             messaging_service = getattr(self._view, "_messenger", None)
 
-        def _send_via_service(text: str) -> Awaitable[Any]:
+        async def _send_message(text: str) -> None:
             if messaging_service is not None:
-                return messaging_service.send_message(
+                await messaging_service.send_message(
                     chat_id=admin_chat_id,
                     text=text,
                     request_category=RequestCategory.GENERAL,
                     context={"admin_chat_id": admin_chat_id, "command": command},
                 )
-            return self._view.send_message(
+                return
+            await self._view.send_message(
                 admin_chat_id,
                 text,
                 request_category=RequestCategory.GENERAL,
             )
 
-        if not args:
-            await _send_via_service("Usage: /get_save_error <chat_id> [detailed]")
-            return
+        if command == "/get_save_error":
+            if not args:
+                await _send_message("Usage: /get_save_error <chat_id> [detailed]")
+                return
 
-        try:
-            chat_id_val = int(args[0])
-        except (TypeError, ValueError):
-            await _send_via_service(f"Invalid chat_id: {args[0]}")
-            return
+            try:
+                chat_id_val = int(args[0])
+            except (TypeError, ValueError):
+                await _send_message(f"Invalid chat_id: {args[0]}")
+                return
 
-        detailed_flag = False
-        if len(args) > 1:
-            flag = args[1]
-            if not isinstance(flag, str):
-                flag = str(flag)
-            detailed_flag = flag.lower() == "detailed"
+            detailed_flag = False
+            if len(args) > 1:
+                flag = args[1]
+                if not isinstance(flag, str):
+                    flag = str(flag)
+                detailed_flag = flag.lower() == "detailed"
 
-        if messaging_service is None:
-            await self._view.send_message(
-                admin_chat_id,
-                "Messaging service unavailable; cannot retrieve save errors.",
-                request_category=RequestCategory.GENERAL,
+            if messaging_service is None:
+                await self._view.send_message(
+                    admin_chat_id,
+                    "Messaging service unavailable; cannot retrieve save errors.",
+                    request_category=RequestCategory.GENERAL,
+                )
+                self._logger.warning(
+                    "Messaging service unavailable for admin command",
+                    extra={"command": command},
+                )
+                return
+
+            await messaging_service.send_last_save_error_to_admin(
+                admin_chat_id=admin_chat_id,
+                chat_id=chat_id_val,
+                detailed=detailed_flag,
             )
-            self._logger.warning(
-                "Messaging service unavailable for admin command", extra={"command": command}
-            )
             return
-
-        await messaging_service.send_last_save_error_to_admin(
-            admin_chat_id=admin_chat_id,
-            chat_id=chat_id_val,
-            detailed=detailed_flag,
-        )
 
     @asynccontextmanager
     async def _chat_guard(
