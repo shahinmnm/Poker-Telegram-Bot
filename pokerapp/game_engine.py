@@ -33,7 +33,6 @@ from typing import (
     Optional,
     Set,
     Tuple,
-    TypeVar,
 )
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes
@@ -193,11 +192,6 @@ class _GameStatsSnapshot:
     @property
     def players(self) -> List[Player]:
         return list(self._players)
-
-
-T = TypeVar("T")
-
-
 class GameEngine:
     """Coordinates game-level constants and helpers."""
 
@@ -679,187 +673,6 @@ class GameEngine:
                 context.setdefault("game_id", game_id)
         return context
 
-    async def _with_stage_guard_retry(
-        self,
-        *,
-        chat_id: ChatId,
-        game: Optional[Game],
-        operation: Callable[[], Awaitable[T]],
-        timeout_seconds: Optional[float],
-        stage_label: str,
-        event_stage_label: str,
-    ) -> T:
-        lock_key = self._stage_lock_key(chat_id)
-        lock_context = self._build_lock_context(chat_id=chat_id, game=game)
-        game_id = lock_context.get("game_id")
-        safe_chat_id = self._safe_int(chat_id)
-        stage_parts = [stage_label, f"chat={safe_chat_id}"]
-        if game_id is not None:
-            stage_parts.append(f"game={game_id}")
-        stage_name = ":".join(str(part) for part in stage_parts if part)
-
-        sentinel: Any = object()
-
-        async def _attempt(
-            timeout: Optional[float],
-        ) -> Tuple[bool, Any]:
-            loop = asyncio.get_running_loop()
-            section_start = loop.time()
-            timeout_repr: Any
-            if timeout is None:
-                timeout_repr = "none"
-            else:
-                try:
-                    timeout_repr = f"{float(timeout):.3f}s"
-                except Exception:
-                    timeout_repr = timeout
-            lock_category = (
-                self._lock_manager._resolve_lock_category(lock_key) or "unknown"
-            )
-            start_extra = self._log_extra(
-                stage=event_stage_label,
-                chat_id=chat_id,
-                game=game,
-                event_type="critical_section_start",
-                lock_key=lock_key,
-                lock_category=lock_category,
-                timeout_seconds=timeout,
-            )
-            self._logger.debug(
-                "[LOCK_TRACE] START critical_section lock=%s stage=%s timeout=%s",
-                lock_key,
-                event_stage_label,
-                timeout_repr,
-                extra=start_extra,
-            )
-            acquired = await self._lock_manager.acquire(
-                lock_key,
-                timeout=timeout,
-                context=lock_context,
-                failure_log_level=logging.WARNING,
-            )
-            if not acquired:
-                return False, sentinel
-
-            try:
-                result = await operation()
-                return True, result
-            finally:
-                self._lock_manager.release(lock_key, context=lock_context)
-                elapsed = loop.time() - section_start
-                end_extra = self._log_extra(
-                    stage=event_stage_label,
-                    chat_id=chat_id,
-                    game=game,
-                    event_type="critical_section_end",
-                    lock_key=lock_key,
-                    lock_category=lock_category,
-                    elapsed=elapsed,
-                    timeout_seconds=timeout,
-                )
-                self._logger.debug(
-                    "[LOCK_TRACE] END critical_section lock=%s stage=%s elapsed=%.3fs",
-                    lock_key,
-                    event_stage_label,
-                    elapsed,
-                    extra=end_extra,
-                )
-                if elapsed > _CRITICAL_SECTION_LONG_HOLD_THRESHOLD_SECONDS:
-                    long_extra = self._log_extra(
-                        stage=event_stage_label,
-                        chat_id=chat_id,
-                        game=game,
-                        event_type="critical_section_long",
-                        lock_key=lock_key,
-                        lock_category=lock_category,
-                        elapsed=elapsed,
-                        timeout_seconds=timeout,
-                    )
-                    self._logger.warning(
-                        "[LOCK_TRACE] LONG HOLD critical_section lock=%s stage=%s elapsed=%.3fs",
-                        lock_key,
-                        event_stage_label,
-                        elapsed,
-                        extra=long_extra,
-                    )
-                    self._log_long_hold_snapshot(
-                        lock_category=lock_category,
-                        stage_label=event_stage_label,
-                        chat_id=chat_id,
-                        game=game,
-                        lock_key=lock_key,
-                        elapsed=elapsed,
-                        timeout_seconds=timeout,
-                    )
-
-        success, result = await _attempt(timeout_seconds)
-        if success:
-            return result
-
-        self._log_engine_event_lock_failure(
-            lock_key=lock_key,
-            event_stage_label=event_stage_label,
-            chat_id=chat_id,
-            game=game,
-            log_level=logging.WARNING,
-        )
-        lock_level = self._lock_manager._resolve_level(lock_key, override=None)
-        snapshot_context: Dict[str, Any] = dict(lock_context)
-        snapshot_context.setdefault("lock_key", lock_key)
-        snapshot_context.setdefault("lock_level", lock_level)
-        snapshot_context.setdefault("chat_id", safe_chat_id)
-        snapshot_context.setdefault("game_id", game_id)
-
-        failure_stage_parts = ["engine_lock_failure", lock_key]
-        if safe_chat_id is not None:
-            failure_stage_parts.append(f"chat={safe_chat_id}")
-        if game_id is not None:
-            failure_stage_parts.append(f"game={game_id}")
-        failure_stage = ":".join(str(part) for part in failure_stage_parts if part)
-        self._lock_manager._log_lock_snapshot_on_timeout(
-            failure_stage,
-            level=logging.WARNING,
-            minimum_level=logging.WARNING,
-            extra=snapshot_context,
-        )
-
-        snapshot_stage_parts = ["chat_guard_timeout", f"chat={safe_chat_id}"]
-        if game_id is not None:
-            snapshot_stage_parts.append(f"game={game_id}")
-        snapshot_stage = ":".join(str(part) for part in snapshot_stage_parts if part)
-        self._log_lock_snapshot(
-            stage=snapshot_stage,
-            level=logging.WARNING,
-            minimum_level=logging.WARNING,
-        )
-
-        log_extra = self._log_extra(
-            stage=stage_name,
-            chat_id=chat_id,
-            game=game,
-            event_type="chat_guard_timeout",
-            timeout_seconds=timeout_seconds,
-        )
-        timeout_value = float("inf") if timeout_seconds is None else float(timeout_seconds)
-        self._logger.warning(
-            "Chat guard timed out after %.1fs for chat %s; retrying without timeout",
-            timeout_value,
-            safe_chat_id,
-            extra=log_extra,
-        )
-
-        retry_success, retry_result = await _attempt(None)
-        if retry_success:
-            return retry_result
-
-        self._log_engine_event_lock_failure(
-            lock_key=lock_key,
-            event_stage_label=event_stage_label,
-            chat_id=chat_id,
-            game=game,
-        )
-        raise TimeoutError(f"Failed to acquire {lock_key} without timeout")
-
     def _log_long_hold_snapshot(
         self,
         *,
@@ -919,94 +732,213 @@ class GameEngine:
         stage_label: str,
         timeout_seconds: Optional[float],
         context: Optional[Mapping[str, Any]] = None,
+        event_stage_label: Optional[str] = None,
+        retry_without_timeout: bool = False,
+        retry_stage_label: Optional[str] = None,
+        retry_log_level: int = logging.WARNING,
         **guard_kwargs: Any,
     ) -> AsyncIterator[None]:
-        loop = asyncio.get_running_loop()
-        start_time = loop.time()
-        if timeout_seconds is None:
-            timeout_repr: Any = "none"
-        else:
-            try:
-                timeout_repr = f"{float(timeout_seconds):.3f}s"
-            except Exception:
-                timeout_repr = timeout_seconds
+        lock_context = dict(context or {})
         lock_category = (
             self._lock_manager._resolve_lock_category(lock_key) or "unknown"
         )
-        start_extra = self._log_extra(
-            stage=stage_label,
-            chat_id=chat_id,
-            game=game,
-            event_type="critical_section_start",
-            lock_key=lock_key,
-            lock_category=lock_category,
-            timeout_seconds=timeout_seconds,
-        )
-        self._logger.debug(
-            "[LOCK_TRACE] START critical_section lock=%s stage=%s timeout=%s",
-            lock_key,
-            stage_label,
-            timeout_repr,
-            extra=start_extra,
-        )
-        entered = False
-        try:
-            async with self._lock_manager.guard(
-                lock_key,
-                timeout=timeout_seconds,
-                context=context,
-                **guard_kwargs,
-            ):
-                entered = True
-                yield
-        finally:
-            if not entered:
-                return
-            elapsed = loop.time() - start_time
-            end_extra = self._log_extra(
+        event_stage = event_stage_label or stage_label
+
+        def _resolve_chat_and_game_ids() -> Tuple[Optional[int], Optional[int]]:
+            resolved_chat: Optional[int] = None
+            if chat_id is not None:
+                try:
+                    resolved_chat = self._safe_int(chat_id)
+                except Exception:  # pragma: no cover - defensive
+                    resolved_chat = None
+            elif "chat_id" in lock_context:
+                try:
+                    resolved_chat = self._safe_int(lock_context["chat_id"])
+                except Exception:  # pragma: no cover - defensive
+                    resolved_chat = None
+
+            resolved_game: Optional[int] = None
+            if game is not None and getattr(game, "id", None) is not None:
+                resolved_game = getattr(game, "id")
+            elif "game_id" in lock_context:
+                candidate = lock_context["game_id"]
+                if isinstance(candidate, int):
+                    resolved_game = candidate
+                else:
+                    try:
+                        resolved_game = int(candidate)  # pragma: no cover - defensive
+                    except Exception:  # pragma: no cover - defensive
+                        resolved_game = None
+
+            return resolved_chat, resolved_game
+
+        def _log_retry_snapshot() -> Tuple[Optional[int], Optional[int]]:
+            safe_chat_id, game_id = _resolve_chat_and_game_ids()
+            self._log_engine_event_lock_failure(
+                lock_key=lock_key,
+                event_stage_label=event_stage,
+                chat_id=chat_id,
+                game=game,
+                log_level=retry_log_level,
+            )
+            lock_level = self._lock_manager._resolve_level(lock_key, override=None)
+            snapshot_context: Dict[str, Any] = dict(lock_context)
+            snapshot_context.setdefault("lock_key", lock_key)
+            snapshot_context.setdefault("lock_level", lock_level)
+            snapshot_context.setdefault("chat_id", safe_chat_id)
+            snapshot_context.setdefault("game_id", game_id)
+
+            failure_stage_parts = ["engine_lock_failure", lock_key]
+            if safe_chat_id is not None:
+                failure_stage_parts.append(f"chat={safe_chat_id}")
+            if game_id is not None:
+                failure_stage_parts.append(f"game={game_id}")
+            failure_stage = ":".join(str(part) for part in failure_stage_parts if part)
+            self._lock_manager._log_lock_snapshot_on_timeout(
+                failure_stage,
+                level=retry_log_level,
+                minimum_level=retry_log_level,
+                extra=snapshot_context,
+            )
+
+            snapshot_stage_parts = ["chat_guard_timeout"]
+            if safe_chat_id is not None:
+                snapshot_stage_parts.append(f"chat={safe_chat_id}")
+            if game_id is not None:
+                snapshot_stage_parts.append(f"game={game_id}")
+            snapshot_stage = ":".join(str(part) for part in snapshot_stage_parts if part)
+            self._log_lock_snapshot(
+                stage=snapshot_stage,
+                level=retry_log_level,
+                minimum_level=retry_log_level,
+            )
+
+            stage_name_parts = [retry_stage_label or f"chat_guard_timeout:{event_stage}"]
+            if safe_chat_id is not None:
+                stage_name_parts.append(f"chat={safe_chat_id}")
+            if game_id is not None:
+                stage_name_parts.append(f"game={game_id}")
+            stage_name = ":".join(str(part) for part in stage_name_parts if part)
+            log_extra = self._log_extra(
+                stage=stage_name,
+                chat_id=chat_id,
+                game=game,
+                event_type="chat_guard_timeout",
+                timeout_seconds=timeout_seconds,
+            )
+            timeout_value = (
+                float("inf")
+                if timeout_seconds is None
+                else float(timeout_seconds)
+            )
+            self._logger.warning(
+                "Chat guard timed out after %.1fs for chat %s; retrying without timeout",
+                timeout_value,
+                safe_chat_id,
+                extra=log_extra,
+            )
+            return safe_chat_id, game_id
+
+        attempt_timeout = timeout_seconds
+        first_attempt = True
+        while True:
+            current_timeout = attempt_timeout
+            loop = asyncio.get_running_loop()
+            start_time = loop.time()
+            if current_timeout is None:
+                timeout_repr: Any = "none"
+            else:
+                try:
+                    timeout_repr = f"{float(current_timeout):.3f}s"
+                except Exception:
+                    timeout_repr = current_timeout
+            start_extra = self._log_extra(
                 stage=stage_label,
                 chat_id=chat_id,
                 game=game,
-                event_type="critical_section_end",
+                event_type="critical_section_start",
                 lock_key=lock_key,
                 lock_category=lock_category,
-                elapsed=elapsed,
-                timeout_seconds=timeout_seconds,
+                timeout_seconds=current_timeout,
             )
             self._logger.debug(
-                "[LOCK_TRACE] END critical_section lock=%s stage=%s elapsed=%.3fs",
+                "[LOCK_TRACE] START critical_section lock=%s stage=%s timeout=%s",
                 lock_key,
                 stage_label,
-                elapsed,
-                extra=end_extra,
+                timeout_repr,
+                extra=start_extra,
             )
-            if elapsed > _CRITICAL_SECTION_LONG_HOLD_THRESHOLD_SECONDS:
-                long_extra = self._log_extra(
+            entered = False
+            try:
+                async with self._lock_manager.guard(
+                    lock_key,
+                    timeout=current_timeout,
+                    context=lock_context,
+                    **guard_kwargs,
+                ):
+                    entered = True
+                    yield
+                    break
+            except TimeoutError:
+                if (
+                    retry_without_timeout
+                    and first_attempt
+                    and timeout_seconds is not None
+                ):
+                    _log_retry_snapshot()
+                    attempt_timeout = None
+                    first_attempt = False
+                    continue
+                raise
+            finally:
+                if not entered:
+                    continue
+                elapsed = loop.time() - start_time
+                end_extra = self._log_extra(
                     stage=stage_label,
                     chat_id=chat_id,
                     game=game,
-                    event_type="critical_section_long",
+                    event_type="critical_section_end",
                     lock_key=lock_key,
                     lock_category=lock_category,
                     elapsed=elapsed,
-                    timeout_seconds=timeout_seconds,
+                    timeout_seconds=current_timeout,
                 )
-                self._logger.warning(
-                    "[LOCK_TRACE] LONG HOLD critical_section lock=%s stage=%s elapsed=%.3fs",
+                self._logger.debug(
+                    "[LOCK_TRACE] END critical_section lock=%s stage=%s elapsed=%.3fs",
                     lock_key,
                     stage_label,
                     elapsed,
-                    extra=long_extra,
+                    extra=end_extra,
                 )
-                self._log_long_hold_snapshot(
-                    lock_category=lock_category,
-                    stage_label=stage_label,
-                    chat_id=chat_id,
-                    game=game,
-                    lock_key=lock_key,
-                    elapsed=elapsed,
-                    timeout_seconds=timeout_seconds,
-                )
+                if elapsed > _CRITICAL_SECTION_LONG_HOLD_THRESHOLD_SECONDS:
+                    long_extra = self._log_extra(
+                        stage=stage_label,
+                        chat_id=chat_id,
+                        game=game,
+                        event_type="critical_section_long",
+                        lock_key=lock_key,
+                        lock_category=lock_category,
+                        elapsed=elapsed,
+                        timeout_seconds=current_timeout,
+                    )
+                    self._logger.warning(
+                        "[LOCK_TRACE] LONG HOLD critical_section lock=%s stage=%s elapsed=%.3fs",
+                        lock_key,
+                        stage_label,
+                        elapsed,
+                        extra=long_extra,
+                    )
+                    self._log_long_hold_snapshot(
+                        lock_category=lock_category,
+                        stage_label=stage_label,
+                        chat_id=chat_id,
+                        game=game,
+                        lock_key=lock_key,
+                        elapsed=elapsed,
+                        timeout_seconds=current_timeout,
+                    )
+        return
 
     def _invalidate_adaptive_report_cache(
         self, players: Iterable[Player], *, event_type: str
@@ -1132,15 +1064,20 @@ class GameEngine:
             )
 
         lock_key = self._stage_lock_key(chat_id)
+        lock_context = self._build_lock_context(chat_id=chat_id, game=game)
         try:
-            return await self._with_stage_guard_retry(
+            async with self._trace_lock_guard(
+                lock_key=lock_key,
                 chat_id=chat_id,
                 game=game,
-                operation=_run_locked,
+                stage_label="stage_lock:progress_stage",
                 timeout_seconds=self._stage_lock_timeout,
-                stage_label="chat_guard_timeout:progress_stage",
+                context=lock_context,
                 event_stage_label="stage_progress",
-            )
+                retry_without_timeout=True,
+                retry_stage_label="chat_guard_timeout:progress_stage",
+            ):
+                return await _run_locked()
         except TimeoutError:
             self._log_engine_event_lock_failure(
                 lock_key=lock_key,
@@ -1213,20 +1150,25 @@ class GameEngine:
             )
 
         lock_key = self._stage_lock_key(chat_id)
+        lock_context = self._build_lock_context(chat_id=chat_id, game=game)
         try:
-            (
-                message_cleanup_ids,
-                announcements,
-                record_kwargs,
-                reset_notifications,
-            ) = await self._with_stage_guard_retry(
+            async with self._trace_lock_guard(
+                lock_key=lock_key,
                 chat_id=chat_id,
                 game=game,
-                operation=_run_locked,
+                stage_label="stage_lock:finalize_game",
                 timeout_seconds=self._stage_lock_timeout,
-                stage_label="chat_guard_timeout:finalize_game",
+                context=lock_context,
                 event_stage_label="game_finalize",
-            )
+                retry_without_timeout=True,
+                retry_stage_label="chat_guard_timeout:finalize_game",
+            ):
+                (
+                    message_cleanup_ids,
+                    announcements,
+                    record_kwargs,
+                    reset_notifications,
+                ) = await _run_locked()
         except TimeoutError:
             self._log_engine_event_lock_failure(
                 lock_key=lock_key,
