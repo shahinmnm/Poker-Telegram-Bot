@@ -327,6 +327,7 @@ class LockManager:
                     await asyncio.wait_for(lock.acquire(), timeout=attempt_timeout)
                 setattr(lock, "_acquired_at_ts", time.time())
                 setattr(lock, "_acquired_by_callsite", call_site)
+                setattr(lock, "_acquired_by_task", self._describe_task(task))
                 elapsed = loop.time() - attempt_start
                 self._record_acquired(key, resolved_level, context_payload)
                 trace_acquired_extra = self._log_extra(
@@ -700,6 +701,7 @@ class LockManager:
 
         held_duration: Optional[float] = None
         acquired_by = getattr(lock, "_acquired_by_callsite", None)
+        acquired_task = getattr(lock, "_acquired_by_task", None)
         acquired_at_ts = getattr(lock, "_acquired_at_ts", None)
         if isinstance(acquired_at_ts, (int, float)):
             held_duration = max(0.0, time.time() - acquired_at_ts)
@@ -713,6 +715,7 @@ class LockManager:
             acquired_from=acquired_by,
             held_duration=held_duration,
             task=self._describe_task(task) if task else None,
+            acquired_task=acquired_task,
         )
         self._logger.debug(
             "[LOCK_TRACE] RELEASE key=%s by=%s (held_for=%.3fs) acquired_from=%s released_from=%s",
