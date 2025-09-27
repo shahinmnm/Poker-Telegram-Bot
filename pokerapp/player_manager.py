@@ -13,7 +13,6 @@ from pokerapp.config import get_game_constants
 from pokerapp.pokerbotview import PokerBotViewer
 from pokerapp.table_manager import TableManager
 from pokerapp.utils.request_metrics import RequestCategory
-from pokerapp.pokerbotmodel import WalletManagerModel
 
 
 _CONSTANTS = get_game_constants()
@@ -72,17 +71,76 @@ class PlayerManager:
     # Seating helpers
     # ------------------------------------------------------------------
     def seat_player(self, game: Game, player: Player, *, seat_index: Optional[int] = None) -> int:
-        """Place ``player`` into ``game`` at ``seat_index`` (or next available)."""
+        """Place ``player`` into ``game`` at ``seat_index`` (or next available) with validation and persistence."""
 
         user_id = getattr(player, "user_id", None)
-        chat_id = getattr(game, "chat_id", None)
 
-        if user_id is None or (isinstance(user_id, str) and user_id == ""):
-            self._logger.warning(
-                "Cannot seat player without valid user_id",
-                extra={
+        chat_id = getattr(game, "chat_id", None)
+        if chat_id is None:
+            for candidate_chat_id, candidate_game in getattr(self._table_manager, "_tables", {}).items():
+                if candidate_game is game:
+                    chat_id = candidate_chat_id
+                    break
+
+        def _record_last_seat_error(exc: Exception, *, message: str) -> None:
+            redis_conn = getattr(self._table_manager, "_redis", None)
+            if not redis_conn or chat_id is None:
+                self._logger.error(
+                    message,
+                    extra={
+                        "user_id": user_id,
+                        "seat_index": seat_index,
+                        "chat_id": chat_id,
+                        "exception": str(exc),
+                    },
+                    exc_info=True,
+                )
+                return
+
+            try:
+                import json
+                from datetime import datetime
+
+                seated_count_getter = getattr(game, "seated_count", None)
+                seated_count = None
+                if callable(seated_count_getter):
+                    try:
+                        seated_count = seated_count_getter()
+                    except Exception:  # noqa: BLE001 - best-effort retrieval only
+                        seated_count = None
+
+                payload = {
                     "user_id": user_id,
                     "seat": seat_index,
+                    "seated_count": seated_count,
+                    "chat_id": chat_id,
+                    "exception": str(exc),
+                    "timestamp": datetime.utcnow().isoformat() + "Z",
+                }
+                redis_conn.set(f"chat:{chat_id}:last_seat_error", json.dumps(payload))
+            except Exception as redis_exc:  # noqa: BLE001 - logging is best-effort
+                self._logger.warning(
+                    "Failed to record last_seat_error in Redis",
+                    extra={"chat_id": chat_id, "error": str(redis_exc)},
+                )
+
+            self._logger.error(
+                message,
+                extra={
+                    "user_id": user_id,
+                    "seat_index": seat_index,
+                    "chat_id": chat_id,
+                    "exception": str(exc),
+                },
+                exc_info=True,
+            )
+
+        if user_id is None or (isinstance(user_id, str) and not user_id.strip()):
+            self._logger.warning(
+                "Rejected seating due to invalid user_id",
+                extra={
+                    "user_id": user_id,
+                    "seat_index": seat_index,
                     "chat_id": chat_id,
                 },
             )
@@ -91,63 +149,39 @@ class PlayerManager:
         existing_players = list(getattr(game, "players", []))
         if any(getattr(existing, "user_id", None) == user_id for existing in existing_players):
             self._logger.warning(
-                "Duplicate player join attempt ignored",
+                "Rejected seating due to duplicate user_id",
                 extra={
                     "user_id": user_id,
-                    "seat": seat_index,
+                    "seat_index": seat_index,
                     "chat_id": chat_id,
                 },
             )
             return -1
 
         if getattr(player, "wallet", None) is None:
-            wallet_redis = getattr(self._table_manager, "_wallet_redis", None)
+            wallet_redis = getattr(self._table_manager, "_wallet_redis", None) or getattr(
+                self._table_manager, "_redis", None
+            )
             try:
+                from pokerapp.pokerbotmodel import WalletManagerModel
+
                 player.wallet = WalletManagerModel(user_id, wallet_redis)
             except Exception as exc:  # noqa: BLE001 - ensure wallet failures are surfaced
-                self._logger.error(
-                    "Failed to create wallet for player",
-                    extra={
-                        "user_id": user_id,
-                        "seat": seat_index,
-                        "chat_id": chat_id,
-                        "exception": str(exc),
-                    },
-                    exc_info=True,
-                )
+                _record_last_seat_error(exc, message="Failed to assign wallet to player")
                 raise
 
         try:
             assigned = game.add_player(player, seat_index=seat_index)
         except UserException as exc:
-            self._logger.error(
-                "Failed to seat player due to user error",
-                extra={
-                    "user_id": user_id,
-                    "seat": seat_index,
-                    "seated_count": getattr(game, "seated_count", lambda: None)(),
-                    "chat_id": chat_id,
-                    "exception": str(exc),
-                },
-                exc_info=True,
-            )
+            _record_last_seat_error(exc, message="Failed to seat player due to user error")
             raise
         except Exception as exc:  # noqa: BLE001 - propagate unexpected errors with context
-            self._logger.error(
-                "Unexpected error while seating player",
-                extra={
-                    "user_id": user_id,
-                    "seat": seat_index,
-                    "seated_count": getattr(game, "seated_count", lambda: None)(),
-                    "chat_id": chat_id,
-                    "exception": str(exc),
-                },
-                exc_info=True,
-            )
+            _record_last_seat_error(exc, message="Unexpected error while seating player")
             raise
 
         self._logger.debug(
-            "Player seated", extra={"user_id": user_id, "seat": assigned}
+            "Player seated",
+            extra={"user_id": user_id, "seat": assigned, "chat_id": chat_id},
         )
         return assigned
 
