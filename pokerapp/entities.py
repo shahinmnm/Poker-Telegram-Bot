@@ -185,6 +185,30 @@ class Game:
         self.seat_announcement_message_id: Optional[MessageId] = None
 
     # --- Seats / players helpers ----------------------------------------
+    def reset_bets(self) -> None:
+        """Clear betting state for all seated players and reset pot tracking."""
+
+        self.pot = 0
+        self.max_round_rate = 0
+        self.current_player_index = -1
+        self.small_blind_index = -1
+        self.big_blind_index = -1
+        for player in self.players:
+            player.total_bet = 0
+            player.round_rate = 0
+            player.has_acted = False
+            player.state = PlayerState.ACTIVE
+
+    def rotate_dealer(self) -> int:
+        """Advance the dealer button and refresh dealer flags."""
+
+        new_dealer_index = self.advance_dealer()
+        for idx, seat_player in enumerate(self.seats):
+            if seat_player is None:
+                continue
+            seat_player.is_dealer = idx == new_dealer_index
+        return new_dealer_index
+
     @property
     def players(self) -> List[Player]:
         """Return a compact list of players currently seated (order is seat ascending)."""

@@ -70,6 +70,53 @@ class PlayerManager:
     # ------------------------------------------------------------------
     # Seating helpers
     # ------------------------------------------------------------------
+    async def reseat_players(self, game: Game) -> None:
+        """Normalize seat assignments and persist the table layout."""
+
+        total_seats = len(getattr(game, "seats", []))
+        if total_seats == 0:
+            return
+
+        normalized_seats: list[Optional[Player]] = [None] * total_seats
+        next_free_index = 0
+
+        for player in list(game.players):
+            seat_index = getattr(player, "seat_index", None)
+            target_index: Optional[int]
+            if (
+                isinstance(seat_index, int)
+                and 0 <= seat_index < total_seats
+                and normalized_seats[seat_index] is None
+            ):
+                target_index = seat_index
+            else:
+                target_index = None
+
+            if target_index is None:
+                while next_free_index < total_seats and normalized_seats[next_free_index] is not None:
+                    next_free_index += 1
+                if next_free_index >= total_seats:
+                    break
+                target_index = next_free_index
+                next_free_index += 1
+
+            normalized_seats[target_index] = player
+            player.seat_index = target_index
+
+        game.seats = normalized_seats
+
+        chat_id = getattr(game, "chat_id", None)
+        if chat_id is None or self._table_manager is None:
+            return
+
+        save_method = getattr(self._table_manager, "save_game", None)
+        if not callable(save_method):
+            return
+
+        maybe_coro = save_method(chat_id, game)
+        if inspect.isawaitable(maybe_coro):
+            await maybe_coro
+
     def seat_player(self, game: Game, player: Player, *, seat_index: Optional[int] = None) -> int:
         """Place ``player`` into ``game`` at ``seat_index`` (or next available) with validation and persistence."""
 
