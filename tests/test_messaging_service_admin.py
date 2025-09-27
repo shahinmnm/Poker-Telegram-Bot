@@ -73,7 +73,7 @@ async def test_send_last_save_error_missing_payload():
         chat_id=12,
         text="No save error found for chat 55",
         request_category=RequestCategory.GENERAL,
-        context={"chat_id": 55, "detailed": False},
+        context={"admin_chat_id": 12, "chat_id": 55, "detailed": False},
     )
     safe_get.assert_awaited_once_with(
         "chat:55:last_save_error",

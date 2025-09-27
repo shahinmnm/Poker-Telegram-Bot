@@ -8,7 +8,7 @@ import math
 import random
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
-from typing import Any, Dict, Iterable, List, Optional, Set, Tuple
+from typing import Any, Awaitable, Dict, Iterable, List, Optional, Set, Tuple
 
 from cachetools import LRUCache
 
@@ -228,6 +228,9 @@ class PokerBotModel:
         self._private_match_service = private_match_service
         self._winner_determine: WinnerDetermination = WinnerDetermination()
         self._round_rate = RoundRateModel(view=self._view, kv=self._kv, model=self)
+        self._messaging_service = getattr(view, "_messaging_service", None)
+        if self._messaging_service is None:
+            self._messaging_service = getattr(view, "_messenger", None)
         def _resolve_ttl(attribute: str, fallback: int) -> int:
             raw_value = getattr(cfg, attribute, fallback)
             try:
@@ -374,30 +377,42 @@ class PokerBotModel:
             extra={"stage": stage, "event_type": "lock_snapshot"},
         )
 
-    async def handle_admin_command(self, command: str, args: list[str]) -> None:
+    async def handle_admin_command(
+        self, command: str, args: list[str], admin_chat_id: Optional[int]
+    ) -> None:
         """Handle administrative commands issued via the configured admin chat."""
 
-        admin_chat_id = getattr(self._view, "_admin_chat_id", None)
-        if admin_chat_id is None:
+        if admin_chat_id is None or command != "/get_save_error":
             return
 
-        if command != "/get_save_error":
-            return
+        messaging_service = getattr(self, "_messaging_service", None)
+        if messaging_service is None:
+            messaging_service = getattr(self._view, "_messaging_service", None)
+        if messaging_service is None:
+            messaging_service = getattr(self._view, "_messenger", None)
+
+        def _send_via_service(text: str) -> Awaitable[Any]:
+            if messaging_service is not None:
+                return messaging_service.send_message(
+                    chat_id=admin_chat_id,
+                    text=text,
+                    request_category=RequestCategory.GENERAL,
+                    context={"admin_chat_id": admin_chat_id, "command": command},
+                )
+            return self._view.send_message(
+                admin_chat_id,
+                text,
+                request_category=RequestCategory.GENERAL,
+            )
 
         if not args:
-            await self._view.send_message(
-                admin_chat_id,
-                "Usage: /get_save_error <chat_id> [detailed]",
-            )
+            await _send_via_service("Usage: /get_save_error <chat_id> [detailed]")
             return
 
         try:
-            chat_id = int(args[0])
+            chat_id_val = int(args[0])
         except (TypeError, ValueError):
-            await self._view.send_message(
-                admin_chat_id,
-                f"Invalid chat_id: {args[0]}",
-            )
+            await _send_via_service(f"Invalid chat_id: {args[0]}")
             return
 
         detailed_flag = False
@@ -407,78 +422,22 @@ class PokerBotModel:
                 flag = str(flag)
             detailed_flag = flag.lower() == "detailed"
 
-        key = (
-            f"chat:{chat_id}:last_save_error_detailed"
-            if detailed_flag
-            else f"chat:{chat_id}:last_save_error"
+        if messaging_service is None:
+            await self._view.send_message(
+                admin_chat_id,
+                "Messaging service unavailable; cannot retrieve save errors.",
+                request_category=RequestCategory.GENERAL,
+            )
+            self._logger.warning(
+                "Messaging service unavailable for admin command", extra={"command": command}
+            )
+            return
+
+        await messaging_service.send_last_save_error_to_admin(
+            admin_chat_id=admin_chat_id,
+            chat_id=chat_id_val,
+            detailed=detailed_flag,
         )
-
-        try:
-            payload_raw = await self._table_manager._redis_ops.safe_get(
-                key,
-                log_extra={"chat_id": chat_id},
-            )
-        except Exception:
-            self._logger.exception(
-                "Failed to fetch save error payload",
-                extra={"chat_id": chat_id, "admin_command": command},
-            )
-            await self._view.send_message(
-                admin_chat_id,
-                f"Unable to fetch save error for chat {chat_id}",
-            )
-            return
-
-        if not payload_raw:
-            await self._view.send_message(
-                admin_chat_id,
-                f"No save error found for chat {chat_id}",
-            )
-            return
-
-        if isinstance(payload_raw, bytes):
-            payload_text = payload_raw.decode("utf-8", errors="replace")
-        else:
-            payload_text = str(payload_raw)
-
-        try:
-            payload = json.loads(payload_text)
-        except Exception:
-            payload = {"raw": payload_text}
-
-        if not isinstance(payload, dict):
-            payload = {"raw": payload}
-
-        if detailed_flag:
-            lines = [
-                f"Chat ID: {payload.get('chat_id')}",
-                f"Time: {payload.get('timestamp')}",
-                f"Game State: {payload.get('game_state')}",
-                f"Exception: {payload.get('exception')}",
-                f"Players ({payload.get('player_count')}):",
-            ]
-            players = payload.get("players") or []
-            if not isinstance(players, list):
-                players = [players]
-            for player in players:
-                if isinstance(player, dict):
-                    lines.append(
-                        " - "
-                        f"{player.get('user_id')} seat {player.get('seat_index')} "
-                        f"role {player.get('role')}"
-                    )
-                else:
-                    lines.append(f" - {player}")
-        else:
-            lines = [
-                f"Error: {payload.get('error')}",
-                f"Time: {payload.get('timestamp')}",
-            ]
-            raw_value = payload.get("raw")
-            if raw_value:
-                lines.append(f"Raw: {raw_value}")
-
-        await self._view.send_message(admin_chat_id, "\n".join(lines))
 
     @asynccontextmanager
     async def _chat_guard(

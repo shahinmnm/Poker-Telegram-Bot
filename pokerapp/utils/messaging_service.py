@@ -316,12 +316,14 @@ class MessagingService:
         """
         Retrieve the last save error from Redis for the given chat_id and send it to admin_chat_id.
         """
+        context = {"admin_chat_id": admin_chat_id, "chat_id": chat_id, "detailed": detailed}
+
         if self._table_manager is None:
             await self.send_message(
                 chat_id=admin_chat_id,
-                text=f"[SaveError] TableManager not available for chat {chat_id}",
+                text="TableManager not available, cannot fetch save error.",
                 request_category=RequestCategory.GENERAL,
-                context={"chat_id": chat_id},
+                context=context,
             )
             return
 
@@ -337,18 +339,18 @@ class MessagingService:
         except Exception as exc:
             await self.send_message(
                 chat_id=admin_chat_id,
-                text=f"[SaveError] Redis get failed: {type(exc).__name__}: {exc}",
+                text=f"Error fetching from Redis: {type(exc).__name__}: {exc}",
                 request_category=RequestCategory.GENERAL,
-                context={"chat_id": chat_id},
+                context=context | {"error_type": type(exc).__name__},
             )
             return
 
         if not payload_raw:
             await self.send_message(
                 chat_id=admin_chat_id,
-                text=f"[SaveError] No error found for chat {chat_id}",
+                text=f"No save error found for chat {chat_id}",
                 request_category=RequestCategory.GENERAL,
-                context={"chat_id": chat_id},
+                context=context,
             )
             return
 
@@ -358,7 +360,11 @@ class MessagingService:
                 payload_raw.decode() if isinstance(payload_raw, bytes) else payload_raw
             )
         except Exception:
-            payload = {"raw": payload_raw.decode() if isinstance(payload_raw, bytes) else str(payload_raw)}
+            payload = {
+                "raw": payload_raw.decode()
+                if isinstance(payload_raw, bytes)
+                else str(payload_raw)
+            }
 
         if detailed:
             lines = [
@@ -378,12 +384,15 @@ class MessagingService:
                 f"Error: {payload.get('error')}",
                 f"Time: {payload.get('timestamp')}"
             ]
+            raw_value = payload.get("raw")
+            if raw_value:
+                lines.append(f"Raw: {raw_value}")
 
         await self.send_message(
             chat_id=admin_chat_id,
             text="\n".join(lines),
             request_category=RequestCategory.GENERAL,
-            context={"chat_id": chat_id, "detailed": detailed},
+            context=context,
         )
 
     def _record_event_metric(
