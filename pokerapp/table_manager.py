@@ -1,5 +1,7 @@
+import json
 import logging
 import pickle
+from datetime import datetime
 from typing import Dict, Optional, Union
 
 import redis.asyncio as aioredis
@@ -22,6 +24,7 @@ class TableManager:
         self._redis = redis
         self._wallet_redis = wallet_redis or redis
         base_logger = logging.getLogger(__name__)
+        self._logger = base_logger
         self._redis_ops = redis_ops or RedisSafeOps(
             redis, logger=base_logger.getChild("redis_safeops")
         )
@@ -121,10 +124,75 @@ class TableManager:
 
     # Internal -----------------------------------------------------------
     async def _save(self, chat_id: ChatId, game: Game) -> None:
-        await self._redis_ops.safe_set(
-            self._game_key(chat_id), pickle.dumps(game), log_extra={"chat_id": chat_id}
-        )
-        await self._update_player_index(chat_id, game)
+        try:
+            await self._redis_ops.safe_set(
+                self._game_key(chat_id),
+                pickle.dumps(game),
+                log_extra={"chat_id": chat_id},
+            )
+            await self._update_player_index(chat_id, game)
+        except Exception as exc:  # noqa: BLE001 - we need broad exception for logging context
+            logger = getattr(self, "_logger", logging.getLogger(__name__))
+            players_attr = getattr(game, "players", [])
+            if callable(players_attr):
+                try:
+                    players_list = list(players_attr())
+                except Exception:  # noqa: BLE001 - fallback to empty snapshot on failure
+                    players_list = []
+            else:
+                players_list = list(players_attr or [])
+
+            player_snapshots = []
+            for player in players_list:
+                wallet = getattr(player, "wallet", None)
+                if wallet is not None:
+                    wallet_repr = (
+                        getattr(wallet, "_user_id", None)
+                        or getattr(wallet, "user_id", None)
+                        or repr(wallet)
+                    )
+                else:
+                    wallet_repr = None
+                player_snapshots.append(
+                    {
+                        "user_id": getattr(player, "user_id", None),
+                        "seat_index": getattr(player, "seat_index", None),
+                        "wallet": wallet_repr,
+                    }
+                )
+
+            ready_users = getattr(game, "ready_users", None)
+            context = {
+                "chat_id": chat_id,
+                "player_count": len(players_list),
+                "players": player_snapshots,
+                "game_state": getattr(getattr(game, "state", None), "name", None),
+                "dealer_index": getattr(game, "dealer_index", None),
+                "ready_users_len": len(ready_users) if ready_users is not None else None,
+            }
+
+            logger.exception("Failed to save game", extra=context)
+
+            error_payload = json.dumps(
+                {
+                    "error": str(exc),
+                    "timestamp": datetime.utcnow().isoformat(),
+                }
+            )
+            error_key = f"chat:{chat_id}:last_save_error"
+            try:
+                await self._redis_ops.safe_set(
+                    error_key,
+                    error_payload,
+                    log_extra={"chat_id": chat_id},
+                )
+            except Exception:
+                logger.exception(
+                    "Failed to record last save error",
+                    extra={"chat_id": chat_id},
+                )
+
+            raise
 
     async def _update_player_index(self, chat_id: ChatId, game: Game) -> None:
         players = {
