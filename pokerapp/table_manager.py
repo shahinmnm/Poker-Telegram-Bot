@@ -141,7 +141,8 @@ class TableManager:
     # Internal -----------------------------------------------------------
     async def _save(self, chat_id: ChatId, game: Game) -> None:
         section_start = time.time()
-        self._redis_ops.logger.debug(
+        # Use correct logger attribute from RedisSafeOps
+        self._redis_ops._logger.debug(
             "[LOCK_SECTION_START] chat_id=%s action=_save",
             chat_id,
         )
@@ -153,7 +154,7 @@ class TableManager:
                 log_extra={"chat_id": chat_id},
             )
             await self._update_player_index(chat_id, game)
-            self._redis_ops.logger.debug(
+            self._redis_ops._logger.debug(
                 "[LOCK_SECTION_END] chat_id=%s action=_save elapsed=%.3fs",
                 chat_id,
                 time.time() - section_start,
