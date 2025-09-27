@@ -961,14 +961,18 @@ class GameEngine:
 
         lock_key = self._stage_lock_key(chat_id)
         lock_context = self._build_lock_context(chat_id=chat_id, game=game)
+        stage_label = "stage_lock:start_game"
+        event_stage_label = "start_game"
         try:
             async with self._trace_lock_guard(
                 lock_key=lock_key,
                 chat_id=chat_id,
                 game=game,
-                stage_label="stage_lock:start_game",
+                stage_label=stage_label,
                 timeout_seconds=self._stage_lock_timeout,
                 context=lock_context,
+                event_stage_label=event_stage_label,
+                retry_without_timeout=False,
             ):
                 await self._matchmaking_service.start_game(
                     context=context,
@@ -979,7 +983,7 @@ class GameEngine:
         except TimeoutError:
             self._log_engine_event_lock_failure(
                 lock_key=lock_key,
-                event_stage_label="start_game",
+                event_stage_label=event_stage_label,
                 chat_id=chat_id,
                 game=game,
             )
@@ -1023,7 +1027,8 @@ class GameEngine:
     ) -> None:
         lock_key = self._stage_lock_key(chat_id)
         lock_context = self._build_lock_context(chat_id=chat_id, game=game)
-        stage_label = "deal_cards_to_players"
+        stage_label = "stage_lock:add_cards_to_table"
+        event_stage_label = "add_cards_to_table"
         try:
             async with self._trace_lock_guard(
                 lock_key=lock_key,
@@ -1032,6 +1037,8 @@ class GameEngine:
                 stage_label=stage_label,
                 timeout_seconds=self._stage_lock_timeout,
                 context=lock_context,
+                event_stage_label=event_stage_label,
+                retry_without_timeout=False,
             ):
                 await self._matchmaking_service.add_cards_to_table(
                     count=count,
@@ -1043,7 +1050,7 @@ class GameEngine:
         except TimeoutError:
             self._log_engine_event_lock_failure(
                 lock_key=lock_key,
-                event_stage_label=stage_label,
+                event_stage_label=event_stage_label,
                 chat_id=chat_id,
                 game=game,
             )
@@ -1151,15 +1158,17 @@ class GameEngine:
 
         lock_key = self._stage_lock_key(chat_id)
         lock_context = self._build_lock_context(chat_id=chat_id, game=game)
+        stage_label = "stage_lock:finalize_game"
+        event_stage_label = "finalize_game"
         try:
             async with self._trace_lock_guard(
                 lock_key=lock_key,
                 chat_id=chat_id,
                 game=game,
-                stage_label="stage_lock:finalize_game",
+                stage_label=stage_label,
                 timeout_seconds=self._stage_lock_timeout,
                 context=lock_context,
-                event_stage_label="game_finalize",
+                event_stage_label=event_stage_label,
                 retry_without_timeout=True,
                 retry_stage_label="chat_guard_timeout:finalize_game",
             ):
@@ -1172,7 +1181,7 @@ class GameEngine:
         except TimeoutError:
             self._log_engine_event_lock_failure(
                 lock_key=lock_key,
-                event_stage_label="finalize_game",
+                event_stage_label=event_stage_label,
                 chat_id=chat_id,
                 game=game,
             )
@@ -1874,14 +1883,18 @@ class GameEngine:
 
         lock_key = self._stage_lock_key(chat_id)
         lock_context = self._build_lock_context(chat_id=chat_id, game=game)
+        stage_label = "stage_lock:confirm_stop_vote"
+        event_stage_label = "confirm_stop_vote"
         try:
             async with self._trace_lock_guard(
                 lock_key=lock_key,
                 chat_id=chat_id,
                 game=game,
-                stage_label="stop_lock:confirm_stop_vote",
+                stage_label=stage_label,
                 timeout_seconds=self._stage_lock_timeout,
                 context=lock_context,
+                event_stage_label=event_stage_label,
+                retry_without_timeout=False,
             ):
                 stop_request = self._validate_stop_request(context=context, game=game)
 
@@ -1911,7 +1924,7 @@ class GameEngine:
         except TimeoutError:
             self._log_engine_event_lock_failure(
                 lock_key=lock_key,
-                event_stage_label="confirm_stop_vote",
+                event_stage_label=event_stage_label,
                 chat_id=chat_id,
                 game=game,
             )
@@ -1928,14 +1941,18 @@ class GameEngine:
 
         lock_key = self._stage_lock_key(chat_id)
         lock_context = self._build_lock_context(chat_id=chat_id, game=game)
+        stage_label = "stage_lock:resume_stop_vote"
+        event_stage_label = "resume_stop_vote"
         try:
             async with self._trace_lock_guard(
                 lock_key=lock_key,
                 chat_id=chat_id,
                 game=game,
-                stage_label="stop_lock:resume_stop_vote",
+                stage_label=stage_label,
                 timeout_seconds=self._stage_lock_timeout,
                 context=lock_context,
+                event_stage_label=event_stage_label,
+                retry_without_timeout=False,
             ):
                 stop_request = context.chat_data.get(self.KEY_STOP_REQUEST)
                 if not stop_request or stop_request.get("game_id") != game.id:
@@ -1962,7 +1979,7 @@ class GameEngine:
         except TimeoutError:
             self._log_engine_event_lock_failure(
                 lock_key=lock_key,
-                event_stage_label="resume_stop_vote",
+                event_stage_label=event_stage_label,
                 chat_id=chat_id,
                 game=game,
             )
@@ -1979,14 +1996,18 @@ class GameEngine:
 
         lock_key = self._stage_lock_key(chat_id)
         lock_context = self._build_lock_context(chat_id=chat_id, game=game)
+        stage_label = "stage_lock:cancel_hand"
+        event_stage_label = "cancel_hand"
         try:
             async with self._trace_lock_guard(
                 lock_key=lock_key,
                 chat_id=chat_id,
                 game=game,
-                stage_label="stage_lock:cancel_hand",
+                stage_label=stage_label,
                 timeout_seconds=self._stage_lock_timeout,
                 context=lock_context,
+                event_stage_label=event_stage_label,
+                retry_without_timeout=False,
             ):
                 original_game_id = game.id
                 players_snapshot = list(game.seated_players())
@@ -2006,7 +2027,7 @@ class GameEngine:
         except TimeoutError:
             self._log_engine_event_lock_failure(
                 lock_key=lock_key,
-                event_stage_label="cancel_hand",
+                event_stage_label=event_stage_label,
                 chat_id=chat_id,
                 game=game,
             )
@@ -2146,14 +2167,18 @@ class GameEngine:
     ) -> None:
         lock_key = self._stage_lock_key(chat_id)
         lock_context = self._build_lock_context(chat_id=chat_id, game=game)
+        stage_label = "stage_lock:finalize_stop_request"
+        event_stage_label = "finalize_stop_request"
         try:
             async with self._trace_lock_guard(
                 lock_key=lock_key,
                 chat_id=chat_id,
                 game=game,
-                stage_label="stop_lock:finalize_stop_request",
+                stage_label=stage_label,
                 timeout_seconds=self._stage_lock_timeout,
                 context=lock_context,
+                event_stage_label=event_stage_label,
+                retry_without_timeout=False,
             ):
                 message_text = self._build_stop_cancellation_message(stop_request)
 
@@ -2178,7 +2203,7 @@ class GameEngine:
         except TimeoutError:
             self._log_engine_event_lock_failure(
                 lock_key=lock_key,
-                event_stage_label="finalize_stop_request",
+                event_stage_label=event_stage_label,
                 chat_id=chat_id,
                 game=game,
             )
@@ -2193,14 +2218,18 @@ class GameEngine:
     ) -> None:
         lock_key = self._stage_lock_key(chat_id)
         lock_context = self._build_lock_context(chat_id=chat_id, game=game)
+        stage_label = "stage_lock:reset_game_state_after_stop"
+        event_stage_label = "reset_game_state_after_stop"
         try:
             async with self._trace_lock_guard(
                 lock_key=lock_key,
                 chat_id=chat_id,
                 game=game,
-                stage_label="stage_lock:reset_game_state_after_stop",
+                stage_label=stage_label,
                 timeout_seconds=self._stage_lock_timeout,
                 context=lock_context,
+                event_stage_label=event_stage_label,
+                retry_without_timeout=False,
             ):
                 await self._player_manager.cleanup_ready_prompt(
                     game, chat_id, persist=False
@@ -2228,7 +2257,7 @@ class GameEngine:
         except TimeoutError:
             self._log_engine_event_lock_failure(
                 lock_key=lock_key,
-                event_stage_label="reset_game_state_after_stop",
+                event_stage_label=event_stage_label,
                 chat_id=chat_id,
                 game=game,
             )
