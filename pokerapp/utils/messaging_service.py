@@ -306,6 +306,107 @@ class MessagingService:
 
         return False
 
+    async def send_last_save_error_to_admin(
+        self,
+        *,
+        admin_chat_id: int,
+        chat_id: int,
+        detailed: bool = False,
+    ) -> None:
+        """Send the last recorded save error for ``chat_id`` to ``admin_chat_id``."""
+
+        if self._table_manager is None:
+            await self.send_message(
+                chat_id=admin_chat_id,
+                text="TableManager not available, cannot fetch save error.",
+                request_category=RequestCategory.GENERAL,
+                context={"admin_chat_id": admin_chat_id, "chat_id": chat_id, "detailed": detailed},
+            )
+            return
+
+        key = (
+            f"chat:{chat_id}:last_save_error_detailed"
+            if detailed
+            else f"chat:{chat_id}:last_save_error"
+        )
+
+        try:
+            payload_raw = await self._table_manager._redis_ops.safe_get(
+                key,
+                log_extra={"chat_id": chat_id},
+            )
+        except Exception as exc:  # pragma: no cover - defensive logging
+            await self.send_message(
+                chat_id=admin_chat_id,
+                text=f"Error fetching from Redis: {exc}",
+                request_category=RequestCategory.GENERAL,
+                context={
+                    "chat_id": chat_id,
+                    "detailed": detailed,
+                    "error_type": type(exc).__name__,
+                },
+            )
+            return
+
+        if not payload_raw:
+            await self.send_message(
+                chat_id=admin_chat_id,
+                text=f"No save error found for chat {chat_id}",
+                request_category=RequestCategory.GENERAL,
+                context={"chat_id": chat_id, "detailed": detailed},
+            )
+            return
+
+        if isinstance(payload_raw, bytes):
+            payload_text = payload_raw.decode("utf-8", errors="replace")
+        else:
+            payload_text = str(payload_raw)
+
+        try:
+            payload = json.loads(payload_text)
+        except Exception:
+            payload = {"raw": payload_text}
+
+        if not isinstance(payload, dict):
+            payload = {"raw": payload}
+
+        if detailed:
+            lines = [
+                f"Chat ID: {payload.get('chat_id')}",
+                f"Time: {payload.get('timestamp')}",
+                f"Game State: {payload.get('game_state')}",
+                f"Exception: {payload.get('exception')}",
+                f"Pickle Size: {payload.get('pickle_size')}",
+                f"Players ({payload.get('player_count')}):",
+            ]
+            players = payload.get("players") or []
+            if not isinstance(players, list):
+                players = [players]
+            for player in players:
+                if isinstance(player, dict):
+                    lines.append(
+                        " - "
+                        f"User {player.get('user_id')} seat {player.get('seat_index')} "
+                        f"role {player.get('role')}"
+                    )
+                else:
+                    lines.append(f" - {player}")
+        else:
+            lines = [
+                f"Error: {payload.get('error')}",
+                f"Time: {payload.get('timestamp')}",
+            ]
+            raw_value = payload.get("raw")
+            if raw_value:
+                lines.append(f"Raw: {raw_value}")
+
+        await self.send_message(
+            chat_id=admin_chat_id,
+            text="\n".join(lines),
+            request_category=RequestCategory.GENERAL,
+            context={"chat_id": chat_id, "detailed": detailed},
+        )
+
     def _record_event_metric(
         self,
         action: str,
