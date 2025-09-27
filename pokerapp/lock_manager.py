@@ -74,6 +74,8 @@ class _WaitingInfo:
 class LockManager:
     """Manage keyed re-entrant async locks with timeout and retry support."""
 
+    _LONG_HOLD_THRESHOLD_SECONDS = 2.0
+
     def __init__(
         self,
         *,
@@ -99,6 +101,7 @@ class LockManager:
         self._waiting_tasks: "WeakKeyDictionary[asyncio.Task[Any], _WaitingInfo]" = (
             WeakKeyDictionary()
         )
+        self._lock_acquire_times: Dict[Tuple[int, str], List[float]] = {}
         self._default_lock_level = (max(LOCK_LEVELS.values()) if LOCK_LEVELS else 0) + 10
         self._lock_state_var: ContextVar[Tuple[_LockAcquisition, ...]] = ContextVar(
             f"lock_manager_state_{id(self)}",
@@ -330,6 +333,10 @@ class LockManager:
                 setattr(lock, "_acquired_by_task", self._describe_task(task))
                 elapsed = loop.time() - attempt_start
                 self._record_acquired(key, resolved_level, context_payload)
+                if task is not None:
+                    acquire_key = (id(task), key)
+                    acquire_times = self._lock_acquire_times.setdefault(acquire_key, [])
+                    acquire_times.append(loop.time())
                 trace_acquired_extra = self._log_extra(
                     context_payload,
                     event_type="lock_trace_acquired",
@@ -649,6 +656,11 @@ class LockManager:
         except RuntimeError:
             task = None
 
+        try:
+            running_loop = asyncio.get_running_loop()
+        except RuntimeError:
+            running_loop = None
+
         lock = self._locks.get(key)
         base_context = dict(context or {})
         if lock is None:
@@ -699,6 +711,17 @@ class LockManager:
             key, release_level, additional=base_context
         )
 
+        acquire_key: Optional[Tuple[int, str]] = None
+        holding_duration: Optional[float] = None
+        if task is not None:
+            acquire_key = (id(task), key)
+            acquire_times = self._lock_acquire_times.get(acquire_key)
+            if acquire_times:
+                current_time = (
+                    running_loop.time() if running_loop is not None else time.monotonic()
+                )
+                holding_duration = max(0.0, current_time - acquire_times[-1])
+
         held_duration: Optional[float] = None
         acquired_by = getattr(lock, "_acquired_by_callsite", None)
         acquired_task = getattr(lock, "_acquired_by_task", None)
@@ -706,6 +729,7 @@ class LockManager:
         if isinstance(acquired_at_ts, (int, float)):
             held_duration = max(0.0, time.time() - acquired_at_ts)
 
+        context_suffix = self._format_context(context_payload)
         trace_release_extra = self._log_extra(
             context_payload,
             event_type="lock_trace_release",
@@ -714,18 +738,56 @@ class LockManager:
             release_site=release_site,
             acquired_from=acquired_by,
             held_duration=held_duration,
+            holding_duration=holding_duration,
             task=self._describe_task(task) if task else None,
             acquired_task=acquired_task,
         )
         self._logger.debug(
-            "[LOCK_TRACE] RELEASE key=%s by=%s (held_for=%.3fs) acquired_from=%s released_from=%s",
+            "[LOCK_TRACE] RELEASE lock_key=%s held_for=%.3fs%s",
             key,
-            self._describe_task(task) if task else None,
-            held_duration if held_duration is not None else -1.0,
-            acquired_by,
-            release_site,
+            holding_duration if holding_duration is not None else -1.0,
+            context_suffix,
             extra=trace_release_extra,
         )
+
+        if (
+            holding_duration is not None
+            and holding_duration > self._LONG_HOLD_THRESHOLD_SECONDS
+        ):
+            long_hold_extra = self._log_extra(
+                context_payload,
+                event_type="lock_long_hold_release",
+                lock_key=key,
+                lock_level=context_payload.get("lock_level"),
+                holding_duration=holding_duration,
+                release_site=release_site,
+                task=self._describe_task(task) if task else None,
+            )
+            self._logger.warning(
+                "[LOCK_TRACE] LONG HOLD on release lock_key=%s held_for=%.3fs%s",
+                key,
+                holding_duration,
+                context_suffix,
+                extra=long_hold_extra,
+            )
+            snapshot = self.detect_deadlock()
+            snapshot_extra = self._log_extra(
+                context_payload,
+                event_type="lock_snapshot_long_hold",
+                lock_key=key,
+                lock_level=context_payload.get("lock_level"),
+                holding_duration=holding_duration,
+                release_site=release_site,
+                task=self._describe_task(task) if task else None,
+            )
+            snapshot_json = json.dumps(snapshot, ensure_ascii=False, default=str)
+            self._logger.warning(
+                "[LOCK_TRACE] SNAPSHOT long hold lock_key=%s snapshot=%s%s",
+                key,
+                snapshot_json,
+                context_suffix,
+                extra=snapshot_extra,
+            )
         try:
             lock.release()
         except RuntimeError:
@@ -746,6 +808,12 @@ class LockManager:
                 release_context = self._finalize_release(record_entry[0])
                 if release_context:
                     context_payload = release_context
+            if acquire_key is not None:
+                acquire_times = self._lock_acquire_times.get(acquire_key)
+                if acquire_times:
+                    acquire_times.pop()
+                    if not acquire_times:
+                        self._lock_acquire_times.pop(acquire_key, None)
             self._logger.info(
                 "%s released%s",
                 self._format_lock_identity(
