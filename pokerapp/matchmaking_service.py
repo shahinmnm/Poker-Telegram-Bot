@@ -349,7 +349,7 @@ class MatchmakingService:
             player.cards = cards
 
     def _ensure_dealer_position(self, game: Game) -> bool:
-        self._config.ALLOW_EMPTY_DEALER = True
+        allow_empty_dealer = bool(getattr(self._config, "ALLOW_EMPTY_DEALER", False))
         if not hasattr(game, "dealer_index"):
             game.dealer_index = -1
 
@@ -359,7 +359,7 @@ class MatchmakingService:
             game.dealer_index = new_dealer_index
 
         if game.dealer_index == -1:
-            if self._config.ALLOW_EMPTY_DEALER:
+            if allow_empty_dealer:
                 fallback_player = self._ensure_debug_dealer(game)
                 self._logger.debug(
                     "Using debug dealer fallback: assigned seat %s (created_dummy=%s)",
