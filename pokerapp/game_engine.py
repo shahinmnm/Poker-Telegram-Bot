@@ -17,11 +17,12 @@ import asyncio
 import datetime
 import json
 import logging
-import time
 from collections import defaultdict
 from dataclasses import dataclass
+from contextlib import asynccontextmanager
 from typing import (
     Any,
+    AsyncIterator,
     Awaitable,
     Callable,
     DefaultDict,
@@ -702,7 +703,8 @@ class GameEngine:
         async def _attempt(
             timeout: Optional[float],
         ) -> Tuple[bool, Any]:
-            section_start = time.time()
+            loop = asyncio.get_running_loop()
+            section_start = loop.time()
             timeout_repr: Any
             if timeout is None:
                 timeout_repr = "none"
@@ -711,12 +713,16 @@ class GameEngine:
                     timeout_repr = f"{float(timeout):.3f}s"
                 except Exception:
                     timeout_repr = timeout
+            lock_category = (
+                self._lock_manager._resolve_lock_category(lock_key) or "unknown"
+            )
             start_extra = self._log_extra(
                 stage=event_stage_label,
                 chat_id=chat_id,
                 game=game,
                 event_type="critical_section_start",
                 lock_key=lock_key,
+                lock_category=lock_category,
                 timeout_seconds=timeout,
             )
             self._logger.debug(
@@ -739,13 +745,15 @@ class GameEngine:
                 result = await operation()
                 return True, result
             finally:
-                elapsed = time.time() - section_start
+                self._lock_manager.release(lock_key, context=lock_context)
+                elapsed = loop.time() - section_start
                 end_extra = self._log_extra(
                     stage=event_stage_label,
                     chat_id=chat_id,
                     game=game,
                     event_type="critical_section_end",
                     lock_key=lock_key,
+                    lock_category=lock_category,
                     elapsed=elapsed,
                     timeout_seconds=timeout,
                 )
@@ -763,6 +771,7 @@ class GameEngine:
                         game=game,
                         event_type="critical_section_long",
                         lock_key=lock_key,
+                        lock_category=lock_category,
                         elapsed=elapsed,
                         timeout_seconds=timeout,
                     )
@@ -773,7 +782,15 @@ class GameEngine:
                         elapsed,
                         extra=long_extra,
                     )
-                self._lock_manager.release(lock_key, context=lock_context)
+                    self._log_long_hold_snapshot(
+                        lock_category=lock_category,
+                        stage_label=event_stage_label,
+                        chat_id=chat_id,
+                        game=game,
+                        lock_key=lock_key,
+                        elapsed=elapsed,
+                        timeout_seconds=timeout,
+                    )
 
         success, result = await _attempt(timeout_seconds)
         if success:
@@ -842,6 +859,152 @@ class GameEngine:
             game=game,
         )
         raise TimeoutError(f"Failed to acquire {lock_key} without timeout")
+
+    def _log_long_hold_snapshot(
+        self,
+        *,
+        lock_category: str,
+        stage_label: str,
+        chat_id: Optional[ChatId],
+        game: Optional[Game],
+        lock_key: str,
+        elapsed: float,
+        timeout_seconds: Optional[float],
+    ) -> None:
+        snapshot_stage = f"lock_snapshot_long_hold_{lock_category}" if lock_category else "lock_snapshot_long_hold_unknown"
+        try:
+            snapshot = self._lock_manager.detect_deadlock()
+        except Exception:
+            error_extra = self._log_extra(
+                stage=f"{snapshot_stage}:capture_failed",
+                chat_id=chat_id,
+                game=game,
+                event_type="lock_snapshot_capture_failed",
+                lock_key=lock_key,
+                lock_category=lock_category,
+                elapsed=elapsed,
+                timeout_seconds=timeout_seconds,
+                operation_stage=stage_label,
+            )
+            self._logger.exception(
+                "Failed to capture lock snapshot for long hold", extra=error_extra
+            )
+            return
+
+        snapshot_extra = self._log_extra(
+            stage=snapshot_stage,
+            chat_id=chat_id,
+            game=game,
+            event_type="lock_snapshot_long_hold",
+            lock_key=lock_key,
+            lock_category=lock_category,
+            elapsed=elapsed,
+            timeout_seconds=timeout_seconds,
+            operation_stage=stage_label,
+        )
+        self._logger.warning(
+            "Lock snapshot (%s): %s",
+            snapshot_stage,
+            json.dumps(snapshot, ensure_ascii=False, default=str),
+            extra=snapshot_extra,
+        )
+
+    @asynccontextmanager
+    async def _trace_lock_guard(
+        self,
+        *,
+        lock_key: str,
+        chat_id: Optional[ChatId],
+        game: Optional[Game],
+        stage_label: str,
+        timeout_seconds: Optional[float],
+        context: Optional[Mapping[str, Any]] = None,
+    ) -> AsyncIterator[None]:
+        loop = asyncio.get_running_loop()
+        start_time = loop.time()
+        if timeout_seconds is None:
+            timeout_repr: Any = "none"
+        else:
+            try:
+                timeout_repr = f"{float(timeout_seconds):.3f}s"
+            except Exception:
+                timeout_repr = timeout_seconds
+        lock_category = (
+            self._lock_manager._resolve_lock_category(lock_key) or "unknown"
+        )
+        start_extra = self._log_extra(
+            stage=stage_label,
+            chat_id=chat_id,
+            game=game,
+            event_type="critical_section_start",
+            lock_key=lock_key,
+            lock_category=lock_category,
+            timeout_seconds=timeout_seconds,
+        )
+        self._logger.debug(
+            "[LOCK_TRACE] START critical_section lock=%s stage=%s timeout=%s",
+            lock_key,
+            stage_label,
+            timeout_repr,
+            extra=start_extra,
+        )
+        entered = False
+        try:
+            async with self._lock_manager.guard(
+                lock_key,
+                timeout=timeout_seconds,
+                context=context,
+            ):
+                entered = True
+                yield
+        finally:
+            if not entered:
+                return
+            elapsed = loop.time() - start_time
+            end_extra = self._log_extra(
+                stage=stage_label,
+                chat_id=chat_id,
+                game=game,
+                event_type="critical_section_end",
+                lock_key=lock_key,
+                lock_category=lock_category,
+                elapsed=elapsed,
+                timeout_seconds=timeout_seconds,
+            )
+            self._logger.debug(
+                "[LOCK_TRACE] END critical_section lock=%s stage=%s elapsed=%.3fs",
+                lock_key,
+                stage_label,
+                elapsed,
+                extra=end_extra,
+            )
+            if elapsed > _CRITICAL_SECTION_LONG_HOLD_THRESHOLD_SECONDS:
+                long_extra = self._log_extra(
+                    stage=stage_label,
+                    chat_id=chat_id,
+                    game=game,
+                    event_type="critical_section_long",
+                    lock_key=lock_key,
+                    lock_category=lock_category,
+                    elapsed=elapsed,
+                    timeout_seconds=timeout_seconds,
+                )
+                self._logger.warning(
+                    "[LOCK_TRACE] LONG HOLD critical_section lock=%s stage=%s elapsed=%.3fs",
+                    lock_key,
+                    stage_label,
+                    elapsed,
+                    extra=long_extra,
+                )
+                self._log_long_hold_snapshot(
+                    lock_category=lock_category,
+                    stage_label=stage_label,
+                    chat_id=chat_id,
+                    game=game,
+                    lock_key=lock_key,
+                    elapsed=elapsed,
+                    timeout_seconds=timeout_seconds,
+                )
 
     def _invalidate_adaptive_report_cache(
         self, players: Iterable[Player], *, event_type: str
@@ -917,10 +1080,14 @@ class GameEngine:
     ) -> None:
         lock_key = self._stage_lock_key(chat_id)
         lock_context = self._build_lock_context(chat_id=chat_id, game=game)
+        stage_label = "deal_cards_to_players"
         try:
-            async with self._lock_manager.guard(
-                lock_key,
-                timeout=self._stage_lock_timeout,
+            async with self._trace_lock_guard(
+                lock_key=lock_key,
+                chat_id=chat_id,
+                game=game,
+                stage_label=stage_label,
+                timeout_seconds=self._stage_lock_timeout,
                 context=lock_context,
             ):
                 await self._matchmaking_service.add_cards_to_table(
@@ -933,7 +1100,7 @@ class GameEngine:
         except TimeoutError:
             self._log_engine_event_lock_failure(
                 lock_key=lock_key,
-                event_stage_label="deal_cards_to_players",
+                event_stage_label=stage_label,
                 chat_id=chat_id,
                 game=game,
             )
