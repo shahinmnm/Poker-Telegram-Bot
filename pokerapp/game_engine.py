@@ -1072,7 +1072,7 @@ class GameEngine:
 
         lock_key = self._stage_lock_key(chat_id)
         stage_label = "stage_lock:progress_stage"
-        event_stage_label = "stage_progress"
+        event_stage_label = "progress_stage"
         retry_stage_label = "chat_guard_timeout:progress_stage"
         try:
             async with self._trace_lock_guard(
@@ -2213,7 +2213,7 @@ class GameEngine:
     ) -> None:
         lock_key = self._stage_lock_key(chat_id)
         stage_label = "stage_lock:finalize_stop_request"
-        event_stage_label = "finalize_stop_request"
+        event_stage_label = "_finalize_stop_request"
         try:
             async with self._trace_lock_guard(
                 lock_key=lock_key,
