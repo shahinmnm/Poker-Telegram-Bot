@@ -1378,6 +1378,9 @@ class GameEngine:
 
         async def _run_locked() -> None:
             clear_all_message_ids(game)
+            game.reset_bets()
+            game.rotate_dealer()
+            await self._player_manager.reseat_players(game)
             self._logger.info(
                 "Game state reset after round",
                 extra=self._log_extra(
