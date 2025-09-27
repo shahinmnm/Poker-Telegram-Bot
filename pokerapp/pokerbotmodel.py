@@ -462,7 +462,7 @@ class PokerBotModel:
                 chat_id=chat_id,
                 game=game,
                 stage_label=stage_label,
-                timeout_seconds=timeout_seconds,
+                timeout=timeout_seconds,
                 level=0,
                 failure_log_level=logging.WARNING,
             ):
@@ -487,7 +487,7 @@ class PokerBotModel:
             chat_id=chat_id,
             game=game,
             stage_label=f"{stage_label}:retry_without_timeout",
-            timeout_seconds=math.inf,
+            timeout=math.inf,
             level=0,
         ):
             yield
@@ -1729,10 +1729,6 @@ class PokerBotModel:
         money: Optional[Money] = None
         recent_actions: List[str] = []
         previous_message_id: Optional[MessageId] = None
-        lock_context = self._game_engine._build_lock_context(
-            chat_id=chat_id, game=game
-        )
-
         async with self._chat_guard(
             chat_id, event_stage_label="send_turn_message", game=game
         ):
@@ -1742,8 +1738,7 @@ class PokerBotModel:
                     chat_id=chat_id,
                     game=game,
                     stage_label="stage_lock:send_turn_message:prepare",
-                    timeout_seconds=10,
-                    context=lock_context,
+                    timeout=10,
                 ):
                     game.chat_id = chat_id
                     await self._view.update_player_anchors_and_keyboards(game)
@@ -1794,8 +1789,7 @@ class PokerBotModel:
                     chat_id=chat_id,
                     game=game,
                     stage_label="stage_lock:send_turn_message:update_state",
-                    timeout_seconds=10,
-                    context=lock_context,
+                    timeout=10,
                 ):
                     if (
                         turn_update.message_id

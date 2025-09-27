@@ -730,19 +730,27 @@ class GameEngine:
         chat_id: Optional[ChatId],
         game: Optional[Game],
         stage_label: str,
-        timeout_seconds: Optional[float],
-        context: Optional[Mapping[str, Any]] = None,
         event_stage_label: Optional[str] = None,
+        timeout: Optional[float] = None,
+        context: Optional[Mapping[str, Any]] = None,
         retry_without_timeout: bool = False,
         retry_stage_label: Optional[str] = None,
         retry_log_level: int = logging.WARNING,
         **guard_kwargs: Any,
     ) -> AsyncIterator[None]:
-        lock_context = dict(context or {})
+        if chat_id is not None:
+            lock_context = self._build_lock_context(
+                chat_id=chat_id, game=game, base=context
+            )
+        else:
+            lock_context = dict(context or {})
+            if game is not None and getattr(game, "id", None) is not None:
+                lock_context.setdefault("game_id", getattr(game, "id"))
         lock_category = (
             self._lock_manager._resolve_lock_category(lock_key) or "unknown"
         )
         event_stage = event_stage_label or stage_label
+        guard_context_manager = self._lock_manager.guard
 
         def _resolve_chat_and_game_ids() -> Tuple[Optional[int], Optional[int]]:
             resolved_chat: Optional[int] = None
@@ -824,13 +832,9 @@ class GameEngine:
                 chat_id=chat_id,
                 game=game,
                 event_type="chat_guard_timeout",
-                timeout_seconds=timeout_seconds,
+                timeout_seconds=timeout,
             )
-            timeout_value = (
-                float("inf")
-                if timeout_seconds is None
-                else float(timeout_seconds)
-            )
+            timeout_value = float("inf") if timeout is None else float(timeout)
             self._logger.warning(
                 "Chat guard timed out after %.1fs for chat %s; retrying without timeout",
                 timeout_value,
@@ -839,7 +843,7 @@ class GameEngine:
             )
             return safe_chat_id, game_id
 
-        attempt_timeout = timeout_seconds
+        attempt_timeout = timeout
         first_attempt = True
         while True:
             current_timeout = attempt_timeout
@@ -870,7 +874,7 @@ class GameEngine:
             )
             entered = False
             try:
-                async with self._lock_manager.guard(
+                async with guard_context_manager(
                     lock_key,
                     timeout=current_timeout,
                     context=lock_context,
@@ -883,7 +887,7 @@ class GameEngine:
                 if (
                     retry_without_timeout
                     and first_attempt
-                    and timeout_seconds is not None
+                    and timeout is not None
                 ):
                     _log_retry_snapshot()
                     attempt_timeout = None
@@ -960,7 +964,6 @@ class GameEngine:
         self._log_lock_snapshot(stage="before_start_game", level=logging.INFO)
 
         lock_key = self._stage_lock_key(chat_id)
-        lock_context = self._build_lock_context(chat_id=chat_id, game=game)
         stage_label = "stage_lock:start_game"
         event_stage_label = "start_game"
         try:
@@ -969,8 +972,7 @@ class GameEngine:
                 chat_id=chat_id,
                 game=game,
                 stage_label=stage_label,
-                timeout_seconds=self._stage_lock_timeout,
-                context=lock_context,
+                timeout=self._stage_lock_timeout,
                 event_stage_label=event_stage_label,
                 retry_without_timeout=False,
             ):
@@ -1026,7 +1028,6 @@ class GameEngine:
         send_message: bool = True,
     ) -> None:
         lock_key = self._stage_lock_key(chat_id)
-        lock_context = self._build_lock_context(chat_id=chat_id, game=game)
         stage_label = "stage_lock:add_cards_to_table"
         event_stage_label = "add_cards_to_table"
         try:
@@ -1035,8 +1036,7 @@ class GameEngine:
                 chat_id=chat_id,
                 game=game,
                 stage_label=stage_label,
-                timeout_seconds=self._stage_lock_timeout,
-                context=lock_context,
+                timeout=self._stage_lock_timeout,
                 event_stage_label=event_stage_label,
                 retry_without_timeout=False,
             ):
@@ -1071,15 +1071,13 @@ class GameEngine:
             )
 
         lock_key = self._stage_lock_key(chat_id)
-        lock_context = self._build_lock_context(chat_id=chat_id, game=game)
         try:
             async with self._trace_lock_guard(
                 lock_key=lock_key,
                 chat_id=chat_id,
                 game=game,
                 stage_label="stage_lock:progress_stage",
-                timeout_seconds=self._stage_lock_timeout,
-                context=lock_context,
+                timeout=self._stage_lock_timeout,
                 event_stage_label="stage_progress",
                 retry_without_timeout=True,
                 retry_stage_label="chat_guard_timeout:progress_stage",
@@ -1157,7 +1155,6 @@ class GameEngine:
             )
 
         lock_key = self._stage_lock_key(chat_id)
-        lock_context = self._build_lock_context(chat_id=chat_id, game=game)
         stage_label = "stage_lock:finalize_game"
         event_stage_label = "finalize_game"
         try:
@@ -1166,8 +1163,7 @@ class GameEngine:
                 chat_id=chat_id,
                 game=game,
                 stage_label=stage_label,
-                timeout_seconds=self._stage_lock_timeout,
-                context=lock_context,
+                timeout=self._stage_lock_timeout,
                 event_stage_label=event_stage_label,
                 retry_without_timeout=True,
                 retry_stage_label="chat_guard_timeout:finalize_game",
@@ -1882,7 +1878,6 @@ class GameEngine:
         """Register a confirmation vote and cancel the hand if approved."""
 
         lock_key = self._stage_lock_key(chat_id)
-        lock_context = self._build_lock_context(chat_id=chat_id, game=game)
         stage_label = "stage_lock:confirm_stop_vote"
         event_stage_label = "confirm_stop_vote"
         try:
@@ -1891,8 +1886,7 @@ class GameEngine:
                 chat_id=chat_id,
                 game=game,
                 stage_label=stage_label,
-                timeout_seconds=self._stage_lock_timeout,
-                context=lock_context,
+                timeout=self._stage_lock_timeout,
                 event_stage_label=event_stage_label,
                 retry_without_timeout=False,
             ):
@@ -1940,7 +1934,6 @@ class GameEngine:
         """Cancel a pending stop request and resume play."""
 
         lock_key = self._stage_lock_key(chat_id)
-        lock_context = self._build_lock_context(chat_id=chat_id, game=game)
         stage_label = "stage_lock:resume_stop_vote"
         event_stage_label = "resume_stop_vote"
         try:
@@ -1949,8 +1942,7 @@ class GameEngine:
                 chat_id=chat_id,
                 game=game,
                 stage_label=stage_label,
-                timeout_seconds=self._stage_lock_timeout,
-                context=lock_context,
+                timeout=self._stage_lock_timeout,
                 event_stage_label=event_stage_label,
                 retry_without_timeout=False,
             ):
@@ -1995,7 +1987,6 @@ class GameEngine:
         """Cancel the current hand, refund players, and reset the game."""
 
         lock_key = self._stage_lock_key(chat_id)
-        lock_context = self._build_lock_context(chat_id=chat_id, game=game)
         stage_label = "stage_lock:cancel_hand"
         event_stage_label = "cancel_hand"
         try:
@@ -2004,8 +1995,7 @@ class GameEngine:
                 chat_id=chat_id,
                 game=game,
                 stage_label=stage_label,
-                timeout_seconds=self._stage_lock_timeout,
-                context=lock_context,
+                timeout=self._stage_lock_timeout,
                 event_stage_label=event_stage_label,
                 retry_without_timeout=False,
             ):
@@ -2166,7 +2156,6 @@ class GameEngine:
         game: Optional[Game] = None,
     ) -> None:
         lock_key = self._stage_lock_key(chat_id)
-        lock_context = self._build_lock_context(chat_id=chat_id, game=game)
         stage_label = "stage_lock:finalize_stop_request"
         event_stage_label = "finalize_stop_request"
         try:
@@ -2175,8 +2164,7 @@ class GameEngine:
                 chat_id=chat_id,
                 game=game,
                 stage_label=stage_label,
-                timeout_seconds=self._stage_lock_timeout,
-                context=lock_context,
+                timeout=self._stage_lock_timeout,
                 event_stage_label=event_stage_label,
                 retry_without_timeout=False,
             ):
@@ -2217,7 +2205,6 @@ class GameEngine:
         context: ContextTypes.DEFAULT_TYPE,
     ) -> None:
         lock_key = self._stage_lock_key(chat_id)
-        lock_context = self._build_lock_context(chat_id=chat_id, game=game)
         stage_label = "stage_lock:reset_game_state_after_stop"
         event_stage_label = "reset_game_state_after_stop"
         try:
@@ -2226,8 +2213,7 @@ class GameEngine:
                 chat_id=chat_id,
                 game=game,
                 stage_label=stage_label,
-                timeout_seconds=self._stage_lock_timeout,
-                context=lock_context,
+                timeout=self._stage_lock_timeout,
                 event_stage_label=event_stage_label,
                 retry_without_timeout=False,
             ):
