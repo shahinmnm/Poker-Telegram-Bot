@@ -1361,6 +1361,55 @@ class GameEngine:
         await self._player_manager.send_join_prompt(game, chat_id)
         return None
 
+    async def _reset_game_state_after_round(
+        self,
+        *,
+        chat_id: ChatId,
+        game: Game,
+    ) -> None:
+        """
+        Reset post-round bookkeeping while holding the stage lock.
+
+        The method currently clears cached Telegram message identifiers and
+        emits a structured log entry. Additional state-reset steps can be added
+        over time without exposing partially reset state to concurrent
+        callbacks.
+        """
+
+        async def _run_locked() -> None:
+            clear_all_message_ids(game)
+            self._logger.info(
+                "Game state reset after round",
+                extra=self._log_extra(
+                    stage="reset_game_state_after_round", game=game, chat_id=chat_id
+                ),
+            )
+
+        lock_key = self._stage_lock_key(chat_id)
+        stage_label = "stage_lock:reset_game_state_after_round"
+        event_stage_label = "reset_game_state_after_round"
+
+        try:
+            async with self._trace_lock_guard(
+                lock_key=lock_key,
+                chat_id=chat_id,
+                game=game,
+                stage_label=stage_label,
+                event_stage_label=event_stage_label,
+                timeout=self._stage_lock_timeout,
+                retry_without_timeout=True,
+                retry_stage_label="chat_guard_timeout:reset_game_state_after_round",
+            ):
+                await _run_locked()
+        except TimeoutError:
+            self._log_engine_event_lock_failure(
+                lock_key=lock_key,
+                event_stage_label=event_stage_label,
+                chat_id=chat_id,
+                game=game,
+            )
+            raise
+
     async def _process_fold_win(
         self,
         game: Game,
