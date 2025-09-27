@@ -127,7 +127,11 @@ class TableManager:
         await self._update_player_index(chat_id, game)
 
     async def _update_player_index(self, chat_id: ChatId, game: Game) -> None:
-        players = {str(player.user_id) for player in game.players}
+        players = {
+            str(player.user_id)
+            for player in game.players
+            if getattr(player, "user_id", None) not in (None, "")
+        }
         players_key = self._chat_players_key(chat_id)
 
         previous_players_raw = await self._redis_ops.safe_smembers(
