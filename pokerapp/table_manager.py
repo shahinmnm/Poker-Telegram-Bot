@@ -1,6 +1,7 @@
 import json
 import logging
 import pickle
+import time
 from datetime import datetime
 from typing import Dict, Optional, Union
 
@@ -61,7 +62,17 @@ class TableManager:
 
     async def get_game(self, chat_id: ChatId) -> Game:
         """Load the chat's game, creating one if necessary."""
+        section_start = time.time()
+        logging.getLogger(__name__).debug(
+            "[LOCK_SECTION_START] chat_id=%s action=get_game",
+            chat_id,
+        )
         if chat_id in self._tables:
+            logging.getLogger(__name__).debug(
+                "[LOCK_SECTION_END] chat_id=%s action=get_game elapsed=%.3fs",
+                chat_id,
+                time.time() - section_start,
+            )
             return self._tables[chat_id]
 
         extra = {"chat_id": chat_id}
@@ -83,6 +94,11 @@ class TableManager:
             await self._save(chat_id, game)
 
         self._tables[chat_id] = game
+        logging.getLogger(__name__).debug(
+            "[LOCK_SECTION_END] chat_id=%s action=get_game elapsed=%.3fs",
+            chat_id,
+            time.time() - section_start,
+        )
         return game
 
     async def save_game(self, chat_id: ChatId, game: Game) -> None:
@@ -124,6 +140,11 @@ class TableManager:
 
     # Internal -----------------------------------------------------------
     async def _save(self, chat_id: ChatId, game: Game) -> None:
+        section_start = time.time()
+        self._redis_ops.logger.debug(
+            "[LOCK_SECTION_START] chat_id=%s action=_save",
+            chat_id,
+        )
         try:
             data = pickle.dumps(game)
             await self._redis_ops.safe_set(
@@ -132,6 +153,11 @@ class TableManager:
                 log_extra={"chat_id": chat_id},
             )
             await self._update_player_index(chat_id, game)
+            self._redis_ops.logger.debug(
+                "[LOCK_SECTION_END] chat_id=%s action=_save elapsed=%.3fs",
+                chat_id,
+                time.time() - section_start,
+            )
         except Exception as exc:  # noqa: BLE001 - we need broad exception for logging context
             logger = getattr(self, "_logger", logging.getLogger(__name__))
             players_attr = getattr(game, "players", [])
