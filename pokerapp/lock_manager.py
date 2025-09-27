@@ -630,6 +630,29 @@ class LockManager:
         finally:
             self.release(key, context=combined_context)
 
+    def trace_guard(
+        self,
+        key: str,
+        *,
+        timeout: Optional[float] = None,
+        context: Optional[Mapping[str, Any]] = None,
+        context_extra: Optional[Mapping[str, Any]] = None,
+        level: Optional[int] = None,
+        timeout_log_level: Optional[int] = logging.WARNING,
+        failure_log_level: Optional[int] = logging.ERROR,
+    ) -> AsyncIterator[None]:
+        """Alias for :meth:`guard` used by traced lock helpers."""
+
+        return self.guard(
+            key,
+            timeout=timeout,
+            context=context,
+            context_extra=context_extra,
+            level=level,
+            timeout_log_level=timeout_log_level,
+            failure_log_level=failure_log_level,
+        )
+
     def release(
         self, key: str, context: Optional[Mapping[str, Any]] = None
     ) -> None:
