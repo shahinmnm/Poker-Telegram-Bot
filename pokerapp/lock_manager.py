@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import json
 import logging
 import math
+import time
 from contextlib import asynccontextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
@@ -235,10 +237,42 @@ class LockManager:
         if task is None:
             raise RuntimeError("LockManager.acquire requires an active asyncio task")
 
+        call_site = "unknown"
+        frame = inspect.currentframe()
+        try:
+            if frame is not None:
+                outer_frames = inspect.getouterframes(frame, 3)
+                if len(outer_frames) >= 3:
+                    call_site = f"{outer_frames[2].filename}:{outer_frames[2].lineno}"
+                elif len(outer_frames) >= 2:
+                    call_site = f"{outer_frames[1].filename}:{outer_frames[1].lineno}"
+        except Exception:
+            call_site = "unknown"
+        finally:
+            del frame
+
+        acquire_start_ts = time.time()
+
         lock = await self._get_lock(key)
         resolved_level = self._resolve_level(key, override=level)
         context_payload = self._build_context_payload(
             key, resolved_level, additional=context
+        )
+        trace_start_extra = self._log_extra(
+            context_payload,
+            event_type="lock_trace_acquire_start",
+            lock_key=key,
+            lock_level=resolved_level,
+            call_site=call_site,
+            task=self._describe_task(task),
+            acquire_start_ts=acquire_start_ts,
+        )
+        self._logger.debug(
+            "[LOCK_TRACE] START acquire key=%s from=%s task=%s",
+            key,
+            call_site,
+            self._describe_task(task),
+            extra=trace_start_extra,
         )
         current_acquisitions = self._get_current_acquisitions()
         self._validate_lock_order(current_acquisitions, key, resolved_level, context_payload)
@@ -291,8 +325,29 @@ class LockManager:
                     await lock.acquire()
                 else:
                     await asyncio.wait_for(lock.acquire(), timeout=attempt_timeout)
+                setattr(lock, "_acquired_at_ts", time.time())
+                setattr(lock, "_acquired_by_callsite", call_site)
                 elapsed = loop.time() - attempt_start
                 self._record_acquired(key, resolved_level, context_payload)
+                trace_acquired_extra = self._log_extra(
+                    context_payload,
+                    event_type="lock_trace_acquired",
+                    lock_key=key,
+                    lock_level=resolved_level,
+                    call_site=call_site,
+                    task=self._describe_task(task),
+                    wait_duration=elapsed,
+                    total_duration=time.time() - acquire_start_ts,
+                )
+                self._logger.debug(
+                    "[LOCK_TRACE] ACQUIRED key=%s by=%s in %.3fs (waited=%.3fs) from=%s",
+                    key,
+                    self._describe_task(task),
+                    time.time() - acquire_start_ts,
+                    elapsed,
+                    call_site,
+                    extra=trace_acquired_extra,
+                )
                 if attempt == 0 and elapsed < 0.1:
                     self._logger.info(
                         "%s acquired quickly in %.3fs%s",
@@ -570,12 +625,50 @@ class LockManager:
     def release(
         self, key: str, context: Optional[Mapping[str, Any]] = None
     ) -> None:
+        release_site = "unknown"
+        frame = inspect.currentframe()
+        try:
+            if frame is not None:
+                outer_frames = inspect.getouterframes(frame, 3)
+                if len(outer_frames) >= 3:
+                    release_site = (
+                        f"{outer_frames[2].filename}:{outer_frames[2].lineno}"
+                    )
+                elif len(outer_frames) >= 2:
+                    release_site = (
+                        f"{outer_frames[1].filename}:{outer_frames[1].lineno}"
+                    )
+        except Exception:
+            release_site = "unknown"
+        finally:
+            del frame
+
+        try:
+            task = asyncio.current_task()
+        except RuntimeError:
+            task = None
+
         lock = self._locks.get(key)
         base_context = dict(context or {})
         if lock is None:
             resolved_level = self._resolve_level(key, override=None)
             unknown_context = self._build_context_payload(
                 key, resolved_level, additional=base_context
+            )
+            trace_unknown_extra = self._log_extra(
+                unknown_context,
+                event_type="lock_trace_release_unknown",
+                lock_key=key,
+                lock_level=resolved_level,
+                release_site=release_site,
+                task=self._describe_task(task) if task else None,
+            )
+            self._logger.debug(
+                "[LOCK_TRACE] RELEASE unknown key=%s by=%s from=%s",
+                key,
+                self._describe_task(task) if task else None,
+                release_site,
+                extra=trace_unknown_extra,
             )
             self._logger.debug(
                 "Release requested for unknown %s%s",
@@ -590,7 +683,6 @@ class LockManager:
             )
             return
 
-        task = asyncio.current_task()
         record_entry: Optional[Tuple[int, _LockAcquisition]] = None
         if task is not None:
             record_entry = self._find_lock_record(task, key)
@@ -604,6 +696,32 @@ class LockManager:
         )
         context_payload = self._build_context_payload(
             key, release_level, additional=base_context
+        )
+
+        held_duration: Optional[float] = None
+        acquired_by = getattr(lock, "_acquired_by_callsite", None)
+        acquired_at_ts = getattr(lock, "_acquired_at_ts", None)
+        if isinstance(acquired_at_ts, (int, float)):
+            held_duration = max(0.0, time.time() - acquired_at_ts)
+
+        trace_release_extra = self._log_extra(
+            context_payload,
+            event_type="lock_trace_release",
+            lock_key=key,
+            lock_level=context_payload.get("lock_level"),
+            release_site=release_site,
+            acquired_from=acquired_by,
+            held_duration=held_duration,
+            task=self._describe_task(task) if task else None,
+        )
+        self._logger.debug(
+            "[LOCK_TRACE] RELEASE key=%s by=%s (held_for=%.3fs) acquired_from=%s released_from=%s",
+            key,
+            self._describe_task(task) if task else None,
+            held_duration if held_duration is not None else -1.0,
+            acquired_by,
+            release_site,
+            extra=trace_release_extra,
         )
         try:
             lock.release()
