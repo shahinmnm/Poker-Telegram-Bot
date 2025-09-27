@@ -1028,13 +1028,22 @@ class GameEngine:
         self._log_lock_snapshot(stage="before_start_game", level=logging.INFO)
 
         lock_key = self._stage_lock_key(chat_id)
+        lock_context = self._build_lock_context(chat_id=chat_id, game=game)
         try:
-            await self._matchmaking_service.start_game(
-                context=context,
-                game=game,
+            async with self._trace_lock_guard(
+                lock_key=lock_key,
                 chat_id=chat_id,
-                build_identity_from_player=self._build_identity_from_player,
-            )
+                game=game,
+                stage_label="stage_lock:start_game",
+                timeout_seconds=self._stage_lock_timeout,
+                context=lock_context,
+            ):
+                await self._matchmaking_service.start_game(
+                    context=context,
+                    game=game,
+                    chat_id=chat_id,
+                    build_identity_from_player=self._build_identity_from_player,
+                )
         except TimeoutError:
             self._log_engine_event_lock_failure(
                 lock_key=lock_key,
@@ -1922,32 +1931,41 @@ class GameEngine:
         """Register a confirmation vote and cancel the hand if approved."""
 
         lock_key = self._stage_lock_key(chat_id)
+        lock_context = self._build_lock_context(chat_id=chat_id, game=game)
         try:
-            stop_request = self._validate_stop_request(context=context, game=game)
-
-            manager_id = context.chat_data.get("game_manager_id")
-            active_ids = set(stop_request.get("active_players", []))
-            votes: Set[UserId] = set(stop_request.get("votes", set()))
-
-            self._validate_stop_voter(voter_id, active_ids, manager_id)
-
-            updated_request = await self._update_votes_and_message(
-                context=context,
-                game=game,
+            async with self._trace_lock_guard(
+                lock_key=lock_key,
                 chat_id=chat_id,
-                stop_request=stop_request,
-                voter_id=voter_id,
-                manager_id=manager_id,
-                votes=votes,
-            )
-
-            await self._check_if_stop_passes(
                 game=game,
-                chat_id=chat_id,
-                context=context,
-                stop_request=updated_request,
-                active_ids=active_ids,
-            )
+                stage_label="stop_lock:confirm_stop_vote",
+                timeout_seconds=self._stage_lock_timeout,
+                context=lock_context,
+            ):
+                stop_request = self._validate_stop_request(context=context, game=game)
+
+                manager_id = context.chat_data.get("game_manager_id")
+                active_ids = set(stop_request.get("active_players", []))
+                votes: Set[UserId] = set(stop_request.get("votes", set()))
+
+                self._validate_stop_voter(voter_id, active_ids, manager_id)
+
+                updated_request = await self._update_votes_and_message(
+                    context=context,
+                    game=game,
+                    chat_id=chat_id,
+                    stop_request=stop_request,
+                    voter_id=voter_id,
+                    manager_id=manager_id,
+                    votes=votes,
+                )
+
+                await self._check_if_stop_passes(
+                    game=game,
+                    chat_id=chat_id,
+                    context=context,
+                    stop_request=updated_request,
+                    active_ids=active_ids,
+                )
         except TimeoutError:
             self._log_engine_event_lock_failure(
                 lock_key=lock_key,
@@ -1967,29 +1985,38 @@ class GameEngine:
         """Cancel a pending stop request and resume play."""
 
         lock_key = self._stage_lock_key(chat_id)
+        lock_context = self._build_lock_context(chat_id=chat_id, game=game)
         try:
-            stop_request = context.chat_data.get(self.KEY_STOP_REQUEST)
-            if not stop_request or stop_request.get("game_id") != game.id:
-                raise UserException(self.ERROR_NO_REQUEST_TO_RESUME)
+            async with self._trace_lock_guard(
+                lock_key=lock_key,
+                chat_id=chat_id,
+                game=game,
+                stage_label="stop_lock:resume_stop_vote",
+                timeout_seconds=self._stage_lock_timeout,
+                context=lock_context,
+            ):
+                stop_request = context.chat_data.get(self.KEY_STOP_REQUEST)
+                if not stop_request or stop_request.get("game_id") != game.id:
+                    raise UserException(self.ERROR_NO_REQUEST_TO_RESUME)
 
-            message_id = stop_request.get("message_id")
-            context.chat_data.pop(self.KEY_STOP_REQUEST, None)
+                message_id = stop_request.get("message_id")
+                context.chat_data.pop(self.KEY_STOP_REQUEST, None)
 
-            await self._telegram_ops.edit_message_text(
-                chat_id,
-                message_id,
-                self.STOP_RESUME_NOTICE,
-                reply_markup=None,
-                request_category=RequestCategory.GENERAL,
-                log_extra=self._build_telegram_log_extra(
-                    chat_id=chat_id,
-                    message_id=message_id,
-                    game_id=getattr(game, "id", None),
-                    operation="stop_vote_resume_message",
+                await self._telegram_ops.edit_message_text(
+                    chat_id,
+                    message_id,
+                    self.STOP_RESUME_NOTICE,
+                    reply_markup=None,
                     request_category=RequestCategory.GENERAL,
-                ),
-                current_game_id=getattr(game, "id", None),
-            )
+                    log_extra=self._build_telegram_log_extra(
+                        chat_id=chat_id,
+                        message_id=message_id,
+                        game_id=getattr(game, "id", None),
+                        operation="stop_vote_resume_message",
+                        request_category=RequestCategory.GENERAL,
+                    ),
+                    current_game_id=getattr(game, "id", None),
+                )
         except TimeoutError:
             self._log_engine_event_lock_failure(
                 lock_key=lock_key,
@@ -2167,27 +2194,36 @@ class GameEngine:
         game: Optional[Game] = None,
     ) -> None:
         lock_key = self._stage_lock_key(chat_id)
+        lock_context = self._build_lock_context(chat_id=chat_id, game=game)
         try:
-            message_text = self._build_stop_cancellation_message(stop_request)
+            async with self._trace_lock_guard(
+                lock_key=lock_key,
+                chat_id=chat_id,
+                game=game,
+                stage_label="stop_lock:finalize_stop_request",
+                timeout_seconds=self._stage_lock_timeout,
+                context=lock_context,
+            ):
+                message_text = self._build_stop_cancellation_message(stop_request)
 
-            current_message_id = stop_request.get("message_id")
-            await self._telegram_ops.edit_message_text(
-                chat_id,
-                current_message_id,
-                message_text,
-                reply_markup=None,
-                request_category=RequestCategory.GENERAL,
-                log_extra=self._build_telegram_log_extra(
-                    chat_id=chat_id,
-                    message_id=current_message_id,
-                    game_id=stop_request.get("game_id"),
-                    operation="stop_vote_finalize_message",
+                current_message_id = stop_request.get("message_id")
+                await self._telegram_ops.edit_message_text(
+                    chat_id,
+                    current_message_id,
+                    message_text,
+                    reply_markup=None,
                     request_category=RequestCategory.GENERAL,
-                ),
-                current_game_id=stop_request.get("game_id"),
-            )
+                    log_extra=self._build_telegram_log_extra(
+                        chat_id=chat_id,
+                        message_id=current_message_id,
+                        game_id=stop_request.get("game_id"),
+                        operation="stop_vote_finalize_message",
+                        request_category=RequestCategory.GENERAL,
+                    ),
+                    current_game_id=stop_request.get("game_id"),
+                )
 
-            context.chat_data.pop(self.KEY_STOP_REQUEST, None)
+                context.chat_data.pop(self.KEY_STOP_REQUEST, None)
         except TimeoutError:
             self._log_engine_event_lock_failure(
                 lock_key=lock_key,
