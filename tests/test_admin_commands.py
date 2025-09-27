@@ -1,132 +1,133 @@
-import json
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
 from pokerapp.pokerbotmodel import PokerBotModel
+from pokerapp.utils.request_metrics import RequestCategory
 
 
-def _make_model(admin_chat_id=123):
+def _make_model(admin_chat_id=123, with_messaging: bool = True):
     view = SimpleNamespace(_admin_chat_id=admin_chat_id)
     view.send_message = AsyncMock()
-    safe_get = AsyncMock()
-    redis_ops = SimpleNamespace(safe_get=safe_get)
-    table_manager = SimpleNamespace(_redis_ops=redis_ops)
+    messaging_service = None
+    if with_messaging:
+        messaging_service = SimpleNamespace(
+            send_message=AsyncMock(),
+            send_last_save_error_to_admin=AsyncMock(),
+        )
 
     model = object.__new__(PokerBotModel)
     model._view = view
-    model._table_manager = table_manager
     model._logger = MagicMock()
-    return model, view.send_message, safe_get
+    model._messaging_service = messaging_service
+    return model, messaging_service, view.send_message
 
 
 @pytest.mark.asyncio
 async def test_handle_admin_command_ignored_without_admin_chat():
-    model, send_message, safe_get = _make_model(admin_chat_id=None)
+    model, messaging_service, send_message = _make_model(
+        admin_chat_id=None
+    )
 
-    await model.handle_admin_command("/get_save_error", [])
+    await model.handle_admin_command("/get_save_error", [], None)
 
+    if messaging_service is not None:
+        messaging_service.send_message.assert_not_awaited()
+        messaging_service.send_last_save_error_to_admin.assert_not_awaited()
     send_message.assert_not_awaited()
-    safe_get.assert_not_awaited()
 
 
 @pytest.mark.asyncio
 async def test_handle_admin_command_usage_message():
-    model, send_message, safe_get = _make_model()
+    model, messaging_service, send_message = _make_model()
 
-    await model.handle_admin_command("/get_save_error", [])
+    await model.handle_admin_command("/get_save_error", [], 123)
 
-    send_message.assert_awaited_once()
-    args, _ = send_message.await_args
-    assert args[0] == 123
-    assert args[1] == "Usage: /get_save_error <chat_id> [detailed]"
-    safe_get.assert_not_awaited()
+    messaging_service.send_message.assert_awaited_once()
+    kwargs = messaging_service.send_message.await_args.kwargs
+    assert kwargs["chat_id"] == 123
+    assert (
+        kwargs["text"] == "Usage: /get_save_error <chat_id> [detailed]"
+    )
+    assert kwargs["request_category"] == RequestCategory.GENERAL
+    send_message.assert_not_awaited()
 
 
 @pytest.mark.asyncio
 async def test_handle_admin_command_invalid_chat_id():
-    model, send_message, safe_get = _make_model()
+    model, messaging_service, send_message = _make_model()
 
-    await model.handle_admin_command("/get_save_error", ["abc"])
+    await model.handle_admin_command("/get_save_error", ["abc"], 123)
 
-    send_message.assert_awaited_once()
-    args, _ = send_message.await_args
-    assert args[1] == "Invalid chat_id: abc"
-    safe_get.assert_not_awaited()
+    messaging_service.send_message.assert_awaited_once()
+    kwargs = messaging_service.send_message.await_args.kwargs
+    assert kwargs["text"] == "Invalid chat_id: abc"
+    assert kwargs["request_category"] == RequestCategory.GENERAL
+    messaging_service.send_last_save_error_to_admin.assert_not_awaited()
+    send_message.assert_not_awaited()
 
 
 @pytest.mark.asyncio
 async def test_handle_admin_command_unknown_command():
-    model, send_message, safe_get = _make_model()
+    model, messaging_service, send_message = _make_model()
 
-    await model.handle_admin_command("/unknown", ["1"])
+    await model.handle_admin_command("/unknown", ["1"], 123)
 
+    messaging_service.send_message.assert_not_awaited()
+    messaging_service.send_last_save_error_to_admin.assert_not_awaited()
     send_message.assert_not_awaited()
-    safe_get.assert_not_awaited()
 
 
 @pytest.mark.asyncio
 async def test_handle_admin_command_no_payload():
-    model, send_message, safe_get = _make_model()
-    safe_get.return_value = None
+    model, messaging_service, send_message = _make_model()
 
-    await model.handle_admin_command("/get_save_error", ["101"])
+    await model.handle_admin_command("/get_save_error", ["101"], 123)
 
-    safe_get.assert_awaited_once_with(
-        "chat:101:last_save_error", log_extra={"chat_id": 101}
+    messaging_service.send_last_save_error_to_admin.assert_awaited_once_with(
+        admin_chat_id=123, chat_id=101, detailed=False
     )
-    args, _ = send_message.await_args
-    assert args[1] == "No save error found for chat 101"
+    messaging_service.send_message.assert_not_awaited()
+    send_message.assert_not_awaited()
 
 
 @pytest.mark.asyncio
 async def test_handle_admin_command_basic_payload():
-    model, send_message, safe_get = _make_model()
-    safe_get.return_value = json.dumps(
-        {"error": "boom", "timestamp": "2024-01-01T00:00:00Z"}
-    )
+    model, messaging_service, send_message = _make_model()
 
-    await model.handle_admin_command("/get_save_error", ["77"])
+    await model.handle_admin_command("/get_save_error", ["77"], 123)
 
-    safe_get.assert_awaited_once_with(
-        "chat:77:last_save_error", log_extra={"chat_id": 77}
+    messaging_service.send_last_save_error_to_admin.assert_awaited_once_with(
+        admin_chat_id=123, chat_id=77, detailed=False
     )
-    args, _ = send_message.await_args
-    assert args[1] == "Error: boom\nTime: 2024-01-01T00:00:00Z"
+    send_message.assert_not_awaited()
 
 
 @pytest.mark.asyncio
 async def test_handle_admin_command_detailed_payload():
-    model, send_message, safe_get = _make_model()
-    safe_get.return_value = json.dumps(
-        {
-            "chat_id": 77,
-            "timestamp": "2024",
-            "game_state": "WAITING",
-            "exception": "boom",
-            "player_count": 1,
-            "players": [{"user_id": 1, "seat_index": 2, "role": "dealer"}],
-        }
-    )
+    model, messaging_service, send_message = _make_model()
 
-    await model.handle_admin_command("/get_save_error", ["77", "detailed"])
+    await model.handle_admin_command("/get_save_error", ["77", "detailed"], 123)
 
-    safe_get.assert_awaited_once_with(
-        "chat:77:last_save_error_detailed", log_extra={"chat_id": 77}
+    messaging_service.send_last_save_error_to_admin.assert_awaited_once_with(
+        admin_chat_id=123, chat_id=77, detailed=True
     )
-    args, _ = send_message.await_args
-    assert "Players (1):" in args[1]
-    assert " - 1 seat 2 role dealer" in args[1]
+    messaging_service.send_message.assert_not_awaited()
+    send_message.assert_not_awaited()
 
 
 @pytest.mark.asyncio
 async def test_handle_admin_command_fallback_raw_payload():
-    model, send_message, safe_get = _make_model()
-    safe_get.return_value = b"not-json"
+    model, messaging_service, send_message = _make_model(with_messaging=False)
 
-    await model.handle_admin_command("/get_save_error", ["55"])
+    await model.handle_admin_command("/get_save_error", ["55"], 123)
 
-    args, _ = send_message.await_args
-    assert "Raw: not-json" in args[1]
+    send_message.assert_awaited_once()
+    call_args = send_message.await_args
+    assert call_args.args[0] == 123
+    assert (
+        call_args.args[1]
+        == "Messaging service unavailable; cannot retrieve save errors."
+    )
 

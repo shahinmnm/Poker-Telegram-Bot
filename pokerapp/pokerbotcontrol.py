@@ -167,7 +167,7 @@ class PokerBotCotroller:
             return
 
         args = list(getattr(context, "args", []) or [])
-        await self._model.handle_admin_command("/get_save_error", args)
+        await self._model.handle_admin_command("/get_save_error", args, admin_chat_id)
 
     async def _handle_ready(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         chat_id = None
