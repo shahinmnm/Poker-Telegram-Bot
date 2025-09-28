@@ -893,10 +893,11 @@ class PokerBotModel:
     ) -> None:
         game_to_start: Optional[Game] = None
 
+        game = await self._table_manager.get_game(chat_id)
+
         async with self._chat_guard(
             chat_id, event_stage_label="countdown_expiry"
         ):
-            game = await self._table_manager.get_game(chat_id)
             if str(getattr(game, "id", None)) != str(game_id):
                 return
             if game.state != GameState.INITIAL:
@@ -1020,10 +1021,11 @@ class PokerBotModel:
         game_for_start: Optional[Game] = None
         early_exit = False
 
+        game = await self._table_manager.get_game(chat_id)
+
         async with self._chat_guard(
             chat_id, event_stage_label="auto_start_tick"
         ):
-            game = await self._table_manager.get_game(chat_id)
             context.chat_data[KEY_CHAT_DATA_GAME] = game
             current_state_token = self._state_token(game.state)
             job_data = getattr(job, "data", {})
@@ -1780,18 +1782,23 @@ class PokerBotModel:
             )
             raise
 
-        turn_update: Optional[TurnMessageUpdate] = None
         async with self._chat_guard(
             chat_id, event_stage_label="send_turn_message", game=game
         ):
-            turn_update = await self._view.update_turn_message(
-                chat_id=chat_id,
-                game=game,
-                player=player,
-                money=money,
-                message_id=previous_message_id,
-                recent_actions=recent_actions,
-            )
+            # The chat guard is used purely to serialize turn updates; the
+            # potentially slow Telegram call is executed after the guard is
+            # released to avoid holding the `chat:` lock while awaiting
+            # network I/O.
+            pass
+
+        turn_update: Optional[TurnMessageUpdate] = await self._view.update_turn_message(
+            chat_id=chat_id,
+            game=game,
+            player=player,
+            money=money,
+            message_id=previous_message_id,
+            recent_actions=recent_actions,
+        )
 
         now_value = now_utc()
         try:
