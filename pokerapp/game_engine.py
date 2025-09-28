@@ -1066,7 +1066,7 @@ class GameEngine:
         chat_id: ChatId,
         game: Game,
     ) -> bool:
-        async def _run_locked() -> bool:
+        async def _progress_locked() -> bool:
             return await self._matchmaking_service.progress_stage(
                 context=context,
                 chat_id=chat_id,
@@ -1077,7 +1077,7 @@ class GameEngine:
         lock_key = self._stage_lock_key(chat_id)
         stage_label = "stage_lock:progress_stage"
         event_stage_label = "progress_stage"
-        retry_stage_label = "chat_guard_timeout:progress_stage"
+        # Migrated to _trace_lock_guard for audited stage lock acquisition
         try:
             async with self._trace_lock_guard(
                 lock_key=lock_key,
@@ -1086,10 +1086,8 @@ class GameEngine:
                 stage_label=stage_label,
                 event_stage_label=event_stage_label,
                 timeout=self._stage_lock_timeout,
-                retry_without_timeout=True,
-                retry_stage_label=retry_stage_label,
             ):
-                return await _run_locked()
+                return await _progress_locked()
         except TimeoutError:
             self._log_engine_event_lock_failure(
                 lock_key=lock_key,
