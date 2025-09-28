@@ -966,22 +966,26 @@ class GameEngine:
         lock_key = self._stage_lock_key(chat_id)
         stage_label = "stage_lock:start_game"
         event_stage_label = "start_game"
+
+        async def _run_locked() -> None:
+            await self._matchmaking_service.start_game(
+                context=context,
+                game=game,
+                chat_id=chat_id,
+                build_identity_from_player=self._build_identity_from_player,
+            )
+
         try:
+            # Migrated to _trace_lock_guard for audited stage lock acquisition
             async with self._trace_lock_guard(
-                lock_key=lock_key,
+                lock_key=self._stage_lock_key(chat_id),
                 chat_id=chat_id,
                 game=game,
                 stage_label=stage_label,
                 event_stage_label=event_stage_label,
                 timeout=self._stage_lock_timeout,
-                retry_without_timeout=False,
             ):
-                await self._matchmaking_service.start_game(
-                    context=context,
-                    game=game,
-                    chat_id=chat_id,
-                    build_identity_from_player=self._build_identity_from_player,
-                )
+                await _run_locked()
         except TimeoutError:
             self._log_engine_event_lock_failure(
                 lock_key=lock_key,
