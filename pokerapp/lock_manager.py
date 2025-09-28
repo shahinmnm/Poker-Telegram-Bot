@@ -240,19 +240,7 @@ class LockManager:
         if task is None:
             raise RuntimeError("LockManager.acquire requires an active asyncio task")
 
-        call_site = "unknown"
-        frame = inspect.currentframe()
-        try:
-            if frame is not None:
-                outer_frames = inspect.getouterframes(frame, 3)
-                if len(outer_frames) >= 3:
-                    call_site = f"{outer_frames[2].filename}:{outer_frames[2].lineno}"
-                elif len(outer_frames) >= 2:
-                    call_site = f"{outer_frames[1].filename}:{outer_frames[1].lineno}"
-        except Exception:
-            call_site = "unknown"
-        finally:
-            del frame
+        call_site, call_function = self._resolve_call_site()
 
         acquire_start_ts = time.time()
 
@@ -267,13 +255,15 @@ class LockManager:
             lock_key=key,
             lock_level=resolved_level,
             call_site=call_site,
+            call_site_function=call_function,
             task=self._describe_task(task),
             acquire_start_ts=acquire_start_ts,
         )
         self._logger.debug(
-            "[LOCK_TRACE] START acquire key=%s from=%s task=%s",
+            "[LOCK_TRACE] START acquire key=%s from=%s (%s) task=%s",
             key,
             call_site,
+            call_function,
             self._describe_task(task),
             extra=trace_start_extra,
         )
@@ -286,6 +276,8 @@ class LockManager:
             lock_key=key,
             lock_level=resolved_level,
             acquisition_order=acquisition_order,
+            call_site=call_site,
+            call_site_function=call_function,
         )
         acquiring_extra.setdefault("lock_name", context_payload.get("lock_name", key))
         acquiring_extra.setdefault("chat_id", context_payload.get("chat_id"))
@@ -332,6 +324,7 @@ class LockManager:
                 lock_acquired = True
                 setattr(lock, "_acquired_at_ts", time.time())
                 setattr(lock, "_acquired_by_callsite", call_site)
+                setattr(lock, "_acquired_by_function", call_function)
                 setattr(lock, "_acquired_by_task", self._describe_task(task))
                 elapsed = loop.time() - attempt_start
                 self._record_acquired(key, resolved_level, context_payload)
@@ -345,17 +338,19 @@ class LockManager:
                     lock_key=key,
                     lock_level=resolved_level,
                     call_site=call_site,
+                    call_site_function=call_function,
                     task=self._describe_task(task),
                     wait_duration=elapsed,
                     total_duration=time.time() - acquire_start_ts,
                 )
                 self._logger.debug(
-                    "[LOCK_TRACE] ACQUIRED key=%s by=%s in %.3fs (waited=%.3fs) from=%s",
+                    "[LOCK_TRACE] ACQUIRED key=%s by=%s in %.3fs (waited=%.3fs) from=%s (%s)",
                     key,
                     self._describe_task(task),
                     time.time() - acquire_start_ts,
                     elapsed,
                     call_site,
+                    call_function,
                     extra=trace_acquired_extra,
                 )
                 if attempt == 0 and elapsed < 0.1:
@@ -371,6 +366,8 @@ class LockManager:
                             lock_level=resolved_level,
                             attempts=attempt + 1,
                             attempt_duration=elapsed,
+                            call_site=call_site,
+                            call_site_function=call_function,
                         ),
                     )
                 else:
@@ -387,6 +384,8 @@ class LockManager:
                             lock_level=resolved_level,
                             attempts=attempt + 1,
                             attempt_duration=elapsed,
+                            call_site=call_site,
+                            call_site_function=call_function,
                         ),
                     )
                 return True
@@ -695,23 +694,7 @@ class LockManager:
     def release(
         self, key: str, context: Optional[Mapping[str, Any]] = None
     ) -> None:
-        release_site = "unknown"
-        frame = inspect.currentframe()
-        try:
-            if frame is not None:
-                outer_frames = inspect.getouterframes(frame, 3)
-                if len(outer_frames) >= 3:
-                    release_site = (
-                        f"{outer_frames[2].filename}:{outer_frames[2].lineno}"
-                    )
-                elif len(outer_frames) >= 2:
-                    release_site = (
-                        f"{outer_frames[1].filename}:{outer_frames[1].lineno}"
-                    )
-        except Exception:
-            release_site = "unknown"
-        finally:
-            del frame
+        release_site, release_function = self._resolve_call_site()
 
         try:
             task = asyncio.current_task()
@@ -736,13 +719,15 @@ class LockManager:
                 lock_key=key,
                 lock_level=resolved_level,
                 release_site=release_site,
+                release_function=release_function,
                 task=self._describe_task(task) if task else None,
             )
             self._logger.debug(
-                "[LOCK_TRACE] RELEASE unknown key=%s by=%s from=%s",
+                "[LOCK_TRACE] RELEASE unknown key=%s by=%s from=%s (%s)",
                 key,
                 self._describe_task(task) if task else None,
                 release_site,
+                release_function,
                 extra=trace_unknown_extra,
             )
             self._logger.debug(
@@ -754,6 +739,7 @@ class LockManager:
                     event_type="lock_release_unknown",
                     lock_key=key,
                     lock_level=unknown_context.get("lock_level"),
+                    release_function=release_function,
                 ),
             )
             return
@@ -786,6 +772,7 @@ class LockManager:
 
         held_duration: Optional[float] = None
         acquired_by = getattr(lock, "_acquired_by_callsite", None)
+        acquired_function = getattr(lock, "_acquired_by_function", None)
         acquired_task = getattr(lock, "_acquired_by_task", None)
         acquired_at_ts = getattr(lock, "_acquired_at_ts", None)
         if isinstance(acquired_at_ts, (int, float)):
@@ -798,16 +785,20 @@ class LockManager:
             lock_key=key,
             lock_level=context_payload.get("lock_level"),
             release_site=release_site,
+            release_function=release_function,
             acquired_from=acquired_by,
+            acquired_function=acquired_function,
             held_duration=held_duration,
             holding_duration=holding_duration,
             task=self._describe_task(task) if task else None,
             acquired_task=acquired_task,
         )
         self._logger.debug(
-            "[LOCK_TRACE] RELEASE lock_key=%s held_for=%.3fs%s",
+            "[LOCK_TRACE] RELEASE lock_key=%s held_for=%.3fs from=%s (%s)%s",
             key,
             holding_duration if holding_duration is not None else -1.0,
+            release_site,
+            release_function,
             context_suffix,
             extra=trace_release_extra,
         )
@@ -823,12 +814,15 @@ class LockManager:
                 lock_level=context_payload.get("lock_level"),
                 holding_duration=holding_duration,
                 release_site=release_site,
+                release_function=release_function,
                 task=self._describe_task(task) if task else None,
             )
             self._logger.warning(
-                "[LOCK_TRACE] LONG HOLD on release lock_key=%s held_for=%.3fs%s",
+                "[LOCK_TRACE] LONG HOLD on release lock_key=%s held_for=%.3fs from=%s (%s)%s",
                 key,
                 holding_duration,
+                release_site,
+                release_function,
                 context_suffix,
                 extra=long_hold_extra,
             )
@@ -840,13 +834,16 @@ class LockManager:
                 lock_level=context_payload.get("lock_level"),
                 holding_duration=holding_duration,
                 release_site=release_site,
+                release_function=release_function,
                 task=self._describe_task(task) if task else None,
             )
             snapshot_json = json.dumps(snapshot, ensure_ascii=False, default=str)
             self._logger.warning(
-                "[LOCK_TRACE] SNAPSHOT long hold lock_key=%s snapshot=%s%s",
+                "[LOCK_TRACE] SNAPSHOT long hold lock_key=%s snapshot=%s from=%s (%s)%s",
                 key,
                 snapshot_json,
+                release_site,
+                release_function,
                 context_suffix,
                 extra=snapshot_extra,
             )
@@ -862,6 +859,8 @@ class LockManager:
                     event_type="lock_release_error",
                     lock_key=key,
                     lock_level=context_payload.get("lock_level"),
+                    release_site=release_site,
+                    release_function=release_function,
                 ),
             )
             raise
@@ -887,6 +886,8 @@ class LockManager:
                     event_type="lock_released",
                     lock_key=key,
                     lock_level=context_payload.get("lock_level"),
+                    release_site=release_site,
+                    release_function=release_function,
                 ),
             )
 
@@ -1202,5 +1203,29 @@ class LockManager:
     def _describe_task(self, task: asyncio.Task[Any]) -> str:
         name = task.get_name()
         return f"{name}#{id(task):x}"
+
+    def _resolve_call_site(self) -> Tuple[str, str]:
+        call_site = "unknown"
+        function_name = "unknown"
+        frame = inspect.currentframe()
+        try:
+            if frame is not None:
+                outer_frames = inspect.getouterframes(frame, 3)
+                target = None
+                if len(outer_frames) >= 3:
+                    target = outer_frames[2]
+                elif len(outer_frames) >= 2:
+                    target = outer_frames[1]
+                if target is not None:
+                    call_site = f"{target.filename}:{target.lineno}"
+                    if getattr(target, "function", None):
+                        function_name = str(target.function)
+                del outer_frames
+        except Exception:
+            call_site = "unknown"
+            function_name = "unknown"
+        finally:
+            del frame
+        return call_site, function_name
 
 __all__ = ["LockManager", "LockOrderError"]
