@@ -1730,22 +1730,50 @@ class GameEngine:
     ) -> None:
         """Validate and submit a stop request for the active hand."""
 
-        if game.state == GameState.INITIAL:
-            await self._player_manager.cleanup_ready_prompt(game, chat_id)
-            clear_all_message_ids(game)
+        async def _stop_locked() -> None:
+            if game.state == GameState.INITIAL:
+                await self._player_manager.cleanup_ready_prompt(game, chat_id)
+                clear_all_message_ids(game)
+                await self._table_manager.save_game(chat_id, game)
+                raise UserException(self.ERROR_NO_ACTIVE_GAME)
+
+            if not any(
+                player.user_id == requester_id for player in game.seated_players()
+            ):
+                raise UserException(self.ERROR_NOT_IN_GAME)
+
+            await self.request_stop(
+                context=context,
+                game=game,
+                chat_id=chat_id,
+                requester_id=requester_id,
+            )
             await self._table_manager.save_game(chat_id, game)
-            raise UserException(self.ERROR_NO_ACTIVE_GAME)
 
-        if not any(player.user_id == requester_id for player in game.seated_players()):
-            raise UserException(self.ERROR_NOT_IN_GAME)
-
-        await self.request_stop(
-            context=context,
-            game=game,
-            chat_id=chat_id,
-            requester_id=requester_id,
-        )
-        await self._table_manager.save_game(chat_id, game)
+        lock_key = self._stage_lock_key(chat_id)
+        stage_label = "stage_lock:stop_game"
+        event_stage_label = "stop_game"
+        retry_stage_label = "chat_guard_timeout:stop_game"
+        try:
+            async with self._trace_lock_guard(
+                lock_key=lock_key,
+                chat_id=chat_id,
+                game=game,
+                stage_label=stage_label,
+                event_stage_label=event_stage_label,
+                timeout=self._stage_lock_timeout,
+                retry_without_timeout=True,
+                retry_stage_label=retry_stage_label,
+            ):
+                await _stop_locked()
+        except TimeoutError:
+            self._log_engine_event_lock_failure(
+                lock_key=lock_key,
+                event_stage_label=event_stage_label,
+                chat_id=chat_id,
+                game=game,
+            )
+            raise
 
     async def request_stop(
         self,
