@@ -2045,9 +2045,27 @@ class GameEngine:
     ) -> None:
         """Cancel the current hand, refund players, and reset the game."""
 
+        async def _cancel_locked() -> None:
+            original_game_id = game.id
+            players_snapshot = list(game.seated_players())
+
+            await self._refund_players(players_snapshot, original_game_id)
+
+            await self._finalize_stop_request(
+                context=context,
+                chat_id=chat_id,
+                stop_request=stop_request,
+                game=game,
+            )
+
+            await self._reset_game_state_after_stop(
+                game=game, chat_id=chat_id, context=context
+            )
+
         lock_key = self._stage_lock_key(chat_id)
         stage_label = "stage_lock:cancel_hand"
         event_stage_label = "cancel_hand"
+        retry_stage_label = "chat_guard_timeout:cancel_hand"
         try:
             async with self._trace_lock_guard(
                 lock_key=lock_key,
@@ -2056,23 +2074,10 @@ class GameEngine:
                 stage_label=stage_label,
                 event_stage_label=event_stage_label,
                 timeout=self._stage_lock_timeout,
-                retry_without_timeout=False,
+                retry_without_timeout=True,
+                retry_stage_label=retry_stage_label,
             ):
-                original_game_id = game.id
-                players_snapshot = list(game.seated_players())
-
-                await self._refund_players(players_snapshot, original_game_id)
-
-                await self._finalize_stop_request(
-                    context=context,
-                    chat_id=chat_id,
-                    stop_request=stop_request,
-                    game=game,
-                )
-
-                await self._reset_game_state_after_stop(
-                    game=game, chat_id=chat_id, context=context
-                )
+                await _cancel_locked()
         except TimeoutError:
             self._log_engine_event_lock_failure(
                 lock_key=lock_key,
