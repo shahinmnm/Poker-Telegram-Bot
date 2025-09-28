@@ -320,6 +320,7 @@ class LockManager:
             lock_identity = self._format_lock_identity(
                 key, resolved_level, context_payload
             )
+            lock_acquired = False
             try:
                 owner = getattr(lock, "_owner", None)
                 if owner is not None and owner is not task:
@@ -328,6 +329,7 @@ class LockManager:
                     await lock.acquire()
                 else:
                     await asyncio.wait_for(lock.acquire(), timeout=attempt_timeout)
+                lock_acquired = True
                 setattr(lock, "_acquired_at_ts", time.time())
                 setattr(lock, "_acquired_by_callsite", call_site)
                 setattr(lock, "_acquired_by_task", self._describe_task(task))
@@ -455,6 +457,43 @@ class LockManager:
                         attempts=attempt + 1,
                     ),
                 )
+                raise
+            except Exception:
+                self._logger.exception(
+                    "Error acquiring %s%s",
+                    lock_identity,
+                    self._format_context(context_payload),
+                    extra=self._log_extra(
+                        context_payload,
+                        event_type="lock_acquire_error",
+                        lock_key=key,
+                        lock_level=resolved_level,
+                        attempts=attempt + 1,
+                    ),
+                )
+                if (
+                    lock_acquired
+                    and getattr(lock, "_owner", None) is task
+                    and lock.locked()
+                ):
+                    try:
+                        lock.release()
+                        self._logger.debug(
+                            "Released lock %s after acquisition error", lock_identity
+                        )
+                    except Exception:
+                        self._logger.exception(
+                            "Failed to release %s after acquisition error%s",
+                            lock_identity,
+                            self._format_context(context_payload),
+                            extra=self._log_extra(
+                                context_payload,
+                                event_type="lock_release_error_after_acquire",
+                                lock_key=key,
+                                lock_level=resolved_level,
+                                attempts=attempt + 1,
+                            ),
+                        )
                 raise
             finally:
                 self._unregister_waiting(task, key)
