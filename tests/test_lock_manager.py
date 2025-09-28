@@ -217,19 +217,17 @@ def test_lock_manager_empty_snapshot_logs_debug() -> None:
 
 
 @pytest.mark.asyncio
-async def test_lock_manager_respects_lock_order_levels() -> None:
+async def test_lock_manager_rejects_mixed_lock_levels_without_release() -> None:
     logger = logging.getLogger("lock_manager_test_hierarchy")
     manager = LockManager(logger=logger, default_timeout_seconds=1)
 
     async with manager.guard(
         "stage:hierarchy", context={"order": "engine_stage"}
     ):
-        async with manager.guard(
-            "pokerbot:player_report:hierarchy",
-            context={"order": "player_report"},
-        ):
+        with pytest.raises(LockOrderError):
             async with manager.guard(
-                "wallet:hierarchy", context={"order": "wallet"}
+                "pokerbot:player_report:hierarchy",
+                context={"order": "player_report"},
             ):
                 pass
 
@@ -243,6 +241,18 @@ async def test_lock_manager_detects_reverse_lock_order() -> None:
         with pytest.raises(LockOrderError):
             await manager.acquire(
                 "stage:reverse", context={"order": "engine_stage"}
+            )
+
+
+@pytest.mark.asyncio
+async def test_lock_manager_detects_increasing_lock_order() -> None:
+    logger = logging.getLogger("lock_manager_test_increasing_violation")
+    manager = LockManager(logger=logger, default_timeout_seconds=1)
+
+    async with manager.guard("stage:increasing", context={"order": "engine_stage"}):
+        with pytest.raises(LockOrderError):
+            await manager.acquire(
+                "chat:increasing", context={"order": "chat"}
             )
 
 
