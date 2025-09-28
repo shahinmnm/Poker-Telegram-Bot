@@ -982,8 +982,17 @@ class LockManager:
             # Re-entrant acquire; allow regardless of order.
             return
         held_levels = self._get_current_levels()
-        highest_level = max(held_levels) if held_levels else None
-        if highest_level is None or level >= highest_level:
+        if not held_levels:
+            return
+        highest_level = max(held_levels)
+        lowest_level = min(held_levels)
+
+        violation_type: Optional[str] = None
+        if level < highest_level:
+            violation_type = "descending"
+        elif level > lowest_level:
+            violation_type = "ascending"
+        else:
             return
         held_contexts = [f"{item.key}(level={item.level})" for item in acquisitions]
         lock_identity = self._format_lock_identity(key, level, context)
@@ -992,6 +1001,7 @@ class LockManager:
         ) % (lock_identity, held_contexts)
         violation_context = dict(context)
         violation_context["acquisition_order"] = held_levels
+        violation_context["violation_type"] = violation_type
         self._logger.error(
             "%s%s",
             message,
@@ -1002,6 +1012,7 @@ class LockManager:
                 lock_key=key,
                 lock_level=level,
                 acquisition_order=held_levels,
+                violation_type=violation_type,
             ),
         )
         raise LockOrderError(message)
