@@ -986,7 +986,17 @@ class GameEngine:
                 timeout=self._stage_lock_timeout,
             ):
                 await _run_locked()
-        except TimeoutError:
+        except (asyncio.TimeoutError, TimeoutError):
+            self._logger.error(
+                "Timeout occurred while acquiring the lock for game start.",
+                extra=self._log_extra(
+                    stage="stage_lock_timeout:start_game",
+                    chat_id=chat_id,
+                    game=game,
+                    event_type="start_game_lock_timeout",
+                    lock_key=lock_key,
+                ),
+            )
             self._log_engine_event_lock_failure(
                 lock_key=lock_key,
                 event_stage_label=event_stage_label,
@@ -994,6 +1004,30 @@ class GameEngine:
                 game=game,
             )
             raise
+        except Exception:
+            self._logger.exception(
+                "Error while starting the game.",
+                extra=self._log_extra(
+                    stage="stage_lock_error:start_game",
+                    chat_id=chat_id,
+                    game=game,
+                    event_type="start_game_lock_error",
+                    lock_key=lock_key,
+                ),
+            )
+            raise
+        finally:
+            self._logger.info(
+                "Game start completed or failed, lock released for chat %s.",
+                chat_id,
+                extra=self._log_extra(
+                    stage="stage_lock:release_notice",
+                    chat_id=chat_id,
+                    game=game,
+                    event_type="start_game_lock_release",
+                    lock_key=lock_key,
+                ),
+            )
 
     def hand_type_to_label(self, hand_type: Optional[HandsOfPoker]) -> Optional[str]:
         if not hand_type:
