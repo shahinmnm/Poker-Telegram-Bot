@@ -1104,7 +1104,7 @@ class GameEngine:
         game: Game,
         chat_id: ChatId,
     ) -> None:
-        async def _run_locked() -> Tuple[
+        async def _finalize_locked() -> Tuple[
             Set[MessageId],
             List[Dict[str, Any]],
             Optional[Dict[str, Any]],
@@ -1179,7 +1179,7 @@ class GameEngine:
                     announcements,
                     record_kwargs,
                     reset_notifications,
-                ) = await _run_locked()
+                ) = await _finalize_locked()
         except TimeoutError:
             self._log_engine_event_lock_failure(
                 lock_key=lock_key,
