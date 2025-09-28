@@ -463,7 +463,6 @@ class PokerBotModel:
                 game=game,
                 stage_label=stage_label,
                 timeout=timeout_seconds,
-                level=0,
                 failure_log_level=logging.WARNING,
             ):
                 yield
@@ -488,7 +487,6 @@ class PokerBotModel:
             game=game,
             stage_label=f"{stage_label}:retry_without_timeout",
             timeout=math.inf,
-            level=0,
         ):
             yield
 

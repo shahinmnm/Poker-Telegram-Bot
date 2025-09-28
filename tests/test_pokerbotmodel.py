@@ -5,6 +5,7 @@ import datetime
 import logging
 import logging
 import unittest
+from contextlib import asynccontextmanager
 from types import SimpleNamespace
 from typing import List, Tuple, Optional
 from unittest.mock import AsyncMock, MagicMock
@@ -265,6 +266,47 @@ def _build_model_with_game():
     game.add_player(player, seat_index=0)
     player.cards = [Card("A♠"), Card("K♦")]
     return model, game, player, view
+
+
+@pytest.mark.asyncio
+async def test_chat_guard_uses_default_chat_lock_level():
+    cfg = MagicMock(DEBUG=False)
+    cfg.constants = get_game_constants()
+    kv = fakeredis.aioredis.FakeRedis()
+    view = _prepare_view_mock(MagicMock())
+    bot = MagicMock()
+    table_manager = MagicMock()
+    private_match_service = _make_private_match_service(kv, table_manager)
+    model = PokerBotModel(
+        view=view,
+        bot=bot,
+        cfg=cfg,
+        kv=kv,
+        table_manager=table_manager,
+        private_match_service=private_match_service,
+    )
+
+    calls: List[dict] = []
+    call_count = 0
+
+    @asynccontextmanager
+    async def fake_guard(**kwargs):
+        nonlocal call_count
+        call_count += 1
+        calls.append(dict(kwargs))
+        if call_count == 1:
+            raise TimeoutError("boom")
+        yield
+
+    model._game_engine._trace_lock_guard = fake_guard  # type: ignore[assignment]
+
+    async with model._chat_guard(chat_id=-1234):
+        pass
+
+    assert len(calls) == 2
+    assert calls[0]["lock_key"] == "chat:-1234"
+    assert "level" not in calls[0] or calls[0]["level"] is None
+    assert "level" not in calls[1] or calls[1]["level"] is None
 
 
 @pytest.mark.asyncio
