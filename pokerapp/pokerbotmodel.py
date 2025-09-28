@@ -52,7 +52,7 @@ from pokerapp.entities import (
     MIN_PLAYERS,
     MAX_PLAYERS,
 )
-from pokerapp.pokerbotview import PokerBotViewer
+from pokerapp.pokerbotview import PokerBotViewer, TurnMessageUpdate
 from pokerapp.utils.markdown import escape_markdown_v1
 from pokerapp.table_manager import TableManager
 from pokerapp.stats import (
@@ -891,6 +891,8 @@ class PokerBotModel:
     async def _handle_countdown_expiry(
         self, context: CallbackContext, chat_id: ChatId, game_id: int | str
     ) -> None:
+        game_to_start: Optional[Game] = None
+
         async with self._chat_guard(
             chat_id, event_stage_label="countdown_expiry"
         ):
@@ -903,8 +905,16 @@ class PokerBotModel:
             logger.info(
                 "[Countdown] Expired for chat %s game %s", chat_id, game_id
             )
-            await self._start_game(context, game, chat_id, require_guard=False)
-            await self._table_manager.save_game(chat_id, game)
+            game_to_start = game
+
+        if game_to_start is not None:
+            await self._start_game(
+                context,
+                game_to_start,
+                chat_id,
+                require_guard=False,
+            )
+            await self._table_manager.save_game(chat_id, game_to_start)
 
     def _build_ready_message(
         self,
@@ -1617,17 +1627,15 @@ class PokerBotModel:
     ) -> None:
         """مراحل شروع یک دست جدید بازی را انجام می‌دهد."""
 
-        async def _run_start() -> None:
-            await self._cancel_auto_start(context, chat_id, game)
-            await self._game_engine.start_game(context, game, chat_id)
-
         if require_guard:
             async with self._chat_guard(
                 chat_id, event_stage_label="start_game", game=game
             ):
-                await _run_start()
+                await self._cancel_auto_start(context, chat_id, game)
         else:
-            await _run_start()
+            await self._cancel_auto_start(context, chat_id, game)
+
+        await self._game_engine.start_game(context, game, chat_id)
 
     def _is_betting_round_over(self, game: Game) -> bool:
         """
@@ -1727,50 +1735,55 @@ class PokerBotModel:
         money: Optional[Money] = None
         recent_actions: List[str] = []
         previous_message_id: Optional[MessageId] = None
-        async with self._chat_guard(
-            chat_id, event_stage_label="send_turn_message", game=game
-        ):
-            try:
-                async with self._game_engine._trace_lock_guard(
-                    lock_key=lock_key,
-                    chat_id=chat_id,
-                    game=game,
-                    stage_label="stage_lock:send_turn_message:prepare",
-                    timeout=10,
-                ):
-                    game.chat_id = chat_id
-                    await self._view.update_player_anchors_and_keyboards(game)
+        try:
+            async with self._game_engine._trace_lock_guard(
+                lock_key=lock_key,
+                chat_id=chat_id,
+                game=game,
+                stage_label="stage_lock:send_turn_message:prepare",
+                timeout=10,
+            ):
+                game.chat_id = chat_id
+                await self._view.update_player_anchors_and_keyboards(game)
 
-                    wallet = getattr(player, "wallet", None)
-                    money = None
-                    if wallet is not None:
-                        try:
-                            money = await wallet.value()
-                        except Exception:
-                            logger.exception(
-                                "Failed to fetch wallet value", extra={"chat_id": chat_id, "player_id": getattr(player, "user_id", None)}
-                            )
-                    if money is None:
-                        logger.debug(
-                            "Defaulting missing wallet value to zero",
+                wallet = getattr(player, "wallet", None)
+                money = None
+                if wallet is not None:
+                    try:
+                        money = await wallet.value()
+                    except Exception:
+                        logger.exception(
+                            "Failed to fetch wallet value",
                             extra={
                                 "chat_id": chat_id,
                                 "player_id": getattr(player, "user_id", None),
-                                "wallet_present": wallet is not None,
                             },
                         )
-                        money = 0
-                    recent_actions = list(game.last_actions)
-                    previous_message_id = game.turn_message_id
-            except TimeoutError:
-                self._game_engine._log_engine_event_lock_failure(
-                    lock_key=lock_key,
-                    event_stage_label="send_turn_message",
-                    chat_id=chat_id,
-                    game=game,
-                )
-                raise
+                if money is None:
+                    logger.debug(
+                        "Defaulting missing wallet value to zero",
+                        extra={
+                            "chat_id": chat_id,
+                            "player_id": getattr(player, "user_id", None),
+                            "wallet_present": wallet is not None,
+                        },
+                    )
+                    money = 0
+                recent_actions = list(game.last_actions)
+                previous_message_id = game.turn_message_id
+        except TimeoutError:
+            self._game_engine._log_engine_event_lock_failure(
+                lock_key=lock_key,
+                event_stage_label="send_turn_message",
+                chat_id=chat_id,
+                game=game,
+            )
+            raise
 
+        turn_update: Optional[TurnMessageUpdate] = None
+        async with self._chat_guard(
+            chat_id, event_stage_label="send_turn_message", game=game
+        ):
             turn_update = await self._view.update_turn_message(
                 chat_id=chat_id,
                 game=game,
@@ -1780,51 +1793,53 @@ class PokerBotModel:
                 recent_actions=recent_actions,
             )
 
-            now_value = now_utc()
-            try:
-                async with self._game_engine._trace_lock_guard(
-                    lock_key=lock_key,
-                    chat_id=chat_id,
-                    game=game,
-                    stage_label="stage_lock:send_turn_message:update_state",
-                    timeout=10,
+        now_value = now_utc()
+        try:
+            async with self._game_engine._trace_lock_guard(
+                lock_key=lock_key,
+                chat_id=chat_id,
+                game=game,
+                stage_label="stage_lock:send_turn_message:update_state",
+                timeout=10,
+            ):
+                if (
+                    turn_update
+                    and turn_update.message_id
+                    and game.turn_message_id == previous_message_id
                 ):
-                    if (
-                        turn_update.message_id
-                        and game.turn_message_id == previous_message_id
-                    ):
-                        game.turn_message_id = turn_update.message_id
-                    elif (
-                        turn_update.message_id
-                        and game.turn_message_id != previous_message_id
-                    ):
-                        logger.debug(
-                            "Skipping turn message id update due to concurrent change",
-                            extra={
-                                "chat_id": chat_id,
-                                "previous_turn_message_id": previous_message_id,
-                                "current_turn_message_id": game.turn_message_id,
-                                "new_turn_message_id": turn_update.message_id,
-                            },
-                        )
-
-                    game.last_turn_time = now_value
-
+                    game.turn_message_id = turn_update.message_id
+                elif (
+                    turn_update
+                    and turn_update.message_id
+                    and game.turn_message_id != previous_message_id
+                ):
                     logger.debug(
-                        "Turn message refreshed",
+                        "Skipping turn message id update due to concurrent change",
                         extra={
                             "chat_id": chat_id,
-                            "turn_message_id": game.turn_message_id,
+                            "previous_turn_message_id": previous_message_id,
+                            "current_turn_message_id": game.turn_message_id,
+                            "new_turn_message_id": turn_update.message_id,
                         },
                     )
-            except TimeoutError:
-                self._game_engine._log_engine_event_lock_failure(
-                    lock_key=lock_key,
-                    event_stage_label="send_turn_message",
-                    chat_id=chat_id,
-                    game=game,
+
+                game.last_turn_time = now_value
+
+                logger.debug(
+                    "Turn message refreshed",
+                    extra={
+                        "chat_id": chat_id,
+                        "turn_message_id": game.turn_message_id,
+                    },
                 )
-                raise
+        except TimeoutError:
+            self._game_engine._log_engine_event_lock_failure(
+                lock_key=lock_key,
+                event_stage_label="send_turn_message",
+                chat_id=chat_id,
+                game=game,
+            )
+            raise
 
     # --- Player Action Handlers ---
     # این بخش تمام حرکات ممکن بازیکنان در نوبتشان را مدیریت می‌کند.
@@ -1992,16 +2007,13 @@ class PokerBotModel:
         street_name: str,
         send_message: bool = True,
     ) -> None:
-        async with self._chat_guard(
-            chat_id, event_stage_label="add_cards_to_table", game=game
-        ):
-            await self._game_engine.add_cards_to_table(
-                count=count,
-                game=game,
-                chat_id=chat_id,
-                street_name=street_name,
-                send_message=send_message,
-            )
+        await self._game_engine.add_cards_to_table(
+            count=count,
+            game=game,
+            chat_id=chat_id,
+            street_name=street_name,
+            send_message=send_message,
+        )
 
     async def bonus(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         chat = update.effective_chat
