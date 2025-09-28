@@ -1397,6 +1397,7 @@ class GameEngine:
         event_stage_label = "reset_game_state_after_round"
 
         try:
+            # Migrated to _trace_lock_guard for audited stage lock acquisition with retries
             async with self._trace_lock_guard(
                 lock_key=lock_key,
                 chat_id=chat_id,
