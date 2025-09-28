@@ -196,6 +196,35 @@ async def test_lock_manager_metrics_recording() -> None:
     assert metrics["lock_contention"] >= 1
 
 
+@pytest.mark.asyncio
+async def test_lock_manager_release_from_loop_callback() -> None:
+    logger = logging.getLogger("lock_manager_test_callback_release")
+    manager = LockManager(logger=logger, default_timeout_seconds=1)
+
+    key = "stage:callback-release"
+    assert await manager.acquire(key, timeout=0.5)
+
+    loop = asyncio.get_running_loop()
+    release_future: asyncio.Future[None] = loop.create_future()
+
+    def _release_from_callback() -> None:
+        try:
+            manager.release(key)
+        except Exception as exc:  # pragma: no cover - defensive
+            if not release_future.done():
+                release_future.set_exception(exc)
+        else:
+            if not release_future.done():
+                release_future.set_result(None)
+
+    loop.call_soon(_release_from_callback)
+    await release_future
+
+    reacquired = await manager.acquire(key, timeout=0.5)
+    assert reacquired
+    manager.release(key)
+
+
 def test_lock_manager_empty_snapshot_logs_debug() -> None:
     logger = logging.getLogger("lock_manager_test_empty_snapshot")
     handler = _ListHandler()
