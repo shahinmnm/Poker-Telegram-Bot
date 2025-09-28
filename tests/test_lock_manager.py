@@ -124,6 +124,17 @@ async def test_lock_manager_context_logging() -> None:
         for message in messages
     )
 
+    assert any(
+        record.__dict__.get("event_type") == "lock_acquired"
+        and record.__dict__.get("call_site_function") not in {None, "unknown"}
+        for record in handler.records
+    )
+    assert any(
+        record.__dict__.get("event_type") == "lock_released"
+        and record.__dict__.get("release_function") not in {None, "unknown"}
+        for record in handler.records
+    )
+
     logger.removeHandler(handler)
 
 
