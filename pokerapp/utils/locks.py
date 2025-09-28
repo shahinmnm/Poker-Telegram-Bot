@@ -31,29 +31,42 @@ class ReentrantAsyncLock:
         """Release the lock.
 
         This implementation relaxes the strict task ownership check so that the
-        lock can be released even when the current task is not the owner. In
-        such a case a warning is logged and the underlying lock is forcibly
-        released when the reentrancy depth reaches zero. This prevents crashes
-        when a scheduled job releases the lock from a different task.
+        lock can be released even when the current task is not the owner or when
+        no task context is available (for example, callbacks scheduled with
+        ``loop.call_soon``). In such cases a warning is logged and the
+        re-entrancy depth is decremented until the underlying lock can be
+        safely released. This prevents crashes or leaked locks when background
+        callbacks or schedulers manage the release lifecycle.
         """
-        current = asyncio.current_task()
+        try:
+            current = asyncio.current_task()
+        except RuntimeError:
+            current = None
+
         if current is None:
-            raise RuntimeError("ReentrantAsyncLock release requires an active task")
+            logging.getLogger(__name__).warning(
+                "Re-entrant lock release invoked without an active asyncio task; forcing release"
+            )
+            self._decrement_depth_and_maybe_release()
+            return
+
         if self._owner is not current:
             logging.getLogger(__name__).warning(
                 "Non-owner task attempted to release re-entrant lock; releasing anyway"
             )
-            if self._depth > 0:
-                self._depth -= 1
-            if self._depth <= 0:
-                self._owner = None
-                if self._lock.locked():
-                    self._lock.release()
+            self._decrement_depth_and_maybe_release()
             return
-        self._depth -= 1
-        if self._depth == 0:
+
+        self._decrement_depth_and_maybe_release()
+
+    def _decrement_depth_and_maybe_release(self) -> None:
+        if self._depth > 0:
+            self._depth -= 1
+        if self._depth <= 0:
+            self._depth = 0
             self._owner = None
-            self._lock.release()
+            if self._lock.locked():
+                self._lock.release()
 
     @asynccontextmanager
     async def context(self) -> AsyncIterator[None]:
