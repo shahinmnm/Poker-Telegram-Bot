@@ -211,6 +211,42 @@ class LockManager:
         payload.setdefault("lock_level", level)
         return payload
 
+    async def _record_long_hold_context(
+        self,
+        *,
+        lock_key: str,
+        game: Optional[Any],
+        elapsed: float,
+        stacktrace: str,
+    ) -> None:
+        """Record information about a long-held lock for offline analysis."""
+
+        try:
+            context_payload = self._build_context_payload(
+                lock_key,
+                self._resolve_level(lock_key, override=None),
+                additional={
+                    "game_id": getattr(game, "id", None) if game else None,
+                    "elapsed_seconds": elapsed,
+                    "stacktrace": stacktrace,
+                },
+            )
+            self._logger.warning(
+                "[LOCK_DIAG] LONG HOLD context recorded: key=%s elapsed=%.2fs",
+                lock_key,
+                elapsed,
+                extra=context_payload,
+            )
+            if hasattr(self, "_redis"):
+                import json
+
+                await self._redis.set(
+                    f"diag:lock:{lock_key}",
+                    json.dumps(context_payload, ensure_ascii=False),
+                )
+        except Exception:
+            self._logger.exception("[LOCK_DIAG] Failed recording long-hold context")
+
     def _format_lock_identity(
         self, key: str, level: int, context: Mapping[str, Any]
     ) -> str:

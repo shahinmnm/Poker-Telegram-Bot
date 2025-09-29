@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
+import traceback
 from contextlib import asynccontextmanager
 from typing import Any, Awaitable, Callable, Dict, Optional, Tuple
 
@@ -447,7 +449,31 @@ class MatchmakingService:
             event_stage_label="send_player_role_anchors",
             timeout=self._stage_lock_timeout,
         ):
-            await self._view.send_player_role_anchors(game=game, chat_id=chat_id)
+            start_ts = asyncio.get_event_loop().time()
+            try:
+                await asyncio.wait_for(
+                    self._view.send_player_role_anchors(game=game, chat_id=chat_id),
+                    timeout=30.0
+                )
+            except asyncio.TimeoutError:
+                elapsed = asyncio.get_event_loop().time() - start_ts
+                self._logger.error(
+                    "[DIAG] send_player_role_anchors TIMEOUT after %.2fs inside Stage Lock",
+                    elapsed,
+                    extra=self._log_extra(stage="send_player_role_anchors_timeout", game=game, chat_id=chat_id)
+                )
+                st = "".join(traceback.format_stack())
+                self._logger.error("[DIAG] Stacktrace inside Stage Lock:\n%s", st)
+                try:
+                    await self._lock_manager._record_long_hold_context(
+                        lock_key=self._stage_lock_key(chat_id),
+                        game=game,
+                        elapsed=elapsed,
+                        stacktrace=st
+                    )
+                except Exception:
+                    self._logger.exception("[DIAG] Failed to record long-hold context")
+                raise
 
         self._record_game_start_action(game)
 
