@@ -137,11 +137,6 @@ class MessagingService:
         Maximum number of message hashes stored in the cache.
     logger_:
         Optional custom :class:`logging.Logger` instance used for diagnostics.
-    retry_after_cap:
-        Maximum duration (in seconds) the service will honour for Telegram
-        ``RetryAfter`` responses before capping the wait.  Prevents locks from
-        being held for excessively long periods when the platform returns very
-        large delays.
     """
 
     #: Maximum time to keep coalescing edits for the same message.
@@ -159,8 +154,6 @@ class MessagingService:
         exc for exc in (TelegramRetryAfter, PTBRetryAfter) if exc is not None
     )
 
-    _MIN_RETRY_AFTER = 0.05
-
     def __init__(
         self,
         bot: Any,
@@ -174,7 +167,6 @@ class MessagingService:
         last_message_hash: Optional[Dict[int, str]] = None,
         last_message_hash_lock: Optional[asyncio.Lock] = None,
         table_manager: Optional["TableManager"] = None,
-        retry_after_cap: float = 4.0,
     ) -> None:
         self._bot = bot
         if logger_ is None:
@@ -207,7 +199,6 @@ class MessagingService:
             logger_=self._logger.getChild("message_state")
         )
         self._table_manager = table_manager
-        self._retry_after_cap = max(float(retry_after_cap), 0.0)
 
     @staticmethod
     def _coerce_context_value(value: Any) -> Any:
@@ -548,28 +539,9 @@ class MessagingService:
             delay = getattr(exc, "retry_after", None)
             if delay is None:
                 raise
-            try:
-                requested_delay = float(delay)
-            except (TypeError, ValueError):
-                requested_delay = self._MIN_RETRY_AFTER
-            wait_time = max(requested_delay, self._MIN_RETRY_AFTER)
-            if self._retry_after_cap and wait_time > self._retry_after_cap:
-                clamp_context = self._merge_context(
-                    base_context,
-                    requested_delay=requested_delay,
-                    applied_delay=self._retry_after_cap,
-                    category="retry_after_clamped",
-                )
-                self._log_event(
-                    "RETRY_AFTER_CLAMPED",
-                    level=logging.WARNING,
-                    context=clamp_context,
-                    include_debug_trace=True,
-                )
-                wait_time = self._retry_after_cap
             retry_context = self._merge_context(
                 base_context,
-                retry_after=requested_delay,
+                retry_after=float(delay),
                 error_type=type(exc).__name__,
                 category=base_context.get("category") or "retry_after",
             )
@@ -579,7 +551,7 @@ class MessagingService:
                 context=retry_context,
                 include_debug_trace=True,
             )
-            await asyncio.sleep(wait_time)
+            await asyncio.sleep(float(delay))
             await throttle()
             return await call()
         except Exception as exc:
