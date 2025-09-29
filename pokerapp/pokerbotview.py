@@ -2391,6 +2391,7 @@ class PokerBotViewer:
                                             message_id=normalized_existing_message,
                                             allow_anchor_deletion=True,
                                             anchor_reason="anchor_refresh",
+                                            game=game,
                                         )
                                     except Exception:
                                         logger.warning(
@@ -2406,6 +2407,7 @@ class PokerBotViewer:
                                     await self.delete_message(
                                         chat_id=chat_id,
                                         message_id=normalized_existing_message,
+                                        game=game,
                                     )
                                 except Exception:
                                     logger.warning(
