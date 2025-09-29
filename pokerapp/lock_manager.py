@@ -990,10 +990,10 @@ class LockManager:
         violation_type: Optional[str] = None
         if level < highest_level:
             violation_type = "descending"
-        elif level > lowest_level:
-            violation_type = "ascending"
-        else:
+        elif level >= highest_level:
             return
+        else:
+            violation_type = "ascending"
         held_contexts = [f"{item.key}(level={item.level})" for item in acquisitions]
         lock_identity = self._format_lock_identity(key, level, context)
         message = (
