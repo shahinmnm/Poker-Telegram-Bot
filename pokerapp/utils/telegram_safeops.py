@@ -270,28 +270,7 @@ class TelegramSafeOps:
                 raise
             except RetryAfter as exc:
                 attempt += 1
-                raw_retry_after = getattr(exc, "retry_after", delay) or delay
-                try:
-                    requested_wait = float(raw_retry_after)
-                except (TypeError, ValueError):
-                    requested_wait = self._MIN_DELAY
-                wait_time = max(requested_wait, self._MIN_DELAY)
-                if wait_time > self._max_delay:
-                    self._logger.warning(
-                        "RetryAfter exceeded max_delay; capping",
-                        extra=self._build_extra(
-                            chat_id=chat_id,
-                            message_id=message_id,
-                            operation=operation,
-                            attempt=attempt,
-                            max_attempts=max_attempts,
-                            retry_after=requested_wait,
-                            max_delay=self._max_delay,
-                            error_type=type(exc).__name__,
-                            extra=log_extra,
-                        ),
-                    )
-                    wait_time = self._max_delay
+                wait_time = float(getattr(exc, "retry_after", delay) or delay)
                 self._logger.warning(
                     "RetryAfter received from Telegram; backing off",
                     extra=self._build_extra(
@@ -300,7 +279,7 @@ class TelegramSafeOps:
                         operation=operation,
                         attempt=attempt,
                         max_attempts=max_attempts,
-                        retry_after=requested_wait,
+                        retry_after=wait_time,
                         error_type=type(exc).__name__,
                         extra=log_extra,
                     ),
