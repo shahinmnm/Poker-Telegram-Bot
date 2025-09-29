@@ -1032,6 +1032,7 @@ class PokerBotViewer:
         disable_web_page_preview: bool = True,
         disable_notification: bool = False,
         request_category: RequestCategory = RequestCategory.GENERAL,
+        game: Optional[Game] = None,
     ) -> Optional[MessageId]:
         key = (chat_id, message_id)
         loop = asyncio.get_running_loop()
@@ -1055,6 +1056,7 @@ class PokerBotViewer:
                     "disable_web_page_preview": disable_web_page_preview,
                     "disable_notification": disable_notification,
                     "request_category": request_category,
+                    "game": game,
                 }
                 self._pending_updates[key] = {"payload": payload, "future": future}
 
@@ -1807,6 +1809,7 @@ class PokerBotViewer:
         disable_notification: bool = False,
         force_send: bool = False,
         request_category: RequestCategory = RequestCategory.GENERAL,
+        game: Optional[Game] = None,
     ) -> Optional[MessageId]:
         context = self._build_context(
             "update_message", chat_id=chat_id, message_id=message_id
@@ -2284,6 +2287,7 @@ class PokerBotViewer:
                         ),
                         chat_id=chat_id,
                         timeout=self._DEFAULT_API_TIMEOUT,
+                        game=game,
                     )
                     new_message_id: Optional[MessageId] = getattr(
                         result, "message_id", None
@@ -2438,6 +2442,7 @@ class PokerBotViewer:
                         ),
                         chat_id=chat_id,
                         timeout=self._DEFAULT_API_TIMEOUT,
+                        game=game,
                     )
                     if hasattr(result, "message_id"):
                         new_message_id = result.message_id  # type: ignore[assignment]
@@ -2666,6 +2671,7 @@ class PokerBotViewer:
                             text=text,
                             reply_markup=keyboard,
                             request_category=RequestCategory.ANCHOR,
+                            game=game,
                         )
                     except Exception as exc:
                         logger.error(
@@ -3056,6 +3062,7 @@ class PokerBotViewer:
                     text=text,
                     reply_markup=keyboard,
                     request_category=RequestCategory.GENERAL,
+                    game=game,
                 )
             except Exception as exc:
                 logger.error(
@@ -3131,6 +3138,7 @@ class PokerBotViewer:
                 text=text,
                 reply_markup=keyboard,
                 request_category=RequestCategory.GENERAL,
+                game=game,
             )
         except Exception as exc:
             logger.error(
@@ -3172,6 +3180,7 @@ class PokerBotViewer:
         markup_signature: str,
         turn_light: str,
         stage_name: Optional[str],
+        game: Optional[Game] = None,
     ) -> bool:
         player_id = getattr(player, "user_id", None)
         normalized_chat = self._safe_int(chat_id)
@@ -3237,6 +3246,7 @@ class PokerBotViewer:
                     ),
                     chat_id=chat_id,
                     timeout=self._DEFAULT_API_TIMEOUT,
+                    game=game,
                 )
             except (BadRequest, Forbidden, RetryAfter, TelegramError) as exc:
                 logger.debug(
@@ -3319,6 +3329,7 @@ class PokerBotViewer:
         turn_light: str,
         previous_message_id: Optional[int],
         fallback_reason: str,
+        game: Optional[Game] = None,
     ) -> Optional[int]:
         player_id = getattr(player, "user_id", None)
         stage_value = self._anchor_registry.get_stage(chat_id)
@@ -3365,18 +3376,19 @@ class PokerBotViewer:
             if previous_message_id is not None:
                 refresh_success = False
                 try:
-                    refresh_success = await self._refresh_role_anchor_in_place(
-                        chat_id=chat_id,
-                        player=player,
-                        message_id=previous_message_id,
-                        base_text=base_text,
-                        display_text=display_text,
-                        keyboard=keyboard,
-                        payload_signature=payload_signature,
-                        markup_signature=markup_signature,
-                        turn_light=turn_light,
-                        stage_name=stage_name,
-                    )
+                        refresh_success = await self._refresh_role_anchor_in_place(
+                            chat_id=chat_id,
+                            player=player,
+                            message_id=previous_message_id,
+                            base_text=base_text,
+                            display_text=display_text,
+                            keyboard=keyboard,
+                            payload_signature=payload_signature,
+                            markup_signature=markup_signature,
+                            turn_light=turn_light,
+                            stage_name=stage_name,
+                            game=game,
+                        )
                 except Exception as exc:
                     logger.debug(
                         "Failed to refresh existing role anchor during countdown",
@@ -3430,6 +3442,7 @@ class PokerBotViewer:
                 await self.delete_message(
                     chat_id=chat_id,
                     message_id=previous_message_id,
+                    game=game,
                 )
                 deletion_reason = await self._peek_role_anchor_deletion(
                     self._safe_int(previous_message_id)
@@ -3470,6 +3483,7 @@ class PokerBotViewer:
                 text=display_text,
                 reply_markup=keyboard,
                 request_category=RequestCategory.ANCHOR,
+                game=game,
             )
         except Exception as exc:
             logger.error(
@@ -3693,6 +3707,7 @@ class PokerBotViewer:
                             reply_markup=keyboard,
                             force_send=True,
                             request_category=RequestCategory.ANCHOR,
+                            game=game,
                         )
                     except Exception as exc:
                         logger.error(
@@ -3810,6 +3825,7 @@ class PokerBotViewer:
                             turn_light=next_light,
                             previous_message_id=anchor_id,
                             fallback_reason=fallback_reason,
+                            game=game,
                         )
                         refreshed_record = self._anchor_registry.get_role(
                             chat_id, player_id
@@ -4024,6 +4040,7 @@ class PokerBotViewer:
         request_category: RequestCategory = RequestCategory.GENERAL,
         *,
         suppress_exceptions: bool = True,
+        game: Optional[Game] = None,
     ) -> Optional[MessageId]:
         """Sends a message and returns its ID, or None if not applicable."""
         context = self._build_context("send_message_return_id", chat_id=chat_id)
@@ -4056,6 +4073,7 @@ class PokerBotViewer:
                 ),
                 chat_id=chat_id,
                 timeout=self._DEFAULT_API_TIMEOUT,
+                game=game,
             )
             if isinstance(message, Message):
                 message_id = message.message_id
@@ -4100,6 +4118,8 @@ class PokerBotViewer:
         reply_markup: ReplyKeyboardMarkup | ReplyKeyboardRemove | None = None,
         parse_mode: str = ParseMode.MARKDOWN,  # <--- پارامتر جدید اضافه شد
         request_category: RequestCategory = RequestCategory.GENERAL,
+        *,
+        game: Optional[Game] = None,
     ) -> Optional[MessageId]:
         context = self._build_context("send_message", chat_id=chat_id)
         normalized_text = self._validator.normalize_text(
@@ -4131,6 +4151,7 @@ class PokerBotViewer:
                 ),
                 chat_id=chat_id,
                 timeout=self._DEFAULT_API_TIMEOUT,
+                game=game,
             )
             if isinstance(message, Message):
                 message_id = message.message_id
@@ -4534,6 +4555,8 @@ class PokerBotViewer:
         disable_notification: bool = True,
         parse_mode: str = ParseMode.MARKDOWN,
         reply_markup: Optional[ReplyKeyboardMarkup | ReplyKeyboardRemove] = None,
+        *,
+        game: Optional[Game] = None,
     ) -> Optional[Message]:
         """Sends desk cards image and returns the message object."""
         context = self._build_context("send_desk_cards_img", chat_id=chat_id)
@@ -4567,6 +4590,7 @@ class PokerBotViewer:
                 ),
                 chat_id=chat_id,
                 timeout=self._DEFAULT_API_TIMEOUT,
+                game=game,
             )
             if isinstance(message, Message):
                 return message
@@ -4588,6 +4612,8 @@ class PokerBotViewer:
         caption: str = "",
         parse_mode: str = ParseMode.MARKDOWN,
         reply_markup: Optional[ReplyKeyboardMarkup | ReplyKeyboardRemove] = None,
+        *,
+        game: Optional[Game] = None,
     ) -> Optional[Message]:
         """Edit an existing desk image or send a new one on failure.
 
@@ -4626,6 +4652,7 @@ class PokerBotViewer:
                 ),
                 chat_id=chat_id,
                 timeout=self._DEFAULT_API_TIMEOUT,
+                game=game,
             )
             return None
         except BadRequest:
@@ -4639,6 +4666,7 @@ class PokerBotViewer:
                     caption=caption,
                     parse_mode=parse_mode,
                     reply_markup=reply_markup,
+                    game=game,
                 )
                 return msg
             except Exception as e:
@@ -4738,6 +4766,7 @@ class PokerBotViewer:
                 disable_web_page_preview=True,
                 disable_notification=anchor_message_id is not None,
                 request_category=RequestCategory.TURN,
+                game=game,
             )
 
             resolved_message_id = self._resolve_message_id(new_message_id)
@@ -5031,6 +5060,7 @@ class PokerBotViewer:
             cards=game.cards_table,
             caption=caption,
             reply_markup=remove_keyboard,
+            game=game,
         )
         if len(final_message) > caption_limit:
             await self.send_message(
@@ -5038,6 +5068,7 @@ class PokerBotViewer:
                 text=final_message[caption_limit:],
                 reply_markup=remove_keyboard,
                 parse_mode="Markdown",
+                game=game,
             )
 
     async def send_new_hand_ready_message(self, chat_id: ChatId) -> None:
