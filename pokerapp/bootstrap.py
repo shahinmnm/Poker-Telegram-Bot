@@ -144,6 +144,7 @@ def build_services(cfg: Config) -> ApplicationServices:
             last_message_hash=last_message_hash,
             last_message_hash_lock=last_message_hash_lock,
             table_manager=table_manager,
+            retry_after_cap=cfg.TELEGRAM_RETRY_MAX_DELAY,
         )
 
     def telegram_safeops_factory(*, view) -> TelegramSafeOps:
