@@ -4202,7 +4202,12 @@ class PokerBotViewer:
             )
 
     async def send_dice_reply(
-        self, chat_id: ChatId, message_id: MessageId, emoji=_DICE_ROLL_EMOJI
+        self,
+        chat_id: ChatId,
+        message_id: MessageId,
+        emoji=_DICE_ROLL_EMOJI,
+        *,
+        game: Optional[Game] = None,
     ) -> Optional[Message]:
         context = self._build_context(
             "send_dice_reply", chat_id=chat_id, message_id=message_id
@@ -4218,6 +4223,7 @@ class PokerBotViewer:
                 ),
                 chat_id=chat_id,
                 timeout=self._DEFAULT_API_TIMEOUT,
+                game=game,
             )
         except Exception as e:
             logger.error(
@@ -4935,7 +4941,13 @@ class PokerBotViewer:
             )
         return False
 
-    async def remove_markup(self, chat_id: ChatId, message_id: MessageId) -> None:
+    async def remove_markup(
+        self,
+        chat_id: ChatId,
+        message_id: MessageId,
+        *,
+        game: Optional[Game] = None,
+    ) -> None:
         """حذف دکمه‌های اینلاین از یک پیام و فیلتر کردن ارورهای رایج."""
         if not message_id:
             return
@@ -4948,6 +4960,7 @@ class PokerBotViewer:
                 ),
                 chat_id=chat_id,
                 timeout=self._DEFAULT_API_TIMEOUT,
+                game=game,
             )
         except BadRequest as e:
             err = str(e).lower()
