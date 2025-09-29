@@ -1746,7 +1746,7 @@ class PokerBotModel:
                 timeout=10,
             ):
                 game.chat_id = chat_id
-                await self._view.update_player_anchors_and_keyboards(game)
+                await self._view.update_player_anchors_and_keyboards(game=game)
 
                 wallet = getattr(player, "wallet", None)
                 money = None

@@ -255,10 +255,10 @@ async def test_process_showdown_results_populates_payouts_and_labels():
     for announcement in announcements:
         await announcement["call"]()
     view.send_showdown_results.assert_awaited_once()
-    send_args, _ = view.send_showdown_results.await_args
+    send_args, send_kwargs = view.send_showdown_results.await_args
     assert send_args[0] == chat_id
-    assert send_args[1] is game
-    assert send_args[2][0]["winners"][0]["player"] is winner
+    assert send_kwargs["game"] is game
+    assert send_args[1][0]["winners"][0]["player"] is winner
 
 
 @pytest.mark.asyncio
@@ -325,7 +325,7 @@ async def test_process_showdown_results_handles_empty_winners():
     assert "ℹ️" in message_args[1]
     view.send_showdown_results.assert_not_awaited()
     await result_calls[0]["call"]()
-    view.send_showdown_results.assert_awaited_once_with(chat_id, game, [])
+    view.send_showdown_results.assert_awaited_once_with(chat_id, [], game=game)
 
 
 @pytest.mark.asyncio
@@ -813,9 +813,10 @@ async def test_finalize_game_single_winner_distributes_pot_and_updates_stats():
     loser_wallet.inc.assert_not_awaited()
 
     assert view.send_showdown_results.await_count == 1
-    send_args, _ = view.send_showdown_results.await_args
+    send_args, send_kwargs = view.send_showdown_results.await_args
     assert send_args[0] == chat_id
-    winners_by_pot = send_args[2]
+    assert send_kwargs["game"] is game
+    winners_by_pot = send_args[1]
     assert winners_by_pot and winners_by_pot[0]["amount"] == 100
     assert winners_by_pot[0]["winners"][0]["player"] is winner
 
@@ -892,8 +893,9 @@ async def test_finalize_game_split_pot_between_tied_winners():
     wallet_a.inc.assert_awaited_once_with(50)
     wallet_b.inc.assert_awaited_once_with(50)
 
-    send_args, _ = view.send_showdown_results.await_args
-    pot_summary = send_args[2]
+    send_args, send_kwargs = view.send_showdown_results.await_args
+    assert send_kwargs["game"] is game
+    pot_summary = send_args[1]
     assert pot_summary and pot_summary[0]["amount"] == 100
     assert {winner_info["player"] for winner_info in pot_summary[0]["winners"]} == {player_a, player_b}
 

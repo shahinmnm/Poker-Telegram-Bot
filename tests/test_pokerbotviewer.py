@@ -166,7 +166,7 @@ def test_clear_all_player_anchors_preserves_anchor_for_string_registry_id():
         markup_signature="markup",
     )
 
-    run(viewer.clear_all_player_anchors(game))
+    run(viewer.clear_all_player_anchors(game=game))
 
     viewer.delete_message.assert_not_awaited()
     state = viewer._anchor_registry.get_chat_state(game.chat_id)
@@ -273,7 +273,7 @@ def test_update_player_anchors_and_keyboards_highlights_active_player():
     )
     player_two.anchor_keyboard_signature = payload_two
 
-    run(viewer.update_player_anchors_and_keyboards(game))
+    run(viewer.update_player_anchors_and_keyboards(game=game))
 
     assert viewer._update_message.await_count == 1
     viewer.edit_message_reply_markup.assert_not_awaited()
@@ -320,7 +320,7 @@ def test_update_player_anchors_and_keyboards_skips_players_without_anchor():
     player.cards = [Card('A♣'), Card('K♥')]
     player.anchor_message = None
 
-    run(viewer.update_player_anchors_and_keyboards(game))
+    run(viewer.update_player_anchors_and_keyboards(game=game))
 
     viewer._update_message.assert_not_awaited()
     assert player.anchor_message is None
@@ -354,10 +354,10 @@ def test_clear_all_player_anchors_preserves_seated_players():
         markup_signature='markup',
     )
 
-    run(viewer.clear_all_player_anchors(game))
+    run(viewer.clear_all_player_anchors(game=game))
 
     viewer.delete_message.assert_not_awaited()
-    viewer.update_player_anchors_and_keyboards.assert_awaited_once_with(game)
+    viewer.update_player_anchors_and_keyboards.assert_awaited_once_with(game=game)
     assert player.anchor_message == (game.chat_id, 404)
     assert 404 not in game.message_ids_to_delete
 
@@ -391,7 +391,7 @@ def test_clear_all_player_anchors_skips_during_active_stage():
         markup_signature='markup',
     )
 
-    run(viewer.clear_all_player_anchors(game))
+    run(viewer.clear_all_player_anchors(game=game))
 
     viewer.delete_message.assert_not_awaited()
     viewer.update_player_anchors_and_keyboards.assert_not_awaited()
@@ -420,7 +420,7 @@ def test_clear_all_player_anchors_removes_missing_player_anchor():
     )
     game.message_ids_to_delete.append(777)
 
-    run(viewer.clear_all_player_anchors(game))
+    run(viewer.clear_all_player_anchors(game=game))
 
     viewer.delete_message.assert_awaited_once()
     call_kwargs = viewer.delete_message.await_args.kwargs

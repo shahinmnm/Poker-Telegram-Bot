@@ -294,7 +294,7 @@ class PlayerManager:
 
         clear_method = getattr(self._view, "clear_all_player_anchors", None)
         if callable(clear_method):
-            await clear_method(game)
+            await clear_method(game=game)
             self._logger.debug("Cleared player anchors", extra={"game_id": getattr(game, "id", None)})
 
     async def send_join_prompt(self, game: Game, chat_id: ChatId) -> None:
