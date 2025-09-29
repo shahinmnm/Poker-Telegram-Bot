@@ -4170,7 +4170,9 @@ class PokerBotViewer:
             )
         return None
 
-    async def send_photo(self, chat_id: ChatId) -> None:
+    async def send_photo(
+        self, chat_id: ChatId, *, game: Optional[Game] = None
+    ) -> None:
         try:
             context = self._build_context("send_photo", chat_id=chat_id)
             with open("./assets/poker_hand.jpg", "rb") as f:
@@ -4186,6 +4188,7 @@ class PokerBotViewer:
                     ),
                     chat_id=chat_id,
                     timeout=self._DEFAULT_API_TIMEOUT,
+                    game=game,
                 )
         except Exception as e:
             logger.error(
@@ -4230,7 +4233,12 @@ class PokerBotViewer:
         return self._request_metrics
 
     async def send_message_reply(
-        self, chat_id: ChatId, message_id: MessageId, text: str
+        self,
+        chat_id: ChatId,
+        message_id: MessageId,
+        text: str,
+        *,
+        game: Optional[Game] = None,
     ) -> None:
         context = self._build_context(
             "send_message_reply", chat_id=chat_id, message_id=message_id
@@ -4264,6 +4272,7 @@ class PokerBotViewer:
                 ),
                 chat_id=chat_id,
                 timeout=self._DEFAULT_API_TIMEOUT,
+                game=game,
             )
         except Exception as e:
             logger.error(
@@ -4518,6 +4527,8 @@ class PokerBotViewer:
         chat_id: ChatId,
         card: Card,
         disable_notification: bool = True,
+        *,
+        game: Optional[Game] = None,
     ) -> None:
         """Send a single card image to the specified chat."""
         try:
@@ -4538,6 +4549,7 @@ class PokerBotViewer:
                 ),
                 chat_id=chat_id,
                 timeout=self._DEFAULT_API_TIMEOUT,
+                game=game,
             )
         except Exception as e:
             logger.error(
@@ -5073,7 +5085,9 @@ class PokerBotViewer:
                 game=game,
             )
 
-    async def send_new_hand_ready_message(self, chat_id: ChatId) -> None:
+    async def send_new_hand_ready_message(
+        self, chat_id: ChatId, *, game: Optional[Game] = None
+    ) -> None:
         """پیام آمادگی برای دست جدید را ارسال می‌کند."""
         message = (
             "♻️ دست به پایان رسید. بازیکنان باقی‌مانده برای دست بعد حفظ شدند.\n"
@@ -5114,6 +5128,7 @@ class PokerBotViewer:
                 ),
                 chat_id=chat_id,
                 timeout=self._DEFAULT_API_TIMEOUT,
+                game=game,
             )
         except Exception as e:
             logger.error(
