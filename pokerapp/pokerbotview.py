@@ -3998,7 +3998,9 @@ class PokerBotViewer:
             request_category=RequestCategory.STAGE_PROGRESS,
         )
 
-    async def notify_admin(self, log_data: Dict[str, Any]) -> None:
+    async def notify_admin(
+        self, log_data: Dict[str, Any], *, game: Optional[Game] = None
+    ) -> None:
         if not self._admin_chat_id:
             return
         context = self._build_context("notify_admin", chat_id=self._admin_chat_id)
@@ -4024,6 +4026,7 @@ class PokerBotViewer:
                 ),
                 chat_id=self._admin_chat_id,
                 timeout=self._DEFAULT_API_TIMEOUT,
+                game=game,
             )
         except Exception as e:
             logger.error(
@@ -4296,6 +4299,7 @@ class PokerBotViewer:
         request_category: RequestCategory = RequestCategory.GENERAL,
         *,
         suppress_exceptions: bool = True,
+        game: Optional[Game] = None,
         current_game_id: Optional[str] = None,
     ) -> Optional[MessageId]:
         """Edit a message using the central ``MessagingService``.
@@ -4337,6 +4341,7 @@ class PokerBotViewer:
                 ),
                 chat_id=chat_id,
                 timeout=self._DEFAULT_API_TIMEOUT,
+                game=game,
             )
             return result
         except Exception as exc:
