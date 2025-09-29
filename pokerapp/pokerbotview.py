@@ -32,6 +32,7 @@ from typing import (
 )
 from dataclasses import dataclass, field
 import asyncio
+import traceback
 import datetime
 import hashlib
 import inspect
@@ -431,6 +432,105 @@ class PokerBotViewer:
         GameState.ROUND_RIVER,
     }
     _SUIT_EMOJI = _SUIT_EMOJI_MAP
+    _DEFAULT_API_TIMEOUT = 10.0
+
+    async def _timed_api_call(
+        self,
+        label: str,
+        coro: Awaitable[Any],
+        *,
+        chat_id: Optional[ChatId] = None,
+        timeout: Optional[float] = None,
+        game: Optional[Game] = None,
+        lock_key: Optional[str] = None,
+    ) -> Any:
+        """Execute ``coro`` with a timeout and record diagnostics on failure."""
+
+        effective_timeout = (
+            self._DEFAULT_API_TIMEOUT if timeout is None else float(timeout)
+        )
+        if effective_timeout <= 0:
+            effective_timeout = self._DEFAULT_API_TIMEOUT
+
+        loop = asyncio.get_running_loop()
+        start_ts = loop.time()
+
+        async def _record_context(elapsed_value: float, stacktrace: str) -> None:
+            lock_manager = getattr(self, "_lock_manager", None)
+            if lock_manager is None:
+                return
+            recorder = getattr(lock_manager, "_record_long_hold_context", None)
+            if not callable(recorder):
+                return
+            resolved_lock_key = lock_key
+            if resolved_lock_key is None:
+                stage_lock_key = getattr(self, "_stage_lock_key", None)
+                if callable(stage_lock_key) and chat_id is not None:
+                    try:
+                        resolved_lock_key = stage_lock_key(chat_id)
+                    except Exception:
+                        resolved_lock_key = None
+            if resolved_lock_key is None and chat_id is not None:
+                resolved_lock_key = f"chat:{chat_id}"
+            if resolved_lock_key is None:
+                return
+            result = recorder(
+                lock_key=resolved_lock_key,
+                game=game,
+                elapsed=float(elapsed_value),
+                stacktrace=stacktrace,
+            )
+            if inspect.isawaitable(result):
+                await result
+
+        try:
+            return await asyncio.wait_for(coro, timeout=effective_timeout)
+        except asyncio.TimeoutError as exc:
+            elapsed = loop.time() - start_ts
+            stacktrace = "".join(traceback.format_stack())
+            logger.error(
+                "[DIAG] Telegram API '%s' TIMEOUT after %.2fs chat_id=%s",
+                label,
+                elapsed,
+                chat_id,
+                extra={
+                    "chat_id": chat_id,
+                    "elapsed": elapsed,
+                    "timeout": effective_timeout,
+                    "stacktrace": stacktrace,
+                },
+            )
+            try:
+                await _record_context(elapsed, stacktrace)
+            except Exception:
+                logger.exception(
+                    "[DIAG] Failed recording long-hold context for Telegram API '%s'",
+                    label,
+                )
+            raise
+        except RetryAfter as retry_after:
+            delay = getattr(retry_after, "retry_after", None)
+            logger.warning(
+                "[DIAG] RetryAfter from Telegram API '%s' chat_id=%s delay=%s",
+                label,
+                chat_id,
+                delay,
+                extra={
+                    "chat_id": chat_id,
+                    "retry_after": delay,
+                    "timeout": effective_timeout,
+                },
+            )
+            if delay is not None and delay > effective_timeout:
+                stacktrace = "".join(traceback.format_stack())
+                try:
+                    await _record_context(float(delay), stacktrace)
+                except Exception:
+                    logger.exception(
+                        "[DIAG] Failed recording RetryAfter long-hold for Telegram API '%s'",
+                        label,
+                    )
+            raise
 
     @classmethod
     def _format_card_symbol(cls, card_value: Any) -> str:
@@ -2170,15 +2270,20 @@ class PokerBotViewer:
             callback_token_registered = False
             try:
                 if message_id is None or should_resend_reply_keyboard:
-                    result = await self._messenger.send_message(
+                    result = await self._timed_api_call(
+                        "update_message.send_message",
+                        self._messenger.send_message(
+                            chat_id=chat_id,
+                            text=normalized_text,
+                            reply_markup=reply_markup,
+                            request_category=request_category,
+                            context=context,
+                            parse_mode=parse_mode,
+                            disable_web_page_preview=disable_web_page_preview,
+                            disable_notification=disable_notification,
+                        ),
                         chat_id=chat_id,
-                        text=normalized_text,
-                        reply_markup=reply_markup,
-                        request_category=request_category,
-                        context=context,
-                        parse_mode=parse_mode,
-                        disable_web_page_preview=disable_web_page_preview,
-                        disable_notification=disable_notification,
+                        timeout=self._DEFAULT_API_TIMEOUT,
                     )
                     new_message_id: Optional[MessageId] = getattr(
                         result, "message_id", None
@@ -2317,17 +2422,22 @@ class PokerBotViewer:
                             callback_throttle_key
                         ] = callback_id
                         callback_token_registered = True
-                    result = await safe_edit_message(
-                        self._messenger,
+                    result = await self._timed_api_call(
+                        "update_message.safe_edit_message",
+                        safe_edit_message(
+                            self._messenger,
+                            chat_id=chat_id,
+                            message_id=message_id,
+                            text=normalized_text,
+                            reply_markup=reply_markup,
+                            force=force_send,
+                            request_category=request_category,
+                            context=context,
+                            parse_mode=parse_mode,
+                            disable_web_page_preview=disable_web_page_preview,
+                        ),
                         chat_id=chat_id,
-                        message_id=message_id,
-                        text=normalized_text,
-                        reply_markup=reply_markup,
-                        force=force_send,
-                        request_category=request_category,
-                        context=context,
-                        parse_mode=parse_mode,
-                        disable_web_page_preview=disable_web_page_preview,
+                        timeout=self._DEFAULT_API_TIMEOUT,
                     )
                     if hasattr(result, "message_id"):
                         new_message_id = result.message_id  # type: ignore[assignment]
@@ -3111,17 +3221,22 @@ class PokerBotViewer:
                 )
                 return False
             try:
-                result = await safe_edit_message(
-                    self._messenger,
+                result = await self._timed_api_call(
+                    "refresh_role_anchor.safe_edit_message",
+                    safe_edit_message(
+                        self._messenger,
+                        chat_id=chat_id,
+                        message_id=message_id,
+                        text=normalized_text,
+                        reply_markup=keyboard,
+                        force=True,
+                        request_category=RequestCategory.ANCHOR,
+                        context=context,
+                        parse_mode=ParseMode.MARKDOWN,
+                        disable_web_page_preview=True,
+                    ),
                     chat_id=chat_id,
-                    message_id=message_id,
-                    text=normalized_text,
-                    reply_markup=keyboard,
-                    force=True,
-                    request_category=RequestCategory.ANCHOR,
-                    context=context,
-                    parse_mode=ParseMode.MARKDOWN,
-                    disable_web_page_preview=True,
+                    timeout=self._DEFAULT_API_TIMEOUT,
                 )
             except (BadRequest, Forbidden, RetryAfter, TelegramError) as exc:
                 logger.debug(
@@ -3881,11 +3996,16 @@ class PokerBotViewer:
             )
             return
         try:
-            await self._messenger.send_message(
+            await self._timed_api_call(
+                "notify_admin.send_message",
+                self._messenger.send_message(
+                    chat_id=self._admin_chat_id,
+                    text=text,
+                    request_category=RequestCategory.GENERAL,
+                    context=context,
+                ),
                 chat_id=self._admin_chat_id,
-                text=text,
-                request_category=RequestCategory.GENERAL,
-                context=context,
+                timeout=self._DEFAULT_API_TIMEOUT,
             )
         except Exception as e:
             logger.error(
@@ -3922,15 +4042,20 @@ class PokerBotViewer:
             self._log_skip_empty(chat_id, None)
             return None
         try:
-            message = await self._messenger.send_message(
+            message = await self._timed_api_call(
+                "send_message_return_id.send_message",
+                self._messenger.send_message(
+                    chat_id=chat_id,
+                    text=normalized_text,
+                    reply_markup=reply_markup,
+                    request_category=request_category,
+                    context=context,
+                    parse_mode=ParseMode.MARKDOWN,
+                    disable_notification=True,
+                    disable_web_page_preview=True,
+                ),
                 chat_id=chat_id,
-                text=normalized_text,
-                reply_markup=reply_markup,
-                request_category=request_category,
-                context=context,
-                parse_mode=ParseMode.MARKDOWN,
-                disable_notification=True,
-                disable_web_page_preview=True,
+                timeout=self._DEFAULT_API_TIMEOUT,
             )
             if isinstance(message, Message):
                 message_id = message.message_id
@@ -3992,15 +4117,20 @@ class PokerBotViewer:
             self._log_skip_empty(chat_id, None)
             return None
         try:
-            message = await self._messenger.send_message(
+            message = await self._timed_api_call(
+                "send_message.send_message",
+                self._messenger.send_message(
+                    chat_id=chat_id,
+                    text=normalized_text,
+                    reply_markup=reply_markup,
+                    request_category=request_category,
+                    context=context,
+                    parse_mode=parse_mode,
+                    disable_notification=True,
+                    disable_web_page_preview=True,
+                ),
                 chat_id=chat_id,
-                text=normalized_text,
-                reply_markup=reply_markup,
-                request_category=request_category,
-                context=context,
-                parse_mode=parse_mode,
-                disable_notification=True,
-                disable_web_page_preview=True,
+                timeout=self._DEFAULT_API_TIMEOUT,
             )
             if isinstance(message, Message):
                 message_id = message.message_id
@@ -4021,13 +4151,18 @@ class PokerBotViewer:
         try:
             context = self._build_context("send_photo", chat_id=chat_id)
             with open("./assets/poker_hand.jpg", "rb") as f:
-                await self._messenger.send_photo(
+                await self._timed_api_call(
+                    "send_photo.send_photo",
+                    self._messenger.send_photo(
+                        chat_id=chat_id,
+                        photo=f,
+                        request_category=RequestCategory.MEDIA,
+                        context=context,
+                        parse_mode=ParseMode.MARKDOWN,
+                        disable_notification=True,
+                    ),
                     chat_id=chat_id,
-                    photo=f,
-                    request_category=RequestCategory.MEDIA,
-                    context=context,
-                    parse_mode=ParseMode.MARKDOWN,
-                    disable_notification=True,
+                    timeout=self._DEFAULT_API_TIMEOUT,
                 )
         except Exception as e:
             logger.error(
@@ -4042,11 +4177,16 @@ class PokerBotViewer:
             "send_dice_reply", chat_id=chat_id, message_id=message_id
         )
         try:
-            return await self._bot.send_dice(
-                reply_to_message_id=message_id,
+            return await self._timed_api_call(
+                "send_dice_reply.send_dice",
+                self._bot.send_dice(
+                    reply_to_message_id=message_id,
+                    chat_id=chat_id,
+                    disable_notification=True,
+                    emoji=emoji,
+                ),
                 chat_id=chat_id,
-                disable_notification=True,
-                emoji=emoji,
+                timeout=self._DEFAULT_API_TIMEOUT,
             )
         except Exception as e:
             logger.error(
@@ -4087,15 +4227,20 @@ class PokerBotViewer:
             self._log_skip_empty(chat_id, message_id)
             return
         try:
-            await self._messenger.send_message(
+            await self._timed_api_call(
+                "send_message_reply.send_message",
+                self._messenger.send_message(
+                    chat_id=chat_id,
+                    text=normalized_text,
+                    reply_markup=None,
+                    request_category=RequestCategory.GENERAL,
+                    context=context,
+                    parse_mode=ParseMode.MARKDOWN,
+                    disable_notification=True,
+                    reply_to_message_id=message_id,
+                ),
                 chat_id=chat_id,
-                text=normalized_text,
-                reply_markup=None,
-                request_category=RequestCategory.GENERAL,
-                context=context,
-                parse_mode=ParseMode.MARKDOWN,
-                disable_notification=True,
-                reply_to_message_id=message_id,
+                timeout=self._DEFAULT_API_TIMEOUT,
             )
         except Exception as e:
             logger.error(
@@ -4144,17 +4289,22 @@ class PokerBotViewer:
             self._log_skip_empty(chat_id, message_id)
             return None
         try:
-            result = await safe_edit_message(
-                self._messenger,
+            result = await self._timed_api_call(
+                "edit_message_text.safe_edit_message",
+                safe_edit_message(
+                    self._messenger,
+                    chat_id=chat_id,
+                    message_id=message_id,
+                    text=normalized_text,
+                    reply_markup=reply_markup,
+                    current_game_id=current_game_id,
+                    request_category=request_category,
+                    context=context,
+                    parse_mode=parse_mode,
+                    disable_web_page_preview=disable_web_page_preview,
+                ),
                 chat_id=chat_id,
-                message_id=message_id,
-                text=normalized_text,
-                reply_markup=reply_markup,
-                current_game_id=current_game_id,
-                request_category=request_category,
-                context=context,
-                parse_mode=parse_mode,
-                disable_web_page_preview=disable_web_page_preview,
+                timeout=self._DEFAULT_API_TIMEOUT,
             )
             return result
         except Exception as exc:
@@ -4265,11 +4415,17 @@ class PokerBotViewer:
         lock = await self._acquire_message_lock(chat_id, message_id)
         async with lock:
             try:
-                await self._messenger.delete_message(
+                await self._timed_api_call(
+                    "delete_message.delete_message",
+                    self._messenger.delete_message(
+                        chat_id=chat_id,
+                        message_id=message_id,
+                        request_category=RequestCategory.DELETE,
+                        context=context,
+                    ),
                     chat_id=chat_id,
-                    message_id=message_id,
-                    request_category=RequestCategory.DELETE,
-                    context=context,
+                    timeout=self._DEFAULT_API_TIMEOUT,
+                    game=game,
                 )
                 await self._mark_message_deleted(normalized_message)
                 if anchor_record is not None:
@@ -4348,12 +4504,17 @@ class PokerBotViewer:
             im_card.save(bio, "PNG")
             bio.seek(0)
             context = self._build_context("send_single_card", chat_id=chat_id)
-            await self._messenger.send_photo(
+            await self._timed_api_call(
+                "send_single_card.send_photo",
+                self._messenger.send_photo(
+                    chat_id=chat_id,
+                    photo=bio,
+                    request_category=RequestCategory.MEDIA,
+                    context=context,
+                    disable_notification=disable_notification,
+                ),
                 chat_id=chat_id,
-                photo=bio,
-                request_category=RequestCategory.MEDIA,
-                context=context,
-                disable_notification=disable_notification,
+                timeout=self._DEFAULT_API_TIMEOUT,
             )
         except Exception as e:
             logger.error(
@@ -4392,15 +4553,20 @@ class PokerBotViewer:
             bio = BytesIO(desk_bytes)
             bio.name = "desk.png"
             bio.seek(0)
-            message = await self._messenger.send_photo(
+            message = await self._timed_api_call(
+                "send_desk_cards_img.send_photo",
+                self._messenger.send_photo(
+                    chat_id=chat_id,
+                    photo=bio,
+                    caption=normalized_caption,
+                    request_category=RequestCategory.MEDIA,
+                    parse_mode=parse_mode,
+                    disable_notification=disable_notification,
+                    reply_markup=reply_markup,
+                    context=context,
+                ),
                 chat_id=chat_id,
-                photo=bio,
-                caption=normalized_caption,
-                request_category=RequestCategory.MEDIA,
-                parse_mode=parse_mode,
-                disable_notification=disable_notification,
-                reply_markup=reply_markup,
-                context=context,
+                timeout=self._DEFAULT_API_TIMEOUT,
             )
             if isinstance(message, Message):
                 return message
@@ -4450,11 +4616,16 @@ class PokerBotViewer:
             media = InputMediaPhoto(
                 media=bio, caption=normalized_caption, parse_mode=parse_mode
             )
-            await self._bot.edit_message_media(
+            await self._timed_api_call(
+                "edit_desk_cards_img.edit_message_media",
+                self._bot.edit_message_media(
+                    chat_id=chat_id,
+                    message_id=message_id,
+                    media=media,
+                    reply_markup=reply_markup,
+                ),
                 chat_id=chat_id,
-                message_id=message_id,
-                media=media,
-                reply_markup=reply_markup,
+                timeout=self._DEFAULT_API_TIMEOUT,
             )
             return None
         except BadRequest:
@@ -4662,12 +4833,17 @@ class PokerBotViewer:
             "edit_message_reply_markup", chat_id=chat_id, message_id=message_id
         )
         try:
-            return await self._messenger.edit_message_reply_markup(
+            return await self._timed_api_call(
+                "edit_message_reply_markup.edit_message_reply_markup",
+                self._messenger.edit_message_reply_markup(
+                    chat_id=chat_id,
+                    message_id=message_id,
+                    reply_markup=reply_markup,
+                    request_category=RequestCategory.INLINE,
+                    context=context,
+                ),
                 chat_id=chat_id,
-                message_id=message_id,
-                reply_markup=reply_markup,
-                request_category=RequestCategory.INLINE,
-                context=context,
+                timeout=self._DEFAULT_API_TIMEOUT,
             )
         except BadRequest as e:
             err = str(e).lower()
@@ -4711,9 +4887,14 @@ class PokerBotViewer:
         if not message_id:
             return
         try:
-            await self._bot.edit_message_reply_markup(
+            await self._timed_api_call(
+                "remove_markup.edit_message_reply_markup",
+                self._bot.edit_message_reply_markup(
+                    chat_id=chat_id,
+                    message_id=message_id,
+                ),
                 chat_id=chat_id,
-                message_id=message_id,
+                timeout=self._DEFAULT_API_TIMEOUT,
             )
         except BadRequest as e:
             err = str(e).lower()
@@ -4886,15 +5067,20 @@ class PokerBotViewer:
             selective=False,
         )
         try:
-            await self._messenger.send_message(
+            await self._timed_api_call(
+                "send_new_hand_ready_message.send_message",
+                self._messenger.send_message(
+                    chat_id=chat_id,
+                    text=normalized_message,
+                    parse_mode=ParseMode.MARKDOWN,
+                    disable_notification=True,
+                    disable_web_page_preview=True,
+                    reply_markup=reply_keyboard,
+                    request_category=RequestCategory.START_GAME,
+                    context=context,
+                ),
                 chat_id=chat_id,
-                text=normalized_message,
-                parse_mode=ParseMode.MARKDOWN,
-                disable_notification=True,
-                disable_web_page_preview=True,
-                reply_markup=reply_keyboard,
-                request_category=RequestCategory.START_GAME,
-                context=context,
+                timeout=self._DEFAULT_API_TIMEOUT,
             )
         except Exception as e:
             logger.error(
