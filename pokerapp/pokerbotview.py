@@ -2134,6 +2134,7 @@ class PokerBotViewer:
                                 chat_id=chat_id,
                                 message_id=message_id,
                                 reply_markup=reply_markup,
+                                game=game,
                             )
                         except Exception:
                             if callback_token_registered:
@@ -3109,6 +3110,7 @@ class PokerBotViewer:
                 chat_id=private_chat_id,
                 message_id=message_id,
                 reply_markup=keyboard,
+                game=game,
             )
         except Exception as exc:
             logger.error(
@@ -4873,6 +4875,8 @@ class PokerBotViewer:
         chat_id: ChatId,
         message_id: MessageId,
         reply_markup: Optional[InlineKeyboardMarkup | ReplyKeyboardMarkup] = None,
+        *,
+        game: Optional[Game] = None,
     ) -> bool:
         """Update a message's inline keyboard while handling common failures."""
         if not message_id:
@@ -4892,6 +4896,7 @@ class PokerBotViewer:
                 ),
                 chat_id=chat_id,
                 timeout=self._DEFAULT_API_TIMEOUT,
+                game=game,
             )
         except BadRequest as e:
             err = str(e).lower()
