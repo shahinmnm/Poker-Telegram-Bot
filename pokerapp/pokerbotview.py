@@ -2924,12 +2924,17 @@ class PokerBotViewer:
 
     async def sync_player_private_keyboards(
         self,
-        game: Game,
+        *,
+        game: Optional[Game] = None,
         include_inactive: bool = False,
         stage_name: Optional[str] = None,
         community_cards: Optional[Sequence[str]] = None,
         players: Optional[Sequence[Player]] = None,
     ) -> None:
+        if game is None:
+            logger.debug("sync_player_private_keyboards called without game context")
+            return
+
         stage = getattr(game, "state", GameState.INITIAL)
         chat_id_for_stage = getattr(game, "chat_id", None)
         resolved_stage: Optional[GameState]
@@ -3534,7 +3539,13 @@ class PokerBotViewer:
 
         return normalized_id
 
-    async def update_player_anchors_and_keyboards(self, game: Game) -> None:
+    async def update_player_anchors_and_keyboards(
+        self, *, game: Optional[Game] = None
+    ) -> None:
+        if game is None:
+            logger.debug("update_player_anchors_and_keyboards called without game")
+            return
+
         chat_id = getattr(game, "chat_id", None)
         if chat_id is None:
             logger.warning(
@@ -3887,7 +3898,13 @@ class PokerBotViewer:
 
                 await asyncio.sleep(0.05)
 
-    async def clear_all_player_anchors(self, game: Game) -> None:
+    async def clear_all_player_anchors(
+        self, *, game: Optional[Game] = None
+    ) -> None:
+        if game is None:
+            logger.debug("clear_all_player_anchors called without game context")
+            return
+
         chat_id = getattr(game, "chat_id", None)
         if chat_id is None or self._is_private_chat(chat_id):
             return
@@ -3961,7 +3978,7 @@ class PokerBotViewer:
                 record.refresh_toggle = ""
 
         if active_players:
-            await self.update_player_anchors_and_keyboards(game)
+            await self.update_player_anchors_and_keyboards(game=game)
 
     async def announce_player_seats(
         self,
@@ -5015,11 +5032,24 @@ class PokerBotViewer:
             message_id,
         )
         
-    async def send_showdown_results(self, chat_id: ChatId, game: Game, winners_by_pot: list) -> None:
+    async def send_showdown_results(
+        self,
+        chat_id: ChatId,
+        winners_by_pot: list,
+        *,
+        game: Optional[Game] = None,
+    ) -> None:
         """
         پیام نهایی نتایج بازی را با فرمت زیبا ساخته و ارسال می‌کند.
         این نسخه برای مدیریت ساختار داده جدید Side Pot (لیست دیکشنری‌ها) به‌روز شده است.
         """
+        if game is None:
+            logger.warning(
+                "Skipping showdown results because game context is missing",
+                extra={"chat_id": chat_id},
+            )
+            return
+
         final_message = "🏆 *نتایج نهایی و نمایش کارت‌ها*\n\n"
 
         if not winners_by_pot:

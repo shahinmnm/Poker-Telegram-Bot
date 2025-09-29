@@ -505,7 +505,7 @@ class MatchmakingService:
                     game.cards_table.append(game.remain_cards.pop())
 
         if should_refresh_anchors:
-            await self._view.update_player_anchors_and_keyboards(game)
+            await self._view.update_player_anchors_and_keyboards(game=game)
 
         if not send_message:
             return

@@ -597,7 +597,7 @@ def test_send_turn_message_updates_turn_message_only():
 
     assert game.turn_message_id == 321
     view.update_turn_message.assert_awaited_once()
-    view.update_player_anchors_and_keyboards.assert_awaited_once_with(game)
+    view.update_player_anchors_and_keyboards.assert_awaited_once_with(game=game)
     view.sync_player_private_keyboards.assert_not_awaited()
 
 
@@ -617,7 +617,7 @@ def test_add_cards_to_table_does_not_send_stage_message():
     view.send_message_return_id.assert_not_awaited()
     view.delete_message.assert_not_awaited()
     assert game.board_message_id is None
-    view.update_player_anchors_and_keyboards.assert_awaited_once_with(game)
+    view.update_player_anchors_and_keyboards.assert_awaited_once_with(game=game)
     view.sync_player_private_keyboards.assert_not_awaited()
 
 
@@ -1131,7 +1131,7 @@ async def test_showdown_sends_new_hand_message_before_join_prompt():
     table_manager.save_game.assert_awaited()
     model._game_engine._clear_game_messages.assert_awaited_once()
     view.send_showdown_results.assert_awaited_once()
-    view.clear_all_player_anchors.assert_awaited_once_with(game)
+    view.clear_all_player_anchors.assert_awaited_once_with(game=game)
 
 
 @pytest.mark.asyncio

@@ -1560,7 +1560,7 @@ class GameEngine:
         announcements.append(
             {
                 "call": lambda winners=winners_by_pot: self._view.send_showdown_results(
-                    chat_id, game, winners
+                    chat_id, winners, game=game
                 ),
                 "operation": "send_showdown_results",
                 "log_extra": self._build_telegram_log_extra(
