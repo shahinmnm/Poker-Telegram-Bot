@@ -818,6 +818,43 @@ class LockManager:
             key, release_level, additional=base_context
         )
 
+        release_context_override: Optional[Dict[str, Any]] = None
+        release_index: Optional[int] = None
+        current_acquisitions = self._get_current_acquisitions()
+        for i, acq in enumerate(current_acquisitions):
+            if acq.key != key:
+                continue
+            if acq.count > 1:
+                acq.count -= 1
+                self._logger.debug(
+                    "[LOCK_TRACE] RE-ENTRANT release key=%s count=%d (still held) from=%s (%s) task=%s",
+                    key,
+                    acq.count,
+                    release_site,
+                    release_function,
+                    self._describe_task(task),
+                    extra=self._log_extra(
+                        context_payload,
+                        event_type="lock_reentrant_release",
+                        lock_key=key,
+                        lock_level=release_level,
+                        reentrant_count=acq.count,
+                        call_site=release_site,
+                        call_site_function=release_function,
+                    ),
+                )
+                self._set_current_acquisitions(current_acquisitions)
+                return
+
+            release_context_override = self._build_context_payload(
+                key, release_level, additional=acq.context
+            )
+            release_index = i
+            break
+
+        if release_context_override is not None:
+            context_payload = release_context_override
+
         acquire_key: Optional[Tuple[int, str]] = None
         holding_duration: Optional[float] = None
         if task is not None:
@@ -924,10 +961,11 @@ class LockManager:
             )
             raise
         else:
-            if task is not None and record_entry is not None:
-                release_context = self._finalize_release(record_entry[0])
-                if release_context:
-                    context_payload = release_context
+            if release_index is not None:
+                current_acquisitions.pop(release_index)
+                self._set_current_acquisitions(current_acquisitions)
+            if release_context_override is not None:
+                context_payload = release_context_override
             if acquire_key is not None:
                 acquire_times = self._lock_acquire_times.get(acquire_key)
                 if acquire_times:
@@ -1103,18 +1141,6 @@ class LockManager:
             if record.key == key:
                 return index, record
         return None
-
-    def _finalize_release(self, index: int) -> Dict[str, Any]:
-        acquisitions = self._get_current_acquisitions()
-        if not acquisitions or not (0 <= index < len(acquisitions)):
-            return {}
-        record = acquisitions[index]
-        record.count -= 1
-        context = dict(record.context)
-        if record.count <= 0:
-            acquisitions.pop(index)
-        self._set_current_acquisitions(acquisitions)
-        return context
 
     def _register_waiting(
         self,
