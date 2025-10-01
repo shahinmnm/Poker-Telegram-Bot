@@ -1068,51 +1068,88 @@ class LockManager:
 
     def _validate_lock_order(
         self,
-        acquisitions: List[_LockAcquisition],
-        key: str,
-        level: int,
-        context: Dict[str, Any],
+        current_acquisitions: List[_LockAcquisition],
+        new_key: str,
+        new_level: int,
+        context: Mapping[str, Any],
     ) -> None:
-        if not acquisitions:
-            return
-        if any(item.key == key for item in acquisitions):
-            # Re-entrant acquire; allow regardless of order.
-            return
-        held_levels = self._get_current_levels()
-        if not held_levels:
-            return
-        highest_level = max(held_levels)
-        lowest_level = min(held_levels)
+        """Validate that acquiring new_key respects hierarchical lock ordering.
 
-        violation_type: Optional[str] = None
-        if level < highest_level:
-            violation_type = "descending"
-        elif level >= highest_level:
+        Raises:
+            LockOrderError: If the new lock would violate ordering constraints.
+        """
+
+        if not current_acquisitions:
+            # No locks held, no ordering constraint
             return
-        else:
-            violation_type = "ascending"
-        held_contexts = [f"{item.key}(level={item.level})" for item in acquisitions]
-        lock_identity = self._format_lock_identity(key, level, context)
-        message = (
-            "Lock ordering violation: attempting to acquire %s while holding %s"
-        ) % (lock_identity, held_contexts)
-        violation_context = dict(context)
-        violation_context["acquisition_order"] = held_levels
-        violation_context["violation_type"] = violation_type
-        self._logger.error(
-            "%s%s",
-            message,
-            self._format_context(violation_context),
-            extra=self._log_extra(
-                violation_context,
-                event_type="lock_order_violation",
-                lock_key=key,
-                lock_level=level,
-                acquisition_order=held_levels,
-                violation_type=violation_type,
-            ),
-        )
-        raise LockOrderError(message)
+
+        # Check if any currently held lock has a higher level than the new lock
+        held_levels = [acq.level for acq in current_acquisitions]
+        max_held_level = max(held_levels)
+
+        if new_level < max_held_level:
+            # Attempting to acquire a lower-level lock while holding a higher-level lock
+            # This can cause AA deadlock if another task acquires in opposite order
+
+            # Find the acquisition with the highest level
+            violating_acquisition = max(
+                current_acquisitions, key=lambda acq: acq.level
+            )
+
+            # Build detailed error message
+            held_keys = [acq.key for acq in current_acquisitions]
+            held_levels_str = ", ".join(
+                f"{acq.key}(L{acq.level})" for acq in current_acquisitions
+            )
+
+            error_message = (
+                f"Lock order violation: Attempting to acquire '{new_key}' (level {new_level}) "
+                f"while holding higher-level lock '{violating_acquisition.key}' (level {violating_acquisition.level}). "
+                f"Currently held locks: [{held_levels_str}]. "
+                "Locks must be acquired in ascending level order to prevent deadlock."
+            )
+
+            # Log the violation with full context
+            task = asyncio.current_task()
+            self._logger.error(
+                "[LOCK_ORDER_VIOLATION] %s task=%s",
+                error_message,
+                self._describe_task(task),
+                extra=self._log_extra(
+                    context,
+                    event_type="lock_order_violation",
+                    lock_key=new_key,
+                    lock_level=new_level,
+                    held_keys=held_keys,
+                    held_levels=held_levels,
+                    max_held_level=max_held_level,
+                    violating_key=violating_acquisition.key,
+                    violating_level=violating_acquisition.level,
+                ),
+            )
+
+            raise LockOrderError(error_message)
+
+        # Additional check: Warn if acquiring the same level (potential design smell)
+        if new_level == max_held_level:
+            held_same_level = [
+                acq.key for acq in current_acquisitions if acq.level == new_level
+            ]
+            if held_same_level and new_key not in held_same_level:
+                self._logger.warning(
+                    "[LOCK_ORDER_WARNING] Acquiring lock '%s' at same level (%d) as held locks %s. "
+                    "Consider using different levels if these locks protect different resources.",
+                    new_key,
+                    new_level,
+                    held_same_level,
+                    extra=self._log_extra(
+                        context,
+                        event_type="lock_order_same_level",
+                        lock_key=new_key,
+                        lock_level=new_level,
+                        held_keys_same_level=held_same_level,
+                    ),
+                )
 
     def _record_acquired(
         self,
