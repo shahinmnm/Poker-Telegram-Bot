@@ -7,6 +7,7 @@ import inspect
 import json
 import logging
 import math
+import random
 import time
 from contextlib import asynccontextmanager
 from contextvars import ContextVar
@@ -50,6 +51,12 @@ _LOCK_PREFIX_LEVELS: Tuple[Tuple[str, str], ...] = (
     ("player_wallet:", "wallet"),
     ("pokerbot:wallet:", "wallet"),
 )
+
+# Timeout configuration constants
+_TIMEOUT_BACKOFF_BASE = 0.1    # Base backoff delay in seconds
+_TIMEOUT_BACKOFF_MAX = 2.0     # Maximum backoff delay in seconds
+_TIMEOUT_JITTER_RATIO = 0.1    # Jitter as fraction of backoff (10%)
+_TIMEOUT_WARNING_RATIO = 0.7   # Warn when 70% of timeout consumed
 
 
 class LockOrderError(RuntimeError):
@@ -353,6 +360,8 @@ class LockManager:
             deadline = loop.time() + max(0.0, total_timeout)
 
         attempts = self._max_retries + 1
+        attempt_timings: List[Dict[str, Any]] = []  # Track timing for diagnostics
+
         for attempt in range(attempts):
             attempt_start = loop.time()
             attempt_timeout: Optional[float]
@@ -361,10 +370,41 @@ class LockManager:
             else:
                 remaining = deadline - loop.time()
                 if remaining <= 0:
+                    # Timeout budget exhausted before this attempt
+                    self._logger.debug(
+                        "[LOCK_TIMEOUT] Timeout budget exhausted before attempt %d for key=%s",
+                        attempt + 1,
+                        key,
+                        extra=self._log_extra(
+                            context_payload,
+                            event_type="lock_timeout_budget_exhausted",
+                            lock_key=key,
+                            lock_level=resolved_level,
+                            attempt=attempt,
+                            attempt_timings=attempt_timings,
+                        ),
+                    )
                     break
-                remaining_attempts = attempts - attempt
-                attempt_timeout = remaining / remaining_attempts
+
+                # Use adaptive timeout calculation instead of linear distribution
+                attempt_timeout = self._calculate_attempt_timeout(
+                    attempt, attempts, remaining
+                )
+
                 if attempt_timeout <= 0:
+                    self._logger.debug(
+                        "[LOCK_TIMEOUT] Calculated timeout <= 0 for attempt %d, key=%s",
+                        attempt + 1,
+                        key,
+                        extra=self._log_extra(
+                            context_payload,
+                            event_type="lock_timeout_invalid",
+                            lock_key=key,
+                            lock_level=resolved_level,
+                            attempt=attempt,
+                            calculated_timeout=attempt_timeout,
+                        ),
+                    )
                     break
 
             self._register_waiting(task, key, resolved_level, context_payload)
@@ -376,10 +416,54 @@ class LockManager:
                 owner = getattr(lock, "_owner", None)
                 if owner is not None and owner is not task:
                     self._metrics["lock_contention"] += 1
+
                 if attempt_timeout is None:
                     await lock.acquire()
                 else:
-                    await asyncio.wait_for(lock.acquire(), timeout=attempt_timeout)
+                    # Monitor acquisition progress for early warning
+                    acquisition_start = loop.time()
+                    try:
+                        await asyncio.wait_for(lock.acquire(), timeout=attempt_timeout)
+                    except asyncio.TimeoutError:
+                        # Record failed attempt timing for diagnostics
+                        attempt_duration = loop.time() - acquisition_start
+                        attempt_timings.append({
+                            "attempt": attempt,
+                            "duration": attempt_duration,
+                            "timeout": attempt_timeout,
+                            "result": "timeout",
+                        })
+                        raise
+                    else:
+                        # Record successful attempt timing
+                        attempt_duration = loop.time() - acquisition_start
+                        attempt_timings.append({
+                            "attempt": attempt,
+                            "duration": attempt_duration,
+                            "timeout": attempt_timeout,
+                            "result": "success",
+                        })
+
+                    # Warn if acquisition took longer than expected (>70% of timeout)
+                    if attempt_duration > attempt_timeout * _TIMEOUT_WARNING_RATIO:
+                        self._logger.warning(
+                            "[TIMEOUT_WARNING] Lock '%s' acquisition took %.2fs (%.0f%% of %.2fs timeout) on attempt %d",
+                            key,
+                            attempt_duration,
+                            (attempt_duration / attempt_timeout) * 100,
+                            attempt_timeout,
+                            attempt + 1,
+                            extra=self._log_extra(
+                                context_payload,
+                                event_type="lock_timeout_warning",
+                                lock_key=key,
+                                lock_level=resolved_level,
+                                attempt=attempt + 1,
+                                attempt_duration=attempt_duration,
+                                attempt_timeout=attempt_timeout,
+                                timeout_ratio=attempt_duration / attempt_timeout,
+                            ),
+                        )
                 lock_acquired = True
                 setattr(lock, "_acquired_at_ts", time.time())
                 setattr(lock, "_acquired_by_callsite", call_site)
@@ -501,6 +585,62 @@ class LockManager:
                             waiting_tasks=diagnostics.get("waiting_tasks"),
                         ),
                     )
+
+                # Apply exponential backoff before retry (if not last attempt)
+                if attempt < attempts - 1:  # Not the last attempt
+                    backoff_delay = self._calculate_backoff_delay(attempt + 1)
+
+                    # Check if we have time budget for backoff
+                    if deadline is not None:
+                        remaining_after_backoff = deadline - loop.time() - backoff_delay
+                        if remaining_after_backoff < 0:
+                            # Skip backoff if it would exceed deadline
+                            self._logger.debug(
+                                "[LOCK_RETRY] Skipping backoff delay (%.2fs) - insufficient time remaining",
+                                backoff_delay,
+                                extra=self._log_extra(
+                                    context_payload,
+                                    event_type="lock_backoff_skipped",
+                                    lock_key=key,
+                                    lock_level=resolved_level,
+                                    attempt=attempt + 1,
+                                    backoff_delay=backoff_delay,
+                                ),
+                            )
+                        else:
+                            # Apply backoff delay
+                            self._logger.debug(
+                                "[LOCK_RETRY] Backing off %.2fs before retry %d for key=%s",
+                                backoff_delay,
+                                attempt + 2,
+                                key,
+                                extra=self._log_extra(
+                                    context_payload,
+                                    event_type="lock_backoff",
+                                    lock_key=key,
+                                    lock_level=resolved_level,
+                                    attempt=attempt + 1,
+                                    backoff_delay=backoff_delay,
+                                ),
+                            )
+                            await asyncio.sleep(backoff_delay)
+                    else:
+                        # No deadline, always apply backoff
+                        self._logger.debug(
+                            "[LOCK_RETRY] Backing off %.2fs before retry %d for key=%s",
+                            backoff_delay,
+                            attempt + 2,
+                            key,
+                            extra=self._log_extra(
+                                context_payload,
+                                event_type="lock_backoff",
+                                lock_key=key,
+                                lock_level=resolved_level,
+                                attempt=attempt + 1,
+                                backoff_delay=backoff_delay,
+                            ),
+                        )
+                        await asyncio.sleep(backoff_delay)
             except asyncio.CancelledError:
                 self._logger.warning(
                     "Lock acquisition for %s cancelled on attempt %d%s",
@@ -556,17 +696,6 @@ class LockManager:
             finally:
                 self._unregister_waiting(task, key)
 
-            if attempt < attempts - 1:
-                backoff = self._retry_backoff_seconds * (2**attempt)
-                if backoff > 0:
-                    if deadline is None:
-                        await asyncio.sleep(backoff)
-                    else:
-                        remaining_sleep = deadline - loop.time()
-                        if remaining_sleep <= 0:
-                            break
-                        await asyncio.sleep(min(backoff, remaining_sleep))
-
         diagnostics = self._lock_diagnostics(key)
         failure_context = dict(context_payload)
         failure_context.update(diagnostics)
@@ -611,6 +740,7 @@ class LockManager:
                     lock_key=key,
                     lock_level=resolved_level,
                     attempts=attempts,
+                    attempt_timings=attempt_timings,
                     held_by_tasks=diagnostics.get("held_by_tasks"),
                     waiting_tasks=diagnostics.get("waiting_tasks"),
                 ),
@@ -1065,6 +1195,78 @@ class LockManager:
         if category_timeout is not None:
             return category_timeout
         return self._default_timeout_seconds
+
+    def _calculate_attempt_timeout(
+        self,
+        attempt: int,
+        total_attempts: int,
+        remaining: float,
+    ) -> float:
+        """Calculate timeout for a specific retry attempt using adaptive strategy.
+
+        Strategy:
+        - First attempt: 30% of average time (fail fast on immediate contention)
+        - Last attempt: All remaining time (give final chance)
+        - Middle attempts: Gradually increasing allocation (50% to 100% progression)
+
+        Args:
+            attempt: Current attempt number (0-indexed)
+            total_attempts: Total number of attempts allowed
+            remaining: Remaining time budget in seconds
+
+        Returns:
+            Timeout in seconds for this attempt
+        """
+
+        if remaining <= 0:
+            return 0.0
+
+        if total_attempts <= 1:
+            return remaining
+
+        remaining_attempts = total_attempts - attempt
+        if remaining_attempts <= 0:
+            return remaining
+
+        # Base allocation: equal distribution of remaining time
+        base_timeout = remaining / remaining_attempts
+
+        if attempt == 0:
+            # First attempt: fail fast (30% of base allocation)
+            return base_timeout * 0.3
+        elif attempt == total_attempts - 1:
+            # Last attempt: use all remaining time
+            return remaining
+        else:
+            # Middle attempts: gradually increase from 50% to 100% of base
+            progress = attempt / (total_attempts - 1)
+            multiplier = 0.5 + 0.5 * progress
+            return base_timeout * multiplier
+
+    def _calculate_backoff_delay(self, attempt: int) -> float:
+        """Calculate exponential backoff delay with jitter.
+
+        Uses exponential progression: base * (2 ^ attempt)
+        Adds random jitter to prevent thundering herd effects.
+
+        Args:
+            attempt: Retry attempt number (0-indexed)
+
+        Returns:
+            Delay in seconds before next retry
+        """
+
+        if attempt == 0:
+            return 0.0  # No delay before first retry
+
+        # Exponential backoff: 0.1s, 0.2s, 0.4s, 0.8s, 1.6s (capped at 2.0s)
+        backoff = _TIMEOUT_BACKOFF_BASE * (2 ** (attempt - 1))
+        backoff = min(backoff, _TIMEOUT_BACKOFF_MAX)
+
+        # Add jitter (±10%) to prevent synchronized retries
+        jitter = backoff * _TIMEOUT_JITTER_RATIO * random.random()
+
+        return backoff + jitter
 
     def _validate_lock_order(
         self,
