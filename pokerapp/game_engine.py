@@ -451,6 +451,37 @@ class GameEngine:
         extra.update(extra_fields)
         return extra
 
+    @asynccontextmanager
+    async def _player_action_locks(
+        self,
+        game: Game,
+        player: Player,
+        *,
+        include_wallet: bool = True,
+        include_report: bool = False,
+    ) -> AsyncIterator[Dict[str, bool]]:
+        """Acquire locks needed for player action (optimized batch)."""
+
+        chat_id = game.chat_id
+        locks_needed = [f"stage:{self._safe_int(chat_id)}"]
+
+        if include_wallet:
+            locks_needed.append(f"wallet:{player.user_id}")
+
+        if include_report:
+            locks_needed.append(f"player_report:{player.user_id}")
+
+        async with self._lock_manager.acquire_batch(
+            locks_needed,
+            timeout=self._stage_lock_timeout,
+            context={
+                "chat_id": chat_id,
+                "game_id": game.id,
+                "user_id": player.user_id,
+            },
+        ) as results:
+            yield results
+
     @staticmethod
     def state_token(state: Any) -> str:
         """Return a token representing the provided state."""
