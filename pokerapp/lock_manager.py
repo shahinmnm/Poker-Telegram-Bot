@@ -304,6 +304,29 @@ class LockManager:
             extra=trace_start_extra,
         )
         current_acquisitions = self._get_current_acquisitions()
+        # Check for re-entrant acquisition of the same lock key
+        for existing in current_acquisitions:
+            if existing.key == key:
+                existing.count += 1
+                self._logger.debug(
+                    "[LOCK_TRACE] RE-ENTRANT acquire key=%s count=%d from=%s (%s) task=%s",
+                    key,
+                    existing.count,
+                    call_site,
+                    call_function,
+                    self._describe_task(task),
+                    extra=self._log_extra(
+                        context_payload,
+                        event_type="lock_reentrant_acquire",
+                        lock_key=key,
+                        lock_level=resolved_level,
+                        reentrant_count=existing.count,
+                        call_site=call_site,
+                        call_site_function=call_function,
+                    ),
+                )
+                return True
+
         self._validate_lock_order(current_acquisitions, key, resolved_level, context_payload)
         acquisition_order = self._get_current_levels()
         acquiring_extra = self._log_extra(
