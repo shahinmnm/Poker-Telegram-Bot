@@ -490,6 +490,13 @@ class RequestManager:
                         )
                         return True
 
+                trace_telegram_api_call(
+                    "editMessageReplyMarkup",
+                    chat_id=chat_id,
+                    message_id=message_id,
+                    reply_markup=reply_markup,
+                )
+
                 try:
                     await self._bot.edit_message_reply_markup(
                         chat_id=chat_id,
