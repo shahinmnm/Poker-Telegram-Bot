@@ -58,6 +58,10 @@ _TIMEOUT_BACKOFF_MAX = 2.0     # Maximum backoff delay in seconds
 _TIMEOUT_JITTER_RATIO = 0.1    # Jitter as fraction of backoff (10%)
 _TIMEOUT_WARNING_RATIO = 0.7   # Warn when 70% of timeout consumed
 
+# Cancellation configuration
+_CANCELLATION_CLEANUP_TIMEOUT = 0.5  # Max time to wait for lock cleanup on cancel
+_CANCELLATION_LOG_STACKTRACE = True  # Log stack traces for cancelled acquisitions
+
 
 class LockOrderError(RuntimeError):
     """Raised when locks are acquired out of the configured order."""
@@ -137,7 +141,14 @@ class LockManager:
         self._category_timeouts = self._normalise_category_timeouts(
             resolved_category_timeouts
         )
-        self._metrics: Dict[str, int] = {"lock_contention": 0, "lock_timeouts": 0}
+        self._metrics: Dict[str, int] = {
+            "lock_contention": 0,
+            "lock_timeouts": 0,
+            "lock_cancellations": 0,
+            "lock_cleanup_failures": 0,
+        }
+        self._shutdown_initiated = False
+        self._shutdown_lock = asyncio.Lock()
 
     async def _get_lock(self, key: str) -> ReentrantAsyncLock:
         async with self._locks_guard:
@@ -146,6 +157,79 @@ class LockManager:
                 lock = ReentrantAsyncLock()
                 self._locks[key] = lock
             return lock
+
+    async def shutdown(self, timeout: float = 5.0) -> Dict[str, Any]:
+        """Initiate graceful shutdown of lock manager.
+
+        Marks the manager as shutting down and waits for active acquisitions
+        to complete. New acquisition attempts will be rejected.
+
+        Args:
+            timeout: Maximum time to wait for graceful shutdown
+
+        Returns:
+            Dictionary with shutdown statistics
+        """
+
+        async with self._shutdown_lock:
+            if self._shutdown_initiated:
+                self._logger.warning("[LOCK_SHUTDOWN] Shutdown already initiated")
+                return {"status": "already_shutdown"}
+
+            self._shutdown_initiated = True
+            self._logger.info(
+                "[LOCK_SHUTDOWN] Initiating graceful shutdown (timeout=%.1fs)",
+                timeout,
+                extra={
+                    "event_type": "lock_manager_shutdown_start",
+                    "timeout": timeout,
+                },
+            )
+
+            shutdown_start = asyncio.get_running_loop().time()
+            deadline = shutdown_start + timeout
+
+            # Wait for all waiting tasks to clear
+            remaining_wait_time = deadline - asyncio.get_running_loop().time()
+            if remaining_wait_time > 0:
+                try:
+                    await asyncio.wait_for(
+                        self._wait_for_waiting_tasks_clear(),
+                        timeout=remaining_wait_time,
+                    )
+                except asyncio.TimeoutError:
+                    self._logger.warning(
+                        "[LOCK_SHUTDOWN] Timeout waiting for tasks to clear (%d still waiting)",
+                        len(self._waiting_tasks),
+                        extra={
+                            "event_type": "lock_manager_shutdown_timeout",
+                            "waiting_tasks": len(self._waiting_tasks),
+                        },
+                    )
+
+            shutdown_duration = asyncio.get_running_loop().time() - shutdown_start
+
+            stats = {
+                "status": "completed",
+                "duration": shutdown_duration,
+                "remaining_locks": len(self._locks),
+                "remaining_waiting": len(self._waiting_tasks),
+                "metrics": dict(self._metrics),
+            }
+
+            self._logger.info(
+                "[LOCK_SHUTDOWN] Shutdown completed in %.2fs",
+                shutdown_duration,
+                extra={"event_type": "lock_manager_shutdown_complete", **stats},
+            )
+
+            return stats
+
+    async def _wait_for_waiting_tasks_clear(self) -> None:
+        """Wait for all waiting tasks to complete or be cancelled."""
+
+        while self._waiting_tasks:
+            await asyncio.sleep(0.1)
 
     def _normalise_category_timeouts(
         self, source: Optional[Mapping[str, Any]]
@@ -282,6 +366,18 @@ class LockManager:
         task = asyncio.current_task()
         if task is None:
             raise RuntimeError("LockManager.acquire requires an active asyncio task")
+
+        # Reject new acquisitions during shutdown
+        if self._shutdown_initiated:
+            self._logger.warning(
+                "[LOCK_SHUTDOWN] Rejecting acquisition attempt for key=%s (shutdown in progress)",
+                key,
+                extra={
+                    "event_type": "lock_acquire_rejected_shutdown",
+                    "lock_key": key,
+                },
+            )
+            return False
 
         call_site, call_function = self._resolve_call_site()
 
@@ -642,19 +738,77 @@ class LockManager:
                         )
                         await asyncio.sleep(backoff_delay)
             except asyncio.CancelledError:
+                self._metrics["lock_cancellations"] += 1
+
+                # Capture stack trace if enabled
+                stacktrace = None
+                if _CANCELLATION_LOG_STACKTRACE:
+                    import traceback
+
+                    stacktrace = "".join(traceback.format_stack())
+
+                # Log cancellation with full context
+                cancellation_extra = self._log_extra(
+                    context_payload,
+                    event_type="lock_cancelled",
+                    lock_key=key,
+                    lock_level=resolved_level,
+                    attempts=attempt + 1,
+                    lock_acquired=lock_acquired,
+                    shutdown_initiated=self._shutdown_initiated,
+                )
+
+                if stacktrace:
+                    cancellation_extra["stacktrace"] = stacktrace
+
                 self._logger.warning(
-                    "Lock acquisition for %s cancelled on attempt %d%s",
+                    "[LOCK_CANCELLED] Lock acquisition for %s cancelled on attempt %d (acquired=%s, shutdown=%s)%s",
                     lock_identity,
                     attempt + 1,
+                    lock_acquired,
+                    self._shutdown_initiated,
                     self._format_context(context_payload),
-                    extra=self._log_extra(
-                        context_payload,
-                        event_type="lock_cancelled",
-                        lock_key=key,
-                        lock_level=resolved_level,
-                        attempts=attempt + 1,
-                    ),
+                    extra=cancellation_extra,
                 )
+
+                # Perform cleanup with timeout protection
+                try:
+                    await asyncio.wait_for(
+                        self._cleanup_after_cancellation(
+                            lock, key, task, lock_acquired, context_payload
+                        ),
+                        timeout=_CANCELLATION_CLEANUP_TIMEOUT,
+                    )
+                except asyncio.TimeoutError:
+                    self._metrics["lock_cleanup_failures"] += 1
+                    self._logger.error(
+                        "[LOCK_CLEANUP] Cleanup timeout (%.1fs) for cancelled acquisition of key=%s",
+                        _CANCELLATION_CLEANUP_TIMEOUT,
+                        key,
+                        extra=self._log_extra(
+                            context_payload,
+                            event_type="lock_cleanup_timeout",
+                            lock_key=key,
+                            lock_level=resolved_level,
+                            cleanup_timeout=_CANCELLATION_CLEANUP_TIMEOUT,
+                        ),
+                    )
+                except Exception as cleanup_error:  # pragma: no cover - defensive
+                    self._metrics["lock_cleanup_failures"] += 1
+                    self._logger.exception(
+                        "[LOCK_CLEANUP] Unexpected error during cleanup for key=%s: %s",
+                        key,
+                        cleanup_error,
+                        extra=self._log_extra(
+                            context_payload,
+                            event_type="lock_cleanup_unexpected_error",
+                            lock_key=key,
+                            lock_level=resolved_level,
+                            error=str(cleanup_error),
+                        ),
+                    )
+
+                # Re-raise cancellation after cleanup
                 raise
             except Exception:
                 self._logger.exception(
@@ -855,7 +1009,23 @@ class LockManager:
         try:
             yield
         finally:
-            self.release(key, context=combined_context)
+            # Release must complete even if cancelled during critical section
+            try:
+                self.release(key, context=combined_context)
+            except Exception as release_error:  # pragma: no cover - defensive
+                self._logger.error(
+                    "[LOCK_GUARD] Failed to release lock in finally block for key=%s: %s",
+                    key,
+                    release_error,
+                    extra=self._log_extra(
+                        combined_context,
+                        event_type="lock_guard_release_failed",
+                        lock_key=key,
+                        error=str(release_error),
+                    ),
+                )
+                # Don't suppress the original exception if release fails
+                raise
 
     def trace_guard(
         self,
@@ -1268,6 +1438,94 @@ class LockManager:
 
         return backoff + jitter
 
+    async def _cleanup_after_cancellation(
+        self,
+        lock: ReentrantAsyncLock,
+        key: str,
+        task: "asyncio.Task[Any]",
+        lock_acquired: bool,
+        context: Mapping[str, Any],
+    ) -> None:
+        """Perform cleanup after lock acquisition is cancelled.
+
+        Ensures that:
+        1. Waiting state is properly unregistered
+        2. Partially acquired locks are released
+        3. Cleanup failures are logged for diagnostics
+
+        Args:
+            lock: The lock object being acquired
+            key: Lock key identifier
+            task: Task that was cancelled
+            lock_acquired: Whether lock was successfully acquired before cancellation
+            context: Context payload for logging
+        """
+
+        cleanup_errors: List[str] = []
+
+        # Unregister from waiting tasks
+        try:
+            self._unregister_waiting(task, key)
+        except Exception as e:  # pragma: no cover - defensive
+            error_msg = f"Failed to unregister waiting task: {e}"
+            cleanup_errors.append(error_msg)
+            self._logger.error(
+                "[LOCK_CLEANUP] %s for key=%s",
+                error_msg,
+                key,
+                extra=self._log_extra(
+                    context,
+                    event_type="lock_cleanup_unregister_failed",
+                    lock_key=key,
+                    error=str(e),
+                ),
+            )
+
+        # Release lock if it was acquired
+        if lock_acquired and getattr(lock, "_owner", None) is task and lock.locked():
+            try:
+                lock.release()
+                self._logger.debug(
+                    "[LOCK_CLEANUP] Released lock after cancellation: key=%s",
+                    key,
+                    extra=self._log_extra(
+                        context,
+                        event_type="lock_cleanup_release_success",
+                        lock_key=key,
+                    ),
+                )
+            except Exception as e:  # pragma: no cover - defensive
+                error_msg = f"Failed to release lock: {e}"
+                cleanup_errors.append(error_msg)
+                self._metrics["lock_cleanup_failures"] += 1
+                self._logger.error(
+                    "[LOCK_CLEANUP] %s for key=%s",
+                    error_msg,
+                    key,
+                    extra=self._log_extra(
+                        context,
+                        event_type="lock_cleanup_release_failed",
+                        lock_key=key,
+                        error=str(e),
+                    ),
+                )
+
+        # Log summary if any errors occurred
+        if cleanup_errors:
+            self._logger.warning(
+                "[LOCK_CLEANUP] Cleanup completed with %d error(s) for key=%s: %s",
+                len(cleanup_errors),
+                key,
+                "; ".join(cleanup_errors),
+                extra=self._log_extra(
+                    context,
+                    event_type="lock_cleanup_completed_with_errors",
+                    lock_key=key,
+                    error_count=len(cleanup_errors),
+                    errors=cleanup_errors,
+                ),
+            )
+
     def _validate_lock_order(
         self,
         current_acquisitions: List[_LockAcquisition],
@@ -1510,6 +1768,19 @@ class LockManager:
     @property
     def metrics(self) -> Dict[str, int]:
         return dict(self._metrics)
+
+    def get_metrics(self) -> Dict[str, Any]:
+        """Return current lock manager metrics."""
+
+        return {
+            "lock_contention": self._metrics["lock_contention"],
+            "lock_timeouts": self._metrics["lock_timeouts"],
+            "lock_cancellations": self._metrics["lock_cancellations"],
+            "lock_cleanup_failures": self._metrics["lock_cleanup_failures"],
+            "active_locks": len(self._locks),
+            "waiting_tasks": len(self._waiting_tasks),
+            "shutdown_initiated": self._shutdown_initiated,
+        }
 
     def _log_extra(
         self,
