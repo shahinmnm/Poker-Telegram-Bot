@@ -14,18 +14,22 @@ class ReentrantAsyncLock:
     def __init__(self) -> None:
         self._lock = asyncio.Lock()
         self._owner: Optional[asyncio.Task[Any]] = None
-        self._depth = 0
+        self._owner_id: Optional[int] = None
+        self._count = 0
 
     async def acquire(self) -> None:
         current = asyncio.current_task()
         if current is None:
             raise RuntimeError("ReentrantAsyncLock requires an active asyncio task")
-        if self._owner is current:
-            self._depth += 1
+        current_task_id = id(current)
+
+        if self._owner_id == current_task_id and self._count > 0:
+            self._count += 1
             return
         await self._lock.acquire()
         self._owner = current
-        self._depth = 1
+        self._owner_id = current_task_id
+        self._count = 1
 
     def release(self) -> None:
         """Release the lock.
@@ -40,8 +44,10 @@ class ReentrantAsyncLock:
         """
         try:
             current = asyncio.current_task()
+            current_task_id = id(current) if current is not None else None
         except RuntimeError:
             current = None
+            current_task_id = None
 
         if current is None:
             logging.getLogger(__name__).warning(
@@ -50,7 +56,7 @@ class ReentrantAsyncLock:
             self._decrement_depth_and_maybe_release()
             return
 
-        if self._owner is not current:
+        if current_task_id is not None and self._owner_id != current_task_id:
             logging.getLogger(__name__).warning(
                 "Non-owner task attempted to release re-entrant lock; releasing anyway"
             )
@@ -60,11 +66,12 @@ class ReentrantAsyncLock:
         self._decrement_depth_and_maybe_release()
 
     def _decrement_depth_and_maybe_release(self) -> None:
-        if self._depth > 0:
-            self._depth -= 1
-        if self._depth <= 0:
-            self._depth = 0
+        if self._count > 0:
+            self._count -= 1
+        if self._count <= 0:
+            self._count = 0
             self._owner = None
+            self._owner_id = None
             if self._lock.locked():
                 self._lock.release()
 
