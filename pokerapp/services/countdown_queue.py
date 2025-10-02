@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 from asyncio import Queue
 from dataclasses import dataclass
-from typing import Optional
+from typing import Awaitable, Callable, Optional
 
 
 @dataclass(eq=False)
@@ -25,6 +25,16 @@ class CountdownMessage:
     text: str
     timestamp: float
     cancelled: bool = False
+    duration_seconds: float = 0.0
+    formatter: Optional[Callable[[float], str]] = None
+    on_complete: Optional[Callable[[], Optional[Awaitable[None]]]] = None
+
+    def format_text(self, remaining: float) -> str:
+        """Return the formatted countdown text for the remaining time."""
+
+        if self.formatter is not None:
+            return self.formatter(remaining)
+        return self.text
 
     def __eq__(self, other: object) -> bool:
         """Compare countdown messages by their chat and message identifiers."""
@@ -50,7 +60,16 @@ class CountdownMessageQueue:
         self._active_countdowns: dict[tuple[int, int], CountdownMessage] = {}
         self._tracking_lock = asyncio.Lock()
 
-    async def enqueue(self, chat_id: int, message_id: int, text: str) -> CountdownMessage:
+    async def enqueue(
+        self,
+        chat_id: int,
+        message_id: int,
+        text: str,
+        *,
+        duration_seconds: float = 0.0,
+        formatter: Optional[Callable[[float], str]] = None,
+        on_complete: Optional[Callable[[], Optional[Awaitable[None]]]] = None,
+    ) -> CountdownMessage:
         """Enqueue a countdown update.
 
         Args:
@@ -73,6 +92,9 @@ class CountdownMessageQueue:
             text=text,
             timestamp=time.monotonic(),
             cancelled=False,
+            duration_seconds=duration_seconds,
+            formatter=formatter,
+            on_complete=on_complete,
         )
 
         if self._queue.full():
