@@ -2,7 +2,8 @@
   "engine": {
     "stage_lock_prefix": "stage:",
     "stop_request": "stop_request",
-    "action_lock_prefix": "action:lock:"
+    "action_lock_prefix": "action:lock:",
+    "_comment_action_lock_prefix": "Distributed action locks (Task 6.2.1)"
   },
   "player_report": {
     "cache_prefix": "pokerbot:player_report:"

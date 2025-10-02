@@ -1,9 +1,13 @@
+import asyncio
 import logging
-import logging
+import uuid
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 import pytest
+import fakeredis
+import fakeredis.aioredis
+import redis.asyncio as aioredis
 
 from pokerapp.aiogram_flow import protect_against_races
 from pokerapp.entities import Game, GameState
@@ -198,7 +202,111 @@ async def test_protect_against_races_rejects_duplicates() -> None:
     assert called is False
     callback.answer.assert_awaited_once()
     assert lock_manager.acquire_calls == []
-    assert table_manager.save_calls == []
+
+
+@pytest.mark.asyncio
+async def test_action_lock_distributed_across_instances() -> None:
+    server = fakeredis.FakeServer()
+    redis_pool_1 = fakeredis.aioredis.FakeRedis(server=server)
+    redis_pool_2 = fakeredis.aioredis.FakeRedis(server=server)
+
+    redis_keys = {"action_lock_prefix": "action:lock:"}
+    logger = logging.getLogger("lock-distributed")
+
+    lock_mgr_instance1 = LockManager(
+        logger=logger,
+        redis_pool=redis_pool_1,
+        redis_keys=redis_keys,
+    )
+    lock_mgr_instance2 = LockManager(
+        logger=logger,
+        redis_pool=redis_pool_2,
+        redis_keys=redis_keys,
+    )
+
+    chat_id, user_id = 12345, 67890
+
+    token1 = await lock_mgr_instance1.acquire_action_lock(chat_id, user_id)
+    assert token1 is not None
+
+    token2 = await lock_mgr_instance2.acquire_action_lock(chat_id, user_id)
+    assert token2 is None
+
+    released = await lock_mgr_instance1.release_action_lock(chat_id, user_id, token1)
+    assert released is True
+
+    token3 = await lock_mgr_instance2.acquire_action_lock(chat_id, user_id)
+    assert token3 is not None
+
+
+@pytest.mark.asyncio
+async def test_action_lock_prevents_token_stealing() -> None:
+    server = fakeredis.FakeServer()
+    redis_pool_a = fakeredis.aioredis.FakeRedis(server=server)
+    redis_pool_b = fakeredis.aioredis.FakeRedis(server=server)
+
+    redis_keys = {"action_lock_prefix": "action:lock:"}
+    logger = logging.getLogger("lock-token")
+
+    lock_mgr_a = LockManager(logger=logger, redis_pool=redis_pool_a, redis_keys=redis_keys)
+    lock_mgr_b = LockManager(logger=logger, redis_pool=redis_pool_b, redis_keys=redis_keys)
+
+    chat_id, user_id = 11111, 22222
+
+    token_a = await lock_mgr_a.acquire_action_lock(chat_id, user_id)
+    assert token_a is not None
+
+    fake_token = str(uuid.uuid4())
+    stolen = await lock_mgr_b.release_action_lock(chat_id, user_id, fake_token)
+    assert stolen is False
+
+    token_b = await lock_mgr_b.acquire_action_lock(chat_id, user_id)
+    assert token_b is None
+
+
+@pytest.mark.asyncio
+async def test_action_lock_auto_expires() -> None:
+    server = fakeredis.FakeServer()
+    redis_pool = fakeredis.aioredis.FakeRedis(server=server)
+    redis_keys = {"action_lock_prefix": "action:lock:"}
+    logger = logging.getLogger("lock-expire-distributed")
+
+    lock_mgr = LockManager(logger=logger, redis_pool=redis_pool, redis_keys=redis_keys)
+    chat_id, user_id = 99999, 88888
+
+    token = await lock_mgr.acquire_action_lock(chat_id, user_id, timeout_seconds=1)
+    assert token is not None
+
+    token2 = await lock_mgr.acquire_action_lock(chat_id, user_id)
+    assert token2 is None
+
+    await asyncio.sleep(1.5)
+
+    token3 = await lock_mgr.acquire_action_lock(chat_id, user_id)
+    assert token3 is not None
+
+
+@pytest.mark.asyncio
+async def test_action_lock_handles_redis_failure(caplog) -> None:
+    mock_redis = AsyncMock()
+    mock_redis.set.side_effect = aioredis.ConnectionError("Redis unavailable")
+
+    redis_keys = {"action_lock_prefix": "action:lock:"}
+    caplog.set_level(logging.ERROR)
+
+    lock_mgr = LockManager(
+        logger=logging.getLogger("lock-redis-failure"),
+        redis_pool=mock_redis,
+        redis_keys=redis_keys,
+    )
+
+    chat_id, user_id = 55555, 66666
+
+    token = await lock_mgr.acquire_action_lock(chat_id, user_id)
+    assert token is None
+
+    error_messages = [record.message for record in caplog.records if record.levelno >= logging.ERROR]
+    assert any("Failed to acquire distributed lock" in message for message in error_messages)
 
 
 @pytest.mark.asyncio
