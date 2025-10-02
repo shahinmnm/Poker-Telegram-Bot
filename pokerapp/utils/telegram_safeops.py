@@ -18,6 +18,7 @@ from telegram.error import BadRequest, NetworkError, RetryAfter, TelegramError, 
 
 from pokerapp.entities import ChatId, MessageId
 from pokerapp.utils.request_metrics import RequestCategory
+from cachetools import LRUCache
 
 T = TypeVar("T")
 
@@ -51,6 +52,10 @@ class TelegramSafeOps:
         self._base_delay = max(float(base_delay), self._MIN_DELAY)
         self._max_delay = max(float(max_delay), self._base_delay)
         self._multiplier = max(float(backoff_multiplier), 1.0)
+        self._edit_throttle: LRUCache[tuple[ChatId, MessageId], float] = LRUCache(
+            maxsize=1024
+        )
+        self._throttle_lock = asyncio.Lock()
 
     async def edit_message_text(
         self,
@@ -92,6 +97,11 @@ class TelegramSafeOps:
                         ),
                     )
                     return message_id
+            await self._apply_edit_throttle(
+                cache_key,
+                chat_id=chat_id,
+                message_id=message_id,
+            )
 
         try:
             result = await self._execute(
@@ -146,6 +156,7 @@ class TelegramSafeOps:
                 if cache_key is not None:
                     async with self._cache_lock:
                         self._last_edit_cache[cache_key] = text
+                    await self._touch_throttle(cache_key)
                 return result
 
         new_id = await self._send_message_return_id(
@@ -163,6 +174,7 @@ class TelegramSafeOps:
                         self._last_edit_cache.pop(cache_key, None)
                     if new_cache_key is not None:
                         self._last_edit_cache[new_cache_key] = text
+                await self._update_throttle_on_replacement(cache_key, new_cache_key)
 
         if new_id and message_id and new_id != message_id:
             try:
@@ -376,6 +388,56 @@ class TelegramSafeOps:
                 await asyncio.sleep(delay)
                 delay = min(delay * self._multiplier, self._max_delay)
                 continue
+
+    async def _apply_edit_throttle(
+        self,
+        key: tuple[ChatId, MessageId],
+        *,
+        chat_id: ChatId,
+        message_id: MessageId,
+    ) -> None:
+        loop = asyncio.get_event_loop()
+        wait_time = 0.0
+        async with self._throttle_lock:
+            last_edit = self._edit_throttle.get(key, 0.0)
+            now = loop.time()
+            elapsed = now - last_edit
+            if last_edit and elapsed < 1.0:
+                wait_time = 1.0 - elapsed
+            if wait_time <= 0:
+                self._edit_throttle[key] = now
+        if wait_time > 0:
+            self._logger.debug(
+                "Throttling edit_message_text, waiting %.2fs",
+                wait_time,
+                extra=self._build_extra(
+                    chat_id=chat_id,
+                    message_id=message_id,
+                    operation="edit_message_text",
+                ),
+            )
+            await asyncio.sleep(wait_time)
+            async with self._throttle_lock:
+                self._edit_throttle[key] = loop.time()
+
+    async def _touch_throttle(self, key: tuple[ChatId, MessageId]) -> None:
+        loop = asyncio.get_event_loop()
+        async with self._throttle_lock:
+            self._edit_throttle[key] = loop.time()
+
+    async def _update_throttle_on_replacement(
+        self,
+        old_key: Optional[tuple[ChatId, MessageId]],
+        new_key: Optional[tuple[ChatId, MessageId]],
+    ) -> None:
+        if old_key is None and new_key is None:
+            return
+        loop = asyncio.get_event_loop()
+        async with self._throttle_lock:
+            if old_key is not None:
+                self._edit_throttle.pop(old_key, None)
+            if new_key is not None:
+                self._edit_throttle[new_key] = loop.time()
 
     def _build_extra(
         self,

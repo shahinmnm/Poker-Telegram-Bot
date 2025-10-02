@@ -38,7 +38,9 @@ import hashlib
 import inspect
 import logging
 import json
+import math
 import threading
+import time
 from cachetools import FIFOCache, LRUCache
 from pokerapp.config import (
     DEFAULT_RATE_LIMIT_PER_MINUTE,
@@ -856,6 +858,7 @@ class PokerBotViewer:
         end_time: float,
         payload_fn: Callable[[int], Tuple[str, Optional[InlineKeyboardMarkup | ReplyKeyboardMarkup]]],
         on_complete: Optional[Callable[[], Awaitable[None]]],
+        task_started_mono: float,
     ) -> asyncio.Task[None]:
         """
         Return an asyncio.Task that runs a per-second countdown until end_time.
@@ -871,9 +874,33 @@ class PokerBotViewer:
             completed = False
             try:
                 loop = asyncio.get_event_loop()
+                key = (normalized_chat, normalized_game)
+                last_monotonic = task_started_mono
                 while True:
                     now = loop.time()
                     seconds_left = max(0, int(round(end_time - now)))
+                    async with self._countdown_lock:
+                        state = self._countdown_state.get(key)
+                        if state is None:
+                            logger.debug(
+                                "[Countdown] State missing for chat %s game %s; stopping",
+                                normalized_chat,
+                                normalized_game,
+                            )
+                            break
+                        started_mono = state.get("task_started_mono")
+                        if isinstance(started_mono, (int, float)) and not math.isclose(
+                            started_mono,
+                            task_started_mono,
+                            rel_tol=0.0,
+                            abs_tol=1e-6,
+                        ):
+                            logger.debug(
+                                "[Countdown] Detected newer task for chat %s game %s; stopping",
+                                normalized_chat,
+                                normalized_game,
+                            )
+                            break
                     try:
                         text, reply_markup = payload_fn(seconds_left)
                     except Exception:
@@ -913,10 +940,32 @@ class PokerBotViewer:
                                 current_message_id = int(result)
                             except (TypeError, ValueError):
                                 pass
+                    monotonic_after_update = time.monotonic()
+                    elapsed = monotonic_after_update - last_monotonic
+                    if elapsed < 0 or elapsed > 5:
+                        logger.warning(
+                            "[Countdown] Time anomaly detected: elapsed=%.2fs",
+                            elapsed,
+                            extra={
+                                "chat_id": normalized_chat,
+                                "game_id": normalized_game,
+                                "anchor": current_message_id,
+                            },
+                        )
+                        elapsed = 1.0
+                    async with self._countdown_lock:
+                        state = self._countdown_state.get(key)
+                        if state is not None:
+                            state["last_update_mono"] = monotonic_after_update
+                            state["seconds_left"] = seconds_left
+                    self._last_edit_time[key] = loop.time()
+                    last_monotonic = monotonic_after_update
                     if seconds_left <= 0:
                         completed = True
                         break
-                    await asyncio.sleep(1.0)
+                    sleep_duration = max(0.0, 1.0 - min(max(elapsed, 0.0), 1.0))
+                    if sleep_duration:
+                        await asyncio.sleep(sleep_duration)
             except asyncio.CancelledError:
                 logger.debug(
                     "[Countdown] Task cancelled for chat %s game %s",
@@ -987,6 +1036,7 @@ class PokerBotViewer:
                 old = self._prestart_countdown_tasks.get(key)
                 if old is not None:
                     old.cancel()
+                task_started_mono = time.monotonic()
                 task = self._create_countdown_task(
                     normalized_chat,
                     normalized_game,
@@ -994,12 +1044,15 @@ class PokerBotViewer:
                     end_time,
                     payload_fn,
                     on_complete,
+                    task_started_mono,
                 )
                 self._prestart_countdown_tasks[key] = task
                 self._countdown_state[key] = {
                     "end_time": end_time,
                     "seconds": max(0, int(seconds)),
                     "anchor_message_id": anchor_message_id,
+                    "task_started_mono": task_started_mono,
+                    "last_update_mono": task_started_mono,
                 }
                 self._last_edit_time[key] = asyncio.get_event_loop().time()
         logger.info(
