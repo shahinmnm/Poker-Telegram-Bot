@@ -783,6 +783,15 @@ class PokerBotViewer:
     async def _cancel_prestart_countdown(
         self, chat_id: ChatId, game_id: Optional[int | str] = None
     ) -> None:
+        """Cancel and cleanup a running countdown while respecting the lock order.
+
+        The countdown state is guarded by ``_countdown_lock`` while the task registry
+        uses ``_prestart_countdown_lock``.  To avoid deadlocks with
+        ``start_prestart_countdown`` (which first grabs ``_prestart_countdown_lock``
+        before entering ``_countdown_lock``) we acquire the locks in the same order
+        here.  This ensures both helpers observe a consistent lock hierarchy even
+        when they race to replace or cancel the same countdown task.
+        """
         normalized_chat = self._safe_int(chat_id)
         normalized_game = str(game_id) if game_id is not None else "0"
         key = (normalized_chat, normalized_game)
@@ -805,6 +814,10 @@ class PokerBotViewer:
 
         self._mark_countdown_transition_pending(normalized_chat)
         try:
+            # ``wait_for`` prevents hanging when the task ignores cancellation; 2
+            # seconds is long enough for the task to finish its current iteration
+            # (which may include a rate-limited Telegram edit) yet short enough to
+            # release the caller and avoid head-of-line blocking the event loop.
             await asyncio.wait_for(task, timeout=2.0)
         except asyncio.CancelledError:
             pass
@@ -892,6 +905,10 @@ class PokerBotViewer:
                 key = (normalized_chat, normalized_game)
                 last_monotonic = task_started_mono
                 while True:
+                    # ``loop.time`` returns a monotonic clock that is immune to
+                    # system wall-clock adjustments.  Using it here keeps the
+                    # countdown stable even if the host clock jumps backwards or
+                    # forwards while we are running.
                     now = loop.time()
                     seconds_left = max(0, int(round(end_time - now)))
                     async with self._countdown_lock:

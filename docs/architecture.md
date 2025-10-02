@@ -95,3 +95,41 @@ constructor arguments are:
 The combination of a single composition root and constructor injection keeps the
 bot modular: new services can be swapped in (for example a different cache or
 messaging backend) without editing the poker logic itself.
+
+## Countdown concurrency guarantees
+
+The pre-start countdown subsystem coordinates asynchronous Telegram edits across
+multiple chats.  The key invariants are:
+
+- **Single writer per chat:** `_create_countdown_task` stores the running task in
+  `_prestart_countdown_tasks`.  `start_prestart_countdown` replaces the entry only
+  after cancelling the previous task, and `_cancel_prestart_countdown` waits for
+  the task to acknowledge cancellation.  This prevents overlapping editors from
+  racing to mutate the same Telegram message.
+- **Rate-limited updates:** `_throttled_edit_message_text` guards every edit with
+  a per `(chat_id, message_id)` timestamp so the bot never exceeds Telegram's
+  `1 req/sec` guidance while still batching bursts of local updates.
+- **Monotonic timing:** Countdown math relies on `loop.time()` (monotonic) rather
+  than wall clock time, keeping the remaining seconds stable even if the host's
+  clock jumps forward or backward.
+
+Together these guarantees eliminate the "time travel" countdown bug, ensure that
+rapid start/stop sequences settle cleanly, and shield the bot from 429 rate-limit
+errors when high volumes of edits are scheduled simultaneously.
+
+### Lock hierarchy
+
+Countdown helpers follow a strict acquisition order so they remain deadlock free
+even when multiple coroutines operate on the same chat simultaneously.
+
+```mermaid
+graph TD
+    A[_prestart_countdown_lock] --> B[_countdown_lock]
+    B --> C[_anchor_lock_guard / per-anchor locks]
+```
+
+`start_prestart_countdown` and `_cancel_prestart_countdown` both grab
+`_prestart_countdown_lock` before `_countdown_lock`.  Anchor-specific locks are
+created lazily once the countdown state is known, so they always sit at the end
+of the chain.  Keeping this hierarchy consistent protects the cancellation flow
+from deadlocks while we drain the in-flight countdown task.
