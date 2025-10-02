@@ -70,6 +70,20 @@ makes the poker logic easy to test and reason about.
 | **MessagingService** | Encapsulates Telegram throttling, retries, and Markdown formatting. Instances are created through a factory stored in `ApplicationServices`. |
 | **TelegramSafeOps** | Wraps `MessagingService` calls with logging metadata, context-aware rate limiting, and exception handling so background tasks remain resilient. |
 
+#### Countdown Error Handling
+
+| Error Type | Detection | Response | Queue Cleanup |
+| ---------- | --------- | -------- | ------------- |
+| Message deleted | "message to edit not found" in `TelegramBadRequest` | Log warning, remove anchor from queue | Yes (via `_remove_anchor_updates()`) |
+| Message uneditable | "message can't be edited" in `TelegramBadRequest` | Log warning, remove anchor from queue | Yes |
+| Content unchanged | "message is not modified" in `TelegramBadRequest` | Log debug, update timestamp, continue | No |
+| Other BadRequest | Any other `TelegramBadRequest` | Log error, abort countdown | No |
+| API error | `TelegramAPIError` | Log exception, abort countdown | No |
+
+The `_remove_anchor_updates()` helper ensures that when an anchor is deleted (by user action or Telegram cleanup), all pending countdown messages for that anchor are removed from the queue, preventing infinite retry loops.
+
+The `cancel_updates_for_anchor()` method is idempotent: it silently succeeds even if the anchor doesn’t exist, making it safe to call during cleanup without checking existence first.
+
 All of these services are created once by the bootstrapper and either stored
 inside `ApplicationServices` or exposed via factories for per-chat usage.
 
