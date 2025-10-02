@@ -209,6 +209,56 @@ class MessagingService:
             return value.value
         return value
 
+    # ------------------------------------------------------------------
+    @staticmethod
+    def build_action_callback_data(
+        action_type: str,
+        stage: Any,
+        version: int,
+    ) -> str:
+        """Create versioned callback data for an action button."""
+
+        if not isinstance(action_type, str) or not action_type:
+            raise ValueError("action_type must be a non-empty string")
+
+        if hasattr(stage, "name"):
+            stage_value = getattr(stage, "name")
+        else:
+            stage_value = stage
+
+        if not isinstance(stage_value, str):
+            stage_value = str(stage_value)
+
+        try:
+            version_int = int(version)
+        except (TypeError, ValueError) as exc:  # pragma: no cover - defensive
+            raise ValueError("version must be an integer") from exc
+
+        return f"action:{action_type}:{stage_value}:{version_int}"
+
+    @staticmethod
+    def parse_action_callback_data(callback_data: str) -> Dict[str, Any]:
+        """Parse callback data created via :meth:`build_action_callback_data`."""
+
+        if not isinstance(callback_data, str):
+            raise ValueError("callback_data must be a string")
+
+        parts = callback_data.split(":")
+        if len(parts) != 4 or parts[0] != "action":
+            raise ValueError(f"Invalid callback data format: {callback_data}")
+
+        action_type, stage, version_str = parts[1], parts[2], parts[3]
+        try:
+            version = int(version_str)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"Invalid version component: {version_str}") from exc
+
+        return {
+            "action_type": action_type,
+            "stage": stage,
+            "version": version,
+        }
+
     def _merge_context(
         self,
         context: Optional[Mapping[str, Any]],

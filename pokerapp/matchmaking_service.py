@@ -260,6 +260,8 @@ class MatchmakingService:
                     self._state_token(next_state),
                 )
                 game.state = next_state
+                if hasattr(game, "increment_callback_version"):
+                    game.increment_callback_version()
                 await self._add_cards_to_table(
                     count=card_count,
                     game=game,

@@ -1800,6 +1800,8 @@ class GameEngine:
             game.reset_bets()
             game.rotate_dealer()
             await self._player_manager.reseat_players(game)
+            if hasattr(game, "increment_callback_version"):
+                game.increment_callback_version()
             self._logger.info(
                 "Game state reset after round",
                 extra=self._log_extra(
@@ -2005,6 +2007,8 @@ class GameEngine:
         clear_all_message_ids(game)
         await self._player_manager.clear_player_anchors(game)
         game.reset()
+        if hasattr(game, "increment_callback_version"):
+            game.increment_callback_version()
         await self._table_manager.save_game(chat_id, game)
         if send_stop_notification:
             await self._telegram_ops.send_message_safe(

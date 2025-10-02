@@ -20,6 +20,7 @@ import contextlib
 import hashlib
 import json
 import logging
+from functools import wraps
 from collections import deque
 from dataclasses import dataclass, field
 from enum import Enum, auto
@@ -79,6 +80,160 @@ def _chip_emoji(key: str, default: str) -> str:
     if isinstance(value, str) and value:
         return value
     return default
+
+
+def _stage_token(game: Any) -> str:
+    stage = getattr(game, "state", None)
+    if stage is None:
+        stage = getattr(game, "stage", None)
+    if hasattr(stage, "name"):
+        return str(getattr(stage, "name"))
+    if stage is None:
+        return ""
+    return str(stage)
+
+
+def protect_against_races(handler: Callable) -> Callable:
+    """Decorate callback handlers to mitigate race conditions."""
+
+    @wraps(handler)
+    async def wrapper(callback_query, *args, **kwargs):
+        chat = getattr(callback_query, "message", None)
+        chat_id = getattr(getattr(chat, "chat", None), "id", None)
+        user_id = getattr(getattr(callback_query, "from_user", None), "id", None)
+        callback_id = getattr(callback_query, "id", None)
+
+        table_manager = kwargs.get("table_manager")
+        lock_manager = kwargs.get("lock_manager")
+        messaging_service = kwargs.get("messaging_service")
+
+        if None in (chat_id, user_id, callback_id) or not all(
+            [table_manager, lock_manager, messaging_service]
+        ):
+            logger.error("Missing dependencies for protected callback handler")
+            answer = getattr(callback_query, "answer", None)
+            if callable(answer):
+                await answer("⚠️ System error, please try again")
+            return None
+
+        try:
+            game, version = await table_manager.load_game_with_version(chat_id)
+        except Exception:
+            logger.exception("Failed loading game for callback handling")
+            answer = getattr(callback_query, "answer", None)
+            if callable(answer):
+                await answer("⚠️ System error, please try again")
+            return None
+
+        if game is None:
+            answer = getattr(callback_query, "answer", None)
+            if callable(answer):
+                await answer("❌ No active game")
+            return None
+
+        mark_callback = getattr(game, "mark_callback_processed", None)
+        new_callback = True
+        if callable(mark_callback):
+            new_callback = mark_callback(str(callback_id))
+            if not new_callback:
+                logger.info("Duplicate callback %s ignored", callback_id)
+                answer = getattr(callback_query, "answer", None)
+                if callable(answer):
+                    await answer("⚠️ This action was already processed")
+                return None
+
+        if new_callback:
+            try:
+                saved = await table_manager.save_game_with_version_check(
+                    chat_id, game, version
+                )
+            except Exception:
+                logger.exception("Failed persisting callback tracking state")
+                answer = getattr(callback_query, "answer", None)
+                if callable(answer):
+                    await answer("⚠️ System error, please try again")
+                return None
+            if not saved:
+                answer = getattr(callback_query, "answer", None)
+                if callable(answer):
+                    await answer(
+                        "⚠️ Game state changed during your action. Please try again."
+                    )
+                return None
+
+        lock_token = await lock_manager.acquire_action_lock(chat_id, user_id)
+        if not lock_token:
+            answer = getattr(callback_query, "answer", None)
+            if callable(answer):
+                await answer("⏳ Please wait, processing previous action…")
+            return None
+
+        try:
+            callback_data = getattr(callback_query, "data", "")
+            try:
+                callback_info = messaging_service.parse_action_callback_data(
+                    callback_data
+                )
+            except ValueError:
+                logger.warning("Received invalid callback data: %s", callback_data)
+                answer = getattr(callback_query, "answer", None)
+                if callable(answer):
+                    await answer("⚠️ Invalid action format")
+                return None
+
+            try:
+                game, current_version = await table_manager.load_game_with_version(
+                    chat_id
+                )
+            except Exception:
+                logger.exception("Failed reloading game inside protected handler")
+                answer = getattr(callback_query, "answer", None)
+                if callable(answer):
+                    await answer("⚠️ System error, please try again")
+                return None
+
+            if game is None:
+                answer = getattr(callback_query, "answer", None)
+                if callable(answer):
+                    await answer("❌ No active game")
+                return None
+
+            current_version_token = getattr(game, "callback_version", 0)
+            if current_version_token != callback_info.get("version"):
+                logger.info(
+                    "Stale callback ignored: expected=%s current=%s",
+                    callback_info.get("version"),
+                    current_version_token,
+                )
+                answer = getattr(callback_query, "answer", None)
+                if callable(answer):
+                    await answer("⚠️ Game state changed. Please use updated buttons.")
+                return None
+
+            stage_expected = callback_info.get("stage")
+            current_stage = _stage_token(game)
+            if stage_expected and stage_expected != current_stage:
+                logger.info(
+                    "Stage mismatch for callback: expected=%s current=%s",
+                    stage_expected,
+                    current_stage,
+                )
+                answer = getattr(callback_query, "answer", None)
+                if callable(answer):
+                    await answer(
+                        "⚠️ Game progressed to next stage. Action cancelled."
+                    )
+                return None
+
+            handler_kwargs = dict(kwargs)
+            handler_kwargs["game"] = game
+            handler_kwargs["version"] = current_version
+            return await handler(callback_query, *args, **handler_kwargs)
+        finally:
+            await lock_manager.release_action_lock(chat_id, user_id, lock_token)
+
+    return wrapper
+
 
 
 _POT_EMOJI = _chip_emoji("pot", "💰")
@@ -1236,6 +1391,7 @@ __all__ = [
     "AnchorMessage",
     "GameState",
     "PlayerInfo",
+    "protect_against_races",
     "PokerMessagingOrchestrator",
     "RequestManager",
     "TurnState",
