@@ -65,14 +65,33 @@ class TelegramSafeOps:
         *,
         reply_markup: Optional[Any] = None,
         parse_mode: str = ParseMode.MARKDOWN,
+        from_countdown: bool = False,
         log_context: Optional[str] = None,
         request_category: RequestCategory = RequestCategory.GENERAL,
         log_extra: Optional[Mapping[str, Any]] = None,
         current_game_id: Optional[str] = None,
     ) -> Optional[MessageId]:
-        """Safely edit a message, retrying transient failures when required."""
+        """Safely edit a message, retrying transient failures when required.
+
+        Args:
+            from_countdown: When ``True`` the countdown subsystem initiated the
+                edit and we bypass throttling delays so the timer task cannot be
+                starved behind other chat operations.  This flag is best-effort
+                and preserves the existing retry and replacement behaviour.
+        """
 
         cache_key: Optional[tuple[ChatId, MessageId]] = None
+
+        if from_countdown:
+            self._logger.debug(
+                "Countdown edit bypassing message throttle",
+                extra=self._build_extra(
+                    chat_id=chat_id,
+                    message_id=message_id,
+                    operation="edit_message_text",
+                    extra=log_extra,
+                ),
+            )
 
         if not message_id:
             return await self._send_message_return_id(
@@ -97,11 +116,12 @@ class TelegramSafeOps:
                         ),
                     )
                     return message_id
-            await self._apply_edit_throttle(
-                cache_key,
-                chat_id=chat_id,
-                message_id=message_id,
-            )
+            if not from_countdown:
+                await self._apply_edit_throttle(
+                    cache_key,
+                    chat_id=chat_id,
+                    message_id=message_id,
+                )
 
         try:
             result = await self._execute(

@@ -1129,6 +1129,7 @@ class PokerBotModel:
                         message_id,
                         text,
                         reply_markup=keyboard,
+                        from_countdown=True,
                         request_category=RequestCategory.COUNTDOWN,
                         current_game_id=getattr(game, "id", None),
                     )
@@ -2067,10 +2068,51 @@ class PokerBotModel:
         self, game: Game, chat_id: ChatId, *, collect_only: bool = False
     ) -> Optional[Set[MessageId]]:
         """Deletes all temporary messages related to the current hand."""
+
+        lock_key = f"chat:{self._safe_int(chat_id)}"
+        circuit_check = getattr(self._lock_manager, "_is_circuit_broken", None)
+
+        try:
+            if callable(circuit_check) and circuit_check(lock_key):
+                self._logger.error(
+                    "Circuit breaker open during _clear_game_messages; triggering emergency reset",
+                    extra={"chat_id": chat_id},
+                )
+                await self._game_engine.emergency_reset(chat_id)
+                return None
+
+            return await self._clear_messages_internal(
+                game, chat_id, collect_only=collect_only
+            )
+        except asyncio.TimeoutError:
+            self._logger.error(
+                "Timeout in _clear_game_messages; triggering emergency reset",
+                extra={"chat_id": chat_id},
+            )
+            await self._game_engine.emergency_reset(chat_id)
+            return None
+        except Exception as exc:
+            self._logger.error(
+                "Error in _clear_game_messages",
+                extra={
+                    "chat_id": chat_id,
+                    "error": str(exc),
+                    "error_type": type(exc).__name__,
+                },
+            )
+            return None
+
+    async def _clear_messages_internal(
+        self, game: Game, chat_id: ChatId, *, collect_only: bool = False
+    ) -> Optional[Set[MessageId]]:
+        """Internal helper implementing the original clearing workflow."""
+
         async with self._chat_guard(
             chat_id, event_stage_label="clear_game_messages", game=game
         ):
-            logger.debug("Clearing game messages", extra={"chat_id": chat_id})
+            self._logger.debug(
+                "Clearing game messages", extra={"chat_id": chat_id}
+            )
 
             ids_to_delete: Set[MessageId] = set(game.message_ids_to_delete)
 
@@ -2100,13 +2142,13 @@ class PokerBotModel:
         for message_id in ids_to_delete:
             try:
                 await self._view.delete_message(chat_id, message_id)
-            except Exception as e:
-                logger.debug(
+            except Exception as exc:
+                self._logger.debug(
                     "Failed to delete message",
                     extra={
                         "chat_id": chat_id,
                         "message_id": message_id,
-                        "error_type": type(e).__name__,
+                        "error_type": type(exc).__name__,
                     },
                 )
 
