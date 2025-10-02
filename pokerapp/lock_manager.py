@@ -165,6 +165,11 @@ class LockManager:
             "lock_pool_misses": 0,
             "lock_cleanup_removed_count": 0,
         }
+        self._timeout_count: Dict[str, int] = {}
+        self._circuit_reset_time: Dict[str, float] = {}
+        self._circuit_breaker_threshold: int = 3
+        self._circuit_reset_interval: float = 60.0
+        self._bypassed_locks: Set[str] = set()
         self._shutdown_initiated = False
         self._shutdown_lock = asyncio.Lock()
         # Initialize lock pool for object reuse
@@ -513,6 +518,70 @@ class LockManager:
         while self._waiting_tasks:
             await asyncio.sleep(0.1)
 
+    def _monotonic_time(self) -> float:
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return time.monotonic()
+        return loop.time()
+
+    def _reset_circuit_state(self, key: str) -> None:
+        if key in self._timeout_count:
+            self._timeout_count[key] = 0
+        self._circuit_reset_time.pop(key, None)
+        self._bypassed_locks.discard(key)
+
+    def _record_timeout(self, key: str) -> None:
+        count = self._timeout_count.get(key, 0) + 1
+        self._timeout_count[key] = count
+        if count >= self._circuit_breaker_threshold:
+            if key not in self._circuit_reset_time:
+                self._circuit_reset_time[key] = self._monotonic_time()
+                self._logger.error(
+                    "[CIRCUIT_BREAKER] Lock %s exceeded timeout threshold; circuit opened",
+                    key,
+                    extra={
+                        "event_type": "lock_circuit_open",
+                        "lock_key": key,
+                        "timeout_count": count,
+                    },
+                )
+
+    def _is_circuit_broken(self, key: str) -> bool:
+        count = self._timeout_count.get(key, 0)
+        if count < self._circuit_breaker_threshold:
+            return False
+
+        reset_time = self._circuit_reset_time.get(key)
+        if reset_time is not None:
+            elapsed = self._monotonic_time() - reset_time
+            if elapsed >= self._circuit_reset_interval:
+                self._logger.info(
+                    "[CIRCUIT_BREAKER] Resetting circuit for lock %s after %.1fs",
+                    key,
+                    elapsed,
+                    extra={
+                        "event_type": "lock_circuit_reset",
+                        "lock_key": key,
+                        "elapsed": elapsed,
+                    },
+                )
+                self._reset_circuit_state(key)
+                return False
+
+        if key not in self._bypassed_locks:
+            self._logger.warning(
+                "[CIRCUIT_BREAKER] Circuit open for lock %s (timeouts=%d)",
+                key,
+                count,
+                extra={
+                    "event_type": "lock_circuit_open_check",
+                    "lock_key": key,
+                    "timeout_count": count,
+                },
+            )
+        return True
+
     def _normalise_category_timeouts(
         self, source: Optional[Mapping[str, Any]]
     ) -> Dict[str, float]:
@@ -664,6 +733,26 @@ class LockManager:
         call_site, call_function = self._resolve_call_site()
         acquire_start_ts = time.time()
         resolved_level = self._resolve_level(key, override=level)
+        context_payload = self._build_context_payload(
+            key, resolved_level, additional=context
+        )
+
+        if self._is_circuit_broken(key):
+            bypass_extra = self._log_extra(
+                context_payload,
+                event_type="lock_circuit_bypass",
+                lock_key=key,
+                lock_level=resolved_level,
+                timeout_count=self._timeout_count.get(key, 0),
+            )
+            self._logger.error(
+                "[CIRCUIT_BREAKER] Bypassing acquisition for %s%s",
+                key,
+                self._format_context(context_payload),
+                extra=bypass_extra,
+            )
+            self._bypassed_locks.add(key)
+            return True
 
         if _ENABLE_FAST_PATH:
             lock = await self._get_lock(key)
@@ -755,6 +844,7 @@ class LockManager:
                     ),
                 )
 
+                self._reset_circuit_state(key)
                 return True
 
             except asyncio.TimeoutError:
@@ -790,9 +880,6 @@ class LockManager:
         # 🐌 SLOW PATH: Full validation continues below (existing code)
 
         lock = await self._get_lock(key)
-        context_payload = self._build_context_payload(
-            key, resolved_level, additional=context
-        )
         trace_start_extra = self._log_extra(
             context_payload,
             event_type="lock_trace_acquire_start",
@@ -833,6 +920,7 @@ class LockManager:
                         call_site_function=call_function,
                     ),
                 )
+                self._reset_circuit_state(key)
                 return True
 
         self._validate_lock_order(current_acquisitions, key, resolved_level, context_payload)
@@ -1032,6 +1120,7 @@ class LockManager:
                             call_site_function=call_function,
                         ),
                     )
+                self._reset_circuit_state(key)
                 return True
             except asyncio.TimeoutError:
                 self._metrics["lock_timeouts"] += 1
@@ -1304,6 +1393,7 @@ class LockManager:
                     waiting_tasks=diagnostics.get("waiting_tasks"),
                 ),
             )
+        self._record_timeout(key)
         return False
 
     @asynccontextmanager
@@ -1471,6 +1561,17 @@ class LockManager:
             running_loop = None
 
         lock = self._locks.get(key)
+        if key in self._bypassed_locks:
+            self._bypassed_locks.discard(key)
+            self._logger.debug(
+                "[CIRCUIT_BREAKER] Release ignored for bypassed lock %s",
+                key,
+                extra={
+                    "event_type": "lock_circuit_release",
+                    "lock_key": key,
+                },
+            )
+            return
         base_context = dict(context or {})
         if lock is None:
             resolved_level = self._resolve_level(key, override=None)

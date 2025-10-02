@@ -1125,6 +1125,157 @@ class GameEngine:
             )
             raise
 
+    async def emergency_reset(self, chat_id: int) -> None:
+        """Forcefully unwind timers and locks after a critical failure."""
+
+        normalized_chat = self._safe_int(chat_id)
+        self._logger.warning(
+            "EMERGENCY RESET TRIGGERED",
+            extra={
+                "chat_id": normalized_chat,
+                "reason": "circuit breaker or watchdog escalation",
+            },
+        )
+
+        try:
+            await self._cancel_all_timers_internal(chat_id)
+            await self._force_release_locks(chat_id)
+
+            game = await self._table_manager.get_game(chat_id)
+            if game:
+                game.stage = GameState.WAITING
+                game.current_bet = 0
+                game.pot = 0
+                game.active_players = []
+                await self._table_manager.save_game(chat_id, game)
+
+            reset_message = (
+                "⚠️ **سیستم به حالت اضطراری بازنشانی شد**\n\n"
+                "به دلیل شناسایی مشکل فنی، بازی متوقف و بازنشانی شد.\n"
+                "می‌توانید بازی جدید را با دستور /start آغاز کنید.\n\n"
+                "پوزش بابت ناراحتی ایجاد شده 🙏"
+            )
+            await self._telegram_ops.send_message_safe(
+                call=lambda: self._view.send_message(
+                    chat_id,
+                    reset_message,
+                    parse_mode="Markdown",
+                ),
+                chat_id=chat_id,
+                operation="emergency_reset_notification",
+            )
+
+            self._logger.info(
+                "Emergency reset completed",
+                extra={"chat_id": normalized_chat},
+            )
+        except Exception as exc:
+            self._logger.error(
+                "Emergency reset failed",
+                extra={
+                    "chat_id": normalized_chat,
+                    "error": str(exc),
+                    "error_type": type(exc).__name__,
+                },
+            )
+
+    async def _cancel_all_timers_internal(self, chat_id: int) -> None:
+        """Cancel countdown timers for ``chat_id`` if they are active."""
+
+        try:
+            cancel = getattr(self._view, "_cancel_prestart_countdown", None)
+            tasks = getattr(self._view, "_prestart_countdown_tasks", None)
+            normalized_chat = self._safe_int(chat_id)
+
+            if callable(cancel):
+                if isinstance(tasks, dict):
+                    keys = [
+                        key for key in list(tasks.keys()) if key[0] == normalized_chat
+                    ]
+                    for _, game_key in keys:
+                        await cancel(chat_id, game_key)
+                else:
+                    await cancel(chat_id)
+
+            self._logger.debug(
+                "Cancelled all timers for chat", extra={"chat_id": normalized_chat}
+            )
+        except Exception as exc:
+            self._logger.error(
+                "Failed to cancel timers during emergency reset",
+                extra={
+                    "chat_id": self._safe_int(chat_id),
+                    "error": str(exc),
+                    "error_type": type(exc).__name__,
+                },
+            )
+
+    async def _force_release_locks(self, chat_id: int) -> None:
+        """Force release locks associated with ``chat_id`` (dangerous)."""
+
+        try:
+            normalized_chat = self._safe_int(chat_id)
+            lock_manager = self._lock_manager
+            lock_keys = {
+                self._stage_lock_key(chat_id),
+                f"chat:{normalized_chat}",
+                f"engine_stage:{normalized_chat}",
+                f"table:{normalized_chat}",
+            }
+            prefixes = (
+                f"chat:{normalized_chat}",
+                f"stage:{normalized_chat}",
+                f"engine_stage:{normalized_chat}",
+                f"table:{normalized_chat}",
+            )
+
+            for key, lock in list(lock_manager._locks.items()):  # pragma: no cover - safety
+                if key in lock_keys or any(key.startswith(prefix) for prefix in prefixes):
+                    reentrant_depth = getattr(lock, "_count", 0)
+                    is_locked = bool(reentrant_depth)
+                    inner_lock = getattr(lock, "_lock", None)
+                    if not is_locked and inner_lock is not None:
+                        is_locked = getattr(inner_lock, "locked", lambda: False)()
+                    if not is_locked:
+                        continue
+                    try:
+                        lock.release()
+                        reset_extra = {
+                            "chat_id": normalized_chat,
+                            "lock_key": key,
+                        }
+                        lock_manager._timeout_count.pop(key, None)
+                        lock_manager._circuit_reset_time.pop(key, None)
+                        lock_manager._bypassed_locks.discard(key)
+                        self._logger.warning(
+                            "Force-released lock during emergency reset",
+                            extra=reset_extra,
+                        )
+                    except Exception as exc:
+                        self._logger.error(
+                            "Failed to force-release lock",
+                            extra={
+                                "chat_id": normalized_chat,
+                                "lock_key": key,
+                                "error": str(exc),
+                                "error_type": type(exc).__name__,
+                            },
+                        )
+
+            self._logger.debug(
+                "All relevant locks released for chat",
+                extra={"chat_id": normalized_chat},
+            )
+        except Exception as exc:  # pragma: no cover - defensive logging
+            self._logger.error(
+                "Failed to force-release locks during emergency reset",
+                extra={
+                    "chat_id": self._safe_int(chat_id),
+                    "error": str(exc),
+                    "error_type": type(exc).__name__,
+                },
+            )
+
     async def progress_stage(
         self,
         context: ContextTypes.DEFAULT_TYPE,
