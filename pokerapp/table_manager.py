@@ -6,6 +6,7 @@ from datetime import datetime
 from typing import Dict, Optional, Tuple, Union
 
 import redis.asyncio as aioredis
+from redis import exceptions as redis_exceptions
 
 from pokerapp.entities import ChatId, Game
 from pokerapp.state_validator import (
@@ -50,6 +51,10 @@ class TableManager:
     @staticmethod
     def _game_key(chat_id: ChatId) -> str:
         return f"chat:{chat_id}:game"
+
+    @staticmethod
+    def _version_key(chat_id: ChatId) -> str:
+        return f"game:{chat_id}:version"
 
     @staticmethod
     def _player_chat_key(user_id: str) -> str:
@@ -168,6 +173,113 @@ class TableManager:
 
         return game, validation_result
 
+    async def load_game_with_version(
+        self, chat_id: ChatId, *, validate: bool = True
+    ) -> Tuple[Optional[Game], int]:
+        """Return the persisted game and its optimistic locking version."""
+
+        game, _ = await self.load_game(chat_id, validate=validate)
+        version_key = self._version_key(chat_id)
+        version_raw = await self._redis.get(version_key)
+
+        if version_raw is None:
+            await self._redis.set(version_key, 0)
+            version = 0
+        else:
+            if isinstance(version_raw, bytes):
+                version_str = version_raw.decode("utf-8", "ignore")
+            else:
+                version_str = str(version_raw)
+            try:
+                version = int(version_str)
+            except (TypeError, ValueError):
+                version = 0
+                await self._redis.set(version_key, version)
+
+        return game, version
+
+    async def save_game_with_version_check(
+        self,
+        chat_id: ChatId,
+        game: Game,
+        expected_version: int,
+    ) -> bool:
+        """Persist ``game`` if the Redis version matches ``expected_version``."""
+
+        game_key = self._game_key(chat_id)
+        version_key = self._version_key(chat_id)
+
+        try:
+            data = pickle.dumps(game)
+        except Exception:  # noqa: BLE001 - mirror _save diagnostic context
+            self._logger.exception("Failed to serialise game before saving", extra={"chat_id": chat_id})
+            raise
+
+        try:
+            async with self._redis.pipeline(transaction=True) as pipe:
+                await pipe.watch(version_key)
+                current_version_raw = await pipe.get(version_key)
+                if current_version_raw is None:
+                    current_version = 0
+                else:
+                    if isinstance(current_version_raw, bytes):
+                        current_version_str = current_version_raw.decode("utf-8", "ignore")
+                    else:
+                        current_version_str = str(current_version_raw)
+                    try:
+                        current_version = int(current_version_str)
+                    except (TypeError, ValueError):
+                        current_version = 0
+
+                if current_version != expected_version:
+                    await pipe.unwatch()
+                    self._logger.warning(
+                        "Version conflict detected during save",
+                        extra={
+                            "chat_id": chat_id,
+                            "expected_version": expected_version,
+                            "current_version": current_version,
+                        },
+                    )
+                    return False
+
+                new_version = current_version + 1
+
+                pipe.multi()
+                pipe.set(game_key, data)
+                pipe.set(version_key, new_version)
+                await pipe.execute()
+
+        except redis_exceptions.WatchError:
+            self._logger.warning(
+                "Concurrent modification detected (WatchError)",
+                extra={"chat_id": chat_id, "expected_version": expected_version},
+            )
+            return False
+        except redis_exceptions.RedisError as exc:
+            self._logger.error(
+                "Redis error during save_game_with_version_check",
+                extra={
+                    "chat_id": chat_id,
+                    "error": type(exc).__name__,
+                    "error_message": str(exc),
+                },
+                exc_info=True,
+            )
+            raise
+
+        await self._update_player_index(chat_id, game)
+        self._tables[chat_id] = game
+        self._logger.debug(
+            "Game saved with version check",
+            extra={
+                "chat_id": chat_id,
+                "old_version": expected_version,
+                "new_version": new_version,
+            },
+        )
+        return True
+
     async def save_game(self, chat_id: ChatId, game: Game) -> None:
         self._tables[chat_id] = game
         await self._save(chat_id, game)
@@ -220,6 +332,7 @@ class TableManager:
                 data,
                 log_extra={"chat_id": chat_id},
             )
+            await self._redis.set(self._version_key(chat_id), 0, nx=True)
             await self._update_player_index(chat_id, game)
             self._redis_ops._logger.debug(
                 "[LOCK_SECTION_END] chat_id=%s action=_save elapsed=%.3fs",

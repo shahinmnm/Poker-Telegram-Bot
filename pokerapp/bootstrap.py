@@ -23,6 +23,7 @@ from pokerapp.utils.cache import AdaptivePlayerReportCache
 from pokerapp.utils.logging_helpers import ContextLoggerAdapter, enforce_context
 from pokerapp.state_validator import GameStateValidator
 from pokerapp.recovery_service import RecoveryService
+from pokerapp.telegram_retry_manager import TelegramRetryManager
 
 
 @dataclass(frozen=True)
@@ -40,6 +41,7 @@ class ApplicationServices:
     private_match_service: PrivateMatchService
     messaging_service_factory: Callable[..., MessagingService]
     telegram_safeops_factory: Callable[..., TelegramSafeOps]
+    retry_manager: TelegramRetryManager
 
 
 def _build_stats_service(logger: ContextLoggerAdapter, cfg: Config) -> BaseStatsService:
@@ -93,6 +95,13 @@ def build_services(cfg: Config) -> ApplicationServices:
         redis_ops=redis_ops,
         wallet_redis_ops=redis_ops,
         state_validator=state_validator,
+    )
+
+    retry_manager = TelegramRetryManager(
+        max_retries=cfg.TELEGRAM_MAX_RETRIES,
+        base_delay=cfg.TELEGRAM_RETRY_BASE_DELAY,
+        max_delay=cfg.TELEGRAM_RETRY_MAX_DELAY,
+        logger=logger,
     )
 
     recovery_logger = _make_service_logger(logger, "recovery", "recovery")
@@ -165,6 +174,7 @@ def build_services(cfg: Config) -> ApplicationServices:
             last_message_hash=last_message_hash,
             last_message_hash_lock=last_message_hash_lock,
             table_manager=table_manager,
+            retry_manager=retry_manager,
         )
 
     def telegram_safeops_factory(*, view) -> TelegramSafeOps:
@@ -191,5 +201,6 @@ def build_services(cfg: Config) -> ApplicationServices:
         private_match_service=private_match_service,
         messaging_service_factory=messaging_service_factory,
         telegram_safeops_factory=telegram_safeops_factory,
+        retry_manager=retry_manager,
     )
 
