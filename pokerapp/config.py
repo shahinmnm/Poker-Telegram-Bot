@@ -691,7 +691,7 @@ class Config:
             env_var="POKERBOT_TELEGRAM_RETRY_BASE_DELAY",
         )
         self.TELEGRAM_RETRY_BASE_DELAY: float = (
-            parsed_base_delay if parsed_base_delay is not None else 0.5
+            parsed_base_delay if parsed_base_delay is not None else 1.0
         )
 
         max_delay_raw = os.getenv("POKERBOT_TELEGRAM_RETRY_MAX_DELAY")
@@ -700,7 +700,7 @@ class Config:
             env_var="POKERBOT_TELEGRAM_RETRY_MAX_DELAY",
         )
         self.TELEGRAM_RETRY_MAX_DELAY: float = (
-            parsed_max_delay if parsed_max_delay is not None else 4.0
+            parsed_max_delay if parsed_max_delay is not None else 30.0
         )
 
         multiplier_raw = os.getenv("POKERBOT_TELEGRAM_RETRY_MULTIPLIER")
