@@ -27,6 +27,9 @@ class TelegramSafeOps:
 
     _MIN_DELAY = 0.05
 
+    _last_edit_cache: dict[tuple[ChatId, MessageId], str] = {}
+    _cache_lock = asyncio.Lock()
+
     def __init__(
         self,
         view: Any,
@@ -64,6 +67,8 @@ class TelegramSafeOps:
     ) -> Optional[MessageId]:
         """Safely edit a message, retrying transient failures when required."""
 
+        cache_key: Optional[tuple[ChatId, MessageId]] = None
+
         if not message_id:
             return await self._send_message_return_id(
                 chat_id,
@@ -71,6 +76,22 @@ class TelegramSafeOps:
                 reply_markup=reply_markup,
                 request_category=request_category,
             )
+
+        cache_key = self._normalize_cache_key(chat_id, message_id)
+        if cache_key is not None:
+            async with self._cache_lock:
+                cached_text = self._last_edit_cache.get(cache_key)
+            if cached_text == text:
+                self._logger.debug(
+                    "Skipping edit_message_text because content unchanged",
+                    extra=self._build_extra(
+                        chat_id=chat_id,
+                        message_id=message_id,
+                        operation="edit_message_text",
+                        extra=log_extra,
+                    ),
+                )
+                return message_id
 
         try:
             result = await self._execute(
@@ -122,6 +143,9 @@ class TelegramSafeOps:
             raise
         else:
             if result:
+                if cache_key is not None:
+                    async with self._cache_lock:
+                        self._last_edit_cache[cache_key] = text
                 return result
 
         new_id = await self._send_message_return_id(
@@ -130,6 +154,15 @@ class TelegramSafeOps:
             reply_markup=reply_markup,
             request_category=request_category,
         )
+
+        if new_id:
+            new_cache_key = self._normalize_cache_key(chat_id, new_id)
+            if cache_key is not None or new_cache_key is not None:
+                async with self._cache_lock:
+                    if cache_key is not None:
+                        self._last_edit_cache.pop(cache_key, None)
+                    if new_cache_key is not None:
+                        self._last_edit_cache[new_cache_key] = text
 
         if new_id and message_id and new_id != message_id:
             try:
@@ -168,6 +201,13 @@ class TelegramSafeOps:
             )
 
         return new_id
+
+    def _normalize_cache_key(
+        self, chat_id: ChatId, message_id: MessageId
+    ) -> Optional[tuple[ChatId, MessageId]]:
+        if not chat_id or not message_id:
+            return None
+        return (chat_id, message_id)
 
     async def send_message_safe(
         self,
