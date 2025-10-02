@@ -4,7 +4,7 @@ import time
 
 import pytest
 
-from pokerapp.lock_manager import LockManager
+from pokerapp.lock_manager import LockManager, LockOrderError
 
 
 @pytest.mark.asyncio
@@ -61,3 +61,64 @@ async def test_pool_bounds_safety():
 
     assert lm._metrics.get("lock_pool_hits", 0) >= 0
     assert lm._metrics.get("lock_pool_misses", 0) >= 0
+
+
+@pytest.mark.asyncio
+async def test_fast_path_deferred_validation(monkeypatch):
+    """Validation for fast-path happens after acquisition succeeds."""
+
+    lm = LockManager(logger=logging.getLogger(__name__), default_timeout_seconds=5)
+
+    key = "deferred:test"
+    lock = await lm._get_lock(key)
+
+    acquire_times = []
+
+    original_lock_acquire = lock.acquire
+
+    async def tracked_lock_acquire(*args, **kwargs):
+        await original_lock_acquire(*args, **kwargs)
+        acquire_times.append(time.time())
+
+    monkeypatch.setattr(lock, "acquire", tracked_lock_acquire, raising=False)
+
+    validation_times = []
+    original_validate = lm._validate_lock_order
+
+    def tracked_validate(*args, **kwargs):
+        validation_times.append(time.time())
+        return original_validate(*args, **kwargs)
+
+    monkeypatch.setattr(lm, "_validate_lock_order", tracked_validate, raising=False)
+
+    start = time.time()
+    result = await lm.acquire(key, timeout=1)
+
+    assert result is True
+    assert len(acquire_times) == 1
+    assert len(validation_times) == 1
+    assert validation_times[0] >= acquire_times[0]
+
+    elapsed_us = (time.time() - start) * 1_000_000
+    assert elapsed_us < 200_000, f"Fast-path unexpectedly slow: {elapsed_us:.0f}μs"
+
+    lm.release(key)
+
+
+@pytest.mark.asyncio
+async def test_fast_path_validation_rollback():
+    """Lock is released when validation fails after fast-path acquisition."""
+
+    lm = LockManager(logger=logging.getLogger(__name__), default_timeout_seconds=5)
+
+    acquired = await lm.acquire("chat:test", level=4, timeout=1)
+    assert acquired
+
+    with pytest.raises(LockOrderError):
+        await lm.acquire("table:test", level=2, timeout=1)
+
+    violating_lock = await lm._get_lock("table:test")
+    assert violating_lock._count == 0
+    assert not violating_lock._lock.locked()
+
+    lm.release("chat:test")

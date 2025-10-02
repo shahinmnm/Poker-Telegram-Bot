@@ -667,18 +667,40 @@ class LockManager:
 
         if _ENABLE_FAST_PATH:
             lock = await self._get_lock(key)
-            fast_path_context = self._build_context_payload(
-                key, resolved_level, additional=context
-            )
-            current_acquisitions = self._get_current_acquisitions()
-            self._validate_lock_order(
-                current_acquisitions, key, resolved_level, fast_path_context
-            )
+
+            fast_path_context = {
+                "lock_key": key,
+                "lock_level": resolved_level,
+                "chat_id": context.get("chat_id") if context else None,
+            }
 
             try:
                 await asyncio.wait_for(
                     lock.acquire(), timeout=_FAST_PATH_TIMEOUT_THRESHOLD
                 )
+
+                current_acquisitions = self._get_current_acquisitions()
+                full_context = self._build_context_payload(
+                    key, resolved_level, additional=context
+                )
+
+                try:
+                    self._validate_lock_order(
+                        current_acquisitions, key, resolved_level, full_context
+                    )
+                except LockOrderError as order_err:
+                    lock.release()
+                    self._logger.error(
+                        "[FAST_PATH] Lock order violation on key=%s, released lock",
+                        key,
+                        exc_info=True,
+                        extra=self._log_extra(
+                            full_context,
+                            event_type="lock_fast_path_order_violation",
+                            lock_key=key,
+                        ),
+                    )
+                    raise order_err
 
                 self._metrics["lock_fast_path_hits"] = (
                     self._metrics.get("lock_fast_path_hits", 0) + 1
@@ -689,7 +711,7 @@ class LockManager:
                 setattr(lock, "_acquired_by_function", call_function)
                 setattr(lock, "_acquired_by_task", self._describe_task(task))
 
-                self._record_acquired(key, resolved_level, fast_path_context)
+                self._record_acquired(key, resolved_level, full_context)
 
                 if task is not None:
                     acquire_key = (id(task), key)
@@ -701,10 +723,10 @@ class LockManager:
                 elapsed_us = (time.time() - acquire_start_ts) * 1_000_000
                 elapsed_seconds = elapsed_us / 1_000_000
                 lock_identity = self._format_lock_identity(
-                    key, resolved_level, fast_path_context
+                    key, resolved_level, full_context
                 )
                 info_extra = self._log_extra(
-                    fast_path_context,
+                    full_context,
                     event_type="lock_acquired",
                     lock_key=key,
                     lock_level=resolved_level,
@@ -717,7 +739,7 @@ class LockManager:
                     "%s acquired quickly in %.3fs%s",
                     lock_identity,
                     elapsed_seconds,
-                    self._format_context(fast_path_context),
+                    self._format_context(full_context),
                     extra=info_extra,
                 )
 
@@ -726,7 +748,7 @@ class LockManager:
                     key,
                     elapsed_us,
                     extra=self._log_extra(
-                        fast_path_context,
+                        full_context,
                         event_type="lock_fast_path_hit",
                         lock_key=key,
                         latency_us=elapsed_us,
