@@ -210,6 +210,8 @@ class PokerBot:
         builder = (
             ApplicationBuilder()
             .token(self._token)
+            .post_init(self._on_application_post_init)
+            .post_shutdown(self._on_application_post_shutdown)
             .post_stop(self._cleanup_webhook)
             .job_queue(self._job_queue)
         )
@@ -241,6 +243,7 @@ class PokerBot:
             adaptive_player_report_cache=self._adaptive_player_report_cache,
             telegram_safe_ops=telegram_safe_ops,
         )
+        self._register_game_engine()
         self._controller = PokerBotCotroller(self._model, self._application)
 
     def _dispose_application(self) -> None:
@@ -254,11 +257,61 @@ class PokerBot:
         except Exception:
             self._logger.debug("Failed to stop running application cleanly.", exc_info=True)
 
+        try:
+            self._application.bot_data.pop("game_engine", None)
+        except Exception:
+            self._logger.debug("Failed to clear game engine reference from bot_data.", exc_info=True)
+
         self._application = None
         self._job_queue = None
         self._controller = None
         self._model = None
         self._view = None
+
+    def _resolve_game_engine(self):
+        if self._model is None:
+            return None
+        return getattr(self._model, "_game_engine", None)
+
+    def _register_game_engine(self) -> None:
+        if self._application is None:
+            return
+
+        game_engine = self._resolve_game_engine()
+        if game_engine is None:
+            self._logger.warning(
+                "Game engine not available for registration; countdown workers will not start.",
+            )
+            return
+
+        self._application.bot_data["game_engine"] = game_engine
+
+    async def _on_application_post_init(self, application: "Application") -> None:
+        game_engine = self._resolve_game_engine()
+        if game_engine is None:
+            self._logger.warning(
+                "Cannot start game engine workers: engine reference missing during post_init.",
+            )
+            return
+
+        application.bot_data["game_engine"] = game_engine
+        try:
+            await game_engine.start()
+        except Exception:
+            self._logger.exception("Failed to start GameEngine background workers")
+            raise
+
+    async def _on_application_post_shutdown(self, application: "Application") -> None:
+        game_engine = application.bot_data.get("game_engine") or self._resolve_game_engine()
+        if game_engine is None:
+            return
+
+        try:
+            await game_engine.shutdown()
+        except Exception:
+            self._logger.exception("Failed to stop GameEngine background workers")
+        finally:
+            application.bot_data.pop("game_engine", None)
 
     def _should_force_polling_due_to_webhook_failure(self, exc: Exception) -> bool:
         for error in self._iter_exception_chain(exc):

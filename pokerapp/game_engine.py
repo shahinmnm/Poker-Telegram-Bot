@@ -1288,8 +1288,6 @@ class GameEngine:
         if context is not None:
             self._countdown_contexts[chat_id] = context
 
-        await self._countdown_worker.start()
-
         game = await self._table_manager.get_game(chat_id)
         if game is None:
             self._logger.warning(
@@ -1372,7 +1370,7 @@ class GameEngine:
                     )
                     return
 
-                if game.state != GameState.INITIAL:
+                if game.state != GameState.WAITING:
                     self._logger.debug(
                         "Countdown completed but game is no longer waiting",
                         extra={
@@ -1459,10 +1457,25 @@ class GameEngine:
                 },
             )
 
+    async def start(self) -> None:
+        """Start background workers managed by the game engine.
+
+        This should be called once during application initialization,
+        after the :class:`GameEngine` is constructed.
+        """
+
+        await self._countdown_worker.start()
+        self._logger.info("GameEngine background workers started")
+
     async def shutdown(self) -> None:
-        """Stop background workers managed by the game engine."""
+        """Stop background workers managed by the game engine.
+
+        This should be called during application shutdown to ensure
+        graceful cleanup of countdown tasks.
+        """
 
         await self._countdown_worker.stop()
+        self._logger.info("GameEngine background workers stopped")
 
     async def progress_stage(
         self,
