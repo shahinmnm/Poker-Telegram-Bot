@@ -99,6 +99,7 @@ _DEFAULT_REDIS_KEYS_DATA: Dict[str, Any] = {
     "engine": {
         "stage_lock_prefix": "stage:",
         "stop_request": "stop_request",
+        "action_lock_prefix": "action:lock:",
     },
     "player_report": {
         "cache_prefix": "pokerbot:player_report:",

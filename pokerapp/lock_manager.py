@@ -27,6 +27,8 @@ from typing import (
 )
 from weakref import WeakKeyDictionary
 
+import redis.asyncio as aioredis
+
 from pokerapp.bootstrap import _make_service_logger
 from pokerapp.utils.locks import ReentrantAsyncLock
 from pokerapp.utils.logging_helpers import add_context, normalise_request_category
@@ -95,10 +97,105 @@ class _WaitingInfo:
     context: Dict[str, Any]
 
 
-@dataclass
-class _ActionLockState:
-    token: str
-    expiry: float
+class _InMemoryActionLockBackend:
+    """Minimal Redis-like backend used when no Redis pool is provided."""
+
+    def __init__(self) -> None:
+        self._lock = asyncio.Lock()
+        self._values: Dict[str, Tuple[str, float]] = {}
+
+    async def set(
+        self,
+        key: str,
+        value: str,
+        *,
+        nx: bool = False,
+        ex: Optional[int] = None,
+    ) -> bool:
+        if ex is None:
+            raise ValueError("In-memory Redis backend requires an expiration (ex) value")
+
+        async with self._lock:
+            self._purge_expired()
+            if nx and key in self._values:
+                return False
+
+            self._values[key] = (value, time.monotonic() + float(ex))
+            return True
+
+    async def eval(
+        self,
+        _script: str,
+        *call_args: Any,
+        **call_kwargs: Any,
+    ) -> int:
+        keys: Sequence[str]
+        args: Sequence[str]
+
+        if call_args:
+            numkeys = int(call_args[0]) if call_args else 0
+            keys = [str(value) for value in call_args[1 : 1 + numkeys]]
+            args = [str(value) for value in call_args[1 + numkeys :]]
+        else:
+            keys = [str(value) for value in call_kwargs.get("keys", [])]
+            args = [str(value) for value in call_kwargs.get("args", [])]
+
+        if not keys:
+            return 0
+
+        key = keys[0]
+        expected_token = args[0] if args else ""
+
+        async with self._lock:
+            self._purge_expired()
+            current = self._values.get(key)
+            if current is None:
+                return 0
+
+            token, _expiry = current
+            if token != expected_token:
+                return 0
+
+            self._values.pop(key, None)
+            return 1
+
+    def _purge_expired(self) -> None:
+        now = time.monotonic()
+        expired = [key for key, (_, expiry) in self._values.items() if expiry <= now]
+        for key in expired:
+            self._values.pop(key, None)
+
+    async def get(self, key: str) -> Optional[str]:
+        async with self._lock:
+            self._purge_expired()
+            entry = self._values.get(key)
+            if entry is None:
+                return None
+            return entry[0]
+
+    async def delete(self, key: str) -> int:
+        async with self._lock:
+            self._purge_expired()
+            removed = self._values.pop(key, None)
+            return 1 if removed is not None else 0
+
+
+def _resolve_action_lock_prefix(source: Optional[Mapping[str, Any]]) -> str:
+    default_prefix = "action:lock:"
+    if not isinstance(source, Mapping):
+        return default_prefix
+
+    direct = source.get("action_lock_prefix")
+    if isinstance(direct, str) and direct:
+        return direct
+
+    engine_section = source.get("engine")
+    if isinstance(engine_section, Mapping):
+        engine_prefix = engine_section.get("action_lock_prefix")
+        if isinstance(engine_prefix, str) and engine_prefix:
+            return engine_prefix
+
+    return default_prefix
 
 
 class LockManager:
@@ -110,6 +207,8 @@ class LockManager:
         self,
         *,
         logger: logging.Logger,
+        redis_pool: Optional[aioredis.Redis] = None,
+        redis_keys: Optional[Mapping[str, Any]] = None,
         default_timeout_seconds: Optional[float] = 5,
         max_retries: int = 3,
         retry_backoff_seconds: float = 1,
@@ -186,8 +285,27 @@ class LockManager:
         self._cached_metrics: Optional[Dict[str, Any]] = None
         self._cached_metrics_ts: float = 0.0
         self._metrics_cache_ttl: float = 0.5  # 500ms cache TTL
-        self._action_locks: Dict[Tuple[int, int], _ActionLockState] = {}
-        self._action_locks_guard = asyncio.Lock()
+        redis_keys_source: Optional[Mapping[str, Any]] = redis_keys
+        config_instance = config
+        if redis_keys_source is None:
+            if config_instance is None:
+                try:
+                    from pokerapp.config import Config  # local import to avoid cycles
+                except Exception:  # pragma: no cover - defensive
+                    config_instance = None
+                else:
+                    config_instance = Config()
+            if config_instance is not None:
+                constants = getattr(config_instance, "constants", None)
+                if constants is not None:
+                    redis_keys_source = getattr(constants, "redis_keys", None)
+                if redis_keys_source is None:
+                    redis_keys_source = getattr(config_instance, "redis_keys", None)
+
+        self._redis_keys: Dict[str, str] = {
+            "action_lock_prefix": _resolve_action_lock_prefix(redis_keys_source)
+        }
+        self._redis_pool: Any = redis_pool or _InMemoryActionLockBackend()
 
     async def _get_lock(self, key: str) -> ReentrantAsyncLock:
         """Get or create a lock with pooling for performance."""
@@ -226,19 +344,6 @@ class LockManager:
 
                 self._locks[key] = lock
             return lock
-
-    def _prune_expired_action_locks(self, now: Optional[float] = None) -> None:
-        """Remove expired action locks from the bookkeeping map."""
-
-        if not self._action_locks:
-            return
-
-        current_time = now if now is not None else time.monotonic()
-        expired_keys = [
-            key for key, state in self._action_locks.items() if state.expiry <= current_time
-        ]
-        for key in expired_keys:
-            self._action_locks.pop(key, None)
 
     async def shutdown(self, timeout: float = 5.0) -> Dict[str, Any]:
         """Initiate graceful shutdown of lock manager.
@@ -2452,20 +2557,56 @@ class LockManager:
         if timeout_seconds <= 0:
             timeout_seconds = 1
 
-        async with self._action_locks_guard:
-            now = time.monotonic()
-            self._prune_expired_action_locks(now)
-            key = (int(chat_id), int(user_id))
-            state = self._action_locks.get(key)
-            if state is not None and state.expiry > now:
-                return None
+        ttl_seconds = int(timeout_seconds)
+        if ttl_seconds <= 0:
+            ttl_seconds = 1
 
-            token = str(uuid.uuid4())
-            self._action_locks[key] = _ActionLockState(
-                token=token,
-                expiry=now + float(timeout_seconds),
+        redis_key = self._redis_keys["action_lock_prefix"] + f"{int(chat_id)}:{int(user_id)}"
+        token = str(uuid.uuid4())
+
+        try:
+            acquired = await self._redis_pool.set(
+                redis_key,
+                token,
+                nx=True,
+                ex=ttl_seconds,
+            )
+        except aioredis.ConnectionError as exc:
+            self._logger.error(
+                "[ACTION_LOCK] Failed to acquire distributed lock (redis error)",
+                extra={
+                    "event_type": "action_lock_acquire_error",
+                    "chat_id": chat_id,
+                    "user_id": user_id,
+                    "timeout_seconds": timeout_seconds,
+                    "error": str(exc),
+                },
+                exc_info=True,
+            )
+            return None
+
+        if acquired:
+            self._logger.debug(
+                "[ACTION_LOCK] Acquired distributed lock",
+                extra={
+                    "event_type": "action_lock_acquired",
+                    "chat_id": chat_id,
+                    "user_id": user_id,
+                    "token_prefix": token[:8],
+                    "ttl_seconds": ttl_seconds,
+                },
             )
             return token
+
+        self._logger.debug(
+            "[ACTION_LOCK] Lock contention",
+            extra={
+                "event_type": "action_lock_contention",
+                "chat_id": chat_id,
+                "user_id": user_id,
+            },
+        )
+        return None
 
     async def release_action_lock(
         self,
@@ -2475,13 +2616,74 @@ class LockManager:
     ) -> bool:
         """Release an action lock if ``lock_token`` matches the owner."""
 
-        async with self._action_locks_guard:
-            key = (int(chat_id), int(user_id))
-            state = self._action_locks.get(key)
-            if state is None or state.token != lock_token:
-                return False
-            self._action_locks.pop(key, None)
+        redis_key = self._redis_keys["action_lock_prefix"] + f"{int(chat_id)}:{int(user_id)}"
+
+        lua_script = """
+        if redis.call("GET", KEYS[1]) == ARGV[1] then
+            return redis.call("DEL", KEYS[1])
+        else
+            return 0
+        end
+        """
+
+        try:
+            try:
+                result = await self._redis_pool.eval(
+                    lua_script,
+                    keys=[redis_key],
+                    args=[lock_token],
+                )
+            except TypeError:
+                result = await self._redis_pool.eval(
+                    lua_script,
+                    1,
+                    redis_key,
+                    lock_token,
+                )
+        except ModuleNotFoundError:
+            current_value = await self._redis_pool.get(redis_key)
+            if isinstance(current_value, bytes):
+                current_value = current_value.decode()
+            if current_value == lock_token:
+                deleted = await self._redis_pool.delete(redis_key)
+                result = 1 if deleted else 0
+            else:
+                result = 0
+        except aioredis.ConnectionError as exc:
+            self._logger.error(
+                "[ACTION_LOCK] Failed to release distributed lock (redis error)",
+                extra={
+                    "event_type": "action_lock_release_error",
+                    "chat_id": chat_id,
+                    "user_id": user_id,
+                    "error": str(exc),
+                },
+                exc_info=True,
+            )
+            return False
+
+        if result == 1:
+            self._logger.debug(
+                "[ACTION_LOCK] Released distributed lock",
+                extra={
+                    "event_type": "action_lock_released",
+                    "chat_id": chat_id,
+                    "user_id": user_id,
+                    "token_prefix": lock_token[:8],
+                },
+            )
             return True
+
+        self._logger.warning(
+            "[ACTION_LOCK] Release failed - token mismatch or lock expired",
+            extra={
+                "event_type": "action_lock_release_failed",
+                "chat_id": chat_id,
+                "user_id": user_id,
+                "token_prefix": lock_token[:8],
+            },
+        )
+        return False
 
     async def clear_all_locks(self) -> int:
         """Remove all tracked locks and return how many were cleared."""
