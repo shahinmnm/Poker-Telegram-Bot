@@ -57,6 +57,8 @@ from pokerapp.utils.telegram_safeops import TelegramSafeOps
 from pokerapp.utils.cache import AdaptivePlayerReportCache
 from pokerapp.utils.common import normalize_player_ids
 from pokerapp.matchmaking_service import MatchmakingService
+from pokerapp.services.countdown_queue import CountdownMessageQueue
+from pokerapp.services.countdown_worker import CountdownWorker
 from pokerapp.player_manager import PlayerManager
 from pokerapp.stats_reporter import StatsReporter
 from pokerapp.stats import PlayerIdentity
@@ -290,12 +292,20 @@ class GameEngine:
         self._safe_int = safe_int
         self._old_players_key = old_players_key
         self._telegram_ops = telegram_safe_ops
+        self._safe_ops = telegram_safe_ops
         self._lock_manager = lock_manager
         self._logger = logger
         self.constants = constants or _CONSTANTS
         self._adaptive_player_report_cache = adaptive_player_report_cache
         self._stage_lock_timeout = self.STAGE_LOCK_TIMEOUT_SECONDS
         self._initialize_stop_translations()
+        self._countdown_queue = CountdownMessageQueue(max_size=100)
+        self._countdown_worker = CountdownWorker(
+            queue=self._countdown_queue,
+            safe_ops=self._safe_ops,
+            edit_interval=1.0,
+        )
+        self._countdown_contexts: Dict[int, ContextTypes.DEFAULT_TYPE] = {}
 
     def _log_lock_snapshot(
         self,
@@ -1183,20 +1193,8 @@ class GameEngine:
         """Cancel countdown timers for ``chat_id`` if they are active."""
 
         try:
-            cancel = getattr(self._view, "_cancel_prestart_countdown", None)
-            tasks = getattr(self._view, "_prestart_countdown_tasks", None)
+            await self.cancel_prestart_countdown(chat_id)
             normalized_chat = self._safe_int(chat_id)
-
-            if callable(cancel):
-                if isinstance(tasks, dict):
-                    keys = [
-                        key for key in list(tasks.keys()) if key[0] == normalized_chat
-                    ]
-                    for _, game_key in keys:
-                        await cancel(chat_id, game_key)
-                else:
-                    await cancel(chat_id)
-
             self._logger.debug(
                 "Cancelled all timers for chat", extra={"chat_id": normalized_chat}
             )
@@ -1260,7 +1258,7 @@ class GameEngine:
                                 "error": str(exc),
                                 "error_type": type(exc).__name__,
                             },
-                        )
+            )
 
             self._logger.debug(
                 "All relevant locks released for chat",
@@ -1275,6 +1273,196 @@ class GameEngine:
                     "error_type": type(exc).__name__,
                 },
             )
+
+    async def _start_prestart_countdown(
+        self,
+        chat_id: int,
+        duration_seconds: int = 10,
+        *,
+        context: Optional[ContextTypes.DEFAULT_TYPE] = None,
+    ) -> None:
+        """Start or restart the pre-game countdown using the queue system."""
+
+        await self._countdown_queue.cancel_countdown_for_chat(chat_id)
+
+        if context is not None:
+            self._countdown_contexts[chat_id] = context
+
+        await self._countdown_worker.start()
+
+        game = await self._table_manager.get_game(chat_id)
+        if game is None:
+            self._logger.warning(
+                "Cannot start countdown: no active game",
+                extra={"chat_id": self._safe_int(chat_id)},
+            )
+            return
+
+        message_id = getattr(game, "ready_message_main_id", None)
+        if not message_id:
+            self._logger.warning(
+                "Cannot start countdown: no anchor message",
+                extra={"chat_id": self._safe_int(chat_id)},
+            )
+            return
+
+        def format_countdown(remaining: float) -> str:
+            seconds = max(0, int(remaining))
+            if seconds == 0:
+                return "🎮 Game starting now!"
+            return f"⏳ Game starts in {seconds} second{'s' if seconds != 1 else ''}..."
+
+        async def on_countdown_complete() -> None:
+            try:
+                await self._handle_countdown_completion(chat_id)
+            except Exception:
+                self._logger.exception(
+                    "Error in countdown completion handler",
+                    extra={"chat_id": self._safe_int(chat_id)},
+                )
+
+        try:
+            await self._countdown_queue.enqueue(
+                chat_id=chat_id,
+                message_id=message_id,
+                text="⏳ Starting...",
+                duration_seconds=float(duration_seconds),
+                formatter=format_countdown,
+                on_complete=on_countdown_complete,
+            )
+        except asyncio.QueueFull:
+            self._logger.error(
+                "Countdown queue is full",
+                extra={"chat_id": self._safe_int(chat_id)},
+            )
+            return
+
+        self._logger.info(
+            "Prestart countdown enqueued",
+            extra={
+                "chat_id": self._safe_int(chat_id),
+                "message_id": message_id,
+                "duration": duration_seconds,
+            },
+        )
+
+    async def _handle_countdown_completion(self, chat_id: int) -> None:
+        """Called when pre-start countdown finishes."""
+
+        context = self._countdown_contexts.pop(chat_id, None)
+
+        lock_key = self._stage_lock_key(chat_id)
+        stage_label = "stage_lock:countdown_completion"
+        event_stage_label = "countdown_completion"
+
+        try:
+            async with self._trace_lock_guard(
+                lock_key=lock_key,
+                chat_id=chat_id,
+                game=None,
+                stage_label=stage_label,
+                event_stage_label=event_stage_label,
+                timeout=self._stage_lock_timeout,
+            ):
+                game = await self._table_manager.get_game(chat_id)
+                if game is None:
+                    self._logger.debug(
+                        "Countdown completed but game not found",
+                        extra={"chat_id": self._safe_int(chat_id)},
+                    )
+                    return
+
+                if game.state != GameState.INITIAL:
+                    self._logger.debug(
+                        "Countdown completed but game is no longer waiting",
+                        extra={
+                            "chat_id": self._safe_int(chat_id),
+                            "state": getattr(game.state, "name", str(game.state)),
+                        },
+                    )
+                    return
+
+                seated_players = [
+                    player for player in getattr(game, "players", []) if player is not None
+                ]
+                seated_count = len(seated_players)
+                if seated_count < 2:
+                    self._logger.warning(
+                        "Countdown completed but not enough players",
+                        extra={
+                            "chat_id": self._safe_int(chat_id),
+                            "seated_count": seated_count,
+                        },
+                    )
+                    try:
+                        await self._player_manager.send_join_prompt(game, chat_id)
+                    except Exception:
+                        self._logger.exception(
+                            "Failed to refresh join prompt after countdown",
+                            extra={"chat_id": self._safe_int(chat_id)},
+                        )
+                    finally:
+                        try:
+                            await self._table_manager.save_game(chat_id, game)
+                        except Exception:
+                            self._logger.exception(
+                                "Failed to persist game after countdown cancellation",
+                                extra={"chat_id": self._safe_int(chat_id)},
+                            )
+                    return
+
+                if context is None:
+                    self._logger.warning(
+                        "Countdown completed without context to start game",
+                        extra={
+                            "chat_id": self._safe_int(chat_id),
+                            "seated_count": seated_count,
+                        },
+                    )
+                    return
+
+                await self.start_game(context, game, chat_id)
+        except Exception:
+            self._logger.exception(
+                "Error while handling countdown completion",
+                extra={"chat_id": self._safe_int(chat_id)},
+            )
+
+    async def cancel_prestart_countdown(self, chat_id: int) -> None:
+        """Cancel any active countdown for this chat."""
+
+        self._countdown_contexts.pop(chat_id, None)
+        cancelled = await self._countdown_queue.cancel_countdown_for_chat(chat_id)
+
+        try:
+            game = await self._table_manager.get_game(chat_id)
+        except Exception:
+            game = None
+
+        message_id = getattr(game, "ready_message_main_id", None) if game else None
+        if message_id is not None:
+            self._countdown_queue.cancel_countdown(chat_id, message_id)
+            self._logger.debug(
+                "Cancelled prestart countdown",
+                extra={
+                    "chat_id": self._safe_int(chat_id),
+                    "message_id": message_id,
+                    "cancelled_entries": cancelled,
+                },
+            )
+        elif cancelled:
+            self._logger.debug(
+                "Cancelled prestart countdown entries without anchor",
+                extra={
+                    "chat_id": self._safe_int(chat_id),
+                    "cancelled_entries": cancelled,
+                },
+            )
+
+    async def shutdown(self) -> None:
+        """Stop background workers managed by the game engine."""
+
+        await self._countdown_worker.stop()
 
     async def progress_stage(
         self,

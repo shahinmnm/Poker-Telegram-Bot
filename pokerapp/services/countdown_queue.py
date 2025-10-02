@@ -130,6 +130,22 @@ class CountdownMessageQueue:
 
         return msg
 
+    async def cancel_countdown_for_chat(self, chat_id: int) -> int:
+        """Cancel all active countdowns for a specific chat."""
+
+        cancelled_count = 0
+
+        async with self._tracking_lock:
+            keys_to_cancel = [
+                key for key in self._active_countdowns.keys() if key[0] == chat_id
+            ]
+            for key in keys_to_cancel:
+                message = self._active_countdowns[key]
+                message.cancelled = True
+                cancelled_count += 1
+
+        return cancelled_count
+
     def cancel_countdown(self, chat_id: int, message_id: int) -> bool:
         """Cancel an active countdown by marking its messages as cancelled.
 
