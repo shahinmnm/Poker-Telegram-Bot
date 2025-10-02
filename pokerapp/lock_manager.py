@@ -70,7 +70,7 @@ _FAST_PATH_TIMEOUT_THRESHOLD = 0.001        # 1ms - abort to slow path if exceed
 
 # Performance optimization: Lock object pooling
 _LOCK_CLEANUP_BATCH_SIZE = 100              # Process locks in batches
-_LOCK_CLEANUP_IDLE_THRESHOLD = 180.0        # 3 minutes idle before cleanup
+_LOCK_CLEANUP_IDLE_THRESHOLD_SECONDS = 180.0  # 3 minutes idle before cleanup
 _ENABLE_LOCK_POOLING = True                 # Reuse lock objects
 _LOCK_POOL_MAX_SIZE = 200                   # Cap pool size (40-50 tables)
 
@@ -159,9 +159,11 @@ class LockManager:
             "lock_cancellations": 0,
             "lock_cleanup_failures": 0,
             "lock_fast_path_hits": 0,
+            "lock_fast_path_misses": 0,
             "lock_slow_path": 0,
             "lock_pool_hits": 0,
             "lock_pool_misses": 0,
+            "lock_cleanup_removed_count": 0,
         }
         self._shutdown_initiated = False
         self._shutdown_lock = asyncio.Lock()
@@ -179,26 +181,34 @@ class LockManager:
             lock = self._locks.get(key)
             if lock is None:
                 # Try pool first (FASTEST - reuse existing object)
-                if _ENABLE_LOCK_POOLING and self._lock_pool:
+                if _ENABLE_LOCK_POOLING:
                     async with self._lock_pool_lock:
-                        if self._lock_pool:  # Double-check after acquiring lock
-                            lock = self._lock_pool.pop()
-                            self._metrics.setdefault("lock_pool_hits", 0)
-                            self._metrics["lock_pool_hits"] += 1
-
-                            if self._logger.isEnabledFor(logging.DEBUG):
-                                self._logger.debug(
-                                    "[LOCK_POOL] Reused lock for key=%s (pool_remaining=%d)",
-                                    key,
-                                    len(self._lock_pool),
-                                    extra={"event_type": "lock_pool_hit", "lock_key": key}
+                        if self._lock_pool:
+                            try:
+                                lock = self._lock_pool.pop()
+                                self._metrics["lock_pool_hits"] = (
+                                    self._metrics.get("lock_pool_hits", 0) + 1
                                 )
+
+                                if self._logger.isEnabledFor(logging.DEBUG):
+                                    self._logger.debug(
+                                        "[LOCK_POOL] Reused lock for key=%s (pool_remaining=%d)",
+                                        key,
+                                        len(self._lock_pool),
+                                        extra={
+                                            "event_type": "lock_pool_hit",
+                                            "lock_key": key,
+                                        },
+                                    )
+                            except IndexError:  # Defensive: pool became empty
+                                lock = None
 
                 # Allocate new if pool empty
                 if lock is None:
                     lock = ReentrantAsyncLock()
-                    self._metrics.setdefault("lock_pool_misses", 0)
-                    self._metrics["lock_pool_misses"] += 1
+                    self._metrics["lock_pool_misses"] = (
+                        self._metrics.get("lock_pool_misses", 0) + 1
+                    )
 
                 self._locks[key] = lock
             return lock
@@ -270,105 +280,114 @@ class LockManager:
 
             return stats
 
-    async def cleanup_idle_locks(self, *, force: bool = False) -> Dict[str, Any]:
-        """Remove idle locks and pool for reuse.
+    async def cleanup_idle_locks(self) -> int:
+        """Remove locks idle for longer than the configured threshold."""
 
-        Args:
-            force: Clean all unlocked locks immediately (for shutdown)
+        if not _ENABLE_LOCK_POOLING:
+            return 0
 
-        Returns:
-            Cleanup statistics
-        """
-        cleaned = 0
-        retained = 0
-        errors = 0
+        current_time = time.time()
+        removed_count = 0
+        keys_to_remove: Set[str] = set()
 
         async with self._locks_guard:
-            keys_to_remove = []
-            current_time = time.time()
-
             for key, lock in list(self._locks.items()):
                 try:
-                    # Skip locked locks
-                    if lock.locked():
-                        retained += 1
+                    locked_attr = getattr(lock, "locked", None)
+                    if callable(locked_attr):
+                        try:
+                            is_locked = bool(locked_attr())
+                        except Exception:  # pragma: no cover - defensive
+                            is_locked = getattr(lock, "_count", 0) > 0
+                    else:
+                        is_locked = getattr(lock, "_count", 0) > 0
+
+                    if is_locked:
                         continue
 
-                    # Check idle threshold
-                    last_used = getattr(lock, '_acquired_at_ts', None)
-                    if last_used is not None and not force:
-                        idle_time = current_time - last_used
-                        if idle_time < _LOCK_CLEANUP_IDLE_THRESHOLD:
-                            retained += 1
-                            continue
+                    last_used = getattr(lock, "_acquired_at_ts", None)
+                    if last_used is None:
+                        continue
 
-                    keys_to_remove.append(key)
+                    idle_duration = current_time - last_used
+                    if idle_duration < _LOCK_CLEANUP_IDLE_THRESHOLD_SECONDS:
+                        continue
 
-                    # Pool lock if space available
-                    if _ENABLE_LOCK_POOLING:
-                        async with self._lock_pool_lock:
-                            if len(self._lock_pool) < _LOCK_POOL_MAX_SIZE:
-                                # Clear metadata before pooling
-                                for attr in (
-                                    '_acquired_at_ts',
-                                    '_acquired_by_callsite',
-                                    '_acquired_by_function',
-                                    '_acquired_by_task',
-                                ):
-                                    try:
-                                        delattr(lock, attr)
-                                    except AttributeError:
-                                        pass
-                                self._lock_pool.append(lock)
+                    if key in keys_to_remove:
+                        continue
 
-                    cleaned += 1
+                    keys_to_remove.add(key)
 
-                except Exception as e:  # pragma: no cover
-                    errors += 1
+                    if len(keys_to_remove) >= _LOCK_CLEANUP_BATCH_SIZE:
+                        removed_count += await self._process_lock_cleanup_batch(keys_to_remove)
+                        keys_to_remove = set()
+
+                except Exception as exc:  # pragma: no cover - defensive
                     self._metrics["lock_cleanup_failures"] = (
                         self._metrics.get("lock_cleanup_failures", 0) + 1
                     )
                     self._logger.warning(
-                        "[LOCK_CLEANUP] Error for key=%s: %s",
+                        "[LOCK_CLEANUP] Error evaluating key=%s: %s",
                         key,
-                        e,
+                        exc,
                         extra={"event_type": "lock_cleanup_error", "lock_key": key},
                     )
 
-                if (
-                    not force
-                    and _LOCK_CLEANUP_BATCH_SIZE
-                    and len(keys_to_remove) >= _LOCK_CLEANUP_BATCH_SIZE
-                ):
-                    break
+            if keys_to_remove:
+                removed_count += await self._process_lock_cleanup_batch(keys_to_remove)
 
-            # Batch remove for speed
-            for key in keys_to_remove:
-                self._locks.pop(key, None)
-
-        stats = {
-            "cleaned": cleaned,
-            "retained": retained,
-            "errors": errors,
-            "pool_size": len(self._lock_pool),
-            "active_locks": len(self._locks),
-        }
-
-        if cleaned > 0 or errors > 0:
+        if removed_count > 0:
+            self._metrics["lock_cleanup_removed_count"] = (
+                self._metrics.get("lock_cleanup_removed_count", 0) + removed_count
+            )
             self._logger.info(
-                "[LOCK_CLEANUP] Cleaned %d locks, retained %d (pool=%d)",
-                cleaned,
-                retained,
-                stats["pool_size"],
-                extra={"event_type": "lock_cleanup_complete", **stats},
+                "Cleaned up %d idle locks",
+                removed_count,
+                extra={
+                    "event_type": "lock_cleanup",
+                    "removed_count": removed_count,
+                },
             )
 
-        # Invalidate metrics cache after cleanup
-        if hasattr(self, '_cached_metrics'):
+        if removed_count > 0 and hasattr(self, "_cached_metrics"):
             self._cached_metrics = None
             self._cached_metrics_ts = 0.0
 
-        return stats
+        return removed_count
+
+    async def _process_lock_cleanup_batch(self, keys: Set[str]) -> int:
+        """Process a batch of lock removals while holding the locks guard."""
+
+        removed_count = 0
+        for batch_key in list(keys):
+            removed_lock = self._locks.pop(batch_key, None)
+            if removed_lock is None:
+                continue
+
+            removed_count += 1
+
+            if len(self._lock_pool) >= _LOCK_POOL_MAX_SIZE:
+                continue
+
+            async with self._lock_pool_lock:
+                if len(self._lock_pool) >= _LOCK_POOL_MAX_SIZE:
+                    continue
+
+                for attr in (
+                    "_acquired_at_ts",
+                    "_acquired_by_callsite",
+                    "_acquired_by_function",
+                    "_acquired_by_task",
+                ):
+                    if hasattr(removed_lock, attr):
+                        try:
+                            delattr(removed_lock, attr)
+                        except AttributeError:
+                            pass
+
+                self._lock_pool.append(removed_lock)
+
+        return removed_count
 
     @asynccontextmanager
     async def acquire_batch(
@@ -642,89 +661,113 @@ class LockManager:
             )
             return False
 
-        # 🚀 FAST PATH: Optimize uncontended lock acquisition (77% of cases)
+        call_site, call_function = self._resolve_call_site()
+        acquire_start_ts = time.time()
+        resolved_level = self._resolve_level(key, override=level)
+
         if _ENABLE_FAST_PATH:
-            fast_path_start = time.time()
             lock = await self._get_lock(key)
+            fast_path_context = self._build_context_payload(
+                key, resolved_level, additional=context
+            )
+            current_acquisitions = self._get_current_acquisitions()
+            self._validate_lock_order(
+                current_acquisitions, key, resolved_level, fast_path_context
+            )
 
-            # Quick check: Is lock immediately available?
-            if not lock.locked() or getattr(lock, '_owner', None) is task:
-                try:
-                    # Attempt non-blocking acquisition with 1ms timeout
-                    await asyncio.wait_for(
-                        lock.acquire(), timeout=_FAST_PATH_TIMEOUT_THRESHOLD
+            try:
+                await asyncio.wait_for(
+                    lock.acquire(), timeout=_FAST_PATH_TIMEOUT_THRESHOLD
+                )
+
+                self._metrics["lock_fast_path_hits"] = (
+                    self._metrics.get("lock_fast_path_hits", 0) + 1
+                )
+
+                setattr(lock, "_acquired_at_ts", time.time())
+                setattr(lock, "_acquired_by_callsite", call_site)
+                setattr(lock, "_acquired_by_function", call_function)
+                setattr(lock, "_acquired_by_task", self._describe_task(task))
+
+                self._record_acquired(key, resolved_level, fast_path_context)
+
+                if task is not None:
+                    acquire_key = (id(task), key)
+                    acquire_times = self._lock_acquire_times.setdefault(
+                        acquire_key, []
                     )
+                    acquire_times.append(time.time())
 
-                    # SUCCESS: Lock acquired on fast path!
-                    resolved_level = self._resolve_level(key, override=level)
+                elapsed_us = (time.time() - acquire_start_ts) * 1_000_000
+                elapsed_seconds = elapsed_us / 1_000_000
+                lock_identity = self._format_lock_identity(
+                    key, resolved_level, fast_path_context
+                )
+                info_extra = self._log_extra(
+                    fast_path_context,
+                    event_type="lock_acquired",
+                    lock_key=key,
+                    lock_level=resolved_level,
+                    attempts=1,
+                    attempt_duration=elapsed_seconds,
+                    call_site=call_site,
+                    call_site_function=call_function,
+                )
+                self._logger.info(
+                    "%s acquired quickly in %.3fs%s",
+                    lock_identity,
+                    elapsed_seconds,
+                    self._format_context(fast_path_context),
+                    extra=info_extra,
+                )
 
-                    # Minimal context building (skip expensive validation)
-                    if _FAST_PATH_SKIP_VALIDATION:
-                        context_payload = {
-                            "lock_key": key,
-                            "lock_level": resolved_level,
-                            "chat_id": context.get("chat_id") if context else None,
-                        }
-                    else:
-                        context_payload = self._build_context_payload(
-                            key, resolved_level, additional=context
-                        )
+                self._logger.debug(
+                    "[FAST_PATH] Acquired key=%s in %.1fμs",
+                    key,
+                    elapsed_us,
+                    extra=self._log_extra(
+                        fast_path_context,
+                        event_type="lock_fast_path_hit",
+                        lock_key=key,
+                        latency_us=elapsed_us,
+                    ),
+                )
 
-                    # Set essential metadata
-                    setattr(lock, "_acquired_at_ts", time.time())
+                return True
 
-                    # Record in task state
-                    self._record_acquired(key, resolved_level, context_payload)
+            except asyncio.TimeoutError:
+                self._metrics["lock_fast_path_misses"] = (
+                    self._metrics.get("lock_fast_path_misses", 0) + 1
+                )
+                self._logger.debug(
+                    "[FAST_PATH] Timeout on key=%s, using slow path",
+                    key,
+                    extra=self._log_extra(
+                        fast_path_context,
+                        event_type="lock_fast_path_miss",
+                        lock_key=key,
+                    ),
+                )
+            except Exception:  # pragma: no cover - defensive fallback
+                self._logger.debug(
+                    "[FAST_PATH] Error acquiring key=%s; falling back",
+                    key,
+                    exc_info=True,
+                    extra=self._log_extra(
+                        fast_path_context,
+                        event_type="lock_fast_path_error",
+                        lock_key=key,
+                    ),
+                )
 
-                    # Track acquisition timing
-                    if task is not None:
-                        acquire_key = (id(task), key)
-                        acquire_times = self._lock_acquire_times.setdefault(
-                            acquire_key, []
-                        )
-                        acquire_times.append(time.time())
-
-                    # Update metrics
-                    self._metrics.setdefault("lock_fast_path_hits", 0)
-                    self._metrics["lock_fast_path_hits"] += 1
-
-                    # Minimal logging for speed
-                    if _FAST_PATH_MINIMAL_LOGGING and self._logger.isEnabledFor(
-                        logging.DEBUG
-                    ):
-                        elapsed_us = (time.time() - fast_path_start) * 1_000_000
-                        self._logger.debug(
-                            "[LOCK_FAST_PATH] key=%s acquired in %.1fμs",
-                            key,
-                            elapsed_us,
-                            extra={
-                                "event_type": "lock_fast_path_hit",
-                                "lock_key": key,
-                                "duration_us": elapsed_us,
-                            },
-                        )
-
-                    return True
-
-                except asyncio.TimeoutError:
-                    # Lock is contended - fall through to slow path
-                    pass
-                except Exception:  # pragma: no cover - defensive fallback
-                    # Unexpected error - fall through to slow path for safety
-                    pass
-
-            # Fast path missed - track slow path usage
-            self._metrics.setdefault("lock_slow_path", 0)
-            self._metrics["lock_slow_path"] += 1
+            self._metrics["lock_slow_path"] = (
+                self._metrics.get("lock_slow_path", 0) + 1
+            )
+            acquire_start_ts = time.time()
 
         # 🐌 SLOW PATH: Full validation continues below (existing code)
 
-        call_site, call_function = self._resolve_call_site()
-
-        acquire_start_ts = time.time()
-
         lock = await self._get_lock(key)
-        resolved_level = self._resolve_level(key, override=level)
         context_payload = self._build_context_payload(
             key, resolved_level, additional=context
         )
