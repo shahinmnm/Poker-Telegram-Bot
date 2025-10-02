@@ -525,7 +525,12 @@ class MessagingService:
         throttle: Callable[[], Awaitable[None]],
         context: Optional[Mapping[str, Any]] = None,
     ) -> Any:
-        """Execute a Telegram API call, retrying once if a RetryAfter occurs."""
+        """Execute a Telegram API call with the appropriate retry strategy.
+
+        When a ``TelegramRetryManager`` instance is available we delegate to it
+        entirely, otherwise we fall back to a simple one-shot retry on
+        ``RetryAfter`` exceptions.
+        """
 
         retry_classes = self._RETRY_AFTER_EXCEPTIONS
         base_context = self._merge_context(
