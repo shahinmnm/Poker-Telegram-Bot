@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from dataclasses import dataclass
 from typing import Callable, Dict, Set
@@ -20,6 +21,8 @@ from pokerapp.utils.telegram_safeops import TelegramSafeOps
 from pokerapp.utils.player_report_cache import PlayerReportCache
 from pokerapp.utils.cache import AdaptivePlayerReportCache
 from pokerapp.utils.logging_helpers import ContextLoggerAdapter, enforce_context
+from pokerapp.state_validator import GameStateValidator
+from pokerapp.recovery_service import RecoveryService
 
 
 @dataclass(frozen=True)
@@ -84,11 +87,29 @@ def build_services(cfg: Config) -> ApplicationServices:
         logger=_make_service_logger(logger, "redis_safeops", "redis"),
     )
 
+    state_validator = GameStateValidator()
     table_manager = TableManager(
         kv_async,
         redis_ops=redis_ops,
         wallet_redis_ops=redis_ops,
+        state_validator=state_validator,
     )
+
+    recovery_logger = _make_service_logger(logger, "recovery", "recovery")
+    recovery_service = RecoveryService(
+        redis=kv_async,
+        table_manager=table_manager,
+        logger=recovery_logger,
+    )
+    try:
+        asyncio.run(recovery_service.run_startup_recovery())
+    except RuntimeError:
+        recovery_logger.warning(
+            "Skipping startup recovery; event loop already running",
+            extra={"event_type": "startup_recovery_skipped"},
+        )
+    except Exception:
+        recovery_logger.exception("Startup recovery failed")
 
     stats_logger = _make_service_logger(logger, "stats", "stats")
     stats_service = _build_stats_service(stats_logger, cfg)

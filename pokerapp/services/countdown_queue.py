@@ -193,14 +193,36 @@ class CountdownMessageQueue:
 
     async def clear(self) -> None:
         """Clear all messages from queue and cancel active countdowns."""
+
+        await self.clear_all()
+
+    async def clear_all(self) -> int:
+        """Cancel all countdowns and drain the queue.
+
+        Returns:
+            The number of countdown entries that were cancelled or removed.
+        """
+
         async with self._tracking_lock:
-            for msg in self._active_countdowns.values():
+            active = list(self._active_countdowns.values())
+            for msg in active:
                 msg.cancelled = True
+            cancelled = len(active)
             self._active_countdowns.clear()
 
-        while not self._queue.empty():
+        drained = 0
+        while True:
             try:
                 self._queue.get_nowait()
-            except asyncio.QueueEmpty:  # pragma: no cover - defensive guard
+            except asyncio.QueueEmpty:
                 break
+            else:
+                drained += 1
+                try:
+                    self._queue.task_done()
+                except ValueError:
+                    # ``task_done`` raises when called more times than items enqueued.
+                    break
+
+        return cancelled + drained
 

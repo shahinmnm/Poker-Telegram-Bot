@@ -2418,4 +2418,12 @@ class LockManager:
             del frame
         return call_site, function_name
 
+    async def clear_all_locks(self) -> int:
+        """Remove all tracked locks and return how many were cleared."""
+
+        async with self._locks_guard:
+            cleared = len(self._locks)
+            self._locks.clear()
+        return cleared
+
 __all__ = ["LockManager", "LockOrderError"]

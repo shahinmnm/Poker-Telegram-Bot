@@ -3,11 +3,16 @@ import logging
 import pickle
 import time
 from datetime import datetime
-from typing import Dict, Optional, Union
+from typing import Dict, Optional, Tuple, Union
 
 import redis.asyncio as aioredis
 
-from pokerapp.entities import Game, ChatId
+from pokerapp.entities import ChatId, Game
+from pokerapp.state_validator import (
+    GameStateValidator,
+    ValidationIssue,
+    ValidationResult,
+)
 from pokerapp.utils.redis_safeops import RedisSafeOps
 
 
@@ -21,6 +26,7 @@ class TableManager:
         *,
         redis_ops: Optional[RedisSafeOps] = None,
         wallet_redis_ops: Optional[RedisSafeOps] = None,
+        state_validator: Optional[GameStateValidator] = None,
     ):
         self._redis = redis
         self._wallet_redis = wallet_redis or redis
@@ -38,6 +44,7 @@ class TableManager:
             )
         # Keep games cached in memory keyed only by chat_id
         self._tables: Dict[ChatId, Game] = {}
+        self._state_validator = state_validator or GameStateValidator()
 
     # Keys ---------------------------------------------------------------
     @staticmethod
@@ -75,21 +82,8 @@ class TableManager:
             )
             return self._tables[chat_id]
 
-        extra = {"chat_id": chat_id}
-        data = await self._redis_ops.safe_get(
-            self._game_key(chat_id), log_extra=extra
-        )
-        if data:
-            game = pickle.loads(data)
-            if self._wallet_redis is not None:
-                from pokerapp.pokerbotmodel import WalletManagerModel
-
-                for player in game.players:
-                    info = getattr(player, "_wallet_info", {"user_id": player.user_id})
-                    player.wallet = WalletManagerModel(info["user_id"], self._wallet_redis)
-                    if hasattr(player, "_wallet_info"):
-                        delattr(player, "_wallet_info")
-        else:
+        game, _ = await self.load_game(chat_id, validate=True)
+        if game is None:
             game = Game()
             await self._save(chat_id, game)
 
@@ -100,6 +94,79 @@ class TableManager:
             time.time() - section_start,
         )
         return game
+
+    async def load_game(
+        self, chat_id: ChatId, *, validate: bool = True
+    ) -> Tuple[Optional[Game], Optional[ValidationResult]]:
+        """Load a game snapshot from Redis without caching it."""
+
+        extra = {"chat_id": chat_id}
+        data = await self._redis_ops.safe_get(
+            self._game_key(chat_id), log_extra=extra
+        )
+        if not data:
+            return None, None
+
+        try:
+            game = pickle.loads(data)
+        except (
+            pickle.UnpicklingError,
+            AttributeError,
+            EOFError,
+            TypeError,
+            json.JSONDecodeError,
+        ) as exc:
+            self._logger.warning(
+                "Failed to decode persisted game; deleting",
+                extra={**extra, "error": str(exc)},
+            )
+            await self._redis_ops.safe_delete(
+                self._game_key(chat_id), log_extra=extra
+            )
+            validation = ValidationResult(
+                is_valid=False,
+                issues=[ValidationIssue.CORRUPTED_JSON],
+                recoverable=False,
+                recovery_action="delete_and_recreate",
+            )
+            return None, validation
+
+        self._rehydrate_wallets(game)
+
+        validation_result: Optional[ValidationResult] = None
+        if validate and self._state_validator is not None:
+            validation_result = self._state_validator.validate_game(game)
+            if not validation_result.is_valid:
+                issues = [issue.value for issue in validation_result.issues]
+                self._logger.warning(
+                    "Loaded game has validation issues",
+                    extra={
+                        **extra,
+                        "issues": issues,
+                        "recoverable": validation_result.recoverable,
+                    },
+                )
+
+                if not validation_result.recoverable:
+                    await self._redis_ops.safe_delete(
+                        self._game_key(chat_id), log_extra=extra
+                    )
+                    return None, validation_result
+
+                game = self._state_validator.recover_game(game, validation_result)
+                try:
+                    await self._save(chat_id, game)
+                except Exception:
+                    self._logger.exception(
+                        "Failed to persist recovered game", extra=extra
+                    )
+                else:
+                    self._logger.warning(
+                        "Recovered game by resetting to waiting",
+                        extra={**extra, "issues": issues},
+                    )
+
+        return game, validation_result
 
     async def save_game(self, chat_id: ChatId, game: Game) -> None:
         self._tables[chat_id] = game
@@ -256,6 +323,21 @@ class TableManager:
                 )
 
             raise
+
+    def _rehydrate_wallets(self, game: Game) -> None:
+        if self._wallet_redis is None:
+            return
+
+        from pokerapp.pokerbotmodel import WalletManagerModel
+
+        for player in game.players:
+            info = getattr(player, "_wallet_info", None) or {}
+            user_id = info.get("user_id") or getattr(player, "user_id", None)
+            if user_id is None:
+                continue
+            player.wallet = WalletManagerModel(user_id, self._wallet_redis)
+            if hasattr(player, "_wallet_info"):
+                delattr(player, "_wallet_info")
 
     async def _update_player_index(self, chat_id: ChatId, game: Game) -> None:
         players = {

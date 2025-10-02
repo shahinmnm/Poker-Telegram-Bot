@@ -146,3 +146,55 @@ graph TD
 `schedule_message_update` and `cancel_updates_for_anchor`.  The worker processes
 updates serially, so no per-anchor locks are needed.  Cancellation is immediate:
 pending updates are removed from the queue without waiting for task acknowledgment.
+
+## Game State Recovery
+
+Recovering from Redis restarts or application crashes relies on a dedicated
+validation and cleanup pipeline:
+
+- **Validation** — `GameStateValidator.validate_game` inspects each persisted
+  `Game` and emits `ValidationIssue` flags when the snapshot is inconsistent.
+  The validator checks for `INVALID_STAGE`, `ORPHANED_PLAYERS`,
+  `MISSING_DEALER`, `INCONSISTENT_POT`, `INVALID_DECK`, and `CORRUPTED_JSON`.
+- **Recovery** — `GameStateValidator.recover_game` decides whether the game can
+  be repaired in place (`reset_to_waiting`) or must be recreated from scratch
+  (`delete_and_recreate`).  Recoverable games keep their seated players but reset
+  blinds, bets, and community cards.
+- **Startup sweep** — `RecoveryService.run_startup_recovery` scans Redis for
+  `chat:*:game` keys, loads each snapshot through `TableManager.load_game`, and
+  applies the validator.  The service also clears any cached locks and countdown
+  tasks to prevent orphaned state from blocking new commands.
+
+```mermaid
+sequenceDiagram
+    participant Bootstrap
+    participant Recovery as RecoveryService
+    participant Redis
+    participant TableManager
+    Bootstrap->>Recovery: run_startup_recovery()
+    Recovery->>Redis: SCAN chat:*:game
+    loop each key
+        Recovery->>TableManager: load_game(chat_id, validate=True)
+        TableManager->>TableManager: validate_game()
+        alt Recoverable issues
+            TableManager->>TableManager: reset_to_waiting()
+            TableManager->>Redis: save snapshot
+        else Unrecoverable
+            TableManager->>Redis: delete key
+        end
+    end
+    Recovery->>LockManager: clear_all_locks()
+    Recovery->>CountdownQueue: clear_all()
+    Recovery-->>Bootstrap: stats
+```
+
+### Error handling
+
+- **Graceful JSON errors:** `TableManager.load_game` catches decoding failures
+  (pickle or JSON) and deletes the corrupted key instead of raising.
+- **Structured logging:** Every recovery step logs its outcome with structured
+  `extra` payloads so dashboards can track `games_deleted`, `games_recovered`,
+  `locks_cleared`, and `countdowns_cleared` metrics.
+- **Resilient iteration:** `RecoveryService` wraps each Redis key and cleanup
+  phase in `try/except`, logging failures while continuing with the remaining
+  work to avoid partial startup states.
