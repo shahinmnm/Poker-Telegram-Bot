@@ -786,21 +786,36 @@ class PokerBotViewer:
         normalized_chat = self._safe_int(chat_id)
         normalized_game = str(game_id) if game_id is not None else "0"
         key = (normalized_chat, normalized_game)
-        task: Optional[asyncio.Task[None]] = None
+        task: Optional[asyncio.Task[None]]
         async with self._prestart_countdown_lock:
             async with self._countdown_lock:
                 task = self._prestart_countdown_tasks.pop(key, None)
-                if task is not None:
-                    task.cancel()
-                    logger.info(
-                        "[Countdown] Cancelled prestart countdown for chat %s game %s",
-                        normalized_chat,
-                        normalized_game,
-                    )
+                if task is None:
+                    return
+
+                task.cancel()
+                logger.info(
+                    "[Countdown] Cancelled prestart countdown for chat %s game %s",
+                    normalized_chat,
+                    normalized_game,
+                )
+
                 self._countdown_state.pop(key, None)
                 self._last_edit_time.pop(key, None)
-        if task is not None:
-            self._mark_countdown_transition_pending(normalized_chat)
+
+        self._mark_countdown_transition_pending(normalized_chat)
+        try:
+            await asyncio.wait_for(task, timeout=2.0)
+        except asyncio.CancelledError:
+            pass
+        except asyncio.TimeoutError:
+            logger.warning(
+                "[Countdown] Task cancellation timeout for chat %s game %s",
+                normalized_chat,
+                normalized_game,
+            )
+        finally:
+            self._clear_countdown_transition_pending(chat_id)
 
     def _mark_countdown_transition_pending(self, normalized_chat: int) -> None:
         if normalized_chat == 0:
