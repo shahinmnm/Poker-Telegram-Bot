@@ -332,7 +332,6 @@ class TableManager:
                 data,
                 log_extra={"chat_id": chat_id},
             )
-            await self._redis.set(self._version_key(chat_id), 0, nx=True)
             await self._update_player_index(chat_id, game)
             self._redis_ops._logger.debug(
                 "[LOCK_SECTION_END] chat_id=%s action=_save elapsed=%.3fs",

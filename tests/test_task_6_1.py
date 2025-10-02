@@ -1,9 +1,13 @@
 import asyncio
+import copy
 from typing import List
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from telegram.error import NetworkError, RetryAfter, TimedOut
+
+import fakeredis
+import fakeredis.aioredis
 
 from pokerapp.entities import Game
 from pokerapp.table_manager import TableManager
@@ -163,3 +167,40 @@ class TestOptimisticLocking:
         assert success is False
         pipe_mock.unwatch.assert_awaited_once()
         pipe_mock.execute.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_concurrent_saves_detect_conflict(self) -> None:
+        server = fakeredis.FakeServer()
+        redis_async = fakeredis.aioredis.FakeRedis(server=server)
+        table_manager = TableManager(redis_async)
+
+        chat_id = 555
+        base_game = await table_manager.create_game(chat_id)
+        base_game.pot = 1
+        await table_manager.save_game(chat_id, base_game)
+
+        loaded_game, version = await table_manager.load_game_with_version(chat_id)
+        assert loaded_game is not None
+        assert version == 0
+
+        first_game = copy.deepcopy(loaded_game)
+        second_game = copy.deepcopy(loaded_game)
+        first_game.pot = 10
+        second_game.pot = 20
+
+        async def attempt_save(game: Game) -> bool:
+            return await table_manager.save_game_with_version_check(
+                chat_id, game, version
+            )
+
+        results = await asyncio.gather(
+            attempt_save(first_game), attempt_save(second_game)
+        )
+
+        assert results.count(True) == 1
+        assert results.count(False) == 1
+
+        final_game, final_version = await table_manager.load_game_with_version(chat_id)
+        assert final_game is not None
+        assert final_version == version + 1
+        assert final_game.pot in {10, 20}
