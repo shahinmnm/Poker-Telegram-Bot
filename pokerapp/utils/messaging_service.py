@@ -52,6 +52,7 @@ from pokerapp.utils.time_utils import now_utc
 
 if TYPE_CHECKING:  # pragma: no cover - import for type checking only
     from pokerapp.table_manager import TableManager
+    from pokerapp.telegram_retry_manager import TelegramRetryManager
 
 try:  # pragma: no cover - aiogram is optional at runtime
     from aiogram.exceptions import TelegramBadRequest, TelegramRetryAfter
@@ -167,6 +168,7 @@ class MessagingService:
         last_message_hash: Optional[Dict[int, str]] = None,
         last_message_hash_lock: Optional[asyncio.Lock] = None,
         table_manager: Optional["TableManager"] = None,
+        retry_manager: Optional["TelegramRetryManager"] = None,
     ) -> None:
         self._bot = bot
         if logger_ is None:
@@ -198,6 +200,7 @@ class MessagingService:
         self.message_state_cache = MessageStateCache(
             logger_=self._logger.getChild("message_state")
         )
+        self._retry_manager = retry_manager
         self._table_manager = table_manager
 
     @staticmethod
@@ -516,6 +519,8 @@ class MessagingService:
         chat_id: int,
         message_id: Optional[int],
         method: str,
+        operation_name: str,
+        critical: bool,
         call: Callable[[], Awaitable[Any]],
         throttle: Callable[[], Awaitable[None]],
         context: Optional[Mapping[str, Any]] = None,
@@ -523,15 +528,32 @@ class MessagingService:
         """Execute a Telegram API call, retrying once if a RetryAfter occurs."""
 
         retry_classes = self._RETRY_AFTER_EXCEPTIONS
-        if not retry_classes:
-            return await call()
-
         base_context = self._merge_context(
             context,
             chat_id=chat_id,
             message_id=message_id,
             method=method,
         )
+
+        if self._retry_manager is not None:
+            attempt = 0
+
+            async def wrapped_call() -> Any:
+                nonlocal attempt
+                attempt += 1
+                if attempt > 1:
+                    await throttle()
+                return await call()
+
+            result = await self._retry_manager.retry_telegram_call(
+                operation_name,
+                critical=critical,
+            )(wrapped_call)()
+
+            return result
+
+        if not retry_classes:
+            return await call()
 
         try:
             return await call()
@@ -621,6 +643,8 @@ class MessagingService:
                 chat_id=chat_id,
                 message_id=None,
                 method=telegram_method,
+                operation_name="send_message",
+                critical=True,
                 call=lambda: self._bot.send_message(
                     chat_id=chat_id,
                     text=text,
@@ -708,6 +732,8 @@ class MessagingService:
                 chat_id=chat_id,
                 message_id=None,
                 method=telegram_method,
+                operation_name="send_photo",
+                critical=True,
                 call=lambda: self._bot.send_photo(
                     chat_id=chat_id,
                     photo=photo,
@@ -1065,6 +1091,8 @@ class MessagingService:
                     chat_id=chat_id,
                     message_id=message_id,
                     method="editMessageText",
+                    operation_name="edit_message_text",
+                    critical=False,
                     call=lambda: self._bot.edit_message_text(
                         chat_id=chat_id,
                         message_id=message_id,
@@ -1432,11 +1460,20 @@ class MessagingService:
                     chat_id=chat_id,
                     message_id=message_id,
                 )
-                result = await self._bot.delete_message(
-                    chat_id=chat_id,
-                    message_id=message_id,
-                    **params,
-                )
+                async def _perform_delete() -> Any:
+                    return await self._bot.delete_message(
+                        chat_id=chat_id,
+                        message_id=message_id,
+                        **params,
+                    )
+
+                if self._retry_manager is not None:
+                    result = await self._retry_manager.retry_telegram_call(
+                        "delete_message",
+                        critical=False,
+                    )(_perform_delete)()
+                else:
+                    result = await _perform_delete()
                 deletion_successful = bool(result)
             finally:
                 await self._forget_content(chat_id, message_id)

@@ -70,6 +70,42 @@ makes the poker logic easy to test and reason about.
 | **MessagingService** | Encapsulates Telegram throttling, retries, and Markdown formatting. Instances are created through a factory stored in `ApplicationServices`. |
 | **TelegramSafeOps** | Wraps `MessagingService` calls with logging metadata, context-aware rate limiting, and exception handling so background tasks remain resilient. |
 
+## Runtime Resilience (Task 6.1)
+
+### Telegram API Retry Logic
+All Telegram API interactions now flow through a dedicated `TelegramRetryManager` that applies exponential backoff and rate-limit handling around bot calls.
+
+- **Exponential Backoff** — network errors (timeouts, transient disconnects) trigger retries with doubling delays up to a configured ceiling.
+- **Rate Limit Compliance** — `RetryAfter` responses are honoured by sleeping for `retry_after + 1` seconds before reattempting the call.
+- **Critical vs Non-Critical** — dealer announcements, pot updates, and hole card delivery retry twice as many times as routine edits and clean-up calls.
+- **Graceful Degradation** — non-critical operations return `None` after exhausting retries while critical operations bubble the original exception for upstream handling.
+
+Example log flow:
+
+```
+WARNING Telegram edit_message_text failed, retrying in 2.0s attempt=1 error=NetworkError
+INFO Telegram edit_message_text succeeded after retry attempt=2
+```
+
+### Redis Optimistic Locking
+Game persistence uses optimistic locking to avoid lost updates when multiple tasks modify the same chat concurrently.
+
+- **Version Counter** — each chat stores `game:{chat_id}:version` alongside the serialized game snapshot.
+- **WATCH/MULTI/EXEC** — saves only commit when the version observed during load matches the version in Redis, then increments the counter atomically.
+- **Conflict Detection** — mismatched versions or Redis `WatchError`s return `False` so callers can reload and retry with fresh state.
+- **Backward Compatible** — existing `load_game` / `save_game` helpers remain available while new workflows can opt into version-aware variants.
+
+Example usage:
+
+```python
+game, version = await table_manager.load_game_with_version(chat_id)
+game.pot += bet_amount
+success = await table_manager.save_game_with_version_check(chat_id, game, version)
+if not success:
+    # Reload and retry with the latest snapshot
+    game, version = await table_manager.load_game_with_version(chat_id)
+```
+
 #### Countdown Error Handling
 
 | Error Type | Detection | Response | Queue Cleanup |
