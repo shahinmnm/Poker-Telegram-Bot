@@ -98,17 +98,18 @@ messaging backend) without editing the poker logic itself.
 
 ## Countdown concurrency guarantees
 
-The pre-start countdown subsystem coordinates asynchronous Telegram edits across
-multiple chats.  The key invariants are:
+The pre-start countdown subsystem coordinates asynchronous Telegram edits through
+a centralized worker queue.  The key invariants are:
 
-- **Single writer per chat:** `_create_countdown_task` stores the running task in
-  `_prestart_countdown_tasks`.  `start_prestart_countdown` replaces the entry only
-  after cancelling the previous task, and `_cancel_prestart_countdown` waits for
-  the task to acknowledge cancellation.  This prevents overlapping editors from
-  racing to mutate the same Telegram message.
-- **Rate-limited updates:** `_throttled_edit_message_text` guards every edit with
-  a per `(chat_id, message_id)` timestamp so the bot never exceeds Telegram's
-  `1 req/sec` guidance while still batching bursts of local updates.
+- **Single writer per chat:** `start_prestart_countdown` schedules updates through
+  `CountdownWorker.schedule_message_update`, which enqueues them in a centralized
+  priority queue.  The worker processes updates serially, ensuring only one edit
+  per `(chat_id, message_id)` is in flight at a time.  Cancellation via
+  `cancel_prestart_countdown` immediately removes pending updates from the queue.
+- **Rate-limited updates:** `schedule_message_update` funnels edits through a
+  debounced worker (`_execute_debounced_update`) so multiple countdown ticks
+  coalesce into a single Telegram edit.  The debounce window enforces Telegram's
+  `1 req/sec` guidance without dropping the final state.
 - **Monotonic timing:** Countdown math relies on `loop.time()` (monotonic) rather
   than wall clock time, keeping the remaining seconds stable even if the host's
   clock jumps forward or backward.
@@ -119,17 +120,15 @@ errors when high volumes of edits are scheduled simultaneously.
 
 ### Lock hierarchy
 
-Countdown helpers follow a strict acquisition order so they remain deadlock free
-even when multiple coroutines operate on the same chat simultaneously.
+The countdown subsystem uses minimal locking to coordinate concurrent updates:
 
 ```mermaid
 graph TD
-    A[_prestart_countdown_lock] --> B[_countdown_lock]
-    B --> C[_anchor_lock_guard / per-anchor locks]
+    A[CountdownWorker._queue_lock] --> B[_worker_task management]
+    B --> C[Per-anchor update serialization]
 ```
 
-`start_prestart_countdown` and `_cancel_prestart_countdown` both grab
-`_prestart_countdown_lock` before `_countdown_lock`.  Anchor-specific locks are
-created lazily once the countdown state is known, so they always sit at the end
-of the chain.  Keeping this hierarchy consistent protects the cancellation flow
-from deadlocks while we drain the in-flight countdown task.
+`CountdownWorker._queue_lock` protects the internal priority queue during
+`schedule_message_update` and `cancel_updates_for_anchor`.  The worker processes
+updates serially, so no per-anchor locks are needed.  Cancellation is immediate:
+pending updates are removed from the queue without waiting for task acknowledgment.
