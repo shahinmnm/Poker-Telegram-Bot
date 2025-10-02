@@ -98,11 +98,23 @@ class _WaitingInfo:
 
 
 class _InMemoryActionLockBackend:
-    """Minimal Redis-like backend used when no Redis pool is provided."""
+    """Minimal Redis-like backend used when no Redis pool is provided.
+
+    Metrics tracked:
+    - purge_count: Number of expired entry cleanup cycles
+    - peak_size: Maximum number of keys stored simultaneously
+    - current_size: Current number of stored keys
+    """
 
     def __init__(self) -> None:
         self._lock = asyncio.Lock()
         self._values: Dict[str, Tuple[str, float]] = {}
+        self._metrics: Dict[str, int] = {
+            "purge_count": 0,
+            "peak_size": 0,
+            "current_size": 0,
+        }
+        self._version = "1.0.0-inmemory"
 
     async def set(
         self,
@@ -121,6 +133,12 @@ class _InMemoryActionLockBackend:
                 return False
 
             self._values[key] = (value, time.monotonic() + float(ex))
+            current_size = len(self._values)
+            self._metrics["current_size"] = current_size
+            self._metrics["peak_size"] = max(
+                self._metrics["peak_size"],
+                current_size,
+            )
             return True
 
     async def eval(
@@ -157,13 +175,25 @@ class _InMemoryActionLockBackend:
                 return 0
 
             self._values.pop(key, None)
+            self._metrics["current_size"] = len(self._values)
             return 1
 
     def _purge_expired(self) -> None:
         now = time.monotonic()
-        expired = [key for key, (_, expiry) in self._values.items() if expiry <= now]
-        for key in expired:
-            self._values.pop(key, None)
+        initial_size = len(self._values)
+
+        self._values = {
+            key: value
+            for key, value in self._values.items()
+            if value[1] > now
+        }
+
+        self._metrics["purge_count"] += 1
+        self._metrics["current_size"] = len(self._values)
+        self._metrics["peak_size"] = max(
+            self._metrics["peak_size"],
+            initial_size,
+        )
 
     async def get(self, key: str) -> Optional[str]:
         async with self._lock:
@@ -177,7 +207,18 @@ class _InMemoryActionLockBackend:
         async with self._lock:
             self._purge_expired()
             removed = self._values.pop(key, None)
-            return 1 if removed is not None else 0
+            if removed is not None:
+                self._metrics["current_size"] = len(self._values)
+                return 1
+            return 0
+
+    def get_metrics(self) -> Dict[str, Any]:
+        """Return current backend metrics (for debugging/monitoring)."""
+
+        return {
+            "backend_version": self._version,
+            **self._metrics,
+        }
 
 
 def _resolve_action_lock_prefix(source: Optional[Mapping[str, Any]]) -> str:
@@ -306,6 +347,21 @@ class LockManager:
             "action_lock_prefix": _resolve_action_lock_prefix(redis_keys_source)
         }
         self._redis_pool: Any = redis_pool or _InMemoryActionLockBackend()
+        if isinstance(self._redis_pool, _InMemoryActionLockBackend):
+            self._logger.warning(
+                "[ACTION_LOCK] Using in-memory backend (single-instance only)",
+                extra={
+                    "event_type": "action_lock_backend_inmemory",
+                    "backend_version": self._redis_pool._version,
+                },
+            )
+
+    def get_lock_metrics(self) -> Dict[str, Any]:
+        """Return lock backend metrics for monitoring."""
+
+        if isinstance(self._redis_pool, _InMemoryActionLockBackend):
+            return self._redis_pool.get_metrics()
+        return {"backend": "redis", "metrics": "not_available"}
 
     async def _get_lock(self, key: str) -> ReentrantAsyncLock:
         """Get or create a lock with pooling for performance."""
@@ -2545,14 +2601,36 @@ class LockManager:
             del frame
         return call_site, function_name
 
+    def _make_action_lock_key(
+        self,
+        chat_id: int,
+        user_id: int,
+        action_data: Optional[str] = None,
+    ) -> str:
+        base = (
+            self._redis_keys["action_lock_prefix"]
+            + f"{int(chat_id)}:{int(user_id)}"
+        )
+        if action_data:
+            return f"{base}:{str(action_data)}"
+        return base
+
     async def acquire_action_lock(
         self,
         chat_id: int,
         user_id: int,
         *,
+        action_data: Optional[str] = None,
         timeout_seconds: int = 5,
     ) -> Optional[str]:
-        """Acquire a short-lived lock serialising actions for a player."""
+        """Acquire a short-lived lock serialising actions for a player.
+
+        Args:
+            chat_id: Telegram chat identifier.
+            user_id: Telegram user identifier.
+            action_data: Optional callback payload for per-action locking.
+            timeout_seconds: Expiry for the distributed lock.
+        """
 
         if timeout_seconds <= 0:
             timeout_seconds = 1
@@ -2561,7 +2639,7 @@ class LockManager:
         if ttl_seconds <= 0:
             ttl_seconds = 1
 
-        redis_key = self._redis_keys["action_lock_prefix"] + f"{int(chat_id)}:{int(user_id)}"
+        redis_key = self._make_action_lock_key(chat_id, user_id, action_data)
         token = str(uuid.uuid4())
 
         try:
@@ -2594,6 +2672,7 @@ class LockManager:
                     "user_id": user_id,
                     "token_prefix": token[:8],
                     "ttl_seconds": ttl_seconds,
+                    "action_data_hash": hash(str(action_data)) if action_data else None,
                 },
             )
             return token
@@ -2613,10 +2692,12 @@ class LockManager:
         chat_id: int,
         user_id: int,
         lock_token: str,
+        *,
+        action_data: Optional[str] = None,
     ) -> bool:
         """Release an action lock if ``lock_token`` matches the owner."""
 
-        redis_key = self._redis_keys["action_lock_prefix"] + f"{int(chat_id)}:{int(user_id)}"
+        redis_key = self._make_action_lock_key(chat_id, user_id, action_data)
 
         lua_script = """
         if redis.call("GET", KEYS[1]) == ARGV[1] then

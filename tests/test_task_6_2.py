@@ -2,6 +2,7 @@ import asyncio
 import logging
 import uuid
 from types import SimpleNamespace
+from typing import Optional
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -44,12 +45,26 @@ class StubLockManager:
         self.acquire_calls = []
         self.release_calls = []
 
-    async def acquire_action_lock(self, chat_id: int, user_id: int):
-        self.acquire_calls.append((chat_id, user_id))
+    async def acquire_action_lock(
+        self,
+        chat_id: int,
+        user_id: int,
+        *,
+        action_data: Optional[str] = None,
+        timeout_seconds: int = 5,
+    ):
+        self.acquire_calls.append((chat_id, user_id, action_data, timeout_seconds))
         return next(self._tokens, None)
 
-    async def release_action_lock(self, chat_id: int, user_id: int, token: str) -> bool:
-        self.release_calls.append((chat_id, user_id, token))
+    async def release_action_lock(
+        self,
+        chat_id: int,
+        user_id: int,
+        token: str,
+        *,
+        action_data: Optional[str] = None,
+    ) -> bool:
+        self.release_calls.append((chat_id, user_id, token, action_data))
         return True
 
 
@@ -163,8 +178,12 @@ async def test_protect_against_races_happy_path() -> None:
     assert observed["game"] is updated_game
     assert observed["version"] == 2
     assert len(table_manager.save_calls) == 1
-    assert lock_manager.acquire_calls == [(123, 456)]
-    assert lock_manager.release_calls == [(123, 456, "token-1")]
+    assert lock_manager.acquire_calls == [
+        (123, 456, callback_data, 5),
+    ]
+    assert lock_manager.release_calls == [
+        (123, 456, "token-1", callback_data),
+    ]
 
 
 @pytest.mark.asyncio
@@ -310,6 +329,50 @@ async def test_action_lock_handles_redis_failure(caplog) -> None:
 
 
 @pytest.mark.asyncio
+async def test_action_lock_concurrent_callback_storm() -> None:
+    server = fakeredis.FakeServer()
+    redis_pool = fakeredis.aioredis.FakeRedis(server=server)
+
+    manager = LockManager(
+        logger=logging.getLogger("lock-storm"),
+        redis_keys={"engine": {"action_lock_prefix": "test:storm:"}},
+        redis_pool=redis_pool,
+    )
+
+    chat_id = 999
+    user_id = 777
+    action_data = "raise_100"
+    ttl = 5
+
+    tasks = [
+        manager.acquire_action_lock(
+            chat_id=chat_id,
+            user_id=user_id,
+            action_data=action_data,
+            timeout_seconds=ttl,
+        )
+        for _ in range(12)
+    ]
+
+    results = await asyncio.gather(*tasks)
+
+    successful_locks = [result for result in results if result is not None]
+    assert len(successful_locks) == 1, f"Expected 1 lock, got {len(successful_locks)}"
+
+    lock_token = successful_locks[0]
+    stored_key = f"test:storm:{chat_id}:{user_id}:{action_data}"
+    stored_value = await redis_pool.get(stored_key)
+    assert stored_value == lock_token.encode(), "Winning token should be stored in Redis"
+
+    await manager.release_action_lock(
+        chat_id=chat_id,
+        user_id=user_id,
+        lock_token=lock_token,
+        action_data=action_data,
+    )
+
+
+@pytest.mark.asyncio
 async def test_protect_against_races_detects_stale_version() -> None:
     game_initial = Game()
     game_initial.state = GameState.ROUND_FLOP
@@ -341,7 +404,9 @@ async def test_protect_against_races_detects_stale_version() -> None:
     )
 
     callback.answer.assert_awaited()
-    assert lock_manager.release_calls == [(5, 7, "tok")]
+    assert lock_manager.release_calls == [
+        (5, 7, "tok", data),
+    ]
 
 
 @pytest.mark.asyncio
@@ -376,4 +441,81 @@ async def test_protect_against_races_detects_stage_mismatch() -> None:
     )
 
     callback.answer.assert_awaited()
-    assert lock_manager.release_calls == [(10, 11, "tok-stage")]
+    assert lock_manager.release_calls == [
+        (10, 11, "tok-stage", data),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_protect_against_races_callback_storm() -> None:
+    server = fakeredis.FakeServer()
+    redis_pool = fakeredis.aioredis.FakeRedis(server=server)
+
+    manager = LockManager(
+        logger=logging.getLogger("lock-deco-storm"),
+        redis_keys={"engine": {"action_lock_prefix": "test:deco:"}},
+        redis_pool=redis_pool,
+    )
+
+    class StormTableManager:
+        def __init__(self) -> None:
+            self._game = Game()
+            self._game.state = GameState.ROUND_FLOP
+            self._game.callback_version = 1
+
+        async def load_game_with_version(self, chat_id: int):
+            return self._game, 1
+
+        async def save_game_with_version_check(self, chat_id: int, game: Game, version: int) -> bool:
+            return True
+
+    table_manager = StormTableManager()
+    messaging_service = SimpleNamespace(
+        parse_action_callback_data=MessagingService.parse_action_callback_data
+    )
+
+    process_count = 0
+    duplicate_count = 0
+
+    @protect_against_races
+    async def handle_callback(callback_query, **kwargs):
+        nonlocal process_count
+        process_count += 1
+        await asyncio.sleep(0.1)
+
+    callback_data = MessagingService.build_action_callback_data(
+        "bet",
+        GameState.ROUND_FLOP,
+        table_manager._game.callback_version,
+    )
+    callback = DummyCallback(
+        chat_id=888,
+        user_id=555,
+        data=callback_data,
+        callback_id="storm_123",
+    )
+
+    original_answer = callback.answer
+
+    async def counting_answer(text: str = "", **kwargs: object) -> bool:
+        nonlocal duplicate_count
+        if isinstance(text, str) and "already processed" in text.lower():
+            duplicate_count += 1
+        return await original_answer(text, **kwargs)
+
+    callback.answer = counting_answer
+
+    tasks = [
+        handle_callback(
+            callback,
+            table_manager=table_manager,
+            lock_manager=manager,
+            messaging_service=messaging_service,
+        )
+        for _ in range(15)
+    ]
+
+    await asyncio.gather(*tasks, return_exceptions=True)
+
+    assert process_count == 1, f"Expected 1 process, got {process_count}"
+    assert duplicate_count == 14, f"Expected 14 duplicates, got {duplicate_count}"

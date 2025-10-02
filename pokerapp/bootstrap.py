@@ -14,6 +14,7 @@ from pokerapp.logging_config import setup_logging
 from pokerapp.stats import BaseStatsService, NullStatsService, StatsService
 from pokerapp.table_manager import TableManager
 from pokerapp.private_match_service import PrivateMatchService
+from pokerapp.translations import init_translations
 from pokerapp.utils.messaging_service import MessagingService
 from pokerapp.utils.redis_safeops import RedisSafeOps
 from pokerapp.utils.request_metrics import RequestMetrics
@@ -76,6 +77,8 @@ def build_services(cfg: Config) -> ApplicationServices:
 
     setup_logging(logging.INFO, debug_mode=cfg.DEBUG)
     logger = enforce_context(logging.getLogger("pokerbot"))
+
+    init_translations("config/data/translations.json")
 
     kv_async = aioredis.Redis(
         host=cfg.REDIS_HOST,

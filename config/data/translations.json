@@ -1,5 +1,11 @@
 {
   "default_language": "fa",
+  "error": {
+    "action_already_processed": "⚠️ این عملیات قبلاً انجام شده است",
+    "action_please_wait": "⚠️ لطفاً منتظر بمانید تا بازیکنان دیگر نوبت خود را تمام کنند",
+    "action_stale_version": "⚠️ این دکمه منسوخ شده است. لطفاً پیام جدید را بررسی کنید",
+    "action_stage_mismatch": "⚠️ مرحله بازی تغییر کرده است. این عملیات دیگر معتبر نیست"
+  },
   "stop_vote": {
     "buttons": {
       "confirm": {
