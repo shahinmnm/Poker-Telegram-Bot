@@ -44,6 +44,7 @@ from cachetools import LRUCache, TTLCache
 
 from pokerapp.config import get_game_constants
 from pokerapp.player_manager import PlayerManager
+from pokerapp.translations import translate
 from pokerapp.utils.messaging_service import MessagingService
 from pokerapp.utils.request_metrics import RequestCategory
 
@@ -139,7 +140,12 @@ def protect_against_races(handler: Callable) -> Callable:
                 logger.info("Duplicate callback %s ignored", callback_id)
                 answer = getattr(callback_query, "answer", None)
                 if callable(answer):
-                    await answer("⚠️ This action was already processed")
+                    await answer(
+                        translate(
+                            "error.action_already_processed",
+                            "⚠️ This action was already processed",
+                        )
+                    )
                 return None
 
         if new_callback:
@@ -161,15 +167,24 @@ def protect_against_races(handler: Callable) -> Callable:
                     )
                 return None
 
-        lock_token = await lock_manager.acquire_action_lock(chat_id, user_id)
+        callback_data = getattr(callback_query, "data", "")
+        lock_token = await lock_manager.acquire_action_lock(
+            chat_id,
+            user_id,
+            action_data=callback_data or None,
+        )
         if not lock_token:
             answer = getattr(callback_query, "answer", None)
             if callable(answer):
-                await answer("⏳ Please wait, processing previous action…")
+                await answer(
+                    translate(
+                        "error.action_please_wait",
+                        "⚠️ Please wait for other players to finish their turn",
+                    )
+                )
             return None
 
         try:
-            callback_data = getattr(callback_query, "data", "")
             try:
                 callback_info = messaging_service.parse_action_callback_data(
                     callback_data
@@ -207,7 +222,12 @@ def protect_against_races(handler: Callable) -> Callable:
                 )
                 answer = getattr(callback_query, "answer", None)
                 if callable(answer):
-                    await answer("⚠️ Game state changed. Please use updated buttons.")
+                    await answer(
+                        translate(
+                            "error.action_stale_version",
+                            "⚠️ This button is outdated. Please check the latest message",
+                        )
+                    )
                 return None
 
             stage_expected = callback_info.get("stage")
@@ -221,7 +241,10 @@ def protect_against_races(handler: Callable) -> Callable:
                 answer = getattr(callback_query, "answer", None)
                 if callable(answer):
                     await answer(
-                        "⚠️ Game progressed to next stage. Action cancelled."
+                        translate(
+                            "error.action_stage_mismatch",
+                            "⚠️ Game stage has changed. This action is no longer valid",
+                        )
                     )
                 return None
 
@@ -230,7 +253,12 @@ def protect_against_races(handler: Callable) -> Callable:
             handler_kwargs["version"] = current_version
             return await handler(callback_query, *args, **handler_kwargs)
         finally:
-            await lock_manager.release_action_lock(chat_id, user_id, lock_token)
+            await lock_manager.release_action_lock(
+                chat_id,
+                user_id,
+                lock_token,
+                action_data=callback_data or None,
+            )
 
     return wrapper
 

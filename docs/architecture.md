@@ -70,6 +70,40 @@ makes the poker logic easy to test and reason about.
 | **MessagingService** | Encapsulates Telegram throttling, retries, and Markdown formatting. Instances are created through a factory stored in `ApplicationServices`. |
 | **TelegramSafeOps** | Wraps `MessagingService` calls with logging metadata, context-aware rate limiting, and exception handling so background tasks remain resilient. |
 
+## Distributed Action Lock System
+
+### Overview
+The action lock system prevents race conditions when multiple players interact with the same game state simultaneously. It uses Redis for distributed coordination across multiple bot instances.
+
+### Backend Selection
+- **Redis Mode**: When `redis_pool` is provided, uses Redis `SET NX EX` for atomic distributed locks
+- **In-Memory Mode**: Fallback for single-instance deployments without Redis
+
+### Lock Lifecycle
+1. **Acquisition**: `SET action:{chat_id}:{user_id}:{action} {token} NX EX {ttl}`
+2. **Processing**: Handler executes game logic while lock is held
+3. **Release**: Lua script validates token ownership before deletion
+4. **Auto-Expiry**: Redis TTL ensures locks don't leak on crashes
+
+### Observability
+- **Metrics**: Purge count, peak size, current size (in-memory backend)
+- **Logging**: Structured logs with event types for query/aggregation
+- **Backend Version**: Tracked for debugging compatibility issues
+
+### Configuration
+```json
+{
+  "engine": {
+    "action_lock_prefix": "action:lock:"
+  }
+}
+```
+
+### Testing
+- Unit tests with FakeRedis for Redis mode
+- Concurrency stress tests (12+ simultaneous locks)
+- Fallback tests for connection failures
+
 ## Runtime Resilience (Task 6.1)
 
 ### Telegram API Retry Logic
