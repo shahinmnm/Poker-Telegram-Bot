@@ -72,7 +72,11 @@ class CountdownWorker:
         try:
             remove_anchor = getattr(self._queue, "remove_anchor", None)
             if remove_anchor is None:
-                raise AttributeError("Countdown queue lacks remove_anchor")
+                self._logger.debug(
+                    "Countdown queue lacks remove_anchor; skipping cancel",
+                    extra={"anchor_key": anchor_key},
+                )
+                return
             await remove_anchor(anchor_key)
             self._logger.debug(
                 "Cancelled countdown updates for anchor",
