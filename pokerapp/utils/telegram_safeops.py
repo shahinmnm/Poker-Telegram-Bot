@@ -81,17 +81,17 @@ class TelegramSafeOps:
         if cache_key is not None:
             async with self._cache_lock:
                 cached_text = self._last_edit_cache.get(cache_key)
-            if cached_text == text:
-                self._logger.debug(
-                    "Skipping edit_message_text because content unchanged",
-                    extra=self._build_extra(
-                        chat_id=chat_id,
-                        message_id=message_id,
-                        operation="edit_message_text",
-                        extra=log_extra,
-                    ),
-                )
-                return message_id
+                if cached_text == text:
+                    self._logger.debug(
+                        "Skipping edit_message_text because content unchanged",
+                        extra=self._build_extra(
+                            chat_id=chat_id,
+                            message_id=message_id,
+                            operation="edit_message_text",
+                            extra=log_extra,
+                        ),
+                    )
+                    return message_id
 
         try:
             result = await self._execute(
