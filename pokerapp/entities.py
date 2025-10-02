@@ -3,6 +3,7 @@
 from abc import ABC, abstractmethod
 import enum
 import datetime
+from collections import deque
 from typing import Tuple, List, Optional
 from uuid import uuid4
 
@@ -24,6 +25,8 @@ MAX_PLAYERS = _coerce_int(_GAME_CONSTANTS.get("max_players", 8), 8)
 MIN_PLAYERS = _coerce_int(_GAME_CONSTANTS.get("min_players", 2), 2)
 SMALL_BLIND = _coerce_int(_GAME_CONSTANTS.get("small_blind", 5), 5)
 DEFAULT_MONEY = _coerce_int(_GAME_CONSTANTS.get("default_money", 1000), 1000)
+
+_CALLBACK_HISTORY_LIMIT = 100
 
 MessageId = str
 ChatId = str
@@ -184,6 +187,11 @@ class Game:
         # پیام لیست صندلی‌ها که ابتدای هر دست ارسال می‌شود
         self.seat_announcement_message_id: Optional[MessageId] = None
 
+        # Callback race-condition mitigation state
+        self.processed_callbacks = set()
+        self._processed_callback_order = deque(maxlen=_CALLBACK_HISTORY_LIMIT)
+        self.callback_version = 0
+
     # --- Seats / players helpers ----------------------------------------
     def reset_bets(self) -> None:
         """Clear betting state for all seated players and reset pot tracking."""
@@ -335,6 +343,42 @@ class Game:
             self.ready_message_game_id = None
         if "ready_message_stage" not in state:
             self.ready_message_stage = None
+        if "processed_callbacks" not in state:
+            self.processed_callbacks = set()
+        if "_processed_callback_order" not in state:
+            self._processed_callback_order = deque(
+                list(getattr(self, "processed_callbacks", set())),
+                maxlen=_CALLBACK_HISTORY_LIMIT,
+            )
+        if "callback_version" not in state:
+            self.callback_version = 0
+
+    def mark_callback_processed(self, callback_id: str) -> bool:
+        """Record ``callback_id`` and return ``True`` if it was unseen."""
+
+        if not isinstance(callback_id, str):
+            return False
+        if callback_id in self.processed_callbacks:
+            return False
+
+        self.processed_callbacks.add(callback_id)
+        self._processed_callback_order.append(callback_id)
+
+        # Keep the tracking set bounded in size
+        while len(self.processed_callbacks) > _CALLBACK_HISTORY_LIMIT:
+            oldest = self._processed_callback_order.popleft()
+            self.processed_callbacks.discard(oldest)
+
+        return True
+
+    def increment_callback_version(self) -> None:
+        """Bump the callback version counter used for race protection."""
+
+        try:
+            self.callback_version += 1
+        except AttributeError:
+            # Guard against partially rehydrated legacy states
+            self.callback_version = 1
 
     def __repr__(self):
         return "{}({!r})".format(self.__class__.__name__, self.__dict__)

@@ -9,6 +9,7 @@ import logging
 import math
 import random
 import time
+import uuid
 from contextlib import asynccontextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
@@ -92,6 +93,12 @@ class _WaitingInfo:
     key: str
     level: int
     context: Dict[str, Any]
+
+
+@dataclass
+class _ActionLockState:
+    token: str
+    expiry: float
 
 
 class LockManager:
@@ -179,6 +186,8 @@ class LockManager:
         self._cached_metrics: Optional[Dict[str, Any]] = None
         self._cached_metrics_ts: float = 0.0
         self._metrics_cache_ttl: float = 0.5  # 500ms cache TTL
+        self._action_locks: Dict[Tuple[int, int], _ActionLockState] = {}
+        self._action_locks_guard = asyncio.Lock()
 
     async def _get_lock(self, key: str) -> ReentrantAsyncLock:
         """Get or create a lock with pooling for performance."""
@@ -217,6 +226,19 @@ class LockManager:
 
                 self._locks[key] = lock
             return lock
+
+    def _prune_expired_action_locks(self, now: Optional[float] = None) -> None:
+        """Remove expired action locks from the bookkeeping map."""
+
+        if not self._action_locks:
+            return
+
+        current_time = now if now is not None else time.monotonic()
+        expired_keys = [
+            key for key, state in self._action_locks.items() if state.expiry <= current_time
+        ]
+        for key in expired_keys:
+            self._action_locks.pop(key, None)
 
     async def shutdown(self, timeout: float = 5.0) -> Dict[str, Any]:
         """Initiate graceful shutdown of lock manager.
@@ -2417,6 +2439,49 @@ class LockManager:
         finally:
             del frame
         return call_site, function_name
+
+    async def acquire_action_lock(
+        self,
+        chat_id: int,
+        user_id: int,
+        *,
+        timeout_seconds: int = 5,
+    ) -> Optional[str]:
+        """Acquire a short-lived lock serialising actions for a player."""
+
+        if timeout_seconds <= 0:
+            timeout_seconds = 1
+
+        async with self._action_locks_guard:
+            now = time.monotonic()
+            self._prune_expired_action_locks(now)
+            key = (int(chat_id), int(user_id))
+            state = self._action_locks.get(key)
+            if state is not None and state.expiry > now:
+                return None
+
+            token = str(uuid.uuid4())
+            self._action_locks[key] = _ActionLockState(
+                token=token,
+                expiry=now + float(timeout_seconds),
+            )
+            return token
+
+    async def release_action_lock(
+        self,
+        chat_id: int,
+        user_id: int,
+        lock_token: str,
+    ) -> bool:
+        """Release an action lock if ``lock_token`` matches the owner."""
+
+        async with self._action_locks_guard:
+            key = (int(chat_id), int(user_id))
+            state = self._action_locks.get(key)
+            if state is None or state.token != lock_token:
+                return False
+            self._action_locks.pop(key, None)
+            return True
 
     async def clear_all_locks(self) -> int:
         """Remove all tracked locks and return how many were cleared."""
