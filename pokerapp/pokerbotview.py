@@ -753,6 +753,9 @@ class PokerBotViewer:
         self._stage_payload_hash_lock = asyncio.Lock()
         self._prestart_countdown_tasks: Dict[Tuple[int, str], asyncio.Task[None]] = {}
         self._prestart_countdown_lock = asyncio.Lock()
+        self._countdown_lock = asyncio.Lock()
+        self._countdown_state: Dict[Tuple[int, str], Dict[str, Any]] = {}
+        self._last_edit_time: Dict[Tuple[int, str], float] = {}
         self._countdown_transition_pending: Set[int] = set()
         self._countdown_transition_lock = threading.Lock()
         self._pending_updates: Dict[
@@ -783,14 +786,17 @@ class PokerBotViewer:
         key = (normalized_chat, normalized_game)
         task: Optional[asyncio.Task[None]] = None
         async with self._prestart_countdown_lock:
-            task = self._prestart_countdown_tasks.pop(key, None)
-            if task is not None:
-                task.cancel()
-                logger.info(
-                    "[Countdown] Cancelled prestart countdown for chat %s game %s",
-                    normalized_chat,
-                    normalized_game,
-                )
+            async with self._countdown_lock:
+                task = self._prestart_countdown_tasks.pop(key, None)
+                if task is not None:
+                    task.cancel()
+                    logger.info(
+                        "[Countdown] Cancelled prestart countdown for chat %s game %s",
+                        normalized_chat,
+                        normalized_game,
+                    )
+                self._countdown_state.pop(key, None)
+                self._last_edit_time.pop(key, None)
         if task is not None:
             self._mark_countdown_transition_pending(normalized_chat)
 
@@ -921,10 +927,21 @@ class PokerBotViewer:
             finally:
                 mark_transition_pending = False
                 async with self._prestart_countdown_lock:
-                    existing = self._prestart_countdown_tasks.get((normalized_chat, normalized_game))
-                    if existing is asyncio.current_task():
-                        self._prestart_countdown_tasks.pop((normalized_chat, normalized_game), None)
-                        mark_transition_pending = True
+                    async with self._countdown_lock:
+                        existing = self._prestart_countdown_tasks.get(
+                            (normalized_chat, normalized_game)
+                        )
+                        if existing is asyncio.current_task():
+                            self._prestart_countdown_tasks.pop(
+                                (normalized_chat, normalized_game), None
+                            )
+                            self._countdown_state.pop(
+                                (normalized_chat, normalized_game), None
+                            )
+                            self._last_edit_time.pop(
+                                (normalized_chat, normalized_game), None
+                            )
+                            mark_transition_pending = True
                 if mark_transition_pending:
                     self._mark_countdown_transition_pending(normalized_chat)
                 logger.info(
@@ -965,19 +982,26 @@ class PokerBotViewer:
         normalized_game = str(game_id)
         end_time = asyncio.get_event_loop().time() + max(0, int(seconds))
         async with self._prestart_countdown_lock:
-            key = (normalized_chat, normalized_game)
-            old = self._prestart_countdown_tasks.get(key)
-            if old is not None:
-                old.cancel()
-            task = self._create_countdown_task(
-                normalized_chat,
-                normalized_game,
-                anchor_message_id,
-                end_time,
-                payload_fn,
-                on_complete,
-            )
-            self._prestart_countdown_tasks[key] = task
+            async with self._countdown_lock:
+                key = (normalized_chat, normalized_game)
+                old = self._prestart_countdown_tasks.get(key)
+                if old is not None:
+                    old.cancel()
+                task = self._create_countdown_task(
+                    normalized_chat,
+                    normalized_game,
+                    anchor_message_id,
+                    end_time,
+                    payload_fn,
+                    on_complete,
+                )
+                self._prestart_countdown_tasks[key] = task
+                self._countdown_state[key] = {
+                    "end_time": end_time,
+                    "seconds": max(0, int(seconds)),
+                    "anchor_message_id": anchor_message_id,
+                }
+                self._last_edit_time[key] = asyncio.get_event_loop().time()
         logger.info(
             "[Countdown] Started prestart countdown for chat %s game %s seconds=%s anchor=%s",
             normalized_chat,
