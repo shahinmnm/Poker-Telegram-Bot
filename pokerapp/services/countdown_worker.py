@@ -6,7 +6,7 @@ import asyncio
 import logging
 from typing import Any, Optional
 
-from telegram.error import TelegramError
+from aiogram.exceptions import TelegramBadRequest, TelegramAPIError
 
 from pokerapp.services.countdown_queue import CountdownMessage, CountdownMessageQueue
 from pokerapp.utils.telegram_safeops import TelegramSafeOps
@@ -63,6 +63,44 @@ class CountdownWorker:
         self._worker_task = None
         self._logger.info("Countdown worker stopped")
 
+    async def cancel_updates_for_anchor(self, anchor_key: str) -> None:
+        """Cancel all pending countdown updates for the given anchor.
+
+        Idempotent: silently succeeds even if anchor doesn't exist.
+        """
+
+        try:
+            remove_anchor = getattr(self._queue, "remove_anchor", None)
+            if remove_anchor is None:
+                raise AttributeError("Countdown queue lacks remove_anchor")
+            await remove_anchor(anchor_key)
+            self._logger.debug(
+                "Cancelled countdown updates for anchor",
+                extra={"anchor_key": anchor_key},
+            )
+        except Exception as exc:  # pragma: no cover - defensive
+            self._logger.debug(
+                "Failed to cancel anchor updates (may not exist)",
+                extra={"anchor_key": anchor_key, "error": str(exc)},
+            )
+
+    async def _remove_anchor_updates(self, anchor_key: str) -> None:
+        """Remove all pending updates for a deleted anchor message."""
+
+        remove_anchor = getattr(self._queue, "remove_anchor", None)
+        if remove_anchor is None:
+            self._logger.debug(
+                "Countdown queue missing remove_anchor; skipping cleanup",
+                extra={"anchor_key": anchor_key},
+            )
+            return
+
+        await remove_anchor(anchor_key)
+        self._logger.info(
+            "Removed all pending updates for deleted anchor",
+            extra={"anchor_key": anchor_key},
+        )
+
     async def _worker_loop(self) -> None:
         """Continuously consume messages from the queue until shutdown."""
 
@@ -100,6 +138,7 @@ class CountdownWorker:
             )
             return
 
+        anchor_key = getattr(msg, "anchor_key", f"{msg.chat_id}:{msg.message_id}")
         remaining = float(getattr(msg, "duration_seconds", 0.0))
         if remaining <= 0:
             await self._invoke_completion(msg)
@@ -132,7 +171,39 @@ class CountdownWorker:
                         text=self._format_message_text(msg, remaining),
                         from_countdown=True,
                     )
-                except TelegramError:
+                except TelegramBadRequest as exc:
+                    error_message = str(exc).lower()
+
+                    if "message to edit not found" in error_message or "message can't be edited" in error_message:
+                        self._logger.warning(
+                            "Countdown message deleted; removing from queue",
+                            extra={
+                                "chat_id": msg.chat_id,
+                                "message_id": msg.message_id,
+                                "anchor_key": anchor_key,
+                            },
+                        )
+                        await self._remove_anchor_updates(anchor_key)
+                        return
+
+                    if "message is not modified" in error_message:
+                        self._logger.debug(
+                            "Countdown content unchanged; skipping edit",
+                            extra={"chat_id": msg.chat_id, "message_id": msg.message_id},
+                        )
+                        last_edit = now
+                        continue
+
+                    self._logger.error(
+                        "BadRequest editing countdown message",
+                        extra={
+                            "chat_id": msg.chat_id,
+                            "message_id": msg.message_id,
+                            "error": str(exc),
+                        },
+                    )
+                    return
+                except TelegramAPIError:
                     self._logger.exception(
                         "TelegramError while editing countdown message",
                         extra={"chat_id": msg.chat_id, "message_id": msg.message_id},

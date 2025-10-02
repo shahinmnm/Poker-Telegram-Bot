@@ -8,7 +8,7 @@ from typing import List
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
-from telegram.error import TelegramError
+from aiogram.exceptions import TelegramAPIError
 
 from pokerapp.services.countdown_queue import CountdownMessageQueue
 from pokerapp.services.countdown_worker import CountdownWorker
@@ -198,7 +198,7 @@ async def test_on_complete_callback() -> None:
 async def test_telegram_error_handling() -> None:
     queue = CountdownMessageQueue()
     safe_ops = MagicMock()
-    safe_ops.edit_message_text = AsyncMock(side_effect=TelegramError("failure"))
+    safe_ops.edit_message_text = AsyncMock(side_effect=TelegramAPIError(MagicMock(), "failure"))
 
     worker = CountdownWorker(queue, safe_ops, edit_interval=0.1)
     await worker.start()

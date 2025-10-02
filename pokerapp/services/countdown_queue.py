@@ -25,6 +25,7 @@ class CountdownMessage:
     text: str
     timestamp: float
     cancelled: bool = False
+    anchor_key: str = ""
     duration_seconds: float = 0.0
     formatter: Optional[Callable[[float], str]] = None
     on_complete: Optional[Callable[[], Optional[Awaitable[None]]]] = None
@@ -69,6 +70,7 @@ class CountdownMessageQueue:
         duration_seconds: float = 0.0,
         formatter: Optional[Callable[[float], str]] = None,
         on_complete: Optional[Callable[[], Optional[Awaitable[None]]]] = None,
+        anchor_key: Optional[str] = None,
     ) -> CountdownMessage:
         """Enqueue a countdown update.
 
@@ -86,6 +88,8 @@ class CountdownMessageQueue:
         import time
 
         key = (chat_id, message_id)
+        anchor_value = anchor_key or f"{chat_id}:{message_id}"
+
         msg = CountdownMessage(
             chat_id=chat_id,
             message_id=message_id,
@@ -95,6 +99,7 @@ class CountdownMessageQueue:
             duration_seconds=duration_seconds,
             formatter=formatter,
             on_complete=on_complete,
+            anchor_key=anchor_value,
         )
 
         if self._queue.full():
@@ -129,6 +134,22 @@ class CountdownMessageQueue:
                     del self._active_countdowns[key]
 
         return msg
+
+    async def remove_anchor(self, anchor_key: str) -> None:
+        """Remove and cancel all countdowns associated with ``anchor_key``."""
+
+        async with self._tracking_lock:
+            keys_to_remove = [
+                key
+                for key, message in self._active_countdowns.items()
+                if getattr(message, "anchor_key", f"{message.chat_id}:{message.message_id}")
+                == anchor_key
+            ]
+
+            for key in keys_to_remove:
+                message = self._active_countdowns.pop(key, None)
+                if message is not None:
+                    message.cancelled = True
 
     async def cancel_countdown_for_chat(self, chat_id: int) -> int:
         """Cancel all active countdowns for a specific chat."""
