@@ -29,7 +29,7 @@ flowchart LR
     ENGINE --> PM : seat/role updates
     PM --> VIEW : join prompt & anchors
     ENGINE --> VIEW : table snapshots
-    ENGINE --> STATS : hand_started / hand_finished
+    ENGINE --> STATS : hand_started / hand_finished_deferred
     STATS --> DB
     ENGINE --> METRIC : cycle tracking
     METRIC --> REDIS : counters

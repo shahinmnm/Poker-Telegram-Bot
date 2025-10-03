@@ -40,6 +40,6 @@ sequenceDiagram
     Note over GE,SS: finalize_game()
     GE->>GE: finalize_game(context, game, chat)
     GE->>TG: send_showdown_results()
-    GE->>SS: hand_finished(payouts, hand_labels)
+    GE->>SS: hand_finished_deferred(payouts, hand_labels)
     GE->>TM: reset+save_game(chat_id, game)
     GE->>PM: send_join_prompt() → back to WAITING

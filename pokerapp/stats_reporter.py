@@ -63,7 +63,7 @@ class StatsReporter:
             )
         await self.invalidate_players(game.seated_players())
 
-    async def hand_finished(
+    async def hand_finished_deferred(
         self,
         game: Game,
         chat_id: ChatId,
@@ -72,7 +72,7 @@ class StatsReporter:
         hand_labels: Dict[int, Optional[str]],
         pot_total: int,
     ) -> None:
-        """Report final hand statistics and invalidate cached player reports."""
+        """Report hand statistics outside of the stage lock."""
 
         if self._stats_enabled():
             results = self._build_hand_results(

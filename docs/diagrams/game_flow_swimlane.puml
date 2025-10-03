@@ -30,7 +30,7 @@ start
 |GameEngine|
 :finalize_game();
 |StatsService|
-:hand_finished(payouts);
+:hand_finished_deferred(payouts);
 |TableManager|
 :reset & save game;
 |PlayerManager|
