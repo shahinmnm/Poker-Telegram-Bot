@@ -1,12 +1,13 @@
 import datetime as dt
-from types import SimpleNamespace
 import logging
-from unittest.mock import AsyncMock, MagicMock
 from types import SimpleNamespace
+from typing import List, Tuple
+from unittest.mock import AsyncMock, MagicMock
 
 import fakeredis.aioredis
 import pytest
 from telegram.error import BadRequest
+from sqlalchemy import event
 
 from pokerapp.pokerbotmodel import PokerBotModel
 from pokerapp.stats import PlayerHandResult, PlayerIdentity, StatsService
@@ -203,6 +204,66 @@ async def test_statistics_command_formats_report(tmp_path):
                 assert row.finished_at.tzinfo.utcoffset(row.finished_at) == dt.timedelta(0)
     finally:
         await service.close()
+
+
+@pytest.mark.asyncio
+async def test_finish_hand_batches_history_inserts(tmp_path):
+    db_path = tmp_path / "batched.sqlite3"
+    service = StatsService(f"sqlite+aiosqlite:///{db_path}")
+    await service.ensure_ready()
+
+    engine = service._engine
+    assert engine is not None
+    sync_engine = engine.sync_engine
+    statements: List[Tuple[str, bool]] = []
+
+    @event.listens_for(sync_engine, "before_cursor_execute")
+    def _capture_history(_conn, _cursor, statement, _parameters, _context, executemany):
+        if "INSERT INTO player_hand_history" in statement:
+            statements.append((statement, executemany))
+
+    try:
+        players = [
+            PlayerIdentity(user_id=1, display_name="P1"),
+            PlayerIdentity(user_id=2, display_name="P2"),
+        ]
+        await service.start_hand("hand-batch", chat_id=777, players=players)
+        await service.finish_hand(
+            "hand-batch",
+            chat_id=777,
+            results=[
+                PlayerHandResult(
+                    user_id=1,
+                    display_name="P1",
+                    total_bet=100,
+                    payout=150,
+                    net_profit=50,
+                    hand_type="فلاش",
+                    was_all_in=False,
+                    result="win",
+                ),
+                PlayerHandResult(
+                    user_id=2,
+                    display_name="P2",
+                    total_bet=100,
+                    payout=50,
+                    net_profit=-50,
+                    hand_type="استریت",
+                    was_all_in=False,
+                    result="loss",
+                ),
+            ],
+            pot_total=200,
+        )
+    finally:
+        event.remove(sync_engine, "before_cursor_execute", _capture_history)
+        await service.close()
+
+    history_statements = [
+        flag for statement, flag in statements if "player_hand_history" in statement
+    ]
+    assert len(history_statements) == 1
+    assert history_statements[0] is True
 
 
 @pytest.mark.asyncio

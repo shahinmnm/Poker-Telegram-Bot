@@ -53,6 +53,7 @@ async def _build_model():
     table_manager = TableManager(kv)
     stats = MagicMock(spec=BaseStatsService)
     stats.start_hand = AsyncMock()
+    stats.record_hand_finished_batch = AsyncMock()
     stats.finish_hand = AsyncMock()
     stats.register_player_profile = AsyncMock()
     stats.build_player_report = AsyncMock()
@@ -169,12 +170,12 @@ async def test_private_matchmaking_reports_results_updates_stats():
     match_id = stats.start_hand.await_args.args[0]
     await model.report_private_match_result(match_id, 505)
 
-    assert stats.finish_hand.await_count == 1
-    finish_call = stats.finish_hand.await_args
-    assert finish_call.args[0] == match_id
-    results = finish_call.args[2]
+    assert stats.record_hand_finished_batch.await_count == 1
+    finish_call = stats.record_hand_finished_batch.await_args
+    assert finish_call.kwargs["hand_id"] == match_id
+    results = finish_call.kwargs["results"]
     expected_pot_total = sum(result.payout for result in results)
-    assert finish_call.args[3] == expected_pot_total == 1
+    assert finish_call.kwargs["pot_total"] == expected_pot_total == 1
     messages = [call.args[1] for call in view.send_message.await_args_list]
     assert any("برنده" in message for message in messages)
 

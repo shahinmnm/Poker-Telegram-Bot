@@ -15,9 +15,10 @@ from sqlalchemy import (
     Integer,
     String,
     UniqueConstraint,
-    select,
-    func,
     delete,
+    func,
+    insert,
+    select,
 )
 from sqlalchemy.ext.asyncio import (
     AsyncConnection,
@@ -237,6 +238,31 @@ class BaseStatsService:
     ) -> None:
         raise NotImplementedError
 
+    async def record_hand_finished_batch(
+        self,
+        *,
+        hand_id: str,
+        chat_id: int,
+        results: Iterable[PlayerHandResult],
+        pot_total: int,
+        end_time: Optional[dt.datetime] = None,
+    ) -> None:
+        """Optimised batch version of :meth:`finish_hand`.
+
+        The default implementation simply delegates to :meth:`finish_hand` so
+        that subclasses can override only one of the two methods. Concrete
+        implementations are encouraged to override this method to perform
+        batched persistence when available.
+        """
+
+        await self.finish_hand(
+            hand_id,
+            chat_id,
+            results,
+            pot_total,
+            end_time=end_time,
+        )
+
     async def record_daily_bonus(
         self, user_id: int, amount: int, *, timestamp: Optional[dt.datetime] = None
     ) -> None:
@@ -286,6 +312,17 @@ class NullStatsService(BaseStatsService):
         results: Iterable[PlayerHandResult],
         pot_total: int,
         *,
+        end_time: Optional[dt.datetime] = None,
+    ) -> None:
+        return None
+
+    async def record_hand_finished_batch(
+        self,
+        *,
+        hand_id: str,
+        chat_id: int,
+        results: Iterable[PlayerHandResult],
+        pot_total: int,
         end_time: Optional[dt.datetime] = None,
     ) -> None:
         return None
@@ -587,13 +624,13 @@ class StatsService(BaseStatsService):
                             )
                         )
 
-    async def finish_hand(
+    async def record_hand_finished_batch(
         self,
+        *,
         hand_id: str,
         chat_id: int,
         results: Iterable[PlayerHandResult],
         pot_total: int,
-        *,
         end_time: Optional[dt.datetime] = None,
     ) -> None:
         if not self._enabled or self._sessionmaker is None:
@@ -636,6 +673,7 @@ class StatsService(BaseStatsService):
             ]
 
         players_for_invalidation: List[int] = []
+        coerced_chat_id = self._coerce_int(chat_id)
 
         async with self._sessionmaker() as session:
             async with session.begin():
@@ -706,6 +744,10 @@ class StatsService(BaseStatsService):
                     ).scalars()
                 }
 
+                history_rows: List[Dict[str, Any]] = []
+                new_stats_objects: List[PlayerStats] = []
+                new_winning_rows: List[PlayerWinningHand] = []
+
                 for result in normalized_results:
                     stats = existing_stats.get(result.user_id)
                     if stats is None:
@@ -715,7 +757,8 @@ class StatsService(BaseStatsService):
                             first_seen=started_at,
                             last_seen=ended_at,
                         )
-                        session.add(stats)
+                        existing_stats[result.user_id] = stats
+                        new_stats_objects.append(stats)
                     else:
                         stats.last_seen = ended_at
                         if result.display_name and not stats.display_name:
@@ -758,8 +801,8 @@ class StatsService(BaseStatsService):
                                     hand_type=result.hand_type,
                                     win_count=1,
                                 )
-                                session.add(row)
                                 winning_hand_rows[key] = row
+                                new_winning_rows.append(row)
                             else:
                                 row.win_count += 1
                             if row.win_count > stats.most_common_winning_hand_count:
@@ -791,23 +834,33 @@ class StatsService(BaseStatsService):
                     if result.hand_type and "فولد" not in result.hand_type:
                         stats.total_showdowns += 1
 
-                    session.add(
-                        PlayerHandHistory(
-                            hand_id=hand_id,
-                            user_id=result.user_id,
-                            chat_id=self._coerce_int(chat_id),
-                            started_at=started_at,
-                            finished_at=ended_at,
-                            duration_seconds=duration_seconds,
-                            hand_type=result.hand_type,
-                            result=outcome,
-                            amount_won=result.payout,
-                            amount_lost=loss_amount if outcome == "loss" else max(result.total_bet - result.payout, 0),
-                            net_profit=result.net_profit,
-                            total_bet=result.total_bet,
-                            pot_size=pot_total,
-                            was_all_in=result.was_all_in,
-                        )
+                    history_rows.append(
+                        {
+                            "hand_id": hand_id,
+                            "user_id": result.user_id,
+                            "chat_id": coerced_chat_id,
+                            "started_at": started_at,
+                            "finished_at": ended_at,
+                            "duration_seconds": duration_seconds,
+                            "hand_type": result.hand_type,
+                            "result": outcome,
+                            "amount_won": result.payout,
+                            "amount_lost": loss_amount if outcome == "loss" else max(result.total_bet - result.payout, 0),
+                            "net_profit": result.net_profit,
+                            "total_bet": result.total_bet,
+                            "pot_size": pot_total,
+                            "was_all_in": result.was_all_in,
+                        }
+                    )
+
+                if new_stats_objects:
+                    session.add_all(new_stats_objects)
+                if new_winning_rows:
+                    session.add_all(new_winning_rows)
+                if history_rows:
+                    await session.execute(
+                        insert(PlayerHandHistory),
+                        history_rows,
                     )
 
         if (
@@ -817,6 +870,23 @@ class StatsService(BaseStatsService):
             self._player_report_cache.invalidate_on_event(
                 players_for_invalidation, event_type="hand_finished"
             )
+
+    async def finish_hand(
+        self,
+        hand_id: str,
+        chat_id: int,
+        results: Iterable[PlayerHandResult],
+        pot_total: int,
+        *,
+        end_time: Optional[dt.datetime] = None,
+    ) -> None:
+        await self.record_hand_finished_batch(
+            hand_id=hand_id,
+            chat_id=chat_id,
+            results=results,
+            pot_total=pot_total,
+            end_time=end_time,
+        )
 
     async def record_daily_bonus(
         self, user_id: int, amount: int, *, timestamp: Optional[dt.datetime] = None
