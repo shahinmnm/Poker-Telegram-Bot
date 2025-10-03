@@ -267,10 +267,20 @@ class PokerBotModel:
             cfg_timezone = DEFAULT_TIMEZONE_NAME
         self._timezone_name = cfg_timezone
         self._stats.bind_player_report_cache(self._player_report_cache)
+        writer_priority = getattr(cfg, "LOCK_WRITER_PRIORITY", True)
+        if not isinstance(writer_priority, bool):
+            writer_priority = bool(writer_priority)
+        slow_threshold = getattr(cfg, "LOCK_SLOW_LOCK_THRESHOLD", 0.5)
+        try:
+            slow_threshold = float(slow_threshold)
+        except (TypeError, ValueError):
+            slow_threshold = 0.5
         self._lock_manager = LockManager(
             logger=logger.getChild("lock_manager"),
             category_timeouts=getattr(cfg, "LOCK_TIMEOUTS", None),
             config=cfg,
+            writer_priority=writer_priority,
+            log_slow_lock_threshold=slow_threshold,
         )
         self._chat_guard_timeout_seconds = _CHAT_GUARD_TIMEOUT_SECONDS
         self._player_identity_manager = PlayerIdentityManager(

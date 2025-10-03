@@ -106,6 +106,48 @@ def _event_factory() -> asyncio.Event:
 
 
 @dataclass
+class _RWLockMetrics:
+    """Metrics for a single table's read/write lock usage."""
+
+    read_acquisitions: int = 0
+    write_acquisitions: int = 0
+    total_read_hold_time: float = 0.0
+    total_write_hold_time: float = 0.0
+    total_read_wait_time: float = 0.0
+    total_write_wait_time: float = 0.0
+    max_read_wait_time: float = 0.0
+    max_write_wait_time: float = 0.0
+
+    def average_read_hold_time(self) -> float:
+        return (
+            self.total_read_hold_time / self.read_acquisitions
+            if self.read_acquisitions
+            else 0.0
+        )
+
+    def average_write_hold_time(self) -> float:
+        return (
+            self.total_write_hold_time / self.write_acquisitions
+            if self.write_acquisitions
+            else 0.0
+        )
+
+    def average_read_wait_time(self) -> float:
+        return (
+            self.total_read_wait_time / self.read_acquisitions
+            if self.read_acquisitions
+            else 0.0
+        )
+
+    def average_write_wait_time(self) -> float:
+        return (
+            self.total_write_wait_time / self.write_acquisitions
+            if self.write_acquisitions
+            else 0.0
+        )
+
+
+@dataclass
 class _RWLockState:
     """In-memory bookkeeping for per-table read-write locks."""
 
@@ -113,11 +155,9 @@ class _RWLockState:
     reader_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     reader_count: int = 0
     writer_waiting: int = 0
+    has_active_writer: bool = False
     no_writer_event: asyncio.Event = field(default_factory=_event_factory)
-    total_read_acquisitions: int = 0
-    total_write_acquisitions: int = 0
-    total_read_time: float = 0.0
-    total_write_time: float = 0.0
+    metrics: _RWLockMetrics = field(default_factory=_RWLockMetrics)
 
 
 class _InMemoryActionLockBackend:
@@ -290,6 +330,8 @@ class LockManager:
         retry_backoff_seconds: float = 1,
         category_timeouts: Optional[Mapping[str, Any]] = None,
         config: Optional["Config"] = None,
+        writer_priority: bool = True,
+        log_slow_lock_threshold: float = 0.5,
     ) -> None:
         base_logger = add_context(logger)
         self._logger = _make_service_logger(
@@ -358,6 +400,8 @@ class LockManager:
         self._countdown_locks: Dict[int, asyncio.Lock] = {}
         self._stage_lock_hold_times: List[float] = []
         self._stage_lock_acquisitions: int = 0
+        self.writer_priority = writer_priority
+        self.log_slow_lock_threshold = max(0.0, float(log_slow_lock_threshold))
         self._shutdown_initiated = False
         self._shutdown_lock = asyncio.Lock()
         # Initialize lock pool for object reuse
@@ -480,7 +524,11 @@ class LockManager:
     async def _unmark_writer_waiting(self, state: _RWLockState) -> None:
         async with state.reader_lock:
             state.writer_waiting = max(0, state.writer_waiting - 1)
-            if state.writer_waiting == 0 and not state.write_lock.locked():
+            if (
+                state.writer_waiting == 0
+                and not state.write_lock.locked()
+                and not state.has_active_writer
+            ):
                 state.no_writer_event.set()
 
     @asynccontextmanager
@@ -513,36 +561,70 @@ class LockManager:
     @asynccontextmanager
     async def table_read_lock(self, chat_id: int) -> AsyncIterator[None]:
         state = self._get_or_create_table_state(chat_id)
-        start_time = time.perf_counter()
+        loop = asyncio.get_running_loop()
+        wait_start = loop.time()
+        waited = False
+        last_wait_snapshot = (False, False)
 
         while True:
             async with state.reader_lock:
-                if state.writer_waiting == 0 and not state.write_lock.locked():
+                writer_active = state.write_lock.locked() or state.has_active_writer
+                writer_waiting = state.writer_waiting > 0
+                should_wait = writer_active or (
+                    self.writer_priority and writer_waiting
+                )
+                if not should_wait:
                     state.reader_count += 1
-                    state.total_read_acquisitions += 1
+                    state.metrics.read_acquisitions += 1
                     if state.writer_waiting == 0 and not state.write_lock.locked():
                         state.no_writer_event.set()
                     break
                 wait_event = state.no_writer_event
+                last_wait_snapshot = (writer_active, writer_waiting)
+            waited = True
             await wait_event.wait()
 
+        if waited:
+            wait_duration = loop.time() - wait_start
+            metrics = state.metrics
+            metrics.total_read_wait_time += wait_duration
+            metrics.max_read_wait_time = max(metrics.max_read_wait_time, wait_duration)
+            if wait_duration > self.log_slow_lock_threshold:
+                writer_active, writer_waiting = last_wait_snapshot
+                self._logger.warning(
+                    "Slow read lock acquisition for chat %s: waited %.3fs",
+                    self._normalize_chat_id(chat_id),
+                    wait_duration,
+                    extra={
+                        "event_type": "table_read_lock_slow",
+                        "writer_active": writer_active,
+                        "writer_waiting": writer_waiting,
+                        "wait_seconds": wait_duration,
+                    },
+                )
+
+        hold_start = loop.time()
         try:
             yield
         finally:
-            hold_time = time.perf_counter() - start_time
+            hold_duration = loop.time() - hold_start
+            state.metrics.total_read_hold_time += hold_duration
             async with state.reader_lock:
                 state.reader_count = max(0, state.reader_count - 1)
-                state.total_read_time += hold_time
-                if state.writer_waiting == 0 and not state.write_lock.locked():
+                if (
+                    state.writer_waiting == 0
+                    and not state.write_lock.locked()
+                    and not state.has_active_writer
+                ):
                     state.no_writer_event.set()
             self._invalidate_metrics_cache()
             self._logger.debug(
                 "Table read lock released after %.3fs",
-                hold_time,
+                hold_duration,
                 extra={
                     "event_type": "table_read_lock_released",
                     "chat_id": self._normalize_chat_id(chat_id),
-                    "hold_time_seconds": hold_time,
+                    "hold_time_seconds": hold_duration,
                     "remaining_readers": state.reader_count,
                 },
             )
@@ -550,45 +632,62 @@ class LockManager:
     @asynccontextmanager
     async def table_write_lock(self, chat_id: int) -> AsyncIterator[None]:
         state = self._get_or_create_table_state(chat_id)
-        start_time = time.perf_counter()
+        loop = asyncio.get_running_loop()
+        wait_start = loop.time()
+        max_reader_wait = 0
 
         await self._mark_writer_waiting(state)
         try:
             async with state.write_lock:
-                wait_start = time.perf_counter()
                 while True:
                     async with state.reader_lock:
+                        max_reader_wait = max(max_reader_wait, state.reader_count)
                         if state.reader_count == 0:
                             break
                     await asyncio.sleep(0.01)
 
-                wait_time = time.perf_counter() - wait_start
-                if wait_time > 0.1:
-                    self._logger.info(
-                        "Write lock waited %.3fs for readers",
-                        wait_time,
-                        extra={
-                            "event_type": "table_write_lock_reader_wait",
-                            "chat_id": self._normalize_chat_id(chat_id),
-                            "wait_seconds": wait_time,
-                        },
+                wait_duration = loop.time() - wait_start
+                if max_reader_wait > 0 or wait_duration > 0.001:
+                    metrics = state.metrics
+                    metrics.total_write_wait_time += wait_duration
+                    metrics.max_write_wait_time = max(
+                        metrics.max_write_wait_time, wait_duration
                     )
+                    if wait_duration > self.log_slow_lock_threshold:
+                        self._logger.warning(
+                            "Slow write lock acquisition for chat %s: waited %.3fs for %d readers",
+                            self._normalize_chat_id(chat_id),
+                            wait_duration,
+                            max_reader_wait,
+                            extra={
+                                "event_type": "table_write_lock_slow",
+                                "wait_seconds": wait_duration,
+                                "max_reader_wait": max_reader_wait,
+                            },
+                        )
 
-                state.total_write_acquisitions += 1
+                async with state.reader_lock:
+                    state.has_active_writer = True
+                    state.metrics.write_acquisitions += 1
 
+                hold_start = loop.time()
                 try:
                     yield
                 finally:
-                    hold_time = time.perf_counter() - start_time
-                    state.total_write_time += hold_time
+                    hold_duration = loop.time() - hold_start
+                    state.metrics.total_write_hold_time += hold_duration
+                    async with state.reader_lock:
+                        state.has_active_writer = False
+                        if state.writer_waiting == 0 and not state.write_lock.locked():
+                            state.no_writer_event.set()
                     self._invalidate_metrics_cache()
                     self._logger.debug(
                         "Table write lock released after %.3fs",
-                        hold_time,
+                        hold_duration,
                         extra={
                             "event_type": "table_write_lock_released",
                             "chat_id": self._normalize_chat_id(chat_id),
-                            "hold_time_seconds": hold_time,
+                            "hold_time_seconds": hold_duration,
                         },
                     )
         finally:
@@ -2758,19 +2857,18 @@ class LockManager:
 
         table_stats: Dict[object, Dict[str, float]] = {}
         for chat_key, state in self._table_rw_locks.items():
+            metrics_obj = state.metrics
             table_stats[chat_key] = {
-                "read_acquisitions": state.total_read_acquisitions,
-                "write_acquisitions": state.total_write_acquisitions,
-                "avg_read_time": (
-                    state.total_read_time / state.total_read_acquisitions
-                    if state.total_read_acquisitions
-                    else 0.0
-                ),
-                "avg_write_time": (
-                    state.total_write_time / state.total_write_acquisitions
-                    if state.total_write_acquisitions
-                    else 0.0
-                ),
+                "read_acquisitions": metrics_obj.read_acquisitions,
+                "write_acquisitions": metrics_obj.write_acquisitions,
+                "avg_read_time": metrics_obj.average_read_hold_time(),
+                "avg_write_time": metrics_obj.average_write_hold_time(),
+                "avg_read_wait_time": metrics_obj.average_read_wait_time(),
+                "avg_write_wait_time": metrics_obj.average_write_wait_time(),
+                "max_read_wait_time": metrics_obj.max_read_wait_time,
+                "max_write_wait_time": metrics_obj.max_write_wait_time,
+                "total_read_wait_time": metrics_obj.total_read_wait_time,
+                "total_write_wait_time": metrics_obj.total_write_wait_time,
             }
 
         metrics["table_lock_stats"] = table_stats
@@ -2786,15 +2884,15 @@ class LockManager:
         self._stage_lock_hold_times.clear()
         self._stage_lock_acquisitions = 0
         for state in self._table_rw_locks.values():
-            state.total_read_acquisitions = 0
-            state.total_write_acquisitions = 0
-            state.total_read_time = 0.0
-            state.total_write_time = 0.0
+            state.metrics = _RWLockMetrics()
         # Remove idle lock states so follow-up calls start from a clean slate
         self._table_rw_locks = {
             chat_id: state
             for chat_id, state in self._table_rw_locks.items()
-            if state.reader_count or state.writer_waiting or state.write_lock.locked()
+            if state.reader_count
+            or state.writer_waiting
+            or state.write_lock.locked()
+            or state.has_active_writer
         }
         self._invalidate_metrics_cache()
         self._logger.info(
