@@ -1342,6 +1342,133 @@ class GameEngine:
 
             return bool(result)
 
+    async def handle_raise(self, chat_id: int, user_id: int, amount: int) -> bool:
+        """Handle a player's raise with table-level locking and version retries."""
+
+        if amount is None or amount <= 0:
+            self._logger.warning(
+                "Raise rejected due to invalid amount",
+                extra={
+                    "event_type": "engine_raise_invalid_amount",
+                    "chat_id": chat_id,
+                    "user_id": user_id,
+                    "amount": amount,
+                },
+            )
+            return False
+
+        async def _process_once() -> Optional[bool]:
+            try:
+                game_data, version = await self._table_manager.load_game_with_version(
+                    chat_id
+                )
+            except Exception:
+                self._logger.exception(
+                    "Failed loading game for raise",
+                    extra={
+                        "event_type": "engine_raise_load_failed",
+                        "chat_id": chat_id,
+                        "user_id": user_id,
+                        "amount": amount,
+                    },
+                )
+                return False
+
+            current_game: Optional[Game]
+            if isinstance(game_data, tuple):
+                current_game = game_data[0]
+            else:
+                current_game = game_data
+
+            if current_game is None:
+                self._logger.warning(
+                    "No active game for raise",
+                    extra={
+                        "event_type": "engine_raise_no_game",
+                        "chat_id": chat_id,
+                        "user_id": user_id,
+                        "amount": amount,
+                    },
+                )
+                return False
+
+            player = self._find_player_by_user_id(current_game, user_id)
+            if player is None:
+                self._logger.warning(
+                    "Player not found in game during raise",
+                    extra={
+                        "event_type": "engine_raise_no_player",
+                        "chat_id": chat_id,
+                        "user_id": user_id,
+                        "amount": amount,
+                        "game_id": getattr(current_game, "id", None),
+                    },
+                )
+                return False
+
+            try:
+                success = await self._execute_player_action(
+                    game=current_game,
+                    player=player,
+                    action="raise",
+                    amount=amount,
+                )
+            except Exception:
+                self._logger.exception(
+                    "Unexpected error executing raise",
+                    extra={
+                        "event_type": "engine_raise_execute_error",
+                        "chat_id": chat_id,
+                        "user_id": user_id,
+                        "amount": amount,
+                        "game_id": getattr(current_game, "id", None),
+                    },
+                )
+                return False
+
+            if not success:
+                return False
+
+            self.refresh_turn_deadline(current_game)
+
+            try:
+                save_success = await self._table_manager.save_game_with_version_check(
+                    chat_id,
+                    current_game,
+                    version,
+                )
+            except Exception:
+                self._logger.exception(
+                    "Failed saving game after raise",
+                    extra={
+                        "event_type": "engine_raise_save_failed",
+                        "chat_id": chat_id,
+                        "user_id": user_id,
+                        "amount": amount,
+                        "game_id": getattr(current_game, "id", None),
+                    },
+                )
+                return False
+
+            if not save_success:
+                return None
+
+            return True
+
+        lock_manager = self._lock_manager
+
+        while True:
+            if lock_manager is None:
+                result = await _process_once()
+            else:
+                async with lock_manager.table_write_lock(chat_id):
+                    result = await _process_once()
+
+            if result is None:
+                continue
+
+            return bool(result)
+
     async def process_bet(self, chat_id: int, user_id: int, amount: int) -> bool:
         """Process a betting request with table-level locking and retries."""
 
