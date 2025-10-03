@@ -4,5 +4,11 @@
   "default_webhook_path": "/telegram/webhook-poker2025",
   "default_rate_limit_per_second": 1,
   "default_rate_limit_per_minute": 20,
-  "default_timezone_name": "Asia/Tehran"
+  "default_timezone_name": "Asia/Tehran",
+  "locks": {
+    "action": {
+      "ttl": 10,
+      "valid_types": ["fold", "check", "call", "raise"]
+    }
+  }
 }
