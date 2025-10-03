@@ -366,3 +366,156 @@ async def test_detect_deadlock_cycle_detection() -> None:
         await task_one_future
     with contextlib.suppress(asyncio.CancelledError):
         await task_two_future
+
+
+@pytest.fixture
+def rw_lock_manager() -> LockManager:
+    """Return a fresh lock manager instance for read/write lock tests."""
+
+    logger = logging.getLogger("lock_manager_test_rw")
+    logger.setLevel(logging.DEBUG)
+    return LockManager(logger=logger)
+
+
+@pytest.mark.asyncio
+async def test_table_read_lock_allows_concurrent_readers(
+    rw_lock_manager: LockManager,
+) -> None:
+    chat_id = 4242
+    events: list[str] = []
+
+    async def reader(idx: int) -> None:
+        async with rw_lock_manager.table_read_lock(chat_id):
+            events.append(f"start_{idx}")
+            await asyncio.sleep(0.05)
+            events.append(f"end_{idx}")
+
+    await asyncio.gather(*(reader(i) for i in range(4)))
+
+    assert events[:4] == [f"start_{i}" for i in range(4)]
+    assert len(events) == 8
+
+
+@pytest.mark.asyncio
+async def test_table_write_lock_blocks_readers(
+    rw_lock_manager: LockManager,
+) -> None:
+    chat_id = 5050
+    timeline: list[str] = []
+
+    async def writer() -> None:
+        async with rw_lock_manager.table_write_lock(chat_id):
+            timeline.append("writer_start")
+            await asyncio.sleep(0.1)
+            timeline.append("writer_end")
+
+    async def reader(name: str) -> None:
+        await asyncio.sleep(0.02)
+        async with rw_lock_manager.table_read_lock(chat_id):
+            timeline.append(name)
+
+    await asyncio.gather(writer(), reader("reader_a"), reader("reader_b"))
+
+    assert timeline[0] == "writer_start"
+    assert timeline[1] == "writer_end"
+    assert "reader_a" in timeline[2:]
+    assert "reader_b" in timeline[2:]
+
+
+@pytest.mark.asyncio
+async def test_table_write_lock_waits_for_readers(
+    rw_lock_manager: LockManager,
+) -> None:
+    chat_id = 6060
+    timeline: list[str] = []
+
+    async def reader(idx: int) -> None:
+        async with rw_lock_manager.table_read_lock(chat_id):
+            timeline.append(f"reader_{idx}_start")
+            await asyncio.sleep(0.08)
+            timeline.append(f"reader_{idx}_end")
+
+    async def writer() -> None:
+        await asyncio.sleep(0.02)
+        async with rw_lock_manager.table_write_lock(chat_id):
+            timeline.append("writer_start")
+
+    await asyncio.gather(reader(1), reader(2), writer())
+
+    assert timeline[:2] == ["reader_1_start", "reader_2_start"]
+    assert timeline[-1] == "writer_start"
+
+
+@pytest.mark.asyncio
+async def test_stage_lock_metrics_updated(rw_lock_manager: LockManager) -> None:
+    chat_id = 11
+
+    async with rw_lock_manager.stage_lock(chat_id):
+        await asyncio.sleep(0.03)
+
+    async with rw_lock_manager.stage_lock(chat_id):
+        await asyncio.sleep(0.07)
+
+    metrics = rw_lock_manager.get_metrics()
+
+    assert metrics["stage_lock_acquisitions"] == 2
+    assert metrics["stage_lock_avg_hold_time"] >= 0.03
+    assert metrics["stage_lock_p95_hold_time"] >= 0.07
+
+
+@pytest.mark.asyncio
+async def test_table_lock_metrics_tracking(rw_lock_manager: LockManager) -> None:
+    chat_id = 12
+
+    for _ in range(2):
+        async with rw_lock_manager.table_read_lock(chat_id):
+            await asyncio.sleep(0.01)
+
+    async with rw_lock_manager.table_write_lock(chat_id):
+        await asyncio.sleep(0.02)
+
+    stats = rw_lock_manager.get_metrics()["table_lock_stats"][chat_id]
+    assert stats["read_acquisitions"] == 2
+    assert stats["write_acquisitions"] == 1
+    assert stats["avg_read_time"] >= 0.01
+    assert stats["avg_write_time"] >= 0.02
+
+
+@pytest.mark.asyncio
+async def test_table_lock_no_deadlock_on_alternating_access(
+    rw_lock_manager: LockManager,
+) -> None:
+    chat_id = 13
+
+    async def reader() -> None:
+        async with rw_lock_manager.table_read_lock(chat_id):
+            await asyncio.sleep(0)
+
+    async def writer() -> None:
+        async with rw_lock_manager.table_write_lock(chat_id):
+            await asyncio.sleep(0)
+
+    await asyncio.gather(*[reader() if i % 2 == 0 else writer() for i in range(60)])
+
+    stats = rw_lock_manager.get_metrics()["table_lock_stats"][chat_id]
+    assert stats["read_acquisitions"] == 30
+    assert stats["write_acquisitions"] == 30
+
+
+@pytest.mark.asyncio
+async def test_lock_manager_metrics_reset_clears_rw_metrics(
+    rw_lock_manager: LockManager,
+) -> None:
+    chat_id = 14
+
+    async with rw_lock_manager.stage_lock(chat_id):
+        pass
+
+    async with rw_lock_manager.table_read_lock(chat_id):
+        pass
+
+    rw_lock_manager.reset_metrics()
+    metrics = rw_lock_manager.get_metrics()
+
+    assert metrics["stage_lock_acquisitions"] == 0
+    assert metrics["table_lock_stats"] == {}

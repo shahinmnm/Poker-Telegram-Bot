@@ -12,7 +12,7 @@ import time
 import uuid
 from contextlib import asynccontextmanager
 from contextvars import ContextVar
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import (
     Any,
     AsyncIterator,
@@ -95,6 +95,29 @@ class _WaitingInfo:
     key: str
     level: int
     context: Dict[str, Any]
+
+
+def _event_factory() -> asyncio.Event:
+    """Create an ``asyncio.Event`` initialised to the set state."""
+
+    event = asyncio.Event()
+    event.set()
+    return event
+
+
+@dataclass
+class _RWLockState:
+    """In-memory bookkeeping for per-table read-write locks."""
+
+    write_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    reader_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    reader_count: int = 0
+    writer_waiting: int = 0
+    no_writer_event: asyncio.Event = field(default_factory=_event_factory)
+    total_read_acquisitions: int = 0
+    total_write_acquisitions: int = 0
+    total_read_time: float = 0.0
+    total_write_time: float = 0.0
 
 
 class _InMemoryActionLockBackend:
@@ -329,6 +352,12 @@ class LockManager:
         self._circuit_breaker_threshold: int = 3
         self._circuit_reset_interval: float = 60.0
         self._bypassed_locks: Set[str] = set()
+        self._stage_locks: Dict[int, asyncio.Lock] = {}
+        self._table_rw_locks: Dict[int, _RWLockState] = {}
+        self._player_locks: Dict[Tuple[int, int], asyncio.Lock] = {}
+        self._countdown_locks: Dict[int, asyncio.Lock] = {}
+        self._stage_lock_hold_times: List[float] = []
+        self._stage_lock_acquisitions: int = 0
         self._shutdown_initiated = False
         self._shutdown_lock = asyncio.Lock()
         # Initialize lock pool for object reuse
@@ -419,6 +448,171 @@ class LockManager:
                 self._action_lock_feedback_text = feedback_candidate.strip()
 
         self._release_lock_script = self.RELEASE_ACTION_LOCK_SCRIPT
+
+    def _invalidate_metrics_cache(self) -> None:
+        """Invalidate the cached metrics snapshot if caching is enabled."""
+
+        if hasattr(self, "_cached_metrics"):
+            self._cached_metrics = None
+            self._cached_metrics_ts = 0.0
+
+    def _normalize_chat_id(self, chat_id: object) -> object:
+        """Best-effort normalisation of chat identifiers for dict keys."""
+
+        try:
+            return int(chat_id)
+        except (TypeError, ValueError):
+            return chat_id
+
+    def _get_or_create_table_state(self, chat_id: object) -> _RWLockState:
+        normalized = self._normalize_chat_id(chat_id)
+        state = self._table_rw_locks.get(normalized)
+        if state is None:
+            state = _RWLockState()
+            self._table_rw_locks[normalized] = state
+        return state
+
+    async def _mark_writer_waiting(self, state: _RWLockState) -> None:
+        async with state.reader_lock:
+            state.writer_waiting += 1
+            state.no_writer_event.clear()
+
+    async def _unmark_writer_waiting(self, state: _RWLockState) -> None:
+        async with state.reader_lock:
+            state.writer_waiting = max(0, state.writer_waiting - 1)
+            if state.writer_waiting == 0 and not state.write_lock.locked():
+                state.no_writer_event.set()
+
+    @asynccontextmanager
+    async def stage_lock(self, chat_id: int) -> AsyncIterator[None]:
+        lock_id = self._normalize_chat_id(chat_id)
+        lock = self._stage_locks.get(lock_id)
+        if lock is None:
+            lock = self._stage_locks[lock_id] = asyncio.Lock()
+
+        start_time = time.perf_counter()
+        async with lock:
+            self._stage_lock_acquisitions += 1
+            try:
+                yield
+            finally:
+                hold_time = time.perf_counter() - start_time
+                self._stage_lock_hold_times.append(hold_time)
+                self._invalidate_metrics_cache()
+                if hold_time > 1.0:
+                    self._logger.warning(
+                        "Stage lock held for %.2fs",
+                        hold_time,
+                        extra={
+                            "event_type": "stage_lock_slow",
+                            "chat_id": lock_id,
+                            "hold_time_seconds": hold_time,
+                        },
+                    )
+
+    @asynccontextmanager
+    async def table_read_lock(self, chat_id: int) -> AsyncIterator[None]:
+        state = self._get_or_create_table_state(chat_id)
+        start_time = time.perf_counter()
+
+        while True:
+            async with state.reader_lock:
+                if state.writer_waiting == 0 and not state.write_lock.locked():
+                    state.reader_count += 1
+                    state.total_read_acquisitions += 1
+                    if state.writer_waiting == 0 and not state.write_lock.locked():
+                        state.no_writer_event.set()
+                    break
+                wait_event = state.no_writer_event
+            await wait_event.wait()
+
+        try:
+            yield
+        finally:
+            hold_time = time.perf_counter() - start_time
+            async with state.reader_lock:
+                state.reader_count = max(0, state.reader_count - 1)
+                state.total_read_time += hold_time
+                if state.writer_waiting == 0 and not state.write_lock.locked():
+                    state.no_writer_event.set()
+            self._invalidate_metrics_cache()
+            self._logger.debug(
+                "Table read lock released after %.3fs",
+                hold_time,
+                extra={
+                    "event_type": "table_read_lock_released",
+                    "chat_id": self._normalize_chat_id(chat_id),
+                    "hold_time_seconds": hold_time,
+                    "remaining_readers": state.reader_count,
+                },
+            )
+
+    @asynccontextmanager
+    async def table_write_lock(self, chat_id: int) -> AsyncIterator[None]:
+        state = self._get_or_create_table_state(chat_id)
+        start_time = time.perf_counter()
+
+        await self._mark_writer_waiting(state)
+        try:
+            async with state.write_lock:
+                wait_start = time.perf_counter()
+                while True:
+                    async with state.reader_lock:
+                        if state.reader_count == 0:
+                            break
+                    await asyncio.sleep(0.01)
+
+                wait_time = time.perf_counter() - wait_start
+                if wait_time > 0.1:
+                    self._logger.info(
+                        "Write lock waited %.3fs for readers",
+                        wait_time,
+                        extra={
+                            "event_type": "table_write_lock_reader_wait",
+                            "chat_id": self._normalize_chat_id(chat_id),
+                            "wait_seconds": wait_time,
+                        },
+                    )
+
+                state.total_write_acquisitions += 1
+
+                try:
+                    yield
+                finally:
+                    hold_time = time.perf_counter() - start_time
+                    state.total_write_time += hold_time
+                    self._invalidate_metrics_cache()
+                    self._logger.debug(
+                        "Table write lock released after %.3fs",
+                        hold_time,
+                        extra={
+                            "event_type": "table_write_lock_released",
+                            "chat_id": self._normalize_chat_id(chat_id),
+                            "hold_time_seconds": hold_time,
+                        },
+                    )
+        finally:
+            await self._unmark_writer_waiting(state)
+
+    @asynccontextmanager
+    async def player_lock(self, chat_id: int, player_id: int) -> AsyncIterator[None]:
+        key = (self._normalize_chat_id(chat_id), player_id)
+        lock = self._player_locks.get(key)
+        if lock is None:
+            lock = self._player_locks[key] = asyncio.Lock()
+
+        async with lock:
+            yield
+
+    @asynccontextmanager
+    async def countdown_lock(self, chat_id: int) -> AsyncIterator[None]:
+        key = self._normalize_chat_id(chat_id)
+        lock = self._countdown_locks.get(key)
+        if lock is None:
+            lock = self._countdown_locks[key] = asyncio.Lock()
+
+        async with lock:
+            yield
 
     def get_lock_metrics(self) -> Dict[str, Any]:
         """Return lock backend metrics for monitoring."""
@@ -2551,10 +2745,62 @@ class LockManager:
             "fast_path_hit_rate": self._compute_fast_path_hit_rate(),
         }
 
+        metrics["stage_lock_acquisitions"] = self._stage_lock_acquisitions
+        if self._stage_lock_hold_times:
+            sorted_times = sorted(self._stage_lock_hold_times)
+            metrics["stage_lock_avg_hold_time"] = sum(sorted_times) / len(sorted_times)
+            percentile_index = int(math.ceil(len(sorted_times) * 0.95)) - 1
+            percentile_index = max(0, min(percentile_index, len(sorted_times) - 1))
+            metrics["stage_lock_p95_hold_time"] = sorted_times[percentile_index]
+        else:
+            metrics["stage_lock_avg_hold_time"] = 0.0
+            metrics["stage_lock_p95_hold_time"] = 0.0
+
+        table_stats: Dict[object, Dict[str, float]] = {}
+        for chat_key, state in self._table_rw_locks.items():
+            table_stats[chat_key] = {
+                "read_acquisitions": state.total_read_acquisitions,
+                "write_acquisitions": state.total_write_acquisitions,
+                "avg_read_time": (
+                    state.total_read_time / state.total_read_acquisitions
+                    if state.total_read_acquisitions
+                    else 0.0
+                ),
+                "avg_write_time": (
+                    state.total_write_time / state.total_write_acquisitions
+                    if state.total_write_acquisitions
+                    else 0.0
+                ),
+            }
+
+        metrics["table_lock_stats"] = table_stats
+
         self._cached_metrics = metrics
         self._cached_metrics_ts = current_time
 
         return metrics.copy()
+
+    def reset_metrics(self) -> None:
+        """Clear collected stage/table metrics (primarily for tests)."""
+
+        self._stage_lock_hold_times.clear()
+        self._stage_lock_acquisitions = 0
+        for state in self._table_rw_locks.values():
+            state.total_read_acquisitions = 0
+            state.total_write_acquisitions = 0
+            state.total_read_time = 0.0
+            state.total_write_time = 0.0
+        # Remove idle lock states so follow-up calls start from a clean slate
+        self._table_rw_locks = {
+            chat_id: state
+            for chat_id, state in self._table_rw_locks.items()
+            if state.reader_count or state.writer_waiting or state.write_lock.locked()
+        }
+        self._invalidate_metrics_cache()
+        self._logger.info(
+            "Lock metrics reset",
+            extra={"event_type": "lock_metrics_reset"},
+        )
 
     def export_prometheus(self) -> str:
         """Export metrics in Prometheus format for scraping."""
