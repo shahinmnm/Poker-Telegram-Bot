@@ -2525,6 +2525,7 @@ class GameEngine:
         if not isinstance(stats_kwargs, dict):
             return
 
+        game_snapshot = stats_kwargs.get("game")
         try:
             await self._stats_reporter.hand_finished_deferred(**stats_kwargs)
         except Exception:
@@ -2537,7 +2538,6 @@ class GameEngine:
                         resolved_chat = int(stats_kwargs["chat_id"])  # type: ignore[arg-type]
                     except Exception:  # pragma: no cover - fallback to None
                         resolved_chat = None
-            game_snapshot = stats_kwargs.get("game")
             log_extra = {
                 "chat_id": resolved_chat,
                 "game_id": getattr(game_snapshot, "id", None),
@@ -2547,6 +2547,13 @@ class GameEngine:
                 extra=log_extra,
                 exc_info=True,
             )
+        else:
+            if self._logger.isEnabledFor(logging.DEBUG):
+                self._logger.debug(
+                    "Queued hand statistics for chat_id=%s hand_id=%s",
+                    chat_scope,
+                    getattr(game_snapshot, "id", None),
+                )
 
     async def _reset_game_state(
         self,

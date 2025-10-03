@@ -5,13 +5,14 @@ from __future__ import annotations
 import asyncio
 import logging
 from dataclasses import dataclass
-from typing import Callable, Dict, Set
+from typing import Callable, Dict, Optional, Set
 
 import redis.asyncio as aioredis
 
-from pokerapp.config import Config
+from pokerapp.config import Config, _SYSTEM_CONSTANTS
 from pokerapp.logging_config import setup_logging
 from pokerapp.stats import BaseStatsService, NullStatsService, StatsService
+from pokerapp.stats.buffer import StatsBatchBuffer
 from pokerapp.table_manager import TableManager
 from pokerapp.private_match_service import PrivateMatchService
 from pokerapp.translations import init_translations
@@ -43,6 +44,7 @@ class ApplicationServices:
     messaging_service_factory: Callable[..., MessagingService]
     telegram_safeops_factory: Callable[..., TelegramSafeOps]
     retry_manager: TelegramRetryManager
+    stats_buffer: Optional[StatsBatchBuffer]
 
 
 def _build_stats_service(logger: ContextLoggerAdapter, cfg: Config) -> BaseStatsService:
@@ -125,6 +127,7 @@ def build_services(cfg: Config) -> ApplicationServices:
 
     stats_logger = _make_service_logger(logger, "stats", "stats")
     stats_service = _build_stats_service(stats_logger, cfg)
+    stats_buffer: Optional[StatsBatchBuffer] = None
 
     adaptive_player_report_cache = AdaptivePlayerReportCache(
         default_ttl=cfg.PLAYER_REPORT_TTL_DEFAULT,
@@ -136,6 +139,14 @@ def build_services(cfg: Config) -> ApplicationServices:
         persistent_store=redis_ops,
     )
     stats_service.bind_player_report_cache(adaptive_player_report_cache)
+
+    if isinstance(stats_service, StatsService):
+        stats_buffer = StatsBatchBuffer(
+            session_maker=getattr(stats_service, "_sessionmaker", None),
+            flush_callback=stats_service._flush_hand_batch_records,
+            config=_SYSTEM_CONSTANTS,
+        )
+        stats_service.attach_buffer(stats_buffer)
 
     player_report_cache = PlayerReportCache(
         redis_ops,
@@ -205,5 +216,6 @@ def build_services(cfg: Config) -> ApplicationServices:
         messaging_service_factory=messaging_service_factory,
         telegram_safeops_factory=telegram_safeops_factory,
         retry_manager=retry_manager,
+        stats_buffer=stats_buffer,
     )
 
