@@ -1,9 +1,6 @@
 import asyncio
 import logging
-from typing import Optional, Tuple
 
-import fakeredis
-import fakeredis.aioredis
 import pytest
 
 from pokerapp.entities import Game, Player
@@ -19,79 +16,6 @@ class DummyWallet:
 
     async def value(self) -> int:
         return 1_000
-
-
-class DummyTableManager:
-    def __init__(self, game: Game) -> None:
-        self._game = game
-        self.save_count = 0
-
-    async def load_game(self, chat_id: int):
-        return self._game, None
-
-    async def save_game(self, chat_id: int, game: Game) -> None:
-        self._game = game
-        self.save_count += 1
-
-
-class DummyView:
-    def __init__(self) -> None:
-        self.messages: list[tuple[int, str]] = []
-
-    async def send_message(self, chat_id: int, text: str, **kwargs) -> Optional[int]:
-        self.messages.append((chat_id, text))
-        return None
-
-
-class DummySafeOps:
-    def __init__(self, view: DummyView) -> None:
-        self._view = view
-        self.calls: list[tuple[int, str]] = []
-
-    async def send_message_safe(
-        self,
-        *,
-        call,
-        chat_id: int,
-        operation: Optional[str] = None,
-        log_extra: Optional[dict] = None,
-    ):
-        self.calls.append((chat_id, operation or "send_message"))
-        return await call()
-
-
-def _build_engine_for_game(
-    *,
-    game: Game,
-    redis_pool,
-    logger_name: str = "engine-action",
-) -> Tuple["GameEngine", DummyTableManager, DummyView]:
-    from pokerapp.game_engine import GameEngine
-
-    logger = logging.getLogger(logger_name)
-    lock_manager = LockManager(logger=logger, redis_pool=redis_pool)
-    table_manager = DummyTableManager(game)
-    view = DummyView()
-    safe_ops = DummySafeOps(view)
-
-    engine = GameEngine.__new__(GameEngine)
-    engine._lock_manager = lock_manager
-    engine._table_manager = table_manager
-    engine._safe_ops = safe_ops
-    engine._telegram_ops = safe_ops
-    engine._view = view
-    engine._logger = logger
-    engine._valid_player_actions = {"fold", "check", "call", "raise"}
-    engine._action_lock_ttl = 1
-    engine._action_lock_feedback_text = "⚠️ Action in progress, please wait..."
-
-    return engine, table_manager, view
-
-
-@pytest.fixture
-def redis_pool():
-    server = fakeredis.FakeServer()
-    return fakeredis.aioredis.FakeRedis(server=server)
 
 
 @pytest.mark.asyncio
@@ -176,9 +100,7 @@ async def test_action_lock_release_validation(redis_pool) -> None:
 
 
 @pytest.mark.asyncio
-async def test_game_engine_rejects_duplicate_action(redis_pool) -> None:
-    logger = logging.getLogger("engine-action")
-
+async def test_game_engine_rejects_duplicate_action(game_engine_factory) -> None:
     game = Game()
     chat_id, user_id = 777, 888
     game.chat_id = chat_id
@@ -188,8 +110,8 @@ async def test_game_engine_rejects_duplicate_action(redis_pool) -> None:
     game.current_player_index = 0
     game.turn_deadline = asyncio.get_running_loop().time() + 5
 
-    engine, table_manager, view = _build_engine_for_game(
-        game=game, redis_pool=redis_pool, logger_name="engine-action"
+    engine, table_manager, view = game_engine_factory(
+        game=game, logger_name="engine-action"
     )
 
     task1 = asyncio.create_task(engine.process_action(chat_id, user_id, "fold"))
@@ -204,7 +126,7 @@ async def test_game_engine_rejects_duplicate_action(redis_pool) -> None:
 
 
 @pytest.mark.asyncio
-async def test_turn_deadline_enforcement(redis_pool) -> None:
+async def test_turn_deadline_enforcement(game_engine_factory) -> None:
     game = Game()
     chat_id, user_id = 123, 456
     game.chat_id = chat_id
@@ -213,8 +135,8 @@ async def test_turn_deadline_enforcement(redis_pool) -> None:
     game.add_player(player, seat_index=0)
     game.current_player_index = 0
 
-    engine, table_manager, _ = _build_engine_for_game(
-        game=game, redis_pool=redis_pool, logger_name="engine-deadline"
+    engine, table_manager, _ = game_engine_factory(
+        game=game, logger_name="engine-deadline"
     )
 
     loop = asyncio.get_running_loop()

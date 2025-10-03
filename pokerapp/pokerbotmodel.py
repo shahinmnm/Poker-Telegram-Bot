@@ -171,6 +171,15 @@ logger = logging.getLogger(__name__)
 
 
 
+def _refresh_turn_deadline_safe(
+    game: Game, engine: Optional[GameEngine]
+) -> None:
+    if engine is not None:
+        engine.refresh_turn_deadline(game)
+    else:
+        game.turn_deadline = GameEngine.compute_turn_deadline()
+
+
 @dataclass(slots=True)
 class _CountdownCacheEntry:
     message_id: Optional[MessageId]
@@ -1716,10 +1725,7 @@ class PokerBotModel:
         if next_player_index != -1:
             game.current_player_index = next_player_index
             engine = getattr(self, "_game_engine", None)
-            if engine is not None:
-                engine.refresh_turn_deadline(game)
-            else:
-                game.turn_deadline = GameEngine.compute_turn_deadline()
+            _refresh_turn_deadline_safe(game, engine)
             return game.players[next_player_index]
 
         # اگر هیچ بازیکن فعالی برای حرکت بعدی وجود ندارد (مثلاً همه All-in هستند)
@@ -2267,10 +2273,8 @@ class RoundRateModel:
         game.current_player_index = first_action_index
         game.trading_end_user_id = big_blind_player.user_id
 
-        if self._model is not None and getattr(self._model, "_game_engine", None) is not None:
-            self._model._game_engine.refresh_turn_deadline(game)
-        else:
-            game.turn_deadline = GameEngine.compute_turn_deadline()
+        engine = getattr(self._model, "_game_engine", None) if self._model is not None else None
+        _refresh_turn_deadline_safe(game, engine)
 
         player_turn = game.get_player_by_seat(game.current_player_index)
         return player_turn
