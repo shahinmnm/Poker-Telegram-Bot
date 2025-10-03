@@ -362,6 +362,44 @@ class GameEngine:
         )
         self._countdown_contexts: Dict[int, ContextTypes.DEFAULT_TYPE] = {}
 
+        locks_config = getattr(self.constants, "locks", None)
+        action_lock_config: Optional[Mapping[str, Any]] = None
+        if isinstance(locks_config, Mapping):
+            candidate = locks_config.get("action")
+            if isinstance(candidate, Mapping):
+                action_lock_config = candidate
+        if action_lock_config is None and hasattr(self.constants, "section"):
+            try:
+                locks_section = self.constants.section("locks")  # type: ignore[attr-defined]
+            except Exception:  # pragma: no cover - defensive fallback
+                locks_section = None
+            if isinstance(locks_section, Mapping):
+                candidate = locks_section.get("action")
+                if isinstance(candidate, Mapping):
+                    action_lock_config = candidate
+
+        self._valid_player_actions: Set[str] = {"fold", "check", "call", "raise"}
+        self._action_lock_ttl: int = 10
+        self._action_lock_feedback_text = "⚠️ Action in progress, please wait..."
+        if isinstance(action_lock_config, Mapping):
+            ttl_candidate = action_lock_config.get("ttl")
+            if isinstance(ttl_candidate, (int, float)):
+                ttl_value = int(ttl_candidate)
+                if ttl_value > 0:
+                    self._action_lock_ttl = ttl_value
+            valid_types_candidate = action_lock_config.get("valid_types")
+            if isinstance(valid_types_candidate, (list, tuple, set)):
+                normalized = {
+                    str(value).strip().lower()
+                    for value in valid_types_candidate
+                    if str(value).strip()
+                }
+                if normalized:
+                    self._valid_player_actions = normalized
+            feedback_candidate = action_lock_config.get("feedback_text")
+            if isinstance(feedback_candidate, str) and feedback_candidate.strip():
+                self._action_lock_feedback_text = feedback_candidate.strip()
+
     async def join_game(
         self,
         *,
@@ -803,6 +841,354 @@ class GameEngine:
             },
         ) as results:
             yield results
+
+    def _find_player_by_user_id(self, game: Game, user_id: int) -> Optional[Player]:
+        """Locate a player in ``game`` by their Telegram ``user_id``."""
+
+        seat_lookup = getattr(game, "seat_index_for_user", None)
+        if callable(seat_lookup):
+            try:
+                seat_index = seat_lookup(user_id)
+            except Exception:  # pragma: no cover - defensive fallback
+                seat_index = -1
+            if isinstance(seat_index, int) and seat_index >= 0:
+                candidate = game.get_player_by_seat(seat_index)
+                if candidate is not None:
+                    return candidate
+
+        for player in getattr(game, "players", []):
+            if getattr(player, "user_id", None) == user_id:
+                return player
+        return None
+
+    async def process_action(
+        self,
+        chat_id: int,
+        user_id: int,
+        action: str,
+        amount: int = 0,
+    ) -> bool:
+        """Process a player's action with action-level locking protection."""
+
+        action_token = (action or "").strip().lower()
+        if action_token not in self._valid_player_actions:
+            self._logger.warning(
+                "Invalid action type",  # pragma: no cover - sanity logging
+                extra={
+                    "event_type": "engine_invalid_action",
+                    "chat_id": chat_id,
+                    "user_id": user_id,
+                    "action": action,
+                },
+            )
+            return False
+
+        lock_token: Optional[str] = None
+        try:
+            lock_token = await self._lock_manager.acquire_action_lock(
+                chat_id,
+                user_id,
+                action_token,
+                ttl=self._action_lock_ttl,
+            )
+        except Exception:
+            self._logger.exception(
+                "Failed acquiring action lock",
+                extra={
+                    "event_type": "engine_action_lock_error",
+                    "chat_id": chat_id,
+                    "user_id": user_id,
+                    "action": action_token,
+                },
+            )
+            return False
+
+        if lock_token is None:
+            self._logger.info(
+                "Action rejected - lock already held",
+                extra={
+                    "event_type": "engine_action_lock_contention",
+                    "chat_id": chat_id,
+                    "user_id": user_id,
+                    "action": action_token,
+                },
+            )
+            if (
+                hasattr(self, "_safe_ops")
+                and hasattr(self._safe_ops, "send_message_safe")
+                and hasattr(self, "_view")
+                and hasattr(self._view, "send_message")
+            ):
+                try:
+                    await self._safe_ops.send_message_safe(
+                        call=lambda text=self._action_lock_feedback_text: self._view.send_message(  # type: ignore[misc]
+                            user_id,
+                            text,
+                            request_category=RequestCategory.GENERAL,
+                        ),
+                        chat_id=user_id,
+                        operation="action_lock_feedback",
+                        log_extra={
+                            "event_type": "engine_action_lock_feedback",
+                            "chat_id": chat_id,
+                            "user_id": user_id,
+                            "action": action_token,
+                        },
+                    )
+                except Exception:
+                    self._logger.debug(
+                        "Unable to send action lock feedback",
+                        extra={
+                            "event_type": "engine_action_lock_feedback_failed",
+                            "chat_id": chat_id,
+                            "user_id": user_id,
+                            "action": action_token,
+                        },
+                        exc_info=True,
+                    )
+            return False
+
+        try:
+            try:
+                loaded_game = await self._table_manager.load_game(chat_id)
+            except Exception:
+                self._logger.exception(
+                    "Failed loading game for action",
+                    extra={
+                        "event_type": "engine_action_load_failed",
+                        "chat_id": chat_id,
+                        "user_id": user_id,
+                        "action": action_token,
+                    },
+                )
+                return False
+
+            if isinstance(loaded_game, tuple):
+                game = loaded_game[0]
+            else:
+                game = loaded_game
+
+            if game is None:
+                self._logger.warning(
+                    "No active game for action",
+                    extra={
+                        "event_type": "engine_action_no_game",
+                        "chat_id": chat_id,
+                        "user_id": user_id,
+                        "action": action_token,
+                    },
+                )
+                return False
+
+            player = self._find_player_by_user_id(game, user_id)
+            if player is None:
+                self._logger.warning(
+                    "Player not found in game",
+                    extra={
+                        "event_type": "engine_action_no_player",
+                        "chat_id": chat_id,
+                        "user_id": user_id,
+                        "action": action_token,
+                        "game_id": getattr(game, "id", None),
+                    },
+                )
+                return False
+
+            deadline = getattr(game, "turn_deadline", None)
+            if isinstance(deadline, (int, float)):
+                try:
+                    current_time = asyncio.get_running_loop().time()
+                except RuntimeError:  # pragma: no cover - fallback for compatibility
+                    current_time = asyncio.get_event_loop().time()
+                if current_time > float(deadline):
+                    self._logger.info(
+                        "Action rejected due to expired turn deadline",
+                        extra={
+                            "event_type": "engine_action_timeout",
+                            "chat_id": chat_id,
+                            "user_id": user_id,
+                            "action": action_token,
+                        },
+                    )
+                    return False
+
+            try:
+                success = await self._execute_player_action(
+                    game=game,
+                    player=player,
+                    action=action_token,
+                    amount=amount,
+                )
+            except Exception:
+                self._logger.exception(
+                    "Unexpected error executing action",
+                    extra={
+                        "event_type": "engine_action_execute_error",
+                        "chat_id": chat_id,
+                        "user_id": user_id,
+                        "action": action_token,
+                    },
+                )
+                return False
+
+            if not success:
+                return False
+
+            try:
+                await self._table_manager.save_game(chat_id, game)
+            except Exception:
+                self._logger.exception(
+                    "Failed saving game after action",
+                    extra={
+                        "event_type": "engine_action_save_failed",
+                        "chat_id": chat_id,
+                        "user_id": user_id,
+                        "action": action_token,
+                    },
+                )
+                return False
+
+            return True
+        finally:
+            if lock_token is not None:
+                try:
+                    await self._lock_manager.release_action_lock(
+                        chat_id,
+                        user_id,
+                        action_token,
+                        lock_token,
+                    )
+                except Exception:
+                    self._logger.warning(
+                        "Failed releasing action lock",
+                        extra={
+                            "event_type": "engine_action_release_failed",
+                            "chat_id": chat_id,
+                            "user_id": user_id,
+                            "action": action_token,
+                        },
+                        exc_info=True,
+                    )
+
+    async def _execute_player_action(
+        self,
+        *,
+        game: Game,
+        player: Player,
+        action: str,
+        amount: int,
+    ) -> bool:
+        """Execute a validated player action on the in-memory game state."""
+
+        action_token = action.strip().lower()
+        mention = getattr(player, "mention_markdown", str(getattr(player, "user_id", "")))
+        chat_id = getattr(game, "chat_id", None)
+        log_context = {
+            "event_type": "engine_execute_player_action",
+            "chat_id": chat_id,
+            "game_id": getattr(game, "id", None),
+            "user_id": getattr(player, "user_id", None),
+            "action": action_token,
+        }
+
+        def record_action(entry: str) -> None:
+            actions = getattr(game, "last_actions", None)
+            if isinstance(actions, list):
+                actions.append(entry)
+                if len(actions) > 5:
+                    del actions[:-5]
+
+        if action_token == "fold":
+            if hasattr(player, "state"):
+                player.state = PlayerState.FOLD
+            if hasattr(player, "has_acted"):
+                player.has_acted = True
+            record_action(f"{mention}: فولد")
+            return True
+
+        if action_token == "check":
+            if hasattr(player, "has_acted"):
+                player.has_acted = True
+            record_action(f"{mention}: چک")
+            return True
+
+        if action_token == "call":
+            call_amount = max(
+                0,
+                int(getattr(game, "max_round_rate", 0))
+                - int(getattr(player, "round_rate", 0)),
+            )
+            if call_amount > 0:
+                wallet = getattr(player, "wallet", None)
+                if wallet is not None and hasattr(wallet, "authorize"):
+                    try:
+                        await wallet.authorize(game.id, call_amount)
+                    except Exception:
+                        self._logger.warning(
+                            "Wallet authorization failed during call",
+                            extra={**log_context, "amount": call_amount},
+                            exc_info=True,
+                        )
+                        return False
+                player.round_rate = int(getattr(player, "round_rate", 0)) + call_amount
+                player.total_bet = int(getattr(player, "total_bet", 0)) + call_amount
+                game.pot = int(getattr(game, "pot", 0)) + call_amount
+            if hasattr(player, "has_acted"):
+                player.has_acted = True
+            if call_amount > 0:
+                record_action(f"{mention}: کال {call_amount}$")
+            else:
+                record_action(f"{mention}: چک")
+            return True
+
+        if action_token == "raise":
+            if amount is None or amount <= 0:
+                self._logger.warning(
+                    "Raise rejected due to invalid amount",
+                    extra={**log_context, "amount": amount},
+                )
+                return False
+            call_amount = max(
+                0,
+                int(getattr(game, "max_round_rate", 0))
+                - int(getattr(player, "round_rate", 0)),
+            )
+            total_amount = call_amount + int(amount)
+            wallet = getattr(player, "wallet", None)
+            if wallet is not None and hasattr(wallet, "authorize"):
+                try:
+                    await wallet.authorize(game.id, total_amount)
+                except Exception:
+                    self._logger.warning(
+                        "Wallet authorization failed during raise",
+                        extra={**log_context, "amount": total_amount},
+                        exc_info=True,
+                    )
+                    return False
+            player.round_rate = int(getattr(player, "round_rate", 0)) + total_amount
+            player.total_bet = int(getattr(player, "total_bet", 0)) + total_amount
+            game.pot = int(getattr(game, "pot", 0)) + total_amount
+            game.max_round_rate = max(
+                int(getattr(game, "max_round_rate", 0)),
+                player.round_rate,
+            )
+            if hasattr(player, "has_acted"):
+                player.has_acted = True
+            if hasattr(game, "trading_end_user_id"):
+                game.trading_end_user_id = getattr(player, "user_id", None)
+            for other in getattr(game, "players", []):
+                if other is player:
+                    continue
+                if getattr(other, "state", PlayerState.ACTIVE) == PlayerState.ACTIVE and hasattr(other, "has_acted"):
+                    other.has_acted = False
+            record_action(f"{mention}: رِیز {total_amount}$")
+            return True
+
+        self._logger.warning(
+            "Unsupported action encountered during execution",
+            extra=log_context,
+        )
+        return False
 
     @staticmethod
     def state_token(state: Any) -> str:

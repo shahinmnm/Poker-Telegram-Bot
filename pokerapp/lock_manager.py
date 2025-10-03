@@ -21,6 +21,7 @@ from typing import (
     Mapping,
     Optional,
     Sequence,
+    Set,
     Tuple,
     TYPE_CHECKING,
 )
@@ -242,6 +243,18 @@ class LockManager:
     """Manage keyed re-entrant async locks with timeout and retry support."""
 
     _LONG_HOLD_THRESHOLD_SECONDS = 2.0
+    RELEASE_ACTION_LOCK_SCRIPT = """
+    local key = KEYS[1]
+    local expected_token = ARGV[1]
+    local current_token = redis.call('GET', key)
+
+    if current_token == expected_token then
+        redis.call('DEL', key)
+        return 1
+    else
+        return 0
+    end
+    """
 
     def __init__(
         self,
@@ -363,13 +376,49 @@ class LockManager:
                     "backend_version": self._redis_pool._version,
                 },
             )
-        self._release_lock_script = (
-            "if redis.call(\"GET\", KEYS[1]) == ARGV[1] then\n"
-            "    return redis.call(\"DEL\", KEYS[1])\n"
-            "else\n"
-            "    return 0\n"
-            "end"
-        )
+
+        action_settings: Mapping[str, Any] | None = None
+        config_for_action = config
+        if config_for_action is None:
+            try:
+                from pokerapp.config import Config  # local import to avoid cycles
+            except Exception:  # pragma: no cover - defensive
+                config_for_action = None
+            else:
+                config_for_action = Config()
+        if config_for_action is not None:
+            constants = getattr(config_for_action, "constants", None)
+            if constants is not None:
+                locks_section = getattr(constants, "locks", None)
+                if isinstance(locks_section, Mapping):
+                    action_settings = locks_section.get("action")
+                if action_settings is None and hasattr(constants, "section"):
+                    try:
+                        locks_section = constants.section("locks")  # type: ignore[assignment]
+                    except Exception:  # pragma: no cover - defensive fallback
+                        locks_section = None
+                    if isinstance(locks_section, Mapping):
+                        action_settings = locks_section.get("action")
+
+        self._action_lock_default_ttl = 10
+        self._valid_action_types: Set[str] = {"fold", "check", "call", "raise"}
+        self._action_lock_feedback_text = "⚠️ Action in progress, please wait..."
+        if isinstance(action_settings, Mapping):
+            ttl_candidate = action_settings.get("ttl")
+            if isinstance(ttl_candidate, (int, float)):
+                ttl_value = int(ttl_candidate)
+                if ttl_value > 0:
+                    self._action_lock_default_ttl = ttl_value
+            valid_types_candidate = action_settings.get("valid_types")
+            if isinstance(valid_types_candidate, (list, tuple, set)):
+                normalized = {str(value).strip().lower() for value in valid_types_candidate if str(value).strip()}
+                if normalized:
+                    self._valid_action_types = normalized
+            feedback_candidate = action_settings.get("feedback_text")
+            if isinstance(feedback_candidate, str) and feedback_candidate.strip():
+                self._action_lock_feedback_text = feedback_candidate.strip()
+
+        self._release_lock_script = self.RELEASE_ACTION_LOCK_SCRIPT
 
     def get_lock_metrics(self) -> Dict[str, Any]:
         """Return lock backend metrics for monitoring."""
@@ -2620,14 +2669,14 @@ class LockManager:
         self,
         chat_id: int,
         user_id: int,
-        action_data: Optional[str] = None,
+        action_identifier: Optional[str] = None,
     ) -> str:
         base = (
             self._redis_keys["action_lock_prefix"]
             + f"{int(chat_id)}:{int(user_id)}"
         )
-        if action_data:
-            return f"{base}:{str(action_data)}"
+        if action_identifier:
+            return f"{base}:{str(action_identifier)}"
         return base
 
     def _make_table_lock_key(self, chat_id: int, operation: str) -> str:
@@ -2784,27 +2833,62 @@ class LockManager:
         self,
         chat_id: int,
         user_id: int,
+        action_type_or_timeout: Optional[object] = None,
         *,
+        action_type: Optional[str] = None,
         action_data: Optional[str] = None,
-        timeout_seconds: int = 5,
+        ttl: Optional[int] = None,
+        timeout_seconds: Optional[int] = None,
     ) -> Optional[str]:
-        """Acquire a short-lived lock serialising actions for a player.
+        """Acquire a short-lived distributed lock for a player's action.
 
         Args:
             chat_id: Telegram chat identifier.
             user_id: Telegram user identifier.
-            action_data: Optional callback payload for per-action locking.
-            timeout_seconds: Expiry for the distributed lock.
+            action_type_or_timeout: Optional positional parameter used either as
+                an action type (preferred) or a legacy timeout override.
+            action_type: Explicit action type ("fold", "check", "call", "raise").
+            action_data: Legacy payload identifier used in earlier releases.
+            ttl: Explicit TTL in seconds for the distributed lock.
+            timeout_seconds: Backwards-compatible TTL override.
         """
 
-        if timeout_seconds <= 0:
+        resolved_action_type: Optional[str] = action_type
+        resolved_timeout: Optional[float] = None
+
+        if isinstance(action_type_or_timeout, str) and resolved_action_type is None:
+            resolved_action_type = action_type_or_timeout.strip().lower()
+        elif isinstance(action_type_or_timeout, (int, float)) and ttl is None and timeout_seconds is None:
+            resolved_timeout = float(action_type_or_timeout)
+
+        if ttl is not None and ttl <= 0:
+            ttl = 1
+
+        if timeout_seconds is not None and timeout_seconds <= 0:
             timeout_seconds = 1
 
-        ttl_seconds = int(timeout_seconds)
+        if resolved_timeout is None:
+            resolved_timeout = timeout_seconds
+
+        ttl_seconds = (
+            int(ttl)
+            if ttl is not None
+            else (
+                int(resolved_timeout)
+                if resolved_timeout is not None
+                else self._action_lock_default_ttl
+            )
+        )
         if ttl_seconds <= 0:
             ttl_seconds = 1
 
-        redis_key = self._make_action_lock_key(chat_id, user_id, action_data)
+        action_identifier: Optional[str]
+        if resolved_action_type:
+            action_identifier = resolved_action_type
+        else:
+            action_identifier = action_data
+
+        redis_key = self._make_action_lock_key(chat_id, user_id, action_identifier)
         token = str(uuid.uuid4())
 
         try:
@@ -2821,7 +2905,8 @@ class LockManager:
                     "event_type": "action_lock_acquire_error",
                     "chat_id": chat_id,
                     "user_id": user_id,
-                    "timeout_seconds": timeout_seconds,
+                    "action_type": resolved_action_type,
+                    "ttl_seconds": ttl_seconds,
                     "error": str(exc),
                 },
                 exc_info=True,
@@ -2837,7 +2922,7 @@ class LockManager:
                     "user_id": user_id,
                     "token_prefix": token[:8],
                     "ttl_seconds": ttl_seconds,
-                    "action_data_hash": hash(str(action_data)) if action_data else None,
+                    "action_identifier": action_identifier,
                 },
             )
             return token
@@ -2848,6 +2933,7 @@ class LockManager:
                 "event_type": "action_lock_contention",
                 "chat_id": chat_id,
                 "user_id": user_id,
+                "action_identifier": action_identifier,
             },
         )
         return None
@@ -2856,16 +2942,40 @@ class LockManager:
         self,
         chat_id: int,
         user_id: int,
-        lock_token: str,
+        token_or_action: str,
+        token: Optional[str] = None,
         *,
+        action_type: Optional[str] = None,
         action_data: Optional[str] = None,
     ) -> bool:
-        """Release an action lock if ``lock_token`` matches the owner."""
+        """Release an action lock using token validation.
 
-        redis_key = self._make_action_lock_key(chat_id, user_id, action_data)
+        Supports both ``release_action_lock(chat_id, user_id, token)`` and the
+        newer ``release_action_lock(chat_id, user_id, action_type, token)``
+        signature.
+        """
+
+        resolved_token: str
+        resolved_action_type: Optional[str] = action_type
+        if token is None:
+            resolved_token = token_or_action
+        else:
+            resolved_token = token
+            if resolved_action_type is None:
+                resolved_action_type = token_or_action.strip().lower()
+
+        action_identifier: Optional[str]
+        if resolved_action_type:
+            action_identifier = resolved_action_type
+        else:
+            action_identifier = action_data
+
+        redis_key = self._make_action_lock_key(chat_id, user_id, action_identifier)
 
         try:
-            result = await self._execute_release_lock_script(redis_key, lock_token)
+            result = await self._execute_release_lock_script(
+                redis_key, resolved_token
+            )
         except aioredis.ConnectionError as exc:
             self._logger.error(
                 "[ACTION_LOCK] Failed to release distributed lock (redis error)",
@@ -2873,6 +2983,7 @@ class LockManager:
                     "event_type": "action_lock_release_error",
                     "chat_id": chat_id,
                     "user_id": user_id,
+                    "action_identifier": action_identifier,
                     "error": str(exc),
                 },
                 exc_info=True,
@@ -2886,7 +2997,8 @@ class LockManager:
                     "event_type": "action_lock_released",
                     "chat_id": chat_id,
                     "user_id": user_id,
-                    "token_prefix": lock_token[:8],
+                    "token_prefix": resolved_token[:8],
+                    "action_identifier": action_identifier,
                 },
             )
             return True
@@ -2897,7 +3009,8 @@ class LockManager:
                 "event_type": "action_lock_release_failed",
                 "chat_id": chat_id,
                 "user_id": user_id,
-                "token_prefix": lock_token[:8],
+                "token_prefix": resolved_token[:8],
+                "action_identifier": action_identifier,
             },
         )
         return False

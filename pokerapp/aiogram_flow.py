@@ -37,9 +37,14 @@ from typing import (
     TYPE_CHECKING,
 )
 
-from aiogram import Bot
+from aiogram import Bot, F, Router
 from aiogram.exceptions import TelegramBadRequest
-from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, Message
+from aiogram.types import (
+    CallbackQuery,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    Message,
+)
 from cachetools import LRUCache, TTLCache
 
 from pokerapp.config import get_game_constants
@@ -49,11 +54,13 @@ from pokerapp.utils.messaging_service import MessagingService
 from pokerapp.utils.request_metrics import RequestCategory
 
 if TYPE_CHECKING:  # pragma: no cover - used only for static analysis
+    from pokerapp.game_engine import GameEngine
     from pokerapp.table_manager import TableManager
 from pokerapp.utils.debug_trace import trace_telegram_api_call
 
 
 logger = logging.getLogger(__name__)
+router = Router()
 
 
 _CARD_SPACER = "     "  # five spaces to visually separate board cards
@@ -1414,6 +1421,96 @@ class PokerMessagingOrchestrator:
         )
 
 
+async def _handle_action_callback(
+    callback: CallbackQuery,
+    game_engine: "GameEngine",
+    action: str,
+) -> None:
+    data = getattr(callback, "data", "") or ""
+    parts = data.split("_")
+
+    if len(parts) < 2:
+        await callback.answer("⚠️ Invalid action format", show_alert=True)
+        return
+
+    try:
+        chat_id = int(parts[1])
+    except (TypeError, ValueError):
+        await callback.answer("⚠️ Invalid action format", show_alert=True)
+        return
+
+    user = getattr(callback, "from_user", None)
+    user_id = getattr(user, "id", None)
+    if user_id is None:
+        await callback.answer("⚠️ Action failed", show_alert=True)
+        return
+
+    amount = 0
+    if action == "raise" and len(parts) > 2:
+        try:
+            amount = int(parts[2])
+        except (TypeError, ValueError):
+            amount = 0
+
+    success = await game_engine.process_action(
+        chat_id=chat_id,
+        user_id=user_id,
+        action=action,
+        amount=amount,
+    )
+
+    if success:
+        responses = {
+            "fold": "✅ Folded",
+            "check": "✅ Checked",
+            "call": "✅ Called",
+            "raise": "✅ Raised",
+        }
+        await callback.answer(responses.get(action, "✅ Done"))
+    else:
+        await callback.answer("⚠️ Action failed", show_alert=True)
+
+
+@router.callback_query(F.data.startswith("fold_"))
+async def handle_fold_callback(
+    callback: CallbackQuery,
+    game_engine: "GameEngine",
+) -> None:
+    """Handle fold button clicks with action-level locking."""
+
+    await _handle_action_callback(callback, game_engine, "fold")
+
+
+@router.callback_query(F.data.startswith("check_"))
+async def handle_check_callback(
+    callback: CallbackQuery,
+    game_engine: "GameEngine",
+) -> None:
+    """Handle check button clicks with action-level locking."""
+
+    await _handle_action_callback(callback, game_engine, "check")
+
+
+@router.callback_query(F.data.startswith("call_"))
+async def handle_call_callback(
+    callback: CallbackQuery,
+    game_engine: "GameEngine",
+) -> None:
+    """Handle call button clicks with action-level locking."""
+
+    await _handle_action_callback(callback, game_engine, "call")
+
+
+@router.callback_query(F.data.startswith("raise_"))
+async def handle_raise_callback(
+    callback: CallbackQuery,
+    game_engine: "GameEngine",
+) -> None:
+    """Handle raise button clicks with action-level locking."""
+
+    await _handle_action_callback(callback, game_engine, "raise")
+
+
 __all__ = [
     "ActionButton",
     "AnchorMessage",
@@ -1423,5 +1520,10 @@ __all__ = [
     "PokerMessagingOrchestrator",
     "RequestManager",
     "TurnState",
+    "handle_fold_callback",
+    "handle_check_callback",
+    "handle_call_callback",
+    "handle_raise_callback",
+    "router",
 ]
 
