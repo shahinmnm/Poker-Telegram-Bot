@@ -43,10 +43,12 @@ from pokerapp.entities import (
     Game,
     GameState,
     MessageId,
+    Money,
     Player,
     PlayerState,
     UserException,
     UserId,
+    Wallet,
 )
 from pokerapp.config import GameConstants, get_game_constants
 from pokerapp.pokerbotview import PokerBotViewer
@@ -68,6 +70,7 @@ from pokerapp.winnerdetermination import (
     HandsOfPoker,
     WinnerDetermination,
 )
+from pokerapp.translations import translate
 
 
 def clear_all_message_ids(game: Game) -> None:
@@ -142,6 +145,50 @@ def _select_translation(
 
 
 _AUTO_START_DEFAULTS = _GAME_CONSTANTS.get("auto_start", {})
+
+
+class _TableLockWallet(Wallet):
+    """Minimal wallet used for table-lock-guarded join operations."""
+
+    def __init__(self, balance: Money) -> None:
+        self._balance: Money = balance
+        self._authorized: Dict[str, Money] = {}
+
+    @staticmethod
+    def _prefix(id: int, suffix: str = ""):
+        return f"wallet:{id}{suffix}"
+
+    async def add_daily(self, amount: Money) -> Money:
+        self._balance += amount
+        return self._balance
+
+    async def has_daily_bonus(self) -> bool:
+        return False
+
+    async def inc(self, amount: Money = 0) -> Money:
+        self._balance += amount
+        return self._balance
+
+    async def inc_authorized_money(self, game_id: str, amount: Money) -> None:
+        self._authorized[game_id] = self._authorized.get(game_id, 0) + amount
+
+    async def authorized_money(self, game_id: str) -> Money:
+        return self._authorized.get(game_id, 0)
+
+    async def authorize(self, game_id: str, amount: Money) -> None:
+        self._authorized[game_id] = amount
+
+    async def authorize_all(self, game_id: str) -> Money:
+        return self._authorized.get(game_id, 0)
+
+    async def value(self) -> Money:
+        return self._balance
+
+    async def approve(self, game_id: str) -> None:
+        self._authorized.pop(game_id, None)
+
+    async def cancel(self, game_id: str) -> None:
+        self._authorized.pop(game_id, None)
 
 
 def _coerce_numeric(
@@ -278,6 +325,7 @@ class GameEngine:
         logger: logging.Logger,
         constants: Optional[GameConstants] = None,
         adaptive_player_report_cache: Optional[AdaptivePlayerReportCache] = None,
+        player_factory: Optional[Callable[[int, str], Player]] = None,
     ) -> None:
         self._table_manager = table_manager
         self._view = view
@@ -298,6 +346,13 @@ class GameEngine:
         self.constants = constants or _CONSTANTS
         self._adaptive_player_report_cache = adaptive_player_report_cache
         self._stage_lock_timeout = self.STAGE_LOCK_TIMEOUT_SECONDS
+        self._max_players = _positive_int(
+            _GAME_CONSTANTS.get("max_players"), 8
+        )
+        self._default_money = _positive_int(
+            _GAME_CONSTANTS.get("default_money"), 1000
+        )
+        self._player_factory = player_factory
         self._initialize_stop_translations()
         self._countdown_queue = CountdownMessageQueue(max_size=100)
         self._countdown_worker = CountdownWorker(
@@ -306,6 +361,255 @@ class GameEngine:
             edit_interval=1.0,
         )
         self._countdown_contexts: Dict[int, ContextTypes.DEFAULT_TYPE] = {}
+
+    async def join_game(
+        self,
+        *,
+        chat_id: int,
+        user_id: int,
+        user_name: str,
+    ) -> bool:
+        lock_token = await self._lock_manager.acquire_table_lock(
+            chat_id=chat_id,
+            operation="join",
+            timeout_seconds=5,
+        )
+
+        if not lock_token:
+            self._logger.warning(
+                "Join rejected - table lock held",
+                extra={
+                    "event_type": "join_table_locked",
+                    "chat_id": chat_id,
+                    "user_id": user_id,
+                },
+            )
+            await self._view.send_message(
+                chat_id,
+                translate(
+                    "error.table_busy",
+                    "⚠️ Table is busy. Please try again in a moment.",
+                ),
+                request_category=RequestCategory.GENERAL,
+            )
+            return False
+
+        try:
+            loaded = await self._table_manager.load_game(chat_id)
+            game = loaded[0] if isinstance(loaded, tuple) else loaded
+            if game is None:
+                game = await self._table_manager.create_game(chat_id)
+
+            if game.state != GameState.INITIAL:
+                await self._view.send_message(
+                    chat_id,
+                    translate(
+                        "error.game_in_progress",
+                        "⚠️ Cannot join - game in progress.",
+                    ),
+                    request_category=RequestCategory.GENERAL,
+                )
+                return False
+
+            if game.seat_index_for_user(user_id) != -1:
+                await self._view.send_message(
+                    chat_id,
+                    translate(
+                        "error.already_joined",
+                        "⚠️ You've already joined this game.",
+                    ),
+                    request_category=RequestCategory.GENERAL,
+                )
+                return False
+
+            if game.seated_count() >= self._max_players:
+                await self._view.send_message(
+                    chat_id,
+                    translate(
+                        "error.table_full",
+                        "⚠️ Table is full ({} players maximum).",
+                    ).format(self._max_players),
+                    request_category=RequestCategory.GENERAL,
+                )
+                return False
+
+            available_seats = self._get_available_seats(game)
+            if not available_seats:
+                self._logger.error(
+                    "No available seats despite table not full",
+                    extra={
+                        "event_type": "seat_assignment_error",
+                        "chat_id": chat_id,
+                        "player_count": game.seated_count(),
+                        "max_players": self._max_players,
+                    },
+                )
+                return False
+
+            seat_index = available_seats[0]
+            player = await self._create_joining_player(user_id, user_name)
+            game.add_player(player, seat_index)
+            if hasattr(game, "ready_users"):
+                game.ready_users.add(user_id)
+
+            await self._table_manager.save_game(chat_id, game)
+
+            await self._view.send_message(
+                chat_id,
+                translate(
+                    "game.player_joined",
+                    "✅ {name} joined the game (Seat {seat}).",
+                ).format(name=user_name, seat=seat_index + 1),
+                request_category=RequestCategory.GENERAL,
+            )
+
+            self._logger.info(
+                "Player joined game",
+                extra={
+                    "event_type": "player_joined",
+                    "chat_id": chat_id,
+                    "user_id": user_id,
+                    "seat": seat_index,
+                },
+            )
+            return True
+        finally:
+            await self._lock_manager.release_table_lock(chat_id, lock_token)
+
+    async def leave_game(
+        self,
+        *,
+        chat_id: int,
+        user_id: int,
+    ) -> bool:
+        lock_token = await self._lock_manager.acquire_table_lock(
+            chat_id=chat_id,
+            operation="leave",
+            timeout_seconds=5,
+        )
+
+        if not lock_token:
+            self._logger.warning(
+                "Leave rejected - table lock held",
+                extra={
+                    "event_type": "leave_table_locked",
+                    "chat_id": chat_id,
+                    "user_id": user_id,
+                },
+            )
+            await self._view.send_message(
+                chat_id,
+                translate(
+                    "error.table_busy",
+                    "⚠️ Table is busy. Please try again in a moment.",
+                ),
+                request_category=RequestCategory.GENERAL,
+            )
+            return False
+
+        try:
+            loaded = await self._table_manager.load_game(chat_id)
+            game = loaded[0] if isinstance(loaded, tuple) else loaded
+            if game is None:
+                await self._view.send_message(
+                    chat_id,
+                    translate(
+                        "error.not_in_game",
+                        "⚠️ You're not in this game.",
+                    ),
+                    request_category=RequestCategory.GENERAL,
+                )
+                return False
+
+            seat_index = game.seat_index_for_user(user_id)
+            if seat_index == -1:
+                await self._view.send_message(
+                    chat_id,
+                    translate(
+                        "error.not_in_game",
+                        "⚠️ You're not in this game.",
+                    ),
+                    request_category=RequestCategory.GENERAL,
+                )
+                return False
+
+            if game.state != GameState.INITIAL:
+                await self._view.send_message(
+                    chat_id,
+                    translate(
+                        "error.cannot_leave_active",
+                        "⚠️ Cannot leave during active hand. Use /stop to end the game.",
+                    ),
+                    request_category=RequestCategory.GENERAL,
+                )
+                return False
+
+            player = game.seats[seat_index]
+            name = getattr(player, "display_name", None) or getattr(
+                player, "full_name", None
+            ) or str(user_id)
+
+            game.remove_player_by_user(user_id)
+            if hasattr(game, "ready_users"):
+                game.ready_users.discard(user_id)
+
+            await self._table_manager.save_game(chat_id, game)
+
+            await self._view.send_message(
+                chat_id,
+                translate(
+                    "game.player_left",
+                    "👋 {name} left the game.",
+                ).format(name=name),
+                request_category=RequestCategory.GENERAL,
+            )
+
+            self._logger.info(
+                "Player left game",
+                extra={
+                    "event_type": "player_left",
+                    "chat_id": chat_id,
+                    "user_id": user_id,
+                },
+            )
+            return True
+        finally:
+            await self._lock_manager.release_table_lock(chat_id, lock_token)
+
+    async def _create_joining_player(
+        self, user_id: int, user_name: str
+    ) -> Player:
+        if self._player_factory is not None:
+            result = self._player_factory(user_id, user_name)
+            if asyncio.iscoroutine(result):
+                return await result  # type: ignore[return-value]
+            return result
+
+        mention = format_mention_markdown(user_id, user_name or str(user_id), version=1)
+        player = Player(
+            user_id=user_id,
+            mention_markdown=mention,
+            wallet=_TableLockWallet(self._default_money),
+            ready_message_id=None,
+            seat_index=None,
+        )
+        player.display_name = user_name or str(user_id)
+        player.username = None
+        player.full_name = user_name
+        return player
+
+    def _get_available_seats(self, game: Game) -> List[int]:
+        seats = getattr(game, "seats", [])
+        if not isinstance(seats, list):
+            return []
+
+        max_seats = min(len(seats), self._max_players)
+        available: List[int] = [
+            index for index in range(max_seats) if seats[index] is None
+        ]
+        if max_seats < self._max_players:
+            available.extend(range(max_seats, self._max_players))
+        return sorted(dict.fromkeys(available))
 
     def _log_lock_snapshot(
         self,

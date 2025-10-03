@@ -2,6 +2,7 @@
   "engine": {
     "stage_lock_prefix": "stage:",
     "action_lock_prefix": "action:lock:",
+    "table_lock_prefix": "table:lock:",
     "stop_request": "stop_request"
   },
   "player_report": {
