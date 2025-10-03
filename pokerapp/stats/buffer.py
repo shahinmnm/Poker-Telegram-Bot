@@ -14,6 +14,14 @@ import logging
 import time
 from typing import Any, Awaitable, Callable, Dict, List, Optional, Sequence
 
+SessionMaker = Any
+try:
+    from sqlalchemy.ext.asyncio import async_sessionmaker
+except Exception:  # pragma: no cover - optional dependency
+    async_sessionmaker = None  # type: ignore[assignment]
+else:  # pragma: no cover - requires SQLAlchemy
+    SessionMaker = async_sessionmaker[Any]
+
 logger = logging.getLogger(__name__)
 
 
@@ -33,7 +41,7 @@ class StatsBatchBuffer:
 
     def __init__(
         self,
-        session_maker: Any,
+        session_maker: SessionMaker,
         flush_callback: FlushCallback,
         config: Dict[str, Any],
     ) -> None:
@@ -106,18 +114,22 @@ class StatsBatchBuffer:
         error: Optional[BaseException] = None
         max_attempts = max(0, self._max_retries) + 1
 
+        rebuffered = False
+
         while attempt <= max_attempts:
             try:
                 await self._flush_callback(records_to_flush)
                 success = True
                 break
             except asyncio.CancelledError:
-                async with self._lock:
-                    self._buffer = records_to_flush + self._buffer
-                    if self._metrics_enabled:
-                        self.metrics["max_buffer_size_reached"] = max(
-                            self.metrics["max_buffer_size_reached"], len(self._buffer)
-                        )
+                if not rebuffered:
+                    async with self._lock:
+                        self._buffer = records_to_flush + self._buffer
+                        if self._metrics_enabled:
+                            self.metrics["max_buffer_size_reached"] = max(
+                                self.metrics["max_buffer_size_reached"], len(self._buffer)
+                            )
+                    rebuffered = True
                 raise
             except Exception as exc:  # pragma: no cover - logging branch
                 error = exc
@@ -131,16 +143,28 @@ class StatsBatchBuffer:
                 )
                 backoff_seconds = self._retry_backoff_base ** (attempt - 1)
                 attempt += 1
-                await asyncio.sleep(backoff_seconds)
+                try:
+                    await asyncio.sleep(backoff_seconds)
+                except asyncio.CancelledError:
+                    if not rebuffered:
+                        async with self._lock:
+                            self._buffer = records_to_flush + self._buffer
+                            if self._metrics_enabled:
+                                self.metrics["max_buffer_size_reached"] = max(
+                                    self.metrics["max_buffer_size_reached"], len(self._buffer)
+                                )
+                        rebuffered = True
+                    raise
 
         if not success:
-            async with self._lock:
-                # Prepend failed batch to ensure it is flushed before newer records.
-                self._buffer = records_to_flush + self._buffer
-                if self._metrics_enabled:
-                    self.metrics["max_buffer_size_reached"] = max(
-                        self.metrics["max_buffer_size_reached"], len(self._buffer)
-                    )
+            if not rebuffered:
+                async with self._lock:
+                    # Prepend failed batch to ensure it is flushed before newer records.
+                    self._buffer = records_to_flush + self._buffer
+                    if self._metrics_enabled:
+                        self.metrics["max_buffer_size_reached"] = max(
+                            self.metrics["max_buffer_size_reached"], len(self._buffer)
+                        )
             if self._metrics_enabled:
                 self.metrics["failed_flushes"] += 1
             if error:
@@ -178,7 +202,14 @@ class StatsBatchBuffer:
             try:
                 while True:
                     await asyncio.sleep(self._flush_interval_seconds)
-                    logger.debug("Background flusher tick")
+
+                    async with self._lock:
+                        buffer_size = len(self._buffer)
+
+                    if buffer_size > 0:
+                        logger.debug(
+                            "Background flusher tick (buffer_size=%s)", buffer_size
+                        )
                     try:
                         await self._flush()
                     except Exception:  # pragma: no cover - defensive logging
