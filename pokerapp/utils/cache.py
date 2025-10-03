@@ -331,6 +331,10 @@ class AdaptivePlayerReportCache(PlayerReportCache):
             maxsize=maxsize,
             logger_=logger_,
         )
+        # The Redis schema changed from ``stats:{user_id}`` to the
+        # chat-scoped ``stats:{chat_id}:{user_id}``.  Flushing the cache during
+        # deployment is sufficient to migrate existing installations.
+        self._prefix = "stats:"
         self._default_ttl = max(default_ttl, 0)
         self._bonus_ttl = max(bonus_ttl, 0)
         self._post_hand_ttl = max(post_hand_ttl, 0)
@@ -394,11 +398,11 @@ class AdaptivePlayerReportCache(PlayerReportCache):
                 )
                 return self._cache[key]
 
-            if self._persistent_store is not None:
-                value = await self._load_from_persistent_store(
-                    key, ttl, ttl_event_type
-                )
-                if value is not None:
+        if self._persistent_store is not None:
+            value = await self._load_from_persistent_store(
+                key, ttl, ttl_event_type
+            )
+            if value is not None:
                     self._hits += 1
                     self._event_metrics[metrics_key]["hits"] += 1
                     return value
@@ -491,6 +495,8 @@ class AdaptivePlayerReportCache(PlayerReportCache):
         if self._persistent_store is None:
             return None
         user_id, chat_id = key
+        if chat_id is None:
+            return None
         try:
             payload = await self._persistent_store.safe_get(
                 self._redis_key(user_id, chat_id),
@@ -551,6 +557,8 @@ class AdaptivePlayerReportCache(PlayerReportCache):
         if self._persistent_store is None:
             return
         user_id, chat_id = key
+        if chat_id is None:
+            return
         try:
             payload = self._serialize(value)
         except Exception:
@@ -633,6 +641,8 @@ class AdaptivePlayerReportCache(PlayerReportCache):
             return
 
         user_id, chat_id = key
+        if chat_id is None:
+            return
 
         async def _delete() -> None:
             try:
@@ -658,11 +668,10 @@ class AdaptivePlayerReportCache(PlayerReportCache):
 
         loop.create_task(_delete())
 
-    @staticmethod
-    def _redis_key(user_id: int, chat_id: Optional[int]) -> str:
+    def _redis_key(self, user_id: int, chat_id: Optional[int] = None) -> str:
         if chat_id is None:
-            return f"stats:{int(user_id)}"
-        return f"stats:{int(chat_id)}:{int(user_id)}"
+            raise ValueError("chat_id is required when building a Redis key")
+        return f"{self._prefix}{int(chat_id)}:{int(user_id)}"
 
     @staticmethod
     def _serialize(value: T) -> bytes:
