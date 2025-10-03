@@ -122,6 +122,7 @@ class PlayerIdentityManager:
         report = await self._player_report_cache.get_with_context(
             user_id_int,
             _load_report,
+            chat_id=chat.id,
         )
         if report is None or (
             report.stats.total_games <= 0 and not report.recent_games

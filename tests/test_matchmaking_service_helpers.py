@@ -182,7 +182,7 @@ async def test_post_blinds_assigns_roles_and_invalidates(matchmaking_setup):
     assert current is player
     matchmaking_setup.player_manager.assign_role_labels.assert_called_once_with(game)
     matchmaking_setup.stats_reporter.invalidate_players.assert_awaited_once_with(
-        game.players
+        game.players, chat_id=-300
     )
 
 

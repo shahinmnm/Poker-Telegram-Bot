@@ -61,7 +61,9 @@ class StatsReporter:
                 chat_id=self._safe_int(chat_id),
                 players=players,
             )
-        await self.invalidate_players(game.seated_players())
+        await self.invalidate_players(
+            game.seated_players(), chat_id=self._safe_int(chat_id)
+        )
 
     async def hand_finished_deferred(
         self,
@@ -84,12 +86,17 @@ class StatsReporter:
                 results=results,
                 pot_total=pot_total,
             )
-        await self.invalidate_players(game.players, event_type="hand_finished")
+        await self.invalidate_players(
+            game.players,
+            chat_id=self._safe_int(chat_id),
+            event_type="hand_finished",
+        )
 
     async def invalidate_players(
         self,
         players: Iterable[Player | int],
         *,
+        chat_id: Optional[ChatId] = None,
         event_type: Optional[str] = None,
     ) -> None:
         """Invalidate cached stats reports for the supplied ``players``."""
@@ -98,13 +105,21 @@ class StatsReporter:
         if not normalized:
             return
 
+        normalized_chat = (
+            self._safe_int(chat_id) if chat_id is not None else None
+        )
+
         if self._adaptive_player_report_cache:
             if event_type:
                 self._adaptive_player_report_cache.invalidate_on_event(
-                    normalized, event_type
+                    normalized,
+                    event_type,
+                    chat_id=normalized_chat,
                 )
             else:
-                self._adaptive_player_report_cache.invalidate_many(normalized)
+                self._adaptive_player_report_cache.invalidate_many(
+                    normalized, chat_id=normalized_chat
+                )
 
         if self._player_report_cache:
             await self._player_report_cache.invalidate(normalized)

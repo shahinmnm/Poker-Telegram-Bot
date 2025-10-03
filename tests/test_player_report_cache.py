@@ -89,7 +89,7 @@ async def test_bonus_event_applies_shorter_ttl(monkeypatch):
     assert cache.metrics()["bonus_claimed"]["misses"] == 1
 
     # Verify expiry was set using the bonus TTL
-    expires_at = cache._expiry_map[7]
+    expires_at = cache._expiry_map[(7, None)]
     assert expires_at - fake_time == pytest.approx(30)
 
     # Advance time just shy of TTL to confirm cache hit still works
@@ -111,14 +111,14 @@ async def test_invalidate_on_event_records_event_specific_ttls(monkeypatch):
     cache.invalidate_on_event([11], event_type="hand_finished")
     cache.invalidate_on_event([12], event_type="bonus_claimed")
 
-    assert cache._next_ttl[11] == ("hand_finished", 15)
-    assert cache._next_ttl[12] == ("bonus_claimed", 45)
+    assert cache._next_ttl[(11, None)] == ("hand_finished", 15)
+    assert cache._next_ttl[(12, None)] == ("bonus_claimed", 45)
 
     await cache.get_with_context(11, loader)
     await cache.get_with_context(12, loader)
 
-    assert cache._expiry_map[11] - time_state["value"] == pytest.approx(15)
-    assert cache._expiry_map[12] - time_state["value"] == pytest.approx(45)
+    assert cache._expiry_map[(11, None)] - time_state["value"] == pytest.approx(15)
+    assert cache._expiry_map[(12, None)] - time_state["value"] == pytest.approx(45)
 
 
 @pytest.mark.asyncio
@@ -209,6 +209,38 @@ async def test_persistent_store_roundtrip():
 
 
 @pytest.mark.asyncio
+async def test_chat_scoped_cache_entries_are_isolated():
+    store = _FakeRedisOps()
+    cache = AdaptivePlayerReportCache(default_ttl=40, persistent_store=store)
+
+    calls = {"a": 0, "b": 0}
+
+    async def loader_a() -> Dict[str, str]:
+        calls["a"] += 1
+        return {"value": "alpha"}
+
+    async def loader_b() -> Dict[str, str]:
+        calls["b"] += 1
+        return {"value": "beta"}
+
+    result_a = await cache.get_with_context(42, loader_a, chat_id=111)
+    result_b = await cache.get_with_context(42, loader_b, chat_id=222)
+
+    assert result_a == {"value": "alpha"}
+    assert result_b == {"value": "beta"}
+
+    repeat_a = await cache.get_with_context(42, loader_a, chat_id=111)
+    repeat_b = await cache.get_with_context(42, loader_b, chat_id=222)
+
+    assert repeat_a == {"value": "alpha"}
+    assert repeat_b == {"value": "beta"}
+    assert calls == {"a": 1, "b": 1}
+
+    assert "stats:111:42" in store.storage
+    assert "stats:222:42" in store.storage
+
+
+@pytest.mark.asyncio
 async def test_concurrent_get_uses_single_loader_call():
     cache = AdaptivePlayerReportCache(default_ttl=90)
     calls = {"count": 0}
@@ -253,7 +285,7 @@ async def test_hand_finished_event_sets_post_hand_ttl(monkeypatch):
     cache.invalidate_on_event([42], event_type="hand_finished")
     first = await cache.get_with_context(42, loader)
     assert first == {"value": 1}
-    assert cache._expiry_map[42] - time_state["value"] == pytest.approx(15)
+    assert cache._expiry_map[(42, None)] - time_state["value"] == pytest.approx(15)
 
     time_state["value"] = 14.5
     hit = await cache.get_with_context(42, loader)
@@ -321,4 +353,4 @@ async def test_unknown_event_type_falls_back_to_default_ttl(monkeypatch):
     cache.invalidate_on_event([99], event_type="unexpected")
     await cache.get_with_context(99, loader)
 
-    assert cache._expiry_map[99] - time_state["value"] == pytest.approx(90)
+    assert cache._expiry_map[(99, None)] - time_state["value"] == pytest.approx(90)
