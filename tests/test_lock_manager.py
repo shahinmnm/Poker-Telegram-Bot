@@ -519,3 +519,129 @@ async def test_lock_manager_metrics_reset_clears_rw_metrics(
 
     assert metrics["stage_lock_acquisitions"] == 0
     assert metrics["table_lock_stats"] == {}
+
+
+@pytest.mark.asyncio
+async def test_multiple_writers_queue_fifo(rw_lock_manager: LockManager) -> None:
+    chat_id = 12345
+    order: list[int] = []
+
+    async def writer(writer_id: int, delay: float) -> None:
+        await asyncio.sleep(delay)
+        async with rw_lock_manager.table_write_lock(chat_id):
+            order.append(writer_id)
+            await asyncio.sleep(0.05)
+
+    tasks = [
+        asyncio.create_task(writer(idx, idx * 0.01))
+        for idx in range(1, 6)
+    ]
+
+    await asyncio.gather(*tasks)
+
+    assert order == [1, 2, 3, 4, 5]
+
+
+@pytest.mark.asyncio
+async def test_reader_defers_to_waiting_writer(rw_lock_manager: LockManager) -> None:
+    rw_lock_manager.writer_priority = True
+    chat_id = 54321
+    events: list[str] = []
+
+    async def reader(reader_id: int) -> None:
+        async with rw_lock_manager.table_read_lock(chat_id):
+            events.append(f"reader_{reader_id}_acquired")
+            await asyncio.sleep(0.1)
+        events.append(f"reader_{reader_id}_released")
+
+    async def writer() -> None:
+        await asyncio.sleep(0.02)
+        events.append("writer_queued")
+        async with rw_lock_manager.table_write_lock(chat_id):
+            events.append("writer_acquired")
+            await asyncio.sleep(0.05)
+        events.append("writer_released")
+
+    async def late_reader() -> None:
+        await asyncio.sleep(0.03)
+        events.append("late_reader_queued")
+        async with rw_lock_manager.table_read_lock(chat_id):
+            events.append("late_reader_acquired")
+
+    await asyncio.gather(reader(1), writer(), late_reader())
+
+    assert events.index("reader_1_acquired") < events.index("writer_queued")
+    assert events.index("writer_queued") < events.index("late_reader_queued")
+    assert events.index("reader_1_released") < events.index("writer_acquired")
+    assert events.index("writer_released") < events.index("late_reader_acquired")
+
+
+@pytest.mark.asyncio
+async def test_cancelled_reader_releases_lock(rw_lock_manager: LockManager) -> None:
+    chat_id = 777
+
+    async def cancelled_reader() -> None:
+        async with rw_lock_manager.table_read_lock(chat_id):
+            await asyncio.sleep(10)
+
+    task = asyncio.create_task(cancelled_reader())
+    await asyncio.sleep(0.01)
+    task.cancel()
+
+    with contextlib.suppress(asyncio.CancelledError):
+        await task
+
+    state = rw_lock_manager._table_rw_locks.get(chat_id)
+    assert state is not None
+    assert state.reader_count == 0
+    assert not state.has_active_writer
+
+
+@pytest.mark.asyncio
+async def test_cancelled_writer_allows_new_writers(
+    rw_lock_manager: LockManager,
+) -> None:
+    chat_id = 888
+    writer_succeeded = False
+
+    async def cancelled_writer() -> None:
+        async with rw_lock_manager.table_write_lock(chat_id):
+            await asyncio.sleep(10)
+
+    async def subsequent_writer() -> None:
+        nonlocal writer_succeeded
+        async with rw_lock_manager.table_write_lock(chat_id):
+            writer_succeeded = True
+
+    task = asyncio.create_task(cancelled_writer())
+    await asyncio.sleep(0.01)
+    task.cancel()
+
+    with contextlib.suppress(asyncio.CancelledError):
+        await task
+
+    await subsequent_writer()
+    assert writer_succeeded
+
+
+@pytest.mark.asyncio
+async def test_wait_time_metrics_accuracy(rw_lock_manager: LockManager) -> None:
+    chat_id = 999
+
+    async def blocking_writer() -> None:
+        async with rw_lock_manager.table_write_lock(chat_id):
+            await asyncio.sleep(0.2)
+
+    async def waiting_reader() -> None:
+        await asyncio.sleep(0.05)
+        async with rw_lock_manager.table_read_lock(chat_id):
+            pass
+
+    await asyncio.gather(blocking_writer(), waiting_reader())
+
+    state = rw_lock_manager._table_rw_locks[chat_id]
+    metrics = state.metrics
+
+    assert metrics.total_read_wait_time > 0.14
+    assert metrics.max_read_wait_time > 0.14
+    assert metrics.average_read_wait_time() > 0.14
