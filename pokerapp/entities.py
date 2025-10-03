@@ -180,6 +180,7 @@ class Game:
 
         # 🆕 اضافه شده: پیام نوبت فعلی
         self.turn_message_id: Optional[MessageId] = None
+        self.turn_deadline: Optional[float] = None
 
         # 🆕 اضافه شده: پیام تصویر میز
         self.board_message_id: Optional[MessageId] = None
@@ -199,6 +200,7 @@ class Game:
         self.pot = 0
         self.max_round_rate = 0
         self.current_player_index = -1
+        self.turn_deadline = None
         self.small_blind_index = -1
         self.big_blind_index = -1
         for player in self.players:

@@ -86,6 +86,7 @@ class PokerBot:
         self._view: Optional[PokerBotViewer] = None
         self._model: Optional[PokerBotModel] = None
         self._controller: Optional[PokerBotCotroller] = None
+        self._aiogram_dispatcher = None
 
         self._kv_async = kv_async
         self._redis_ops = redis_ops
@@ -98,6 +99,35 @@ class PokerBot:
         self._player_report_cache = player_report_cache
         self._adaptive_player_report_cache = adaptive_player_report_cache
         self._build_application()
+        self._setup_aiogram_dispatcher()
+
+    def _setup_aiogram_dispatcher(self) -> None:
+        try:
+            from aiogram import Dispatcher  # type: ignore
+        except ImportError:  # pragma: no cover - optional dependency guard
+            self._logger.warning(
+                "Aiogram not available; skipping action router registration.",
+                extra={"event_type": "aiogram_router_skipped", "router": "action_router"},
+            )
+            self._aiogram_dispatcher = None
+            return
+
+        if self._aiogram_dispatcher is None:
+            self._aiogram_dispatcher = Dispatcher()
+
+        dispatcher = self._aiogram_dispatcher
+
+        from pokerapp.aiogram_flow import router as action_router
+
+        sub_routers = getattr(dispatcher, "sub_routers", [])
+        if any(router is action_router for router in sub_routers):
+            return
+
+        dispatcher.include_router(action_router)
+        self._logger.info(
+            "Action router registered",
+            extra={"event_type": "aiogram_router_registered", "router": "action_router"},
+        )
 
     def run(self) -> None:
         """Start the bot using the webhook listener."""
