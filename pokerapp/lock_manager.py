@@ -21,7 +21,6 @@ from typing import (
     Mapping,
     Optional,
     Sequence,
-    Set,
     Tuple,
     TYPE_CHECKING,
 )
@@ -343,8 +342,17 @@ class LockManager:
                 if redis_keys_source is None:
                     redis_keys_source = getattr(config_instance, "redis_keys", None)
 
-        self._redis_keys: Dict[str, str] = {
-            "action_lock_prefix": _resolve_action_lock_prefix(redis_keys_source)
+        engine_defaults: Dict[str, str] = {"table_lock_prefix": "table:lock:"}
+        if isinstance(redis_keys_source, Mapping):
+            engine_section = redis_keys_source.get("engine")
+            if isinstance(engine_section, Mapping):
+                for key, value in engine_section.items():
+                    if isinstance(value, str) and value:
+                        engine_defaults[key] = value
+
+        self._redis_keys: Dict[str, Any] = {
+            "action_lock_prefix": _resolve_action_lock_prefix(redis_keys_source),
+            "engine": engine_defaults,
         }
         self._redis_pool: Any = redis_pool or _InMemoryActionLockBackend()
         if isinstance(self._redis_pool, _InMemoryActionLockBackend):
@@ -355,6 +363,13 @@ class LockManager:
                     "backend_version": self._redis_pool._version,
                 },
             )
+        self._release_lock_script = (
+            "if redis.call(\"GET\", KEYS[1]) == ARGV[1] then\n"
+            "    return redis.call(\"DEL\", KEYS[1])\n"
+            "else\n"
+            "    return 0\n"
+            "end"
+        )
 
     def get_lock_metrics(self) -> Dict[str, Any]:
         """Return lock backend metrics for monitoring."""
@@ -2615,6 +2630,139 @@ class LockManager:
             return f"{base}:{str(action_data)}"
         return base
 
+    def _make_table_lock_key(self, chat_id: int, operation: str) -> str:
+        engine_keys = self._redis_keys.get("engine", {})
+        prefix = engine_keys.get("table_lock_prefix", "table:lock:")
+        try:
+            normalized_chat = int(chat_id)
+        except (TypeError, ValueError):
+            normalized_chat = chat_id
+        return f"{prefix}{normalized_chat}"
+
+    async def _execute_release_lock_script(self, redis_key: str, token: str) -> int:
+        try:
+            try:
+                return await self._redis_pool.eval(
+                    self._release_lock_script,
+                    keys=[redis_key],
+                    args=[token],
+                )
+            except TypeError:
+                return await self._redis_pool.eval(
+                    self._release_lock_script,
+                    1,
+                    redis_key,
+                    token,
+                )
+        except ModuleNotFoundError:
+            current_value = await self._redis_pool.get(redis_key)
+            if isinstance(current_value, bytes):
+                current_value = current_value.decode()
+            if current_value == token:
+                deleted = await self._redis_pool.delete(redis_key)
+                return 1 if deleted else 0
+            return 0
+
+    async def acquire_table_lock(
+        self,
+        *,
+        chat_id: int,
+        operation: str,
+        timeout_seconds: int = 5,
+    ) -> Optional[str]:
+        if timeout_seconds <= 0:
+            timeout_seconds = 1
+
+        ttl_seconds = int(timeout_seconds)
+        if ttl_seconds <= 0:
+            ttl_seconds = 1
+
+        lock_key = self._make_table_lock_key(chat_id, operation)
+        token = str(uuid.uuid4())
+
+        try:
+            acquired = await self._redis_pool.set(
+                lock_key,
+                token,
+                nx=True,
+                ex=ttl_seconds,
+            )
+        except aioredis.ConnectionError as exc:
+            self._logger.error(
+                "[TABLE_LOCK] Failed to acquire distributed lock (redis error)",
+                extra={
+                    "event_type": "table_lock_acquire_error",
+                    "chat_id": chat_id,
+                    "operation": operation,
+                    "timeout_seconds": timeout_seconds,
+                    "error": str(exc),
+                },
+                exc_info=True,
+            )
+            return None
+
+        if acquired:
+            self._logger.debug(
+                "Table lock acquired",
+                extra={
+                    "event_type": "table_lock_acquired",
+                    "chat_id": chat_id,
+                    "operation": operation,
+                    "token_prefix": token[:8],
+                    "ttl_seconds": ttl_seconds,
+                },
+            )
+            return token
+
+        self._logger.debug(
+            "Table lock already held",
+            extra={
+                "event_type": "table_lock_contention",
+                "chat_id": chat_id,
+                "operation": operation,
+            },
+        )
+        return None
+
+    async def release_table_lock(self, chat_id: int, token: str) -> bool:
+        lock_key = self._make_table_lock_key(chat_id, "")
+
+        try:
+            result = await self._execute_release_lock_script(lock_key, token)
+        except aioredis.ConnectionError as exc:
+            self._logger.error(
+                "[TABLE_LOCK] Failed to release distributed lock (redis error)",
+                extra={
+                    "event_type": "table_lock_release_error",
+                    "chat_id": chat_id,
+                    "token_prefix": token[:8],
+                    "error": str(exc),
+                },
+                exc_info=True,
+            )
+            return False
+
+        if result == 1:
+            self._logger.debug(
+                "Table lock release",
+                extra={
+                    "event_type": "table_lock_released",
+                    "chat_id": chat_id,
+                    "token_prefix": token[:8],
+                },
+            )
+            return True
+
+        self._logger.debug(
+            "Table lock release failed",
+            extra={
+                "event_type": "table_lock_release_failed",
+                "chat_id": chat_id,
+                "token_prefix": token[:8],
+            },
+        )
+        return False
+
     async def acquire_action_lock(
         self,
         chat_id: int,
@@ -2699,37 +2847,8 @@ class LockManager:
 
         redis_key = self._make_action_lock_key(chat_id, user_id, action_data)
 
-        lua_script = """
-        if redis.call("GET", KEYS[1]) == ARGV[1] then
-            return redis.call("DEL", KEYS[1])
-        else
-            return 0
-        end
-        """
-
         try:
-            try:
-                result = await self._redis_pool.eval(
-                    lua_script,
-                    keys=[redis_key],
-                    args=[lock_token],
-                )
-            except TypeError:
-                result = await self._redis_pool.eval(
-                    lua_script,
-                    1,
-                    redis_key,
-                    lock_token,
-                )
-        except ModuleNotFoundError:
-            current_value = await self._redis_pool.get(redis_key)
-            if isinstance(current_value, bytes):
-                current_value = current_value.decode()
-            if current_value == lock_token:
-                deleted = await self._redis_pool.delete(redis_key)
-                result = 1 if deleted else 0
-            else:
-                result = 0
+            result = await self._execute_release_lock_script(redis_key, lock_token)
         except aioredis.ConnectionError as exc:
             self._logger.error(
                 "[ACTION_LOCK] Failed to release distributed lock (redis error)",
