@@ -96,6 +96,13 @@ The winner is determinated by various combinations of Poker hands rank from five
   frequently rate limited or raise it if you need to burst above the default
   throughput.
 
+#### Debugging flags
+
+- Pass `--skip-stats-buffer` to `python main.py` to bypass the asynchronous
+  statistics batching buffer. This is useful when diagnosing migration issues or
+  when you want writes to hit the database immediately at the cost of higher
+  load.
+
 ### Statistics & database setup
 
 The bot ships with a production-ready statistics engine that keeps track of
