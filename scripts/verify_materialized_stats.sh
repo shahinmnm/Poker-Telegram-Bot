@@ -37,14 +37,24 @@ echo ""
 
 # Check 3: Triggers exist
 echo "✓ Check 3: Trigger verification"
-TRIGGERS=$(sqlite3 "$DB_PATH" $'SELECT name FROM sqlite_master WHERE type=\'trigger\' AND name LIKE \'%update_stats%\';')
-echo "$TRIGGERS" | sed 's/^/    ✅ /'
-TRIGGER_COUNT=$(echo "$TRIGGERS" | wc -l)
-if [ "$TRIGGER_COUNT" -ge 2 ]; then
-    echo "  ✅ All $TRIGGER_COUNT triggers created"
+TRIGGERS=$(sqlite3 "$DB_PATH" $'SELECT name FROM sqlite_master WHERE type=\'trigger\' AND name LIKE \'%stats%\' ORDER BY name;')
+if [ -n "$TRIGGERS" ]; then
+    echo "$TRIGGERS" | sed 's/^/    ✅ /'
+fi
+TRIGGER_COUNT=$(sqlite3 "$DB_PATH" "SELECT COUNT(*) FROM sqlite_master WHERE type='trigger' AND name LIKE '%stats%';")
+if [ "$TRIGGER_COUNT" -eq 3 ]; then
+    echo "  ✅ All 3 triggers created"
 else
-    echo "  ❌ Expected 2+ triggers, found $TRIGGER_COUNT"
+    echo "  ❌ Expected 3 triggers, found $TRIGGER_COUNT"
     exit 1
+fi
+
+TRIGGER_COUNT_SYNC=$(sqlite3 "$DB_PATH" "SELECT COUNT(*) FROM sqlite_master WHERE type='trigger' AND name='trg_sync_username_to_stats';")
+echo "    Username sync trigger: $TRIGGER_COUNT_SYNC"
+if [ "$TRIGGER_COUNT_SYNC" -eq 1 ]; then
+    echo "  ✅ Username sync trigger exists"
+else
+    echo "  ⚠️  Username sync trigger missing"
 fi
 echo ""
 

@@ -1,10 +1,22 @@
--- ============================================================================
--- Migration 003: Materialized Player Statistics Table
--- ============================================================================
+-- =============================================================================
+-- Migration 003: Create Materialized Player Statistics Table
+-- =============================================================================
+-- DESIGN DECISION: Global Statistics
+--
+-- This table stores GLOBAL player statistics across ALL chats.
+-- Rationale:
+--   - Simpler schema (no chat_id column needed)
+--   - Players have one unified reputation/track record
+--   - Easier cross-chat leaderboards
+--   - Matches original bot design philosophy
+--
+-- Note: Code uses chat-scoped cache invalidation for performance optimization,
+--       but the underlying stats remain global. This is intentional.
+-- =============================================================================
 -- Purpose: Create pre-aggregated stats table for 10-20x faster queries
 -- Dependencies: Requires migrations 001 and 002
 -- Rollback: See scripts/rollback_003.sql
--- ============================================================================
+-- =============================================================================
 
 BEGIN TRANSACTION;
 
@@ -83,10 +95,13 @@ SELECT
     COALESCE(SUM(CASE WHEN hp.amount_won < 0 THEN ABS(hp.amount_won) ELSE 0 END), 0) AS total_losses,
     COALESCE(SUM(hp.amount_won), 0) AS net_profit,
     COALESCE(MAX(hp.amount_won), 0) AS biggest_pot,
-    ROUND(
-        CAST(SUM(CASE WHEN hp.amount_won > 0 THEN 1 ELSE 0 END) AS REAL) / 
-        NULLIF(COUNT(DISTINCT hp.hand_id), 0) * 100, 
-        2
+    COALESCE(
+        ROUND(
+            CAST(SUM(CASE WHEN hp.amount_won > 0 THEN 1 ELSE 0 END) AS REAL) /
+            NULLIF(COUNT(DISTINCT hp.hand_id), 0) * 100,
+            2
+        ),
+        0.0
     ) AS win_rate,
     ROUND(
         CAST(SUM(hp.amount_won) AS REAL) / 
@@ -142,10 +157,13 @@ BEGIN
         COALESCE(ps.total_losses, 0) + CASE WHEN hp.amount_won < 0 THEN ABS(hp.amount_won) ELSE 0 END,
         COALESCE(ps.net_profit, 0) + hp.amount_won,
         MAX(COALESCE(ps.biggest_pot, 0), hp.amount_won),
-        ROUND(
-            CAST(COALESCE(ps.hands_won, 0) + CASE WHEN hp.amount_won > 0 THEN 1 ELSE 0 END AS REAL) / 
-            NULLIF(COALESCE(ps.total_hands, 0) + 1, 0) * 100,
-            2
+        COALESCE(
+            ROUND(
+                CAST(COALESCE(ps.hands_won, 0) + CASE WHEN hp.amount_won > 0 THEN 1 ELSE 0 END AS REAL) /
+                NULLIF(COALESCE(ps.total_hands, 0) + 1, 0) * 100,
+                2
+            ),
+            0.0
         ),
         ROUND(
             CAST(COALESCE(ps.net_profit, 0) + hp.amount_won AS REAL) / 
@@ -195,10 +213,13 @@ BEGIN
         COALESCE(ps.total_losses, 0) + CASE WHEN NEW.amount_won < 0 THEN ABS(NEW.amount_won) ELSE 0 END,
         COALESCE(ps.net_profit, 0) + NEW.amount_won,
         MAX(COALESCE(ps.biggest_pot, 0), NEW.amount_won),
-        ROUND(
-            CAST(COALESCE(ps.hands_won, 0) + CASE WHEN NEW.amount_won > 0 THEN 1 ELSE 0 END AS REAL) / 
-            NULLIF(COALESCE(ps.total_hands, 0) + 1, 0) * 100,
-            2
+        COALESCE(
+            ROUND(
+                CAST(COALESCE(ps.hands_won, 0) + CASE WHEN NEW.amount_won > 0 THEN 1 ELSE 0 END AS REAL) /
+                NULLIF(COALESCE(ps.total_hands, 0) + 1, 0) * 100,
+                2
+            ),
+            0.0
         ),
         ROUND(
             CAST(COALESCE(ps.net_profit, 0) + NEW.amount_won AS REAL) / 
@@ -213,6 +234,19 @@ BEGIN
         LEFT JOIN player_stats ps ON u.id = NEW.user_id
     WHERE 
         u.id = NEW.user_id;
+END;
+
+-- Trigger 3: Sync username changes into stats table
+CREATE TRIGGER IF NOT EXISTS trg_sync_username_to_stats
+AFTER UPDATE OF username ON users
+FOR EACH ROW
+WHEN NEW.username IS NOT NULL AND NEW.username != OLD.username
+BEGIN
+    UPDATE player_stats
+    SET
+        username = NEW.username,
+        updated_at = CURRENT_TIMESTAMP
+    WHERE user_id = NEW.id;
 END;
 
 -- ============================================================================
@@ -234,7 +268,7 @@ WHERE type = 'index'
 SELECT 'Triggers created: ' || COUNT(*) || ' triggers' AS test_3
 FROM sqlite_master 
 WHERE type = 'trigger' 
-  AND (name LIKE '%update_stats%');
+  AND (name LIKE '%update_stats%' OR name = 'trg_sync_username_to_stats');
 
 -- Test 4: Sample query performance (leaderboard top 10)
 EXPLAIN QUERY PLAN

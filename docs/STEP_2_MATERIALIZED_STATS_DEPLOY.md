@@ -2,6 +2,7 @@
 
 ## Overview
 This migration creates a `player_stats` table that pre-aggregates player statistics for 10-20x faster queries.
+It maintains global player history with three triggers (hand completion, player result, and username sync) to keep materialized data fresh even when usernames change.
 
 ## Pre-Deployment Checklist
 
@@ -116,11 +117,13 @@ SQL
 ### 3. Trigger Verification
 ```bash
 sqlite3 data/poker.db <<'SQL'
-SELECT name FROM sqlite_master 
-WHERE type = 'trigger' AND name LIKE '%update_stats%';
+SELECT name FROM sqlite_master
+WHERE type = 'trigger' AND name LIKE '%stats%'
+ORDER BY name;
 SQL
 ```
-✅ **Expected**: 2 triggers listed
+✅ **Expected**: 3 triggers listed
+- `trg_sync_username_to_stats`
 - `trg_update_stats_on_hand_complete`
 - `trg_update_stats_on_player_result`
 
@@ -406,14 +409,24 @@ echo ""
 
 # Check 3: Triggers exist
 echo "✓ Check 3: Trigger verification"
-TRIGGERS=$(sqlite3 "$DB_PATH" $'SELECT name FROM sqlite_master WHERE type=\'trigger\' AND name LIKE \'%update_stats%\';')
-echo "$TRIGGERS" | sed 's/^/    ✅ /'
-TRIGGER_COUNT=$(echo "$TRIGGERS" | wc -l)
-if [ "$TRIGGER_COUNT" -ge 2 ]; then
-    echo "  ✅ All $TRIGGER_COUNT triggers created"
+TRIGGERS=$(sqlite3 "$DB_PATH" $'SELECT name FROM sqlite_master WHERE type=\'trigger\' AND name LIKE \'%stats%\' ORDER BY name;')
+if [ -n "$TRIGGERS" ]; then
+    echo "$TRIGGERS" | sed 's/^/    ✅ /'
+fi
+TRIGGER_COUNT=$(sqlite3 "$DB_PATH" "SELECT COUNT(*) FROM sqlite_master WHERE type='trigger' AND name LIKE '%stats%';")
+if [ "$TRIGGER_COUNT" -eq 3 ]; then
+    echo "  ✅ All 3 triggers created"
 else
-    echo "  ❌ Expected 2+ triggers, found $TRIGGER_COUNT"
+    echo "  ❌ Expected 3 triggers, found $TRIGGER_COUNT"
     exit 1
+fi
+
+TRIGGER_COUNT_SYNC=$(sqlite3 "$DB_PATH" "SELECT COUNT(*) FROM sqlite_master WHERE type='trigger' AND name='trg_sync_username_to_stats';")
+echo "    Username sync trigger: $TRIGGER_COUNT_SYNC"
+if [ "$TRIGGER_COUNT_SYNC" -eq 1 ]; then
+    echo "  ✅ Username sync trigger exists"
+else
+    echo "  ⚠️  Username sync trigger missing"
 fi
 echo ""
 
@@ -478,6 +491,11 @@ echo "  2. Monitor bot logs for 24 hours"
 echo "  3. Run full integrity check after 1 week"
 ```
 
+#### Expected Output
+- ✅ Table created: `player_stats`
+- ✅ Indexes created: 3 (winnings, last_played, win_rate)
+- ✅ Triggers created: 3 (hand_complete, player_result, username_sync)
+
 ### **File 4: Rollback Script**
 `scripts/rollback_003.sql`
 
@@ -492,6 +510,7 @@ echo "  3. Run full integrity check after 1 week"
 BEGIN TRANSACTION;
 
 -- Drop triggers first (dependencies)
+DROP TRIGGER IF EXISTS trg_sync_username_to_stats;
 DROP TRIGGER IF EXISTS trg_update_stats_on_hand_complete;
 DROP TRIGGER IF EXISTS trg_update_stats_on_player_result;
 
@@ -506,7 +525,9 @@ DROP TABLE IF EXISTS player_stats;
 -- Verify cleanup
 SELECT 'Rollback complete. Remaining artifacts: ' || COUNT(*) AS status
 FROM sqlite_master 
-WHERE name LIKE '%player_stats%' OR name LIKE '%update_stats%';
+WHERE name LIKE '%player_stats%'
+   OR name LIKE '%update_stats%'
+   OR name LIKE '%sync_username%';
 
 COMMIT;
 ```

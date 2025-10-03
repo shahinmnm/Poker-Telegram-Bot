@@ -8,6 +8,7 @@
 BEGIN TRANSACTION;
 
 -- Drop triggers first (dependencies)
+DROP TRIGGER IF EXISTS trg_sync_username_to_stats;
 DROP TRIGGER IF EXISTS trg_update_stats_on_hand_complete;
 DROP TRIGGER IF EXISTS trg_update_stats_on_player_result;
 
@@ -22,6 +23,8 @@ DROP TABLE IF EXISTS player_stats;
 -- Verify cleanup
 SELECT 'Rollback complete. Remaining artifacts: ' || COUNT(*) AS status
 FROM sqlite_master 
-WHERE name LIKE '%player_stats%' OR name LIKE '%update_stats%';
+WHERE name LIKE '%player_stats%' 
+   OR name LIKE '%update_stats%'
+   OR name LIKE '%sync_username%';
 
 COMMIT;
