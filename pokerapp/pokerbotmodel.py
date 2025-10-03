@@ -685,7 +685,12 @@ class PokerBotModel:
         pot_total = sum(result.payout for result in results)
 
         if self._stats_enabled():
-            await self._stats.finish_hand(match_id, chat_id, results, pot_total)
+            await self._stats.record_hand_finished_batch(
+                hand_id=match_id,
+                chat_id=chat_id,
+                results=results,
+                pot_total=pot_total,
+            )
             self._player_report_cache.invalidate_on_event(
                 (self._safe_int(player.user_id) for player in game.players),
                 event_type="hand_finished",

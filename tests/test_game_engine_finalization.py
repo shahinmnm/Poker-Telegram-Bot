@@ -66,6 +66,7 @@ def _build_stats_service() -> MagicMock:
     stats = MagicMock(spec=BaseStatsService)
     stats.register_player_profile = AsyncMock()
     stats.start_hand = AsyncMock()
+    stats.record_hand_finished_batch = AsyncMock()
     stats.finish_hand = AsyncMock()
     stats.record_daily_bonus = AsyncMock()
     stats.build_player_report = AsyncMock()
@@ -820,8 +821,8 @@ async def test_finalize_game_single_winner_distributes_pot_and_updates_stats():
     assert winners_by_pot and winners_by_pot[0]["amount"] == 100
     assert winners_by_pot[0]["winners"][0]["player"] is winner
 
-    stats.finish_hand.assert_awaited_once()
-    _, stats_kwargs = stats.finish_hand.await_args
+    stats.record_hand_finished_batch.assert_awaited_once()
+    _, stats_kwargs = stats.record_hand_finished_batch.await_args
     results = list(stats_kwargs["results"])
     assert any(res.user_id == winner.user_id and res.payout == 100 for res in results)
     assert any(res.user_id == loser.user_id and res.result == "loss" for res in results)
@@ -899,7 +900,7 @@ async def test_finalize_game_split_pot_between_tied_winners():
     assert pot_summary and pot_summary[0]["amount"] == 100
     assert {winner_info["player"] for winner_info in pot_summary[0]["winners"]} == {player_a, player_b}
 
-    _, stats_kwargs = stats.finish_hand.await_args
+    _, stats_kwargs = stats.record_hand_finished_batch.await_args
     results = list(stats_kwargs["results"])
     for result in results:
         assert result.result == "push"

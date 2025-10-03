@@ -78,7 +78,7 @@ class StatsReporter:
             results = self._build_hand_results(
                 game=game, payouts=payouts, hand_labels=hand_labels
             )
-            await self._stats.finish_hand(
+            await self._stats.record_hand_finished_batch(
                 hand_id=game.id,
                 chat_id=self._safe_int(chat_id),
                 results=results,
