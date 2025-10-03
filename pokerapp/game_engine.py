@@ -1122,6 +1122,116 @@ class GameEngine:
 
         return result
 
+    async def handle_call(self, chat_id: int, user_id: int) -> bool:
+        """Handle a player's call with table-level locking and version retries."""
+
+        async def _process_once() -> Optional[bool]:
+            try:
+                game_data, version = await self._table_manager.load_game_with_version(
+                    chat_id
+                )
+            except Exception:
+                self._logger.exception(
+                    "Failed loading game for call",
+                    extra={
+                        "event_type": "engine_call_load_failed",
+                        "chat_id": chat_id,
+                        "user_id": user_id,
+                    },
+                )
+                return False
+
+            current_game: Optional[Game]
+            if isinstance(game_data, tuple):
+                current_game = game_data[0]
+            else:
+                current_game = game_data
+
+            if current_game is None:
+                self._logger.warning(
+                    "No active game for call",
+                    extra={
+                        "event_type": "engine_call_no_game",
+                        "chat_id": chat_id,
+                        "user_id": user_id,
+                    },
+                )
+                return False
+
+            player = self._find_player_by_user_id(current_game, user_id)
+            if player is None:
+                self._logger.warning(
+                    "Player not found in game during call",
+                    extra={
+                        "event_type": "engine_call_no_player",
+                        "chat_id": chat_id,
+                        "user_id": user_id,
+                        "game_id": getattr(current_game, "id", None),
+                    },
+                )
+                return False
+
+            try:
+                success = await self._execute_player_action(
+                    game=current_game,
+                    player=player,
+                    action="call",
+                    amount=0,
+                )
+            except Exception:
+                self._logger.exception(
+                    "Unexpected error executing call",
+                    extra={
+                        "event_type": "engine_call_execute_error",
+                        "chat_id": chat_id,
+                        "user_id": user_id,
+                        "game_id": getattr(current_game, "id", None),
+                    },
+                )
+                return False
+
+            if not success:
+                return False
+
+            self.refresh_turn_deadline(current_game)
+
+            try:
+                save_success = await self._table_manager.save_game_with_version_check(
+                    chat_id,
+                    current_game,
+                    version,
+                )
+            except Exception:
+                self._logger.exception(
+                    "Failed saving game after call",
+                    extra={
+                        "event_type": "engine_call_save_failed",
+                        "chat_id": chat_id,
+                        "user_id": user_id,
+                        "game_id": getattr(current_game, "id", None),
+                    },
+                )
+                return False
+
+            if not save_success:
+                return None
+
+            return True
+
+        lock_manager = self._lock_manager
+
+        while True:
+            if lock_manager is None:
+                result = await _process_once()
+            else:
+                async with lock_manager.table_write_lock(chat_id):
+                    result = await _process_once()
+
+            if result is None:
+                continue
+
+            return bool(result)
+
     async def handle_fold(self, chat_id: int, user_id: int) -> bool:
         """Handle a player's fold with table-level locking and version retries."""
 
