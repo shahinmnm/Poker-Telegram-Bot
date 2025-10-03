@@ -10,5 +10,13 @@
       "ttl": 10,
       "valid_types": ["fold", "check", "call", "raise"]
     }
+  },
+  "stats_batch_buffer": {
+    "max_size": 100,
+    "flush_interval_seconds": 5,
+    "flush_on_shutdown": true,
+    "enable_metrics": true,
+    "max_retries": 3,
+    "retry_backoff_base": 2
   }
 }
