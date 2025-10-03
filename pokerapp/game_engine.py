@@ -305,6 +305,30 @@ class GameEngine:
         "stop_resume_callback",
         "stop:resume",
     )
+
+    @staticmethod
+    def _loop_time() -> float:
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:  # pragma: no cover - fallback for compatibility
+            loop = asyncio.get_event_loop()
+        return loop.time()
+
+    @classmethod
+    def compute_turn_deadline(cls) -> float:
+        return cls._loop_time() + cls._MAX_TIME_FOR_TURN_SECONDS
+
+    def refresh_turn_deadline(self, game: Game) -> None:
+        if game is None:
+            return
+
+        current_index = getattr(game, "current_player_index", -1)
+        if not isinstance(current_index, int) or current_index < 0:
+            if hasattr(game, "turn_deadline"):
+                game.turn_deadline = None
+            return
+
+        game.turn_deadline = self.compute_turn_deadline()
     def __init__(
         self,
         *,
@@ -1033,6 +1057,8 @@ class GameEngine:
 
             if not success:
                 return False
+
+            self.refresh_turn_deadline(game)
 
             try:
                 await self._table_manager.save_game(chat_id, game)
@@ -2193,6 +2219,7 @@ class GameEngine:
         stage_label = "stage_lock:progress_stage"
         event_stage_label = "progress_stage"
         # Migrated to _trace_lock_guard for audited stage lock acquisition
+        result = False
         try:
             async with self._trace_lock_guard(
                 lock_key=lock_key,
@@ -2202,7 +2229,7 @@ class GameEngine:
                 event_stage_label=event_stage_label,
                 timeout=self._stage_lock_timeout,
             ):
-                return await _progress_locked()
+                result = await _progress_locked()
         except TimeoutError:
             self._log_engine_event_lock_failure(
                 lock_key=lock_key,
@@ -2211,6 +2238,9 @@ class GameEngine:
                 game=game,
             )
             raise
+
+        self.refresh_turn_deadline(game)
+        return result
 
     async def finalize_game(
         self,

@@ -2942,11 +2942,12 @@ class LockManager:
         self,
         chat_id: int,
         user_id: int,
-        token_or_action: str,
+        token_or_action: Optional[str] = None,
         token: Optional[str] = None,
         *,
         action_type: Optional[str] = None,
         action_data: Optional[str] = None,
+        lock_token: Optional[str] = None,
     ) -> bool:
         """Release an action lock using token validation.
 
@@ -2955,14 +2956,26 @@ class LockManager:
         signature.
         """
 
-        resolved_token: str
+        if lock_token is not None and token is None:
+            token = lock_token
+
+        resolved_token: Optional[str]
         resolved_action_type: Optional[str] = action_type
-        if token is None:
+        if token is None and token_or_action is not None:
             resolved_token = token_or_action
         else:
             resolved_token = token
-            if resolved_action_type is None:
+            if (
+                resolved_action_type is None
+                and token_or_action is not None
+                and isinstance(token_or_action, str)
+            ):
                 resolved_action_type = token_or_action.strip().lower()
+
+        if resolved_token is None:
+            raise ValueError(
+                "Token must be provided when releasing an action lock."
+            )
 
         action_identifier: Optional[str]
         if resolved_action_type:

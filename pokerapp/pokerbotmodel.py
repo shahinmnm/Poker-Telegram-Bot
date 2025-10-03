@@ -1715,6 +1715,11 @@ class PokerBotModel:
 
         if next_player_index != -1:
             game.current_player_index = next_player_index
+            engine = getattr(self, "_game_engine", None)
+            if engine is not None:
+                engine.refresh_turn_deadline(game)
+            else:
+                game.turn_deadline = GameEngine.compute_turn_deadline()
             return game.players[next_player_index]
 
         # اگر هیچ بازیکن فعالی برای حرکت بعدی وجود ندارد (مثلاً همه All-in هستند)
@@ -2261,6 +2266,11 @@ class RoundRateModel:
         game.max_round_rate = SMALL_BLIND * 2
         game.current_player_index = first_action_index
         game.trading_end_user_id = big_blind_player.user_id
+
+        if self._model is not None and getattr(self._model, "_game_engine", None) is not None:
+            self._model._game_engine.refresh_turn_deadline(game)
+        else:
+            game.turn_deadline = GameEngine.compute_turn_deadline()
 
         player_turn = game.get_player_by_seat(game.current_player_index)
         return player_turn
