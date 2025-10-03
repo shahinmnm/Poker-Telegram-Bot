@@ -474,7 +474,11 @@ class GameEngine:
             )
             return True
         finally:
-            await self._lock_manager.release_table_lock(chat_id, lock_token)
+            await self._lock_manager.release_table_lock(
+                chat_id=chat_id,
+                token=lock_token,
+                operation="join",
+            )
 
     async def leave_game(
         self,
@@ -574,7 +578,11 @@ class GameEngine:
             )
             return True
         finally:
-            await self._lock_manager.release_table_lock(chat_id, lock_token)
+            await self._lock_manager.release_table_lock(
+                chat_id=chat_id,
+                token=lock_token,
+                operation="leave",
+            )
 
     async def _create_joining_player(
         self, user_id: int, user_name: str
@@ -1562,7 +1570,7 @@ class GameEngine:
                                 "error": str(exc),
                                 "error_type": type(exc).__name__,
                             },
-            )
+                        )
 
             self._logger.debug(
                 "All relevant locks released for chat",
