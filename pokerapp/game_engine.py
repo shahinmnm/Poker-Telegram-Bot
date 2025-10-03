@@ -586,34 +586,15 @@ class GameEngine:
         chat_id: int,
         user_id: int,
     ) -> bool:
-        lock_token = await self._lock_manager.acquire_table_lock(
-            chat_id=chat_id,
-            operation="leave",
-            timeout_seconds=5,
-        )
+        logger = self._logger
 
-        if not lock_token:
-            self._logger.warning(
-                "Leave rejected - table lock held",
-                extra={
-                    "event_type": "leave_table_locked",
-                    "chat_id": chat_id,
-                    "user_id": user_id,
-                },
-            )
-            await self._view.send_message(
-                chat_id,
-                translate(
-                    "error.table_busy",
-                    "⚠️ Table is busy. Please try again in a moment.",
-                ),
-                request_category=RequestCategory.GENERAL,
-            )
-            return False
+        async def _process_once() -> Optional[bool]:
+            try:
+                game, version = await self._table_manager.load_game_with_version(chat_id)
+            except Exception:
+                logger.exception("Failed loading game for leave")
+                return False
 
-        try:
-            loaded = await self._table_manager.load_game(chat_id)
-            game = loaded[0] if isinstance(loaded, tuple) else loaded
             if game is None:
                 await self._view.send_message(
                     chat_id,
@@ -657,7 +638,16 @@ class GameEngine:
             if hasattr(game, "ready_users"):
                 game.ready_users.discard(user_id)
 
-            await self._table_manager.save_game(chat_id, game)
+            try:
+                success = await self._table_manager.save_game_with_version_check(
+                    chat_id, game, version
+                )
+            except Exception:
+                logger.exception("Failed saving game after leave")
+                return False
+
+            if not success:
+                return None
 
             await self._view.send_message(
                 chat_id,
@@ -668,7 +658,7 @@ class GameEngine:
                 request_category=RequestCategory.GENERAL,
             )
 
-            self._logger.info(
+            logger.info(
                 "Player left game",
                 extra={
                     "event_type": "player_left",
@@ -677,12 +667,18 @@ class GameEngine:
                 },
             )
             return True
-        finally:
-            await self._lock_manager.release_table_lock(
-                chat_id=chat_id,
-                token=lock_token,
-                operation="leave",
-            )
+
+        lock_manager = self._lock_manager
+
+        while True:
+            if lock_manager is None:
+                result = await _process_once()
+            else:
+                async with lock_manager.table_write_lock(chat_id):
+                    result = await _process_once()
+
+            if result is not None:
+                return bool(result)
 
     async def _create_joining_player(
         self, user_id: int, user_name: str
