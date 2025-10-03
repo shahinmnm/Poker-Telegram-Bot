@@ -590,7 +590,7 @@ async def test_record_hand_results_updates_cache_and_stats():
     engine._invalidate_adaptive_report_cache.assert_called_once()
     cache_args, cache_kwargs = engine._invalidate_adaptive_report_cache.call_args
     assert cache_args[0] == players_snapshot
-    assert cache_kwargs == {"event_type": "hand_finished"}
+    assert cache_kwargs == {"event_type": "hand_finished", "chat_id": -99}
 
     engine._stats_reporter.hand_finished_deferred.assert_awaited_once()
     _, stats_kwargs = engine._stats_reporter.hand_finished_deferred.await_args
@@ -968,7 +968,7 @@ async def test_finalize_game_single_winner_distributes_pot_and_updates_stats():
 
 
     adaptive_cache_mock.invalidate_on_event.assert_called_once_with(
-        {1, 2}, "hand_finished"
+        {1, 2}, "hand_finished", chat_id=chat_id
     )
     winner_wallet.inc.assert_awaited_once_with(100)
     loser_wallet.inc.assert_not_awaited()
@@ -1049,7 +1049,7 @@ async def test_finalize_game_split_pot_between_tied_winners():
 
 
     adaptive_cache_mock.invalidate_on_event.assert_called_once_with(
-        {10, 20}, "hand_finished"
+        {10, 20}, "hand_finished", chat_id=chat_id
     )
     wallet_a.inc.assert_awaited_once_with(50)
     wallet_b.inc.assert_awaited_once_with(50)

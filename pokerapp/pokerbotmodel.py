@@ -694,6 +694,7 @@ class PokerBotModel:
             self._player_report_cache.invalidate_on_event(
                 (self._safe_int(player.user_id) for player in game.players),
                 event_type="hand_finished",
+                chat_id=self._safe_int(chat_id),
             )
 
         game.state = GameState.FINISHED

@@ -1710,15 +1710,20 @@ class GameEngine:
         return
 
     def _invalidate_adaptive_report_cache(
-        self, players: Iterable[Player], *, event_type: str
+        self,
+        players: Iterable[Player],
+        *,
+        event_type: str,
+        chat_id: Optional[ChatId] = None,
     ) -> None:
         if self._adaptive_player_report_cache is None:
             return
         player_ids = normalize_player_ids(players)
         if not player_ids:
             return
+        normalized_chat = self._safe_int(chat_id) if chat_id is not None else None
         self._adaptive_player_report_cache.invalidate_on_event(
-            player_ids, event_type
+            player_ids, event_type, chat_id=normalized_chat
         )
 
     async def start_game(
@@ -2501,12 +2506,22 @@ class GameEngine:
             return
 
         players_list = list(statistics.get("players", []))
+        stats_kwargs = statistics.get("stats_kwargs") if statistics else None
+        chat_scope: Optional[int] = None
+        if isinstance(stats_kwargs, dict):
+            raw_chat = stats_kwargs.get("chat_id")
+            if raw_chat is not None:
+                try:
+                    chat_scope = self._safe_int(raw_chat)
+                except Exception:
+                    chat_scope = None
         if players_list:
             self._invalidate_adaptive_report_cache(
-                players_list, event_type="hand_finished"
+                players_list,
+                event_type="hand_finished",
+                chat_id=chat_scope,
             )
 
-        stats_kwargs = statistics.get("stats_kwargs")
         if not isinstance(stats_kwargs, dict):
             return
 
@@ -3274,7 +3289,9 @@ class GameEngine:
             original_game_id = game.id
             players_snapshot = list(game.seated_players())
 
-            await self._refund_players(players_snapshot, original_game_id)
+            await self._refund_players(
+                players_snapshot, original_game_id, chat_id=chat_id
+            )
 
             await self._finalize_stop_request(
                 context=context,
@@ -3396,7 +3413,11 @@ class GameEngine:
             await self.cancel_hand(game, chat_id, context, stop_request)
 
     async def _refund_players(
-        self, players: Iterable[Player], original_game_id: str
+        self,
+        players: Iterable[Player],
+        original_game_id: str,
+        *,
+        chat_id: Optional[ChatId] = None,
     ) -> None:
         player_list = list(players)
         for player in player_list:
@@ -3404,11 +3425,15 @@ class GameEngine:
                 await player.wallet.cancel(original_game_id)
 
         self._invalidate_adaptive_report_cache(
-            player_list, event_type="hand_finished"
+            player_list,
+            event_type="hand_finished",
+            chat_id=chat_id,
         )
 
         await self._stats_reporter.invalidate_players(
-            player_list, event_type="hand_finished"
+            player_list,
+            chat_id=self._safe_int(chat_id) if chat_id is not None else None,
+            event_type="hand_finished",
         )
 
     def _build_stop_cancellation_message(

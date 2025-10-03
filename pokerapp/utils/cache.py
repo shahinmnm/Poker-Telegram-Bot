@@ -8,7 +8,18 @@ import pickle
 import time
 from collections import defaultdict
 from dataclasses import dataclass
-from typing import Any, Awaitable, Callable, DefaultDict, Dict, Iterable, Optional, Tuple, TypeVar
+from typing import (
+    Any,
+    Awaitable,
+    Callable,
+    DefaultDict,
+    Dict,
+    Iterable,
+    Optional,
+    Tuple,
+    TypeVar,
+    Union,
+)
 
 from cachetools import TTLCache
 
@@ -151,6 +162,9 @@ class MessageStateCache:
 
 T = TypeVar("T")
 
+CacheKey = Tuple[int, Optional[int]]
+CacheIdentifier = Union[int, CacheKey]
+
 
 class PlayerReportCache:
     """Cache expensive statistics queries on a per-player basis."""
@@ -163,23 +177,49 @@ class PlayerReportCache:
         logger_: Optional[logging.Logger] = None,
         redis_ops: Optional[RedisSafeOps] = None,
     ) -> None:
-        self._cache: TTLCache[int, T] = TTLCache(maxsize=maxsize, ttl=ttl)
-        self._locks: Dict[int, asyncio.Lock] = {}
+        self._cache: TTLCache[CacheKey, T] = TTLCache(maxsize=maxsize, ttl=ttl)
+        self._locks: Dict[CacheKey, asyncio.Lock] = {}
         self._hits = 0
         self._misses = 0
         self._logger = logger_ or logger.getChild("player_report")
         self._redis_ops = redis_ops
 
-    def _get_lock(self, user_id: int) -> asyncio.Lock:
-        lock = self._locks.get(user_id)
+    @staticmethod
+    def _normalize_chat_id(chat_id: Optional[int]) -> Optional[int]:
+        if chat_id is None:
+            return None
+        try:
+            return int(chat_id)
+        except (TypeError, ValueError):
+            return None
+
+    def _normalize_identifier(
+        self,
+        identifier: CacheIdentifier,
+        chat_id: Optional[int] = None,
+    ) -> CacheKey:
+        if isinstance(identifier, tuple):
+            user_id, scoped_chat = identifier
+            return int(user_id), self._normalize_chat_id(scoped_chat)
+        return int(identifier), self._normalize_chat_id(chat_id)
+
+    def _get_lock(self, key: CacheKey) -> asyncio.Lock:
+        lock = self._locks.get(key)
         if lock is None:
             lock = asyncio.Lock()
-            self._locks[user_id] = lock
+            self._locks[key] = lock
         return lock
 
-    def _log_extra(self, *, user_id: int, event_type: str, **kwargs: Any) -> Dict[str, Any]:
+    def _log_extra(
+        self,
+        *,
+        user_id: int,
+        chat_id: Optional[int],
+        event_type: str,
+        **kwargs: Any,
+    ) -> Dict[str, Any]:
         payload: Dict[str, Any] = {
-            "chat_id": kwargs.pop("chat_id", None),
+            "chat_id": chat_id,
             "game_id": kwargs.pop("game_id", None),
             "user_id": user_id,
             "event_type": event_type,
@@ -193,19 +233,23 @@ class PlayerReportCache:
         self,
         user_id: int,
         loader: Callable[[], Awaitable[Optional[T]]],
+        *,
+        chat_id: Optional[int] = None,
     ) -> Optional[T]:
         """Return a cached report or populate it using ``loader``."""
 
-        normalized_id = int(user_id)
-        lock = self._get_lock(normalized_id)
+        key = self._normalize_identifier(user_id, chat_id)
+        normalized_id, normalized_chat = key
+        lock = self._get_lock(key)
         async with lock:
-            if normalized_id in self._cache:
+            if key in self._cache:
                 self._hits += 1
-                value = self._cache[normalized_id]
+                value = self._cache[key]
                 self._logger.debug(
                     "PlayerReportCache hit",
                     extra=self._log_extra(
                         user_id=normalized_id,
+                        chat_id=normalized_chat,
                         event_type="player_report_cache_hit",
                     ),
                 )
@@ -215,29 +259,39 @@ class PlayerReportCache:
                 "PlayerReportCache miss",
                 extra=self._log_extra(
                     user_id=normalized_id,
+                    chat_id=normalized_chat,
                     event_type="player_report_cache_miss",
                 ),
             )
             value = await loader()
             if value is not None:
-                self._cache[normalized_id] = value
+                self._cache[key] = value
             return value
 
-    def invalidate(self, user_id: int) -> None:
-        normalized_id = int(user_id)
-        if normalized_id in self._cache:
-            self._cache.pop(normalized_id, None)
+    def invalidate(
+        self, user_id: CacheIdentifier, *, chat_id: Optional[int] = None
+    ) -> None:
+        key = self._normalize_identifier(user_id, chat_id)
+        normalized_id, normalized_chat = key
+        if key in self._cache:
+            self._cache.pop(key, None)
             self._logger.debug(
                 "PlayerReportCache invalidate",
                 extra=self._log_extra(
                     user_id=normalized_id,
+                    chat_id=normalized_chat,
                     event_type="player_report_cache_invalidate",
                 ),
             )
 
-    def invalidate_many(self, user_ids: Iterable[int]) -> None:
+    def invalidate_many(
+        self,
+        user_ids: Iterable[CacheIdentifier],
+        *,
+        chat_id: Optional[int] = None,
+    ) -> None:
         for user_id in user_ids:
-            self.invalidate(user_id)
+            self.invalidate(user_id, chat_id=chat_id)
 
     @property
     def stats(self) -> Dict[str, int]:
@@ -281,8 +335,8 @@ class AdaptivePlayerReportCache(PlayerReportCache):
         self._bonus_ttl = max(bonus_ttl, 0)
         self._post_hand_ttl = max(post_hand_ttl, 0)
         self._persistent_store = persistent_store
-        self._expiry_map: Dict[int, float] = {}
-        self._next_ttl: Dict[int, Tuple[Optional[str], int]] = {}
+        self._expiry_map: Dict[CacheKey, float] = {}
+        self._next_ttl: Dict[CacheKey, Tuple[Optional[str], int]] = {}
         self._event_metrics: DefaultDict[str, Dict[str, int]] = defaultdict(
             lambda: {"hits": 0, "misses": 0}
         )
@@ -292,12 +346,13 @@ class AdaptivePlayerReportCache(PlayerReportCache):
         self,
         *,
         user_id: Optional[int],
+        chat_id: Optional[int],
         cache_event: str,
         ttl_event_type: Optional[str],
         **kwargs: Any,
     ) -> Dict[str, Any]:
         payload: Dict[str, Any] = {
-            "chat_id": kwargs.pop("chat_id", None),
+            "chat_id": chat_id,
             "game_id": kwargs.pop("game_id", None),
             "user_id": user_id,
             "event_type": ttl_event_type,
@@ -314,31 +369,34 @@ class AdaptivePlayerReportCache(PlayerReportCache):
         user_id: int,
         loader: Callable[[], Awaitable[Optional[T]]],
         *,
+        chat_id: Optional[int] = None,
         event_type: Optional[str] = None,
     ) -> Optional[T]:
-        ttl_event_type, ttl = self._resolve_context(user_id, event_type)
+        key = self._normalize_identifier(user_id, chat_id)
+        normalized_id, normalized_chat = key
+        ttl_event_type, ttl = self._resolve_context(key, event_type)
         metrics_key = ttl_event_type or "default"
-        normalized_id = int(user_id)
-        lock = self._get_lock(normalized_id)
+        lock = self._get_lock(key)
         async with lock:
-            if self._is_entry_valid(normalized_id):
+            if self._is_entry_valid(key):
                 self._hits += 1
                 self._event_metrics[metrics_key]["hits"] += 1
                 self._logger.debug(
                     "AdaptivePlayerReportCache hit",
                     extra=self._build_log_extra(
                         user_id=normalized_id,
+                        chat_id=normalized_chat,
                         cache_event="cache_hit",
                         ttl_event_type=ttl_event_type,
                         ttl=ttl,
                         source="memory",
                     ),
                 )
-                return self._cache[normalized_id]
+                return self._cache[key]
 
             if self._persistent_store is not None:
                 value = await self._load_from_persistent_store(
-                    normalized_id, ttl, ttl_event_type
+                    key, ttl, ttl_event_type
                 )
                 if value is not None:
                     self._hits += 1
@@ -351,6 +409,7 @@ class AdaptivePlayerReportCache(PlayerReportCache):
                 "AdaptivePlayerReportCache miss",
                 extra=self._build_log_extra(
                     user_id=normalized_id,
+                    chat_id=normalized_chat,
                     cache_event="cache_miss",
                     ttl_event_type=ttl_event_type,
                     ttl=ttl,
@@ -358,21 +417,29 @@ class AdaptivePlayerReportCache(PlayerReportCache):
             )
             value = await loader()
             if value is not None:
-                self._store(normalized_id, value, ttl)
-                await self._persist(normalized_id, value, ttl, ttl_event_type)
+                self._store(key, value, ttl)
+                await self._persist(key, value, ttl, ttl_event_type)
             return value
 
-    def invalidate(self, user_id: int) -> None:
-        normalized_id = int(user_id)
-        self._next_ttl.pop(normalized_id, None)
-        self._invalidate_internal(normalized_id, event_type=None)
+    def invalidate(
+        self, user_id: CacheIdentifier, *, chat_id: Optional[int] = None
+    ) -> None:
+        key = self._normalize_identifier(user_id, chat_id)
+        self._next_ttl.pop(key, None)
+        self._invalidate_internal(key, event_type=None)
 
-    def invalidate_on_event(self, user_ids: Iterable[int], event_type: str) -> None:
+    def invalidate_on_event(
+        self,
+        user_ids: Iterable[CacheIdentifier],
+        event_type: str,
+        *,
+        chat_id: Optional[int] = None,
+    ) -> None:
         ttl = self._resolve_ttl(event_type)
         for user_id in user_ids:
-            normalized_id = int(user_id)
-            self._next_ttl[normalized_id] = (event_type, ttl)
-            self._invalidate_internal(normalized_id, event_type=event_type)
+            key = self._normalize_identifier(user_id, chat_id)
+            self._next_ttl[key] = (event_type, ttl)
+            self._invalidate_internal(key, event_type=event_type)
 
     # ``get`` remains part of the public API for historical callers; route it to
     # the context-aware implementation to avoid duplication.
@@ -384,14 +451,13 @@ class AdaptivePlayerReportCache(PlayerReportCache):
         return snapshot
 
     def _resolve_context(
-        self, user_id: int, explicit_event: Optional[str]
+        self, key: CacheKey, explicit_event: Optional[str]
     ) -> Tuple[Optional[str], int]:
-        normalized_id = int(user_id)
         if explicit_event is not None:
-            self._next_ttl.pop(normalized_id, None)
+            self._next_ttl.pop(key, None)
             return explicit_event, self._resolve_ttl(explicit_event)
 
-        pending = self._next_ttl.pop(normalized_id, None)
+        pending = self._next_ttl.pop(key, None)
         if pending is not None:
             return pending
         return None, self._default_ttl
@@ -403,32 +469,34 @@ class AdaptivePlayerReportCache(PlayerReportCache):
             return self._post_hand_ttl or self._default_ttl
         return self._default_ttl
 
-    def _is_entry_valid(self, user_id: int) -> bool:
-        if user_id not in self._cache:
+    def _is_entry_valid(self, key: CacheKey) -> bool:
+        if key not in self._cache:
             return False
-        expiry = self._expiry_map.get(user_id)
+        expiry = self._expiry_map.get(key)
         if expiry is None:
             return True
         if expiry <= self._timer():
-            self._cache.pop(user_id, None)
-            self._expiry_map.pop(user_id, None)
+            self._cache.pop(key, None)
+            self._expiry_map.pop(key, None)
             return False
         return True
 
-    def _store(self, user_id: int, value: T, ttl: int) -> None:
-        self._cache[user_id] = value
-        self._expiry_map[user_id] = self._timer() + max(ttl, 0)
+    def _store(self, key: CacheKey, value: T, ttl: int) -> None:
+        self._cache[key] = value
+        self._expiry_map[key] = self._timer() + max(ttl, 0)
 
     async def _load_from_persistent_store(
-        self, user_id: int, ttl: int, event_type: Optional[str]
+        self, key: CacheKey, ttl: int, event_type: Optional[str]
     ) -> Optional[T]:
         if self._persistent_store is None:
             return None
+        user_id, chat_id = key
         try:
             payload = await self._persistent_store.safe_get(
-                self._redis_key(user_id),
+                self._redis_key(user_id, chat_id),
                 log_extra=self._build_log_extra(
                     user_id=user_id,
+                    chat_id=chat_id,
                     cache_event="persistent_fetch",
                     ttl_event_type=event_type,
                 ),
@@ -438,6 +506,7 @@ class AdaptivePlayerReportCache(PlayerReportCache):
                 "Failed to fetch cache entry from persistent store",
                 extra=self._build_log_extra(
                     user_id=user_id,
+                    chat_id=chat_id,
                     cache_event="persistent_fetch_error",
                     ttl_event_type=event_type,
                 ),
@@ -452,16 +521,18 @@ class AdaptivePlayerReportCache(PlayerReportCache):
                 "Failed to deserialize player report cache entry",
                 extra=self._build_log_extra(
                     user_id=user_id,
+                    chat_id=chat_id,
                     cache_event="deserialize_error",
                     ttl_event_type=event_type,
                 ),
             )
             return None
-        self._store(user_id, value, ttl)
+        self._store(key, value, ttl)
         self._logger.debug(
             "AdaptivePlayerReportCache hit",
             extra=self._build_log_extra(
                 user_id=user_id,
+                chat_id=chat_id,
                 cache_event="cache_hit",
                 ttl_event_type=event_type,
                 ttl=ttl,
@@ -472,13 +543,14 @@ class AdaptivePlayerReportCache(PlayerReportCache):
 
     async def _persist(
         self,
-        user_id: int,
+        key: CacheKey,
         value: T,
         ttl: int,
         event_type: Optional[str],
     ) -> None:
         if self._persistent_store is None:
             return
+        user_id, chat_id = key
         try:
             payload = self._serialize(value)
         except Exception:
@@ -486,6 +558,7 @@ class AdaptivePlayerReportCache(PlayerReportCache):
                 "Failed to serialize player report cache entry",
                 extra=self._build_log_extra(
                     user_id=user_id,
+                    chat_id=chat_id,
                     cache_event="serialize_error",
                     ttl_event_type=event_type,
                 ),
@@ -493,11 +566,12 @@ class AdaptivePlayerReportCache(PlayerReportCache):
             return
         try:
             await self._persistent_store.safe_set(
-                self._redis_key(user_id),
+                self._redis_key(user_id, chat_id),
                 payload,
                 expire=max(ttl, 0) or None,
                 log_extra=self._build_log_extra(
                     user_id=user_id,
+                    chat_id=chat_id,
                     cache_event="persistent_store",
                     ttl_event_type=event_type,
                 ),
@@ -507,17 +581,22 @@ class AdaptivePlayerReportCache(PlayerReportCache):
                 "Failed to persist cache entry in Redis",
                 extra=self._build_log_extra(
                     user_id=user_id,
+                    chat_id=chat_id,
                     cache_event="persist_error",
                     ttl_event_type=event_type,
                 ),
             )
 
-    def _invalidate_internal(self, user_id: int, *, event_type: Optional[str]) -> None:
-        removed = self._cache.pop(user_id, None) is not None
-        self._expiry_map.pop(user_id, None)
+    def _invalidate_internal(
+        self, key: CacheKey, *, event_type: Optional[str]
+    ) -> None:
+        removed = self._cache.pop(key, None) is not None
+        self._expiry_map.pop(key, None)
+        user_id, chat_id = key
         cache_event = "invalidate_removed" if removed else "invalidate_noop"
         log_payload = self._build_log_extra(
             user_id=user_id,
+            chat_id=chat_id,
             cache_event=cache_event,
             ttl_event_type=event_type,
             removed=removed,
@@ -543,22 +622,25 @@ class AdaptivePlayerReportCache(PlayerReportCache):
                 extra=log_payload,
             )
         if self._persistent_store is not None:
-            self._schedule_persistent_delete(user_id, event_type)
+            self._schedule_persistent_delete(key, event_type)
 
     def _schedule_persistent_delete(
-        self, user_id: int, event_type: Optional[str]
+        self, key: CacheKey, event_type: Optional[str]
     ) -> None:
         try:
             loop = asyncio.get_running_loop()
         except RuntimeError:
             return
 
+        user_id, chat_id = key
+
         async def _delete() -> None:
             try:
                 await self._persistent_store.safe_delete(
-                    self._redis_key(user_id),
+                    self._redis_key(user_id, chat_id),
                     log_extra=self._build_log_extra(
                         user_id=user_id,
+                        chat_id=chat_id,
                         cache_event="persistent_delete",
                         ttl_event_type=event_type,
                     ),
@@ -568,6 +650,7 @@ class AdaptivePlayerReportCache(PlayerReportCache):
                     "Failed to delete cache entry in Redis",
                     extra=self._build_log_extra(
                         user_id=user_id,
+                        chat_id=chat_id,
                         cache_event="persistent_delete_error",
                         ttl_event_type=event_type,
                     ),
@@ -576,8 +659,10 @@ class AdaptivePlayerReportCache(PlayerReportCache):
         loop.create_task(_delete())
 
     @staticmethod
-    def _redis_key(user_id: int) -> str:
-        return f"stats:{int(user_id)}"
+    def _redis_key(user_id: int, chat_id: Optional[int]) -> str:
+        if chat_id is None:
+            return f"stats:{int(user_id)}"
+        return f"stats:{int(chat_id)}:{int(user_id)}"
 
     @staticmethod
     def _serialize(value: T) -> bytes:

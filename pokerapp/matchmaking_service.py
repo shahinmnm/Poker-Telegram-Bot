@@ -430,7 +430,9 @@ class MatchmakingService:
     ) -> Optional[Player]:
         current_player = await self._round_rate.set_blinds(game, chat_id)
         self._player_manager.assign_role_labels(game)
-        await self._stats_reporter.invalidate_players(game.players)
+        await self._stats_reporter.invalidate_players(
+            game.players, chat_id=self._safe_int(chat_id)
+        )
         return current_player
 
     async def _handle_post_start_notifications(

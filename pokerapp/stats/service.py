@@ -868,7 +868,9 @@ class StatsService(BaseStatsService):
             and self._player_report_cache is not None
         ):
             self._player_report_cache.invalidate_on_event(
-                players_for_invalidation, event_type="hand_finished"
+                players_for_invalidation,
+                event_type="hand_finished",
+                chat_id=coerced_chat_id,
             )
 
     async def finish_hand(
@@ -914,7 +916,8 @@ class StatsService(BaseStatsService):
 
         if self._player_report_cache is not None:
             self._player_report_cache.invalidate_on_event(
-                [self._coerce_int(user_id)], event_type="bonus_claimed"
+                [self._coerce_int(user_id)],
+                event_type="bonus_claimed",
             )
 
     async def build_player_report(self, user_id: int) -> Optional[PlayerStatisticsReport]:
