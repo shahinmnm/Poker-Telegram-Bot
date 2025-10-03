@@ -8,7 +8,7 @@ import math
 import random
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
-from typing import Any, Awaitable, Dict, Iterable, List, Optional, Set, Tuple
+from typing import Any, Awaitable, Callable, Dict, Iterable, List, Optional, Set, Tuple
 
 from cachetools import LRUCache
 
@@ -186,6 +186,14 @@ class _CountdownCacheEntry:
     countdown: Optional[int]
     text: str
     updated_at: datetime.datetime
+
+
+@dataclass(slots=True)
+class _ActionProcessingResult:
+    success: bool
+    game: Optional[Game] = None
+    next_player: Optional[Player] = None
+    error_message: Optional[str] = None
 
 
 class PokerBotModel:
@@ -1879,105 +1887,338 @@ class PokerBotModel:
     # --- Player Action Handlers ---
     # این بخش تمام حرکات ممکن بازیکنان در نوبتشان را مدیریت می‌کند.
 
+    @staticmethod
+    def _append_last_action(game: Game, entry: str) -> None:
+        actions = getattr(game, "last_actions", None)
+        if isinstance(actions, list):
+            actions.append(entry)
+            if len(actions) > 5:
+                del actions[:-5]
+
+    async def _handle_locked_player_action(
+        self,
+        *,
+        update: Update,
+        context: ContextTypes.DEFAULT_TYPE,
+        action: str,
+        amount: int = 0,
+        processor: Callable[[Game, Player], Awaitable[Tuple[bool, Optional[str]]]],
+    ) -> _ActionProcessingResult:
+        chat = getattr(update, "effective_chat", None)
+        user = getattr(update, "effective_user", None)
+        if chat is None or user is None:
+            return _ActionProcessingResult(success=False)
+
+        chat_id = getattr(chat, "id", None)
+        user_id = getattr(user, "id", None)
+        if chat_id is None or user_id is None:
+            return _ActionProcessingResult(success=False)
+
+        lock_token: Optional[str] = None
+        action_identifier = f"{action}_{amount}"
+        log_extra = {
+            "chat_id": chat_id,
+            "user_id": user_id,
+            "action": action,
+        }
+
+        try:
+            lock_token = await self._lock_manager.acquire_action_lock(
+                chat_id,
+                user_id,
+                action_type=action,
+                action_data=action_identifier,
+            )
+        except Exception:
+            logger.exception(
+                "Failed acquiring action lock",
+                extra={**log_extra, "event_type": "model_action_lock_error"},
+            )
+            return _ActionProcessingResult(success=False)
+
+        if not lock_token:
+            logger.info(
+                "Action rejected because lock already held",
+                extra={**log_extra, "event_type": "model_action_lock_busy"},
+            )
+            return _ActionProcessingResult(success=False)
+
+        current_game: Optional[Game] = None
+        next_player: Optional[Player] = None
+
+        try:
+            async with self._lock_manager.table_write_lock(chat_id):
+                try:
+                    game_data, version = await self._table_manager.load_game_with_version(
+                        chat_id
+                    )
+                except Exception:
+                    logger.exception(
+                        "Failed loading game for action",
+                        extra={**log_extra, "event_type": "model_action_load_failed"},
+                    )
+                    return _ActionProcessingResult(success=False)
+
+                if isinstance(game_data, tuple):
+                    current_game = game_data[0]
+                else:
+                    current_game = game_data
+
+                if current_game is None:
+                    logger.warning(
+                        "No active game when handling action",
+                        extra={**log_extra, "event_type": "model_action_no_game"},
+                    )
+                    return _ActionProcessingResult(success=False)
+
+                current_game.chat_id = chat_id
+                context.chat_data[KEY_CHAT_DATA_GAME] = current_game
+
+                current_index = getattr(current_game, "current_player_index", -1)
+                if not isinstance(current_index, int) or current_index < 0:
+                    logger.warning(
+                        "Action rejected because turn index is invalid",
+                        extra={**log_extra, "event_type": "model_action_invalid_turn"},
+                    )
+                    return _ActionProcessingResult(success=False, game=current_game)
+
+                current_player = current_game.get_player_by_seat(current_index)
+                if (
+                    current_player is None
+                    or getattr(current_player, "user_id", None) != user_id
+                ):
+                    logger.info(
+                        "Action rejected because it is not player's turn",
+                        extra={**log_extra, "event_type": "model_action_wrong_turn"},
+                    )
+                    return _ActionProcessingResult(success=False, game=current_game)
+
+                try:
+                    action_success, error_message = await processor(
+                        current_game, current_player
+                    )
+                except Exception:
+                    logger.exception(
+                        "Unexpected error during action processor",
+                        extra={**log_extra, "event_type": "model_action_processor_failed"},
+                    )
+                    return _ActionProcessingResult(success=False, game=current_game)
+
+                if not action_success:
+                    return _ActionProcessingResult(
+                        success=False, game=current_game, error_message=error_message
+                    )
+
+                try:
+                    next_player = await self._process_playing(
+                        chat_id, current_game, context
+                    )
+                except Exception:
+                    logger.exception(
+                        "Failed processing post-action flow",
+                        extra={**log_extra, "event_type": "model_action_process_failed"},
+                    )
+                    return _ActionProcessingResult(success=False, game=current_game)
+
+                try:
+                    saved = await self._table_manager.save_game_with_version_check(
+                        chat_id, current_game, version
+                    )
+                except Exception:
+                    logger.exception(
+                        "Failed saving game after action",
+                        extra={**log_extra, "event_type": "model_action_save_failed"},
+                    )
+                    return _ActionProcessingResult(success=False, game=current_game)
+
+                if not saved:
+                    logger.warning(
+                        "Action save aborted due to version conflict",
+                        extra={
+                            **log_extra,
+                            "event_type": "model_action_version_conflict",
+                            "expected_version": version,
+                        },
+                    )
+                    return _ActionProcessingResult(success=False, game=current_game)
+
+                return _ActionProcessingResult(
+                    success=True, game=current_game, next_player=next_player
+                )
+        finally:
+            if lock_token:
+                try:
+                    await self._lock_manager.release_action_lock(
+                        chat_id,
+                        user_id,
+                        action_type=action,
+                        lock_token=lock_token,
+                    )
+                except Exception:
+                    logger.warning(
+                        "Failed releasing action lock",
+                        extra={**log_extra, "event_type": "model_action_release_failed"},
+                        exc_info=True,
+                    )
+
     async def player_action_fold(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
     ) -> None:
         """بازیکن فولد می‌کند، از دور شرط‌بندی کنار می‌رود و نوبت به نفر بعدی منتقل می‌شود."""
-        game, chat_id = await self._get_game(update, context)
-        current_player = self._current_turn_player(game)
-        if not current_player:
-            return
-        current_player.state = PlayerState.FOLD
-        action_str = f"{current_player.mention_markdown}: فولد"
-        game.last_actions.append(action_str)
-        if len(game.last_actions) > 5:
-            game.last_actions.pop(0)
 
-        next_player = await self._process_playing(chat_id, game, context)
-        if next_player:
-            await self._send_turn_message(game, next_player, chat_id)
-        await self._table_manager.save_game(chat_id, game)
+        chat = getattr(update, "effective_chat", None)
+        if chat is None or getattr(chat, "id", None) is None:
+            return
+        chat_id = chat.id
+
+        async def _fold_processor(game: Game, player: Player) -> Tuple[bool, Optional[str]]:
+            player.state = PlayerState.FOLD
+            if hasattr(player, "has_acted"):
+                player.has_acted = True
+            mention = getattr(player, "mention_markdown", str(player.user_id))
+            self._append_last_action(game, f"{mention}: فولد")
+            return True, None
+
+        result = await self._handle_locked_player_action(
+            update=update,
+            context=context,
+            action="fold",
+            processor=_fold_processor,
+        )
+
+        if result.error_message:
+            await self._view.send_message(chat_id, result.error_message)
+            return
+
+        if result.success and result.game is not None and result.next_player is not None:
+            await self._send_turn_message(result.game, result.next_player, chat_id)
 
     async def player_action_call_check(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
     ) -> None:
         """بازیکن کال (پرداخت) یا چک (عبور) را انجام می‌دهد."""
-        game, chat_id = await self._get_game(update, context)
-        current_player = self._current_turn_player(game)
-        if not current_player:
+
+        chat = getattr(update, "effective_chat", None)
+        if chat is None or getattr(chat, "id", None) is None:
             return
-        call_amount = game.max_round_rate - current_player.round_rate
-        current_player.has_acted = True
+        chat_id = chat.id
 
-        try:
+        async def _call_processor(game: Game, player: Player) -> Tuple[bool, Optional[str]]:
+            current_round_rate = int(getattr(player, "round_rate", 0))
+            max_round_rate = int(getattr(game, "max_round_rate", 0))
+            call_amount = max(0, max_round_rate - current_round_rate)
+
             if call_amount > 0:
-                await current_player.wallet.authorize(game.id, call_amount)
-                current_player.round_rate += call_amount
-                current_player.total_bet += call_amount
-                game.pot += call_amount
-            # منطق Check بدون نیاز به عمل خاص
-        except UserException as e:
-            await self._view.send_message(
-                chat_id, f"⚠️ خطای {current_player.mention_markdown}: {e}"
-            )
-            return  # اگر پول نداشت، از ادامه متد جلوگیری کن
+                wallet = getattr(player, "wallet", None)
+                try:
+                    if wallet is not None and hasattr(wallet, "authorize"):
+                        await wallet.authorize(game.id, call_amount)
+                except UserException as exc:
+                    mention = getattr(player, "mention_markdown", str(player.user_id))
+                    return False, f"⚠️ خطای {mention}: {exc}"
 
-        action_type = "کال" if call_amount > 0 else "چک"
-        amount = call_amount if call_amount > 0 else 0
-        action_str = f"{current_player.mention_markdown}: {action_type}"
-        if amount > 0:
-            action_str += f" {amount}$"
-        game.last_actions.append(action_str)
-        if len(game.last_actions) > 5:
-            game.last_actions.pop(0)
+                player.round_rate = current_round_rate + call_amount
+                player.total_bet = int(getattr(player, "total_bet", 0)) + call_amount
+                game.pot = int(getattr(game, "pot", 0)) + call_amount
 
-        next_player = await self._process_playing(chat_id, game, context)
-        if next_player:
-            await self._send_turn_message(game, next_player, chat_id)
-        await self._table_manager.save_game(chat_id, game)
+            if hasattr(player, "has_acted"):
+                player.has_acted = True
+
+            mention = getattr(player, "mention_markdown", str(player.user_id))
+            if call_amount > 0:
+                self._append_last_action(
+                    game, f"{mention}: کال {call_amount}$"
+                )
+            else:
+                self._append_last_action(game, f"{mention}: چک")
+
+            return True, None
+
+        result = await self._handle_locked_player_action(
+            update=update,
+            context=context,
+            action="call",
+            processor=_call_processor,
+        )
+
+        if result.error_message:
+            await self._view.send_message(chat_id, result.error_message)
+            return
+
+        if result.success and result.game is not None and result.next_player is not None:
+            await self._send_turn_message(result.game, result.next_player, chat_id)
 
     async def player_action_raise_bet(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE, raise_amount: int
     ) -> None:
         """بازیکن شرط را افزایش می‌دهد (Raise) یا برای اولین بار شرط می‌بندد (Bet)."""
-        game, chat_id = await self._get_game(update, context)
-        current_player = self._current_turn_player(game)
-        if not current_player:
+
+        chat = getattr(update, "effective_chat", None)
+        if chat is None or getattr(chat, "id", None) is None:
             return
-        call_amount = game.max_round_rate - current_player.round_rate
-        total_amount_to_bet = call_amount + raise_amount
+        chat_id = chat.id
 
-        try:
-            await current_player.wallet.authorize(game.id, total_amount_to_bet)
-            current_player.round_rate += total_amount_to_bet
-            current_player.total_bet += total_amount_to_bet
-            game.pot += total_amount_to_bet
+        async def _raise_processor(game: Game, player: Player) -> Tuple[bool, Optional[str]]:
+            if raise_amount is None or raise_amount <= 0:
+                return False, "⚠️ مبلغ رِیز نامعتبر است."
 
-            game.max_round_rate = current_player.round_rate
+            current_round_rate = int(getattr(player, "round_rate", 0))
+            max_round_rate = int(getattr(game, "max_round_rate", 0))
+            call_amount = max(0, max_round_rate - current_round_rate)
+            total_amount_to_bet = call_amount + int(raise_amount)
+
+            wallet = getattr(player, "wallet", None)
+            try:
+                if wallet is not None and hasattr(wallet, "authorize"):
+                    await wallet.authorize(game.id, total_amount_to_bet)
+            except UserException as exc:
+                mention = getattr(player, "mention_markdown", str(player.user_id))
+                return False, f"⚠️ خطای {mention}: {exc}"
+
+            player.round_rate = current_round_rate + total_amount_to_bet
+            player.total_bet = int(getattr(player, "total_bet", 0)) + total_amount_to_bet
+            game.pot = int(getattr(game, "pot", 0)) + total_amount_to_bet
+            game.max_round_rate = player.round_rate
+
+            if hasattr(game, "trading_end_user_id"):
+                game.trading_end_user_id = getattr(player, "user_id", None)
+
+            if hasattr(player, "has_acted"):
+                player.has_acted = True
+
+            try:
+                active_players = game.players_by(states=(PlayerState.ACTIVE,))
+            except Exception:
+                active_players = list(getattr(game, "players", []))
+
+            for other in active_players:
+                if getattr(other, "user_id", None) == getattr(player, "user_id", None):
+                    continue
+                if hasattr(other, "has_acted"):
+                    other.has_acted = False
+
+            mention = getattr(player, "mention_markdown", str(player.user_id))
             action_text = "بِت" if call_amount == 0 else "رِیز"
-
-            # --- بخش کلیدی منطق پوکر ---
-            game.trading_end_user_id = current_player.user_id
-            current_player.has_acted = True
-            for p in game.players_by(states=(PlayerState.ACTIVE,)):
-                if p.user_id != current_player.user_id:
-                    p.has_acted = False
-
-        except UserException as e:
-            await self._view.send_message(
-                chat_id, f"⚠️ خطای {current_player.mention_markdown}: {e}"
+            self._append_last_action(
+                game, f"{mention}: {action_text} {total_amount_to_bet}$"
             )
+
+            return True, None
+
+        result = await self._handle_locked_player_action(
+            update=update,
+            context=context,
+            action="raise",
+            amount=raise_amount,
+            processor=_raise_processor,
+        )
+
+        if result.error_message:
+            await self._view.send_message(chat_id, result.error_message)
             return
 
-        action_str = f"{current_player.mention_markdown}: {action_text} {total_amount_to_bet}$"
-        game.last_actions.append(action_str)
-        if len(game.last_actions) > 5:
-            game.last_actions.pop(0)
-
-        next_player = await self._process_playing(chat_id, game, context)
-        if next_player:
-            await self._send_turn_message(game, next_player, chat_id)
-        await self._table_manager.save_game(chat_id, game)
+        if result.success and result.game is not None and result.next_player is not None:
+            await self._send_turn_message(result.game, result.next_player, chat_id)
 
     async def player_action_all_in(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
