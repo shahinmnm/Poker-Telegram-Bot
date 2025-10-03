@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 
+import asyncio
 import os
 import sys
 from typing import Iterable, Mapping, Sequence
@@ -173,10 +174,22 @@ def main() -> None:
         messaging_service_factory=services.messaging_service_factory,
         telegram_safeops_factory=services.telegram_safeops_factory,
     )
-    if use_polling:
-        bot.run_polling()
-    else:
-        bot.run()
+    try:
+        if use_polling:
+            bot.run_polling()
+        else:
+            bot.run()
+    finally:
+        try:
+            asyncio.run(services.stats_service.close())
+        except RuntimeError:
+            loop = asyncio.new_event_loop()
+            try:
+                loop.run_until_complete(services.stats_service.close())
+            finally:
+                loop.close()
+        except Exception:
+            logger.exception("Failed to close statistics service during shutdown.")
 
 
 if __name__ == "__main__":

@@ -4,7 +4,7 @@ import asyncio
 import datetime as dt
 import logging
 import re
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, TYPE_CHECKING
 
@@ -20,6 +20,7 @@ from sqlalchemy import (
     insert,
     select,
 )
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.ext.asyncio import (
     AsyncConnection,
     AsyncEngine,
@@ -34,6 +35,7 @@ from pokerapp.config import DEFAULT_TIMEZONE_NAME, get_game_constants
 from pokerapp.utils.datetime_utils import ensure_utc
 from pokerapp.utils.time_utils import format_local, now_utc
 from pokerapp.utils.markdown import escape_markdown_v1
+from pokerapp.stats.buffer import StatsBatchBuffer
 
 if TYPE_CHECKING:
     from pokerapp.utils.cache import AdaptivePlayerReportCache
@@ -202,6 +204,83 @@ class _HandContext:
     players: List[PlayerIdentity]
 
 
+@dataclass(slots=True)
+class _BufferedHandRecord:
+    """Serializable payload representing a completed hand awaiting persistence."""
+
+    hand_id: str
+    chat_id: int
+    coerced_chat_id: int
+    pot_total: int
+    ended_at: dt.datetime
+    started_at: Optional[dt.datetime]
+    duration_seconds: int
+    results: List[PlayerHandResult]
+
+    def to_buffer(self) -> Dict[str, Any]:
+        """Return a dictionary payload suitable for :class:`StatsBatchBuffer`."""
+
+        return {
+            "hand_id": self.hand_id,
+            "chat_id": self.chat_id,
+            "coerced_chat_id": self.coerced_chat_id,
+            "pot_total": self.pot_total,
+            "ended_at": self.ended_at.isoformat(),
+            "started_at": self.started_at.isoformat() if self.started_at else None,
+            "duration_seconds": self.duration_seconds,
+            "results": [asdict(result) for result in self.results],
+        }
+
+    @classmethod
+    def from_buffer(cls, payload: Dict[str, Any]) -> "_BufferedHandRecord":
+        """Reconstruct an instance from buffered dictionary payload."""
+
+        ended_raw = payload.get("ended_at")
+        started_raw = payload.get("started_at")
+        if isinstance(ended_raw, str) and ended_raw:
+            ended_at = dt.datetime.fromisoformat(ended_raw)
+        elif isinstance(ended_raw, dt.datetime):
+            ended_at = ended_raw
+        else:
+            ended_at = now_utc()
+        started_at: Optional[dt.datetime]
+        if isinstance(started_raw, str) and started_raw:
+            started_at = dt.datetime.fromisoformat(started_raw)
+        elif isinstance(started_raw, dt.datetime):
+            started_at = ensure_utc(started_raw)
+        else:
+            started_at = None
+
+        results_payload = payload.get("results", [])
+        results = [
+            PlayerHandResult(
+                user_id=int(item.get("user_id", 0)),
+                display_name=item.get("display_name", str(item.get("user_id", 0))),
+                total_bet=int(item.get("total_bet", 0)),
+                payout=int(item.get("payout", 0)),
+                net_profit=int(item.get("net_profit", 0)),
+                hand_type=item.get("hand_type"),
+                was_all_in=bool(item.get("was_all_in", False)),
+                result=item.get("result"),
+            )
+            for item in results_payload
+        ]
+
+        duration_seconds = int(payload.get("duration_seconds", 0))
+
+        return cls(
+            hand_id=str(payload.get("hand_id", "")),
+            chat_id=int(payload.get("chat_id", 0)),
+            coerced_chat_id=int(payload.get("coerced_chat_id", payload.get("chat_id", 0))),
+            pot_total=int(payload.get("pot_total", 0)),
+            ended_at=ensure_utc(ended_at),
+            started_at=ensure_utc(started_at) if started_at else None,
+            duration_seconds=duration_seconds,
+            results=results,
+        )
+
+
+
 class BaseStatsService:
     """Abstract base class for statistics services."""
 
@@ -362,6 +441,9 @@ class StatsService(BaseStatsService):
         self._schema_lock = asyncio.Lock()
         self._initialized = False
         self._active_hands: Dict[str, _HandContext] = {}
+        self._stats_buffer: Optional[StatsBatchBuffer] = None
+        self._buffer_flusher_started = False
+        self._buffer_start_lock = asyncio.Lock()
         self._player_report_cache = player_report_cache
         if not self._enabled:
             return
@@ -378,6 +460,12 @@ class StatsService(BaseStatsService):
         self, cache: "AdaptivePlayerReportCache"
     ) -> None:
         self._player_report_cache = cache
+
+    def attach_buffer(self, buffer: StatsBatchBuffer) -> None:
+        """Attach a :class:`StatsBatchBuffer` used for deferred persistence."""
+
+        self._stats_buffer = buffer
+        self._buffer_flusher_started = False
 
     @staticmethod
     def _utcnow() -> dt.datetime:
@@ -441,6 +529,9 @@ class StatsService(BaseStatsService):
             except OSError as exc:
                 logger.warning("Unable to read migration %s: %s", path, exc)
                 continue
+            if backend == "sqlite" and path.name != "001_create_statistics_tables.sql":
+                logger.debug("Skipping migration %s for SQLite backend", path.name)
+                continue
             statements = self._split_sql_statements(sql)
             if not statements:
                 continue
@@ -453,8 +544,27 @@ class StatsService(BaseStatsService):
                     continue
                 try:
                     await conn.exec_driver_sql(text)
+                except OperationalError as exc:
+                    message = str(exc).lower()
+                    if (
+                        "no such table" in message
+                        or "no such column" in message
+                        or "has no column" in message
+                    ):
+                        logger.warning(
+                            "Skipping migration statement from %s due to missing dependency: %s",
+                            path.name,
+                            text,
+                        )
+                        continue
+                    logger.exception(
+                        "Failed to apply migration statement from %s", path.name
+                    )
+                    raise
                 except Exception:
-                    logger.exception("Failed to apply migration statement from %s", path.name)
+                    logger.exception(
+                        "Failed to apply migration statement from %s", path.name
+                    )
                     raise
 
     async def ensure_ready(self) -> None:
@@ -476,7 +586,23 @@ class StatsService(BaseStatsService):
         else:
             loop.create_task(self.ensure_ready())
 
+    async def _ensure_buffer_started(self) -> None:
+        """Ensure the stats batch buffer background flusher is running."""
+
+        if not self._stats_buffer or self._buffer_flusher_started:
+            return
+
+        async with self._buffer_start_lock:
+            if not self._stats_buffer or self._buffer_flusher_started:
+                return
+            await self._stats_buffer.start_background_flusher()
+            self._buffer_flusher_started = True
+
     async def close(self) -> None:
+        if self._stats_buffer is not None:
+            await self._stats_buffer.shutdown()
+            self._stats_buffer = None
+            self._buffer_flusher_started = False
         if self._engine is not None:
             await self._engine.dispose()
 
@@ -636,12 +762,42 @@ class StatsService(BaseStatsService):
         if not self._enabled or self._sessionmaker is None:
             return
         await self._ensure_schema()
+        payload = self._build_hand_buffer_payload(
+            hand_id=hand_id,
+            chat_id=chat_id,
+            results=results,
+            pot_total=pot_total,
+            end_time=end_time,
+        )
+        if payload is None:
+            return
+
+        if self._stats_buffer is not None:
+            await self._ensure_buffer_started()
+            await self._stats_buffer.add([payload.to_buffer()])
+            return
+
+        await self._flush_hand_batch_records([payload])
+
+    def _build_hand_buffer_payload(
+        self,
+        *,
+        hand_id: str,
+        chat_id: int,
+        results: Iterable[PlayerHandResult],
+        pot_total: int,
+        end_time: Optional[dt.datetime],
+    ) -> Optional[_BufferedHandRecord]:
         ended_at = ensure_utc(end_time) if end_time else self._utcnow()
         context = self._active_hands.pop(hand_id, None)
         started_at = context.started_at if context else ended_at
-        duration_seconds = int(
-            max((ended_at - started_at).total_seconds(), 0)
-        ) if started_at else 0
+        if started_at:
+            started_at = ensure_utc(started_at)
+        duration_seconds = (
+            int(max((ended_at - started_at).total_seconds(), 0))
+            if started_at
+            else 0
+        )
 
         normalized_results = [
             PlayerHandResult(
@@ -672,17 +828,62 @@ class StatsService(BaseStatsService):
                 for player in context.players
             ]
 
-        players_for_invalidation: List[int] = []
+        if not normalized_results:
+            return None
+
         coerced_chat_id = self._coerce_int(chat_id)
+
+        return _BufferedHandRecord(
+            hand_id=hand_id,
+            chat_id=chat_id,
+            coerced_chat_id=coerced_chat_id,
+            pot_total=pot_total,
+            ended_at=ended_at,
+            started_at=started_at,
+            duration_seconds=duration_seconds,
+            results=normalized_results,
+        )
+
+    async def _flush_hand_batch_records(
+        self, records: Iterable[Dict[str, Any] | _BufferedHandRecord]
+    ) -> None:
+        if not self._enabled or self._sessionmaker is None:
+            return
+
+        payloads: List[_BufferedHandRecord] = []
+        for record in records:
+            if isinstance(record, _BufferedHandRecord):
+                payloads.append(record)
+            else:
+                payloads.append(_BufferedHandRecord.from_buffer(record))
+
+        if not payloads:
+            return
+
+        await self._ensure_schema()
+        for payload in payloads:
+            try:
+                await self._process_hand_finished_batch(payload)
+            except Exception:
+                logger.warning(
+                    "Failed to flush buffered statistics for hand_id=%s", payload.hand_id,
+                    exc_info=True,
+                )
+
+    async def _process_hand_finished_batch(self, payload: _BufferedHandRecord) -> None:
+        if not payload.results or self._sessionmaker is None:
+            return
+
+        players_for_invalidation: List[int] = []
 
         async with self._sessionmaker() as session:
             async with session.begin():
-                game = await session.get(GameSession, hand_id)
+                game = await session.get(GameSession, payload.hand_id)
                 top_hand = next(
                     (
                         result.hand_type
                         for result in sorted(
-                            normalized_results,
+                            payload.results,
                             key=lambda r: r.payout,
                             reverse=True,
                         )
@@ -692,37 +893,34 @@ class StatsService(BaseStatsService):
                 )
                 if game is None:
                     game = GameSession(
-                        hand_id=hand_id,
-                        chat_id=self._coerce_int(chat_id),
-                        started_at=started_at,
-                        finished_at=ended_at,
-                        duration_seconds=duration_seconds,
-                        pot_total=pot_total,
-                        participant_count=len(normalized_results),
+                        hand_id=payload.hand_id,
+                        chat_id=payload.coerced_chat_id,
+                        started_at=payload.started_at,
+                        finished_at=payload.ended_at,
+                        duration_seconds=payload.duration_seconds,
+                        pot_total=payload.pot_total,
+                        participant_count=len(payload.results),
                         top_winning_hand=top_hand,
                         is_active=False,
                     )
                     session.add(game)
                 else:
-                    game.chat_id = self._coerce_int(chat_id)
-                    game.finished_at = ended_at
-                    game.duration_seconds = duration_seconds
-                    game.pot_total = pot_total
-                    if normalized_results:
-                        game.participant_count = len(normalized_results)
+                    game.chat_id = payload.coerced_chat_id
+                    game.finished_at = payload.ended_at
+                    game.duration_seconds = payload.duration_seconds
+                    game.pot_total = payload.pot_total
+                    if payload.results:
+                        game.participant_count = len(payload.results)
                     game.top_winning_hand = top_hand
                     game.is_active = False
 
                 await session.execute(
                     delete(PlayerHandHistory).where(
-                        PlayerHandHistory.hand_id == hand_id
+                        PlayerHandHistory.hand_id == payload.hand_id
                     )
                 )
 
-                if not normalized_results:
-                    return
-
-                player_ids = [result.user_id for result in normalized_results]
+                player_ids = [result.user_id for result in payload.results]
                 players_for_invalidation = list(dict.fromkeys(player_ids))
                 existing_stats = {
                     stat.user_id: stat
@@ -748,28 +946,28 @@ class StatsService(BaseStatsService):
                 new_stats_objects: List[PlayerStats] = []
                 new_winning_rows: List[PlayerWinningHand] = []
 
-                for result in normalized_results:
+                for result in payload.results:
                     stats = existing_stats.get(result.user_id)
                     if stats is None:
                         stats = PlayerStats(
                             user_id=result.user_id,
                             display_name=result.display_name,
-                            first_seen=started_at,
-                            last_seen=ended_at,
+                            first_seen=payload.started_at,
+                            last_seen=payload.ended_at,
                         )
                         existing_stats[result.user_id] = stats
                         new_stats_objects.append(stats)
                     else:
-                        stats.last_seen = ended_at
+                        stats.last_seen = payload.ended_at
                         if result.display_name and not stats.display_name:
                             stats.display_name = result.display_name
 
                     stats.total_games += 1
-                    stats.total_play_time += duration_seconds
+                    stats.total_play_time += payload.duration_seconds
                     stats.lifetime_bet_amount += result.total_bet
                     stats.lifetime_profit += result.net_profit
                     stats.total_amount_won += result.payout
-                    stats.total_pot_participated += pot_total
+                    stats.total_pot_participated += payload.pot_total
                     if result.was_all_in:
                         stats.total_all_in_events += 1
 
@@ -828,27 +1026,27 @@ class StatsService(BaseStatsService):
                         stats.total_amount_lost += loss_component
 
                     stats.last_result = outcome
-                    stats.last_game_at = ended_at
-                    if pot_total > stats.largest_pot_participated:
-                        stats.largest_pot_participated = pot_total
+                    stats.last_game_at = payload.ended_at
+                    if payload.pot_total > stats.largest_pot_participated:
+                        stats.largest_pot_participated = payload.pot_total
                     if result.hand_type and "فولد" not in result.hand_type:
                         stats.total_showdowns += 1
 
                     history_rows.append(
                         {
-                            "hand_id": hand_id,
+                            "hand_id": payload.hand_id,
                             "user_id": result.user_id,
-                            "chat_id": coerced_chat_id,
-                            "started_at": started_at,
-                            "finished_at": ended_at,
-                            "duration_seconds": duration_seconds,
+                            "chat_id": payload.coerced_chat_id,
+                            "started_at": payload.started_at,
+                            "finished_at": payload.ended_at,
+                            "duration_seconds": payload.duration_seconds,
                             "hand_type": result.hand_type,
                             "result": outcome,
                             "amount_won": result.payout,
                             "amount_lost": loss_amount if outcome == "loss" else max(result.total_bet - result.payout, 0),
                             "net_profit": result.net_profit,
                             "total_bet": result.total_bet,
-                            "pot_size": pot_total,
+                            "pot_size": payload.pot_total,
                             "was_all_in": result.was_all_in,
                         }
                     )
@@ -870,7 +1068,7 @@ class StatsService(BaseStatsService):
             self._player_report_cache.invalidate_on_event(
                 players_for_invalidation,
                 event_type="hand_finished",
-                chat_id=coerced_chat_id,
+                chat_id=payload.coerced_chat_id,
             )
 
     async def finish_hand(
