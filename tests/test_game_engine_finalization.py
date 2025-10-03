@@ -1,5 +1,8 @@
+import asyncio
 import logging
+import time
 from collections import defaultdict
+from contextlib import asynccontextmanager
 from types import SimpleNamespace
 from typing import Any, Dict, List, Optional
 from unittest.mock import AsyncMock, MagicMock
@@ -559,7 +562,7 @@ async def test_record_hand_results_updates_cache_and_stats():
 
     engine = model._game_engine
     engine._invalidate_adaptive_report_cache = MagicMock()
-    engine._stats_reporter.hand_finished = AsyncMock()
+    engine._stats_reporter.hand_finished_deferred = AsyncMock()
 
     game = Game()
     player = Player(
@@ -572,8 +575,7 @@ async def test_record_hand_results_updates_cache_and_stats():
     payouts = {7: 40}
     hand_labels = {7: "label"}
 
-    await engine._record_hand_results(
-        game=game,
+    statistics = engine._prepare_hand_statistics(
         chat_id=-99,
         payouts=payouts,
         hand_labels=hand_labels,
@@ -581,23 +583,181 @@ async def test_record_hand_results_updates_cache_and_stats():
         players_snapshot=players_snapshot,
         game_id=game.id,
     )
+    assert statistics is not None
+
+    await engine._record_hand_results(statistics=statistics)
 
     engine._invalidate_adaptive_report_cache.assert_called_once()
     cache_args, cache_kwargs = engine._invalidate_adaptive_report_cache.call_args
-    assert list(cache_args[0]) == players_snapshot
+    assert cache_args[0] == players_snapshot
     assert cache_kwargs == {"event_type": "hand_finished"}
 
-    engine._stats_reporter.hand_finished.assert_awaited_once()
-    stats_args, stats_kwargs = engine._stats_reporter.hand_finished.await_args
-    stats_game, stats_chat_id = stats_args
-    assert stats_chat_id == -99
-    assert stats_game.id == game.id
-    assert stats_game.seated_players() == players_snapshot
-    assert stats_kwargs == {
-        "payouts": payouts,
-        "hand_labels": hand_labels,
-        "pot_total": 150,
-    }
+    engine._stats_reporter.hand_finished_deferred.assert_awaited_once()
+    _, stats_kwargs = engine._stats_reporter.hand_finished_deferred.await_args
+    assert stats_kwargs["chat_id"] == -99
+    assert stats_kwargs["game"].id == game.id
+    assert stats_kwargs["game"].seated_players() == players_snapshot
+    assert stats_kwargs["payouts"] == payouts
+    assert stats_kwargs["hand_labels"] == hand_labels
+    assert stats_kwargs["pot_total"] == 150
+
+
+@pytest.mark.asyncio
+async def test_finalize_game_defers_statistics_outside_lock():
+    view = _build_view_mock()
+    bot = MagicMock()
+    cfg = MagicMock(DEBUG=False)
+    cfg.constants = get_game_constants()
+    kv = fakeredis.aioredis.FakeRedis()
+    table_manager = MagicMock()
+    stats = _build_stats_service()
+
+    private_match_service = _make_private_match_service(kv, table_manager)
+    model = PokerBotModel(
+        view=view,
+        bot=bot,
+        cfg=cfg,
+        kv=kv,
+        table_manager=table_manager,
+        private_match_service=private_match_service,
+        stats_service=stats,
+    )
+
+    engine = model._game_engine
+    engine._clear_game_messages = AsyncMock(return_value=set())
+    engine._delete_chat_messages = AsyncMock()
+    engine._notify_results = AsyncMock()
+    engine._execute_payouts = AsyncMock()
+    engine._reset_game_state = AsyncMock(return_value=None)
+    engine._player_manager.send_join_prompt = AsyncMock()
+    engine._invalidate_adaptive_report_cache = MagicMock()
+
+    wallet = _make_wallet_mock(1000)
+    player = Player(
+        user_id=11,
+        mention_markdown="@winner",
+        wallet=wallet,
+        ready_message_id="ready",
+    )
+    player.state = PlayerState.ACTIVE
+    player.total_bet = 50
+
+    payouts = defaultdict(int)
+    payouts[player.user_id] = 200
+    hand_labels = {player.user_id: "برنده"}
+
+    engine._determine_winners = AsyncMock(return_value=(payouts, hand_labels, []))
+
+    stats_call_time: Optional[float] = None
+    lock_acquire_time: Optional[float] = None
+    lock_release_time: Optional[float] = None
+
+    @asynccontextmanager
+    async def fake_guard(**_kwargs):
+        nonlocal lock_acquire_time, lock_release_time
+        lock_acquire_time = time.monotonic()
+        try:
+            yield
+        finally:
+            lock_release_time = time.monotonic()
+
+    engine._trace_lock_guard = MagicMock(side_effect=lambda **kwargs: fake_guard(**kwargs))
+
+    async def mock_hand_finished_deferred(**_kwargs):
+        nonlocal stats_call_time
+        stats_call_time = time.monotonic()
+        await asyncio.sleep(0.45)
+
+    engine._stats_reporter.hand_finished_deferred = AsyncMock(
+        side_effect=mock_hand_finished_deferred
+    )
+
+    game = Game()
+    game.state = GameState.ROUND_RIVER
+    game.pot = 200
+    game.add_player(player, seat_index=0)
+
+    context = SimpleNamespace(chat_data={})
+    chat_id = -123
+
+    start_time = time.monotonic()
+    await engine.finalize_game(context=context, game=game, chat_id=chat_id)
+    end_time = time.monotonic()
+
+    assert lock_acquire_time is not None
+    assert lock_release_time is not None
+    assert stats_call_time is not None
+    assert stats_call_time > lock_release_time
+    assert lock_release_time - lock_acquire_time < 0.1
+    assert end_time - start_time > 0.45
+
+
+@pytest.mark.asyncio
+async def test_finalize_game_statistics_failure_does_not_block_reset():
+    view = _build_view_mock()
+    bot = MagicMock()
+    cfg = MagicMock(DEBUG=False)
+    cfg.constants = get_game_constants()
+    kv = fakeredis.aioredis.FakeRedis()
+    table_manager = MagicMock()
+    stats = _build_stats_service()
+
+    private_match_service = _make_private_match_service(kv, table_manager)
+    model = PokerBotModel(
+        view=view,
+        bot=bot,
+        cfg=cfg,
+        kv=kv,
+        table_manager=table_manager,
+        private_match_service=private_match_service,
+        stats_service=stats,
+    )
+
+    engine = model._game_engine
+    engine._clear_game_messages = AsyncMock(return_value=set())
+    engine._delete_chat_messages = AsyncMock()
+    engine._notify_results = AsyncMock()
+    engine._execute_payouts = AsyncMock()
+    engine._reset_game_state = AsyncMock(return_value=None)
+    engine._player_manager.send_join_prompt = AsyncMock()
+    engine._invalidate_adaptive_report_cache = MagicMock()
+    engine._logger = MagicMock()
+
+    payouts = defaultdict(int)
+    hand_labels: Dict[int, Optional[str]] = {}
+    engine._determine_winners = AsyncMock(return_value=(payouts, hand_labels, []))
+
+    @asynccontextmanager
+    async def fake_guard(**_kwargs):
+        yield
+
+    engine._trace_lock_guard = MagicMock(side_effect=lambda **kwargs: fake_guard(**kwargs))
+
+    engine._stats_reporter.hand_finished_deferred = AsyncMock(
+        side_effect=RuntimeError("Database connection lost")
+    )
+
+    game = Game()
+    game.state = GameState.ROUND_RIVER
+    game.pot = 150
+    wallet = _make_wallet_mock(500)
+    player = Player(
+        user_id=21,
+        mention_markdown="@player",
+        wallet=wallet,
+        ready_message_id="ready",
+    )
+    player.state = PlayerState.ACTIVE
+    game.add_player(player, seat_index=0)
+
+    context = SimpleNamespace(chat_data={})
+
+    await engine.finalize_game(context=context, game=game, chat_id=-456)
+
+    engine._reset_game_state.assert_awaited_once()
+    engine._stats_reporter.hand_finished_deferred.assert_awaited_once()
+    engine._player_manager.send_join_prompt.assert_awaited_once_with(game, -456)
+    engine._logger.error.assert_called_once()
 
 
 @pytest.mark.asyncio

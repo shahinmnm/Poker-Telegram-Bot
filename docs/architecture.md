@@ -63,7 +63,7 @@ makes the poker logic easy to test and reason about.
 | Service | Responsibility |
 | ------- | -------------- |
 | **TableManager** | Persists `Game` snapshots in Redis, rehydrates games after bot restarts, and enforces per-chat storage isolation. |
-| **StatsService / StatsReporter** | Streams `hand_started` and `hand_finished` events into the relational database or a no-op backend, depending on configuration. |
+| **StatsService / StatsReporter** | Streams `hand_started` and `hand_finished_deferred` events into the relational database or a no-op backend, depending on configuration. |
 | **PlayerReportCache** | Provides cached leaderboard and player statistics for `/stats` requests so users see instant responses. |
 | **AdaptivePlayerReportCache** | Learns which players query stats most often and invalidates their cache entries immediately after each hand or stop vote. |
 | **PrivateMatchService** | Manages private matches, old-player reminders, and other orchestration that spans multiple hands. |
@@ -167,7 +167,7 @@ constructor arguments are:
 - `MatchmakingService` — drives stage transitions (`start_game`, `progress_stage`,
   and dealing helpers) while holding the `LockManager` stage lock.
 - `PlayerManager` — manages seating, ready prompts, and stop votes.
-- `StatsReporter` — records `hand_started`/`hand_finished` events and invalidates
+- `StatsReporter` — records `hand_started`/`hand_finished_deferred` events and invalidates
   caches for player reports.
 - `RequestMetrics` — tracks per-stage timing and request categories for logging.
 - `TelegramSafeOps` — ensures Telegram API calls are retried safely with rich

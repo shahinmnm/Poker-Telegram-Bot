@@ -2257,7 +2257,7 @@ class GameEngine:
         ]:
             message_cleanup_local: Set[MessageId] = set()
             announcements_local: List[Dict[str, Any]] = []
-            record_kwargs_local: Optional[Dict[str, Any]] = None
+            stats_payload_local: Optional[Dict[str, Any]] = None
             reset_notifications_local: Optional[_ResetNotifications] = None
 
             game.chat_id = chat_id
@@ -2279,15 +2279,14 @@ class GameEngine:
 
             await self._execute_payouts(game=game, payouts=payouts)
 
-            record_kwargs_local = {
-                "game": game,
-                "chat_id": chat_id,
-                "payouts": dict(payouts),
-                "hand_labels": hand_labels,
-                "pot_total": pot_total,
-                "players_snapshot": players_snapshot,
-                "game_id": game_id,
-            }
+            stats_payload_local = self._prepare_hand_statistics(
+                chat_id=chat_id,
+                payouts=payouts,
+                hand_labels=hand_labels,
+                pot_total=pot_total,
+                players_snapshot=players_snapshot,
+                game_id=game_id,
+            )
 
             reset_notifications_local = await self._reset_game_state(
                 game=game,
@@ -2300,7 +2299,7 @@ class GameEngine:
             return (
                 message_cleanup_local,
                 announcements_local,
-                record_kwargs_local,
+                stats_payload_local,
                 reset_notifications_local,
             )
 
@@ -2322,7 +2321,7 @@ class GameEngine:
                 (
                     message_cleanup_ids,
                     announcements,
-                    record_kwargs,
+                    stats_payload,
                     reset_notifications,
                 ) = await _finalize_locked()
         except TimeoutError:
@@ -2343,8 +2342,8 @@ class GameEngine:
                 announcements=announcements,
             )
 
-        if record_kwargs is not None:
-            await self._record_hand_results(**record_kwargs)
+        if stats_payload is not None:
+            await self._record_hand_results(statistics=stats_payload)
 
         if reset_notifications is not None:
             await self._announce_new_hand_ready(
@@ -2459,31 +2458,80 @@ class GameEngine:
                 log_extra=announcement.get("log_extra"),
             )
 
-    async def _record_hand_results(
+    def _prepare_hand_statistics(
         self,
         *,
-        game: Game,
         chat_id: ChatId,
-        payouts: Dict[int, int],
-        hand_labels: Dict[int, Optional[str]],
+        payouts: Mapping[int, int],
+        hand_labels: Mapping[int, Optional[str]],
         pot_total: int,
         players_snapshot: Iterable[Player],
         game_id: Optional[int],
+    ) -> Optional[Dict[str, Any]]:
+        """Prepare statistics payload for deferred persistence.
+
+        Runs entirely within the stage lock but avoids any blocking I/O so
+        that the resulting snapshot can be handed off once the lock is
+        released.
+        """
+
+        players_list = [player for player in players_snapshot if player is not None]
+        if not players_list:
+            return None
+
+        snapshot = _GameStatsSnapshot(game_id, tuple(players_list))
+        stats_kwargs: Dict[str, Any] = {
+            "game": snapshot,
+            "chat_id": chat_id,
+            "payouts": dict(payouts),
+            "hand_labels": dict(hand_labels),
+            "pot_total": pot_total,
+        }
+        return {
+            "players": players_list,
+            "stats_kwargs": stats_kwargs,
+        }
+
+    async def _record_hand_results(
+        self,
+        *,
+        statistics: Optional[Dict[str, Any]],
     ) -> None:
-        players_list = list(players_snapshot)
-        self._invalidate_adaptive_report_cache(
-            players_list, event_type="hand_finished"
-        )
+        if not statistics:
+            return
 
-        stats_game = _GameStatsSnapshot(game_id, tuple(players_list))
+        players_list = list(statistics.get("players", []))
+        if players_list:
+            self._invalidate_adaptive_report_cache(
+                players_list, event_type="hand_finished"
+            )
 
-        await self._stats_reporter.hand_finished(
-            stats_game,
-            chat_id,
-            payouts=payouts,
-            hand_labels=hand_labels,
-            pot_total=pot_total,
-        )
+        stats_kwargs = statistics.get("stats_kwargs")
+        if not isinstance(stats_kwargs, dict):
+            return
+
+        try:
+            await self._stats_reporter.hand_finished_deferred(**stats_kwargs)
+        except Exception:
+            resolved_chat: Optional[int] = None
+            if "chat_id" in stats_kwargs:
+                try:
+                    resolved_chat = self._safe_int(stats_kwargs["chat_id"])
+                except Exception:  # pragma: no cover - defensive logging
+                    try:
+                        resolved_chat = int(stats_kwargs["chat_id"])  # type: ignore[arg-type]
+                    except Exception:  # pragma: no cover - fallback to None
+                        resolved_chat = None
+            game_snapshot = stats_kwargs.get("game")
+            log_extra = {
+                "chat_id": resolved_chat,
+                "game_id": getattr(game_snapshot, "id", None),
+            }
+            self._logger.error(
+                "Failed to record deferred hand statistics",
+                extra=log_extra,
+                exc_info=True,
+            )
 
     async def _reset_game_state(
         self,
