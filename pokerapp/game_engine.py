@@ -729,9 +729,9 @@ class GameEngine:
             player = game.seats[seat_index]
             if player is None or not hasattr(player, "wallet"):
                 logger.error(
-                    "Player missing wallet attribute",
+                    "Player object invalid or missing wallet attribute",
                     extra={
-                        "event_type": "chip_update_no_wallet",
+                        "event_type": "chip_update_player_invalid",
                         "chat_id": chat_id,
                         "user_id": user_id,
                     },
@@ -741,9 +741,9 @@ class GameEngine:
             wallet = getattr(player, "wallet", None)
             if wallet is None or not hasattr(wallet, "chips"):
                 logger.error(
-                    "Player missing wallet attribute",
+                    "Wallet object invalid or missing chips attribute",
                     extra={
-                        "event_type": "chip_update_no_wallet",
+                        "event_type": "chip_update_wallet_invalid",
                         "chat_id": chat_id,
                         "user_id": user_id,
                     },
