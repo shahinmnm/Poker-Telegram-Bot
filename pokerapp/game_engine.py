@@ -680,6 +680,140 @@ class GameEngine:
             if result is not None:
                 return bool(result)
 
+    async def update_player_chips(
+        self,
+        *,
+        chat_id: int,
+        user_id: int,
+        amount: int,
+    ) -> bool:
+        """Update player chip balance with version-controlled retry."""
+
+        if amount == 0:
+            return True
+
+        logger = self._logger
+
+        async def _process_once() -> Optional[bool]:
+            try:
+                game, version = await self._table_manager.load_game_with_version(
+                    chat_id
+                )
+            except Exception:
+                logger.exception(
+                    "Failed loading game for chip update",
+                    extra={
+                        "event_type": "chip_update_load_failed",
+                        "chat_id": chat_id,
+                        "user_id": user_id,
+                        "amount": amount,
+                    },
+                )
+                return False
+
+            if game is None:
+                return False
+
+            seat_index = game.seat_index_for_user(user_id)
+            if seat_index == -1:
+                logger.warning(
+                    "Chip update for user not in game",
+                    extra={
+                        "event_type": "chip_update_user_not_found",
+                        "chat_id": chat_id,
+                        "user_id": user_id,
+                    },
+                )
+                return False
+
+            player = game.seats[seat_index]
+            if player is None or not hasattr(player, "wallet"):
+                logger.error(
+                    "Player missing wallet attribute",
+                    extra={
+                        "event_type": "chip_update_no_wallet",
+                        "chat_id": chat_id,
+                        "user_id": user_id,
+                    },
+                )
+                return False
+
+            wallet = getattr(player, "wallet", None)
+            if wallet is None or not hasattr(wallet, "chips"):
+                logger.error(
+                    "Player missing wallet attribute",
+                    extra={
+                        "event_type": "chip_update_no_wallet",
+                        "chat_id": chat_id,
+                        "user_id": user_id,
+                    },
+                )
+                return False
+
+            old_balance = wallet.chips
+            new_balance = old_balance + amount
+
+            if new_balance < 0:
+                logger.warning(
+                    "Chip update would result in negative balance",
+                    extra={
+                        "event_type": "chip_update_negative",
+                        "chat_id": chat_id,
+                        "user_id": user_id,
+                        "old": old_balance,
+                        "delta": amount,
+                        "new": new_balance,
+                    },
+                )
+                return False
+
+            wallet.chips = new_balance
+
+            try:
+                success = await self._table_manager.save_game_with_version_check(
+                    chat_id, game, version
+                )
+            except Exception:
+                logger.exception(
+                    "Failed saving game after chip update",
+                    extra={
+                        "event_type": "chip_update_save_failed",
+                        "chat_id": chat_id,
+                        "user_id": user_id,
+                        "amount": amount,
+                    },
+                )
+                return False
+
+            if not success:
+                return None
+
+            logger.info(
+                "Player chips updated",
+                extra={
+                    "event_type": "chip_update_success",
+                    "chat_id": chat_id,
+                    "user_id": user_id,
+                    "old_balance": old_balance,
+                    "new_balance": new_balance,
+                    "delta": amount,
+                },
+            )
+
+            return True
+
+        lock_manager = self._lock_manager
+
+        while True:
+            if lock_manager is None:
+                result = await _process_once()
+            else:
+                async with lock_manager.table_write_lock(chat_id):
+                    result = await _process_once()
+
+            if result is not None:
+                return bool(result)
+
     async def _create_joining_player(
         self, user_id: int, user_name: str
     ) -> Player:
