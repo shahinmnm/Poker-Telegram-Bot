@@ -70,6 +70,45 @@ makes the poker logic easy to test and reason about.
 | **MessagingService** | Encapsulates Telegram throttling, retries, and Markdown formatting. Instances are created through a factory stored in `ApplicationServices`. |
 | **TelegramSafeOps** | Wraps `MessagingService` calls with logging metadata, context-aware rate limiting, and exception handling so background tasks remain resilient. |
 
+## Lock Manager Semantics
+
+The `LockManager` provides hierarchical locking with read-write semantics for the table layer.
+
+### Read-Write Locks (Table Layer)
+
+**Read locks** allow multiple concurrent acquisitions:
+
+```python
+async with lock_manager.table_read_lock(chat_id):
+    game = await table_manager.get_game(chat_id)
+    # Other readers can proceed simultaneously
+```
+
+**Write locks** provide exclusive access:
+
+```python
+async with lock_manager.table_write_lock(chat_id):
+    await table_manager.save_game(chat_id, game)
+    # No readers or writers can proceed
+```
+
+This design enables:
+
+- Multiple `/stats` queries during active hands
+- Minimal contention between read-only operations
+- Exclusive access for mutations (save/delete)
+
+### Lock Hierarchy
+
+```
+Stage Lock (exclusive)
+  └─> Table Lock (read-write)
+      └─> Player Lock (exclusive)
+      └─> Countdown Lock (exclusive)
+```
+
+Always acquire locks in this order to prevent deadlocks.
+
 ## Distributed Action Lock System
 
 ### Overview

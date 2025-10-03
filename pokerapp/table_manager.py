@@ -3,7 +3,7 @@ import logging
 import pickle
 import time
 from datetime import datetime
-from typing import Dict, Optional, Tuple, Union
+from typing import Dict, Optional, Tuple, Union, TYPE_CHECKING
 
 import redis.asyncio as aioredis
 from redis import exceptions as redis_exceptions
@@ -15,6 +15,9 @@ from pokerapp.state_validator import (
     ValidationResult,
 )
 from pokerapp.utils.redis_safeops import RedisSafeOps
+
+if TYPE_CHECKING:  # pragma: no cover - typing only
+    from pokerapp.lock_manager import LockManager
 
 
 class TableManager:
@@ -28,6 +31,7 @@ class TableManager:
         redis_ops: Optional[RedisSafeOps] = None,
         wallet_redis_ops: Optional[RedisSafeOps] = None,
         state_validator: Optional[GameStateValidator] = None,
+        lock_manager: Optional["LockManager"] = None,
     ):
         self._redis = redis
         self._wallet_redis = wallet_redis or redis
@@ -46,6 +50,7 @@ class TableManager:
         # Keep games cached in memory keyed only by chat_id
         self._tables: Dict[ChatId, Game] = {}
         self._state_validator = state_validator or GameStateValidator()
+        self._lock_manager = lock_manager
 
     # Keys ---------------------------------------------------------------
     @staticmethod
@@ -64,41 +69,79 @@ class TableManager:
     def _chat_players_key(chat_id: ChatId) -> str:
         return f"chat:{chat_id}:players"
 
+    @staticmethod
+    def _lock_chat_id(chat_id: ChatId) -> Union[int, ChatId]:
+        try:
+            return int(chat_id)
+        except (TypeError, ValueError):
+            return chat_id
+
     # Public API ---------------------------------------------------------
     async def create_game(self, chat_id: ChatId) -> Game:
         """Create a new game for the chat and persist it."""
         game = Game()
-        self._tables[chat_id] = game
-        await self._save(chat_id, game)
+        await self.save_game(chat_id, game)
         return game
 
     async def get_game(self, chat_id: ChatId) -> Game:
         """Load the chat's game, creating one if necessary."""
         section_start = time.time()
-        logging.getLogger(__name__).debug(
-            "[LOCK_SECTION_START] chat_id=%s action=get_game",
-            chat_id,
-        )
-        if chat_id in self._tables:
-            logging.getLogger(__name__).debug(
+        logger = logging.getLogger(__name__)
+        logger.debug("[LOCK_SECTION_START] chat_id=%s action=get_game", chat_id)
+
+        cached = self._tables.get(chat_id)
+        if cached is not None:
+            logger.debug(
                 "[LOCK_SECTION_END] chat_id=%s action=get_game elapsed=%.3fs",
                 chat_id,
                 time.time() - section_start,
             )
-            return self._tables[chat_id]
+            return cached
 
-        game, _ = await self.load_game(chat_id, validate=True)
-        if game is None:
-            game = Game()
-            await self._save(chat_id, game)
+        lock_manager = self._lock_manager
+        if lock_manager is None:
+            game, _ = await self.load_game(chat_id, validate=True)
+            if game is None:
+                game = Game()
+                await self._save(chat_id, game)
+            self._tables[chat_id] = game
+            logger.debug(
+                "[LOCK_SECTION_END] chat_id=%s action=get_game elapsed=%.3fs",
+                chat_id,
+                time.time() - section_start,
+            )
+            return game
 
-        self._tables[chat_id] = game
-        logging.getLogger(__name__).debug(
+        lock_chat_id = self._lock_chat_id(chat_id)
+
+        async with lock_manager.table_read_lock(lock_chat_id):
+            cached = self._tables.get(chat_id)
+
+        if cached is not None:
+            logger.debug(
+                "[LOCK_SECTION_END] chat_id=%s action=get_game elapsed=%.3fs",
+                chat_id,
+                time.time() - section_start,
+            )
+            return cached
+
+        async with lock_manager.table_write_lock(lock_chat_id):
+            cached = self._tables.get(chat_id)
+            if cached is not None:
+                final_game = cached
+            else:
+                final_game, _ = await self.load_game(chat_id, validate=True)
+                if final_game is None:
+                    final_game = Game()
+                    await self._save(chat_id, final_game)
+                self._tables[chat_id] = final_game
+
+        logger.debug(
             "[LOCK_SECTION_END] chat_id=%s action=get_game elapsed=%.3fs",
             chat_id,
             time.time() - section_start,
         )
-        return game
+        return final_game
 
     async def load_game(
         self, chat_id: ChatId, *, validate: bool = True
@@ -160,7 +203,13 @@ class TableManager:
 
                 game = self._state_validator.recover_game(game, validation_result)
                 try:
-                    await self._save(chat_id, game)
+                    lock_manager = self._lock_manager
+                    if lock_manager is None:
+                        await self._save(chat_id, game)
+                    else:
+                        lock_chat_id = self._lock_chat_id(chat_id)
+                        async with lock_manager.table_write_lock(lock_chat_id):
+                            await self._save(chat_id, game)
                 except Exception:
                     self._logger.exception(
                         "Failed to persist recovered game", extra=extra
@@ -281,8 +330,44 @@ class TableManager:
         return True
 
     async def save_game(self, chat_id: ChatId, game: Game) -> None:
-        self._tables[chat_id] = game
-        await self._save(chat_id, game)
+        lock_manager = self._lock_manager
+        if lock_manager is None:
+            self._tables[chat_id] = game
+            await self._save(chat_id, game)
+            return
+
+        lock_chat_id = self._lock_chat_id(chat_id)
+        async with lock_manager.table_write_lock(lock_chat_id):
+            self._tables[chat_id] = game
+            await self._save(chat_id, game)
+
+    async def delete_game(self, chat_id: ChatId) -> None:
+        """Remove the persisted game snapshot and cache for ``chat_id``."""
+
+        async def _delete_snapshot() -> None:
+            self._tables.pop(chat_id, None)
+            await self._redis_ops.safe_delete(
+                self._game_key(chat_id),
+                log_extra={"chat_id": chat_id},
+            )
+            await self._redis_ops.safe_delete(
+                self._version_key(chat_id),
+                log_extra={"chat_id": chat_id},
+            )
+
+        lock_manager = self._lock_manager
+        if lock_manager is None:
+            await _delete_snapshot()
+        else:
+            lock_chat_id = self._lock_chat_id(chat_id)
+            async with lock_manager.table_write_lock(lock_chat_id):
+                await _delete_snapshot()
+
+        self._logger.info(
+            "Game deleted for chat %s",
+            chat_id,
+            extra={"chat_id": chat_id, "event_type": "game_deleted"},
+        )
 
     async def find_game_by_user(self, user_id: int) -> tuple[Game, ChatId]:
         """Return the game and chat id for the given user.
