@@ -75,6 +75,7 @@ from pokerapp.matchmaking_service import MatchmakingService
 from pokerapp.game_engine import GameEngine
 from pokerapp.utils.telegram_safeops import TelegramSafeOps
 from pokerapp.stats_reporter import StatsReporter
+from pokerapp.translations import translate
 
 _GAME_CONSTANTS = get_game_constants()
 _GAME_SECTION = _GAME_CONSTANTS.game
@@ -2242,29 +2243,36 @@ class PokerBotModel:
             all_in_amount = await player.wallet.value()
 
             if all_in_amount <= 0:
-                return False, "👀 موجودی کافی برای آل-این وجود ندارد"
+                return False, translate("errors.no_chips_for_all_in")
 
             try:
                 await player.wallet.authorize(game.id, all_in_amount)
             except UserException as exc:
-                return False, f"⚠️ خطا در برداشت: {exc}"
+                return False, f"⚠️ {translate('errors.wallet_error')}: {exc}"
 
             player.round_rate += all_in_amount
             player.total_bet += all_in_amount
             game.pot += all_in_amount
 
-            if player.round_rate > game.max_round_rate:
+            if getattr(player, "round_rate", 0) > getattr(game, "max_round_rate", 0):
                 game.max_round_rate = player.round_rate
-                game.trading_end_user_id = player.user_id
-                for other in game.players_by(states=(PlayerState.ACTIVE,)):
-                    if other.user_id != player.user_id and hasattr(other, "has_acted"):
+                game.trading_end_user_id = getattr(player, "user_id", None)
+                try:
+                    active_players = game.players_by(states=(PlayerState.ACTIVE,))
+                except Exception:
+                    active_players = list(getattr(game, "players", []))
+                for other in active_players:
+                    if getattr(other, "user_id", None) == getattr(player, "user_id", None):
+                        continue
+                    if hasattr(other, "has_acted"):
                         other.has_acted = False
 
             player.state = PlayerState.ALL_IN
             player.has_acted = True
 
             mention = getattr(player, "mention_markdown", str(player.user_id))
-            self._append_last_action(game, f"{mention}: آل-این {all_in_amount}$")
+            action_text = f"{mention}: {translate('actions.all_in')} {all_in_amount}$"
+            self._append_last_action(game, action_text)
 
             return True, None
 
@@ -2279,10 +2287,12 @@ class PokerBotModel:
             await self._view.send_message(chat_id, result.error_message)
             return
 
-        if result.success and result.game:
-            next_player = await self._process_playing(chat_id, result.game, context)
-            if next_player:
-                await self._send_turn_message(result.game, next_player, chat_id)
+        if result.success and result.game and result.next_player:
+            await self._send_turn_message(
+                result.game,
+                result.next_player,
+                chat_id,
+            )
 
     # ---- Table management commands ---------------------------------
 
