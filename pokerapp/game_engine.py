@@ -431,38 +431,42 @@ class GameEngine:
         user_id: int,
         user_name: str,
     ) -> bool:
-        lock_token = await self._lock_manager.acquire_table_lock(
-            chat_id=chat_id,
-            operation="join",
-            timeout_seconds=5,
-        )
+        """Join a table with table-level locking and version retries."""
 
-        if not lock_token:
-            self._logger.warning(
-                "Join rejected - table lock held",
-                extra={
-                    "event_type": "join_table_locked",
-                    "chat_id": chat_id,
-                    "user_id": user_id,
-                },
-            )
-            await self._view.send_message(
-                chat_id,
-                translate(
-                    "error.table_busy",
-                    "⚠️ Table is busy. Please try again in a moment.",
-                ),
-                request_category=RequestCategory.GENERAL,
-            )
-            return False
+        async def _process_once() -> Optional[bool]:
+            try:
+                game_data, version = await self._table_manager.load_game_with_version(
+                    chat_id
+                )
+            except Exception:
+                self._logger.exception(
+                    "Failed loading game for join",
+                    extra={
+                        "event_type": "join_load_failed",
+                        "chat_id": chat_id,
+                        "user_id": user_id,
+                    },
+                )
+                await self._view.send_message(
+                    chat_id,
+                    translate(
+                        "error.generic",
+                        "⚠️ Something went wrong. Please try again shortly.",
+                    ),
+                    request_category=RequestCategory.GENERAL,
+                )
+                return False
 
-        try:
-            loaded = await self._table_manager.load_game(chat_id)
-            game = loaded[0] if isinstance(loaded, tuple) else loaded
-            if game is None:
-                game = await self._table_manager.create_game(chat_id)
+            current_game: Optional[Game]
+            if isinstance(game_data, tuple):
+                current_game = game_data[0]
+            else:
+                current_game = game_data
 
-            if game.state != GameState.INITIAL:
+            if current_game is None:
+                current_game = Game()
+
+            if current_game.state != GameState.INITIAL:
                 await self._view.send_message(
                     chat_id,
                     translate(
@@ -473,7 +477,7 @@ class GameEngine:
                 )
                 return False
 
-            if game.seat_index_for_user(user_id) != -1:
+            if current_game.seat_index_for_user(user_id) != -1:
                 await self._view.send_message(
                     chat_id,
                     translate(
@@ -484,7 +488,7 @@ class GameEngine:
                 )
                 return False
 
-            if game.seated_count() >= self._max_players:
+            if current_game.seated_count() >= self._max_players:
                 await self._view.send_message(
                     chat_id,
                     translate(
@@ -495,14 +499,14 @@ class GameEngine:
                 )
                 return False
 
-            available_seats = self._get_available_seats(game)
+            available_seats = self._get_available_seats(current_game)
             if not available_seats:
                 self._logger.error(
                     "No available seats despite table not full",
                     extra={
                         "event_type": "seat_assignment_error",
                         "chat_id": chat_id,
-                        "player_count": game.seated_count(),
+                        "player_count": current_game.seated_count(),
                         "max_players": self._max_players,
                     },
                 )
@@ -510,11 +514,37 @@ class GameEngine:
 
             seat_index = available_seats[0]
             player = await self._create_joining_player(user_id, user_name)
-            game.add_player(player, seat_index)
-            if hasattr(game, "ready_users"):
-                game.ready_users.add(user_id)
+            current_game.add_player(player, seat_index)
+            if hasattr(current_game, "ready_users"):
+                current_game.ready_users.add(user_id)
 
-            await self._table_manager.save_game(chat_id, game)
+            try:
+                save_success = await self._table_manager.save_game_with_version_check(
+                    chat_id,
+                    current_game,
+                    version,
+                )
+            except Exception:
+                self._logger.exception(
+                    "Failed saving game after join",
+                    extra={
+                        "event_type": "join_save_failed",
+                        "chat_id": chat_id,
+                        "user_id": user_id,
+                    },
+                )
+                await self._view.send_message(
+                    chat_id,
+                    translate(
+                        "error.generic",
+                        "⚠️ Something went wrong. Please try again shortly.",
+                    ),
+                    request_category=RequestCategory.GENERAL,
+                )
+                return False
+
+            if not save_success:
+                return None
 
             await self._view.send_message(
                 chat_id,
@@ -535,12 +565,20 @@ class GameEngine:
                 },
             )
             return True
-        finally:
-            await self._lock_manager.release_table_lock(
-                chat_id=chat_id,
-                token=lock_token,
-                operation="join",
-            )
+
+        lock_manager = self._lock_manager
+
+        while True:
+            if lock_manager is None:
+                result = await _process_once()
+            else:
+                async with lock_manager.table_write_lock(chat_id):
+                    result = await _process_once()
+
+            if result is None:
+                continue
+
+            return bool(result)
 
     async def leave_game(
         self,
