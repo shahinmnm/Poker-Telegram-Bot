@@ -72,9 +72,9 @@ from pokerapp.lock_manager import LockManager
 from pokerapp.player_identity_manager import PlayerIdentityManager
 from pokerapp.player_manager import PlayerManager
 from pokerapp.matchmaking_service import MatchmakingService
-from pokerapp.stats_reporter import StatsReporter
 from pokerapp.game_engine import GameEngine
 from pokerapp.utils.telegram_safeops import TelegramSafeOps
+from pokerapp.stats_reporter import StatsReporter
 
 _GAME_CONSTANTS = get_game_constants()
 _GAME_SECTION = _GAME_CONSTANTS.game
@@ -2224,45 +2224,65 @@ class PokerBotModel:
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
     ) -> None:
         """بازیکن تمام موجودی خود را شرط می‌بندد (All-in)."""
-        game, chat_id = await self._get_game(update, context)
-        current_player = self._current_turn_player(game)
-        if not current_player:
-            return
-        all_in_amount = await current_player.wallet.value()
 
-        if all_in_amount <= 0:
-            await self._view.send_message(
-                chat_id,
-                f"👀 {current_player.mention_markdown} موجودی برای آل-این ندارد و چک می‌کند.",
-            )
-            await self.player_action_call_check(
-                update, context
-            )  # این حرکت معادل چک است
+        chat = getattr(update, "effective_chat", None)
+        if chat is None or getattr(chat, "id", None) is None:
+            return
+        chat_id = chat.id
+
+        user = getattr(update, "effective_user", None)
+        if user is None or getattr(user, "id", None) is None:
             return
 
-        await current_player.wallet.authorize(game.id, all_in_amount)
-        current_player.round_rate += all_in_amount
-        current_player.total_bet += all_in_amount
-        game.pot += all_in_amount
-        current_player.state = PlayerState.ALL_IN
-        current_player.has_acted = True
+        async def _all_in_processor(
+            game: Game, player: Player
+        ) -> Tuple[bool, Optional[str]]:
+            """Execute all-in logic inside protected lock scope."""
 
-        action_str = f"{current_player.mention_markdown}: آل-این {all_in_amount}$"
-        game.last_actions.append(action_str)
-        if len(game.last_actions) > 5:
-            game.last_actions.pop(0)
+            all_in_amount = await player.wallet.value()
 
-        if current_player.round_rate > game.max_round_rate:
-            game.max_round_rate = current_player.round_rate
-            game.trading_end_user_id = current_player.user_id
-            for p in game.players_by(states=(PlayerState.ACTIVE,)):
-                if p.user_id != current_player.user_id:
-                    p.has_acted = False
+            if all_in_amount <= 0:
+                return False, "👀 موجودی کافی برای آل-این وجود ندارد"
 
-        next_player = await self._process_playing(chat_id, game, context)
-        if next_player:
-            await self._send_turn_message(game, next_player, chat_id)
-        await self._table_manager.save_game(chat_id, game)
+            try:
+                await player.wallet.authorize(game.id, all_in_amount)
+            except UserException as exc:
+                return False, f"⚠️ خطا در برداشت: {exc}"
+
+            player.round_rate += all_in_amount
+            player.total_bet += all_in_amount
+            game.pot += all_in_amount
+
+            if player.round_rate > game.max_round_rate:
+                game.max_round_rate = player.round_rate
+                game.trading_end_user_id = player.user_id
+                for other in game.players_by(states=(PlayerState.ACTIVE,)):
+                    if other.user_id != player.user_id and hasattr(other, "has_acted"):
+                        other.has_acted = False
+
+            player.state = PlayerState.ALL_IN
+            player.has_acted = True
+
+            mention = getattr(player, "mention_markdown", str(player.user_id))
+            self._append_last_action(game, f"{mention}: آل-این {all_in_amount}$")
+
+            return True, None
+
+        result = await self._handle_locked_player_action(
+            update=update,
+            context=context,
+            action="all_in",
+            processor=_all_in_processor,
+        )
+
+        if result.error_message:
+            await self._view.send_message(chat_id, result.error_message)
+            return
+
+        if result.success and result.game:
+            next_player = await self._process_playing(chat_id, result.game, context)
+            if next_player:
+                await self._send_turn_message(result.game, next_player, chat_id)
 
     # ---- Table management commands ---------------------------------
 
