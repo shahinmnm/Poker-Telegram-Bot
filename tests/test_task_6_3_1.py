@@ -113,7 +113,9 @@ async def test_table_lock_acquire_release(lock_manager: LockManager):
 
 
 @pytest.mark.asyncio
-async def test_table_lock_join_leave_serialised(lock_manager: LockManager):
+async def test_table_lock_different_operations_independent(
+    lock_manager: LockManager,
+):
     chat_id = 101
 
     token_join = await lock_manager.acquire_table_lock(
@@ -121,16 +123,26 @@ async def test_table_lock_join_leave_serialised(lock_manager: LockManager):
         operation="join",
         timeout_seconds=5,
     )
-    assert token_join is not None
+    assert token_join is not None, "Join lock should be acquired"
 
     token_leave = await lock_manager.acquire_table_lock(
         chat_id=chat_id,
         operation="leave",
         timeout_seconds=5,
     )
-    assert token_leave is None
+    assert (
+        token_leave is not None
+    ), "Leave lock should be independent from join lock"
 
-    await lock_manager.release_table_lock(chat_id, token_join)
+    released_join = await lock_manager.release_table_lock(
+        chat_id, token_join, operation="join"
+    )
+    assert released_join, "Join lock should release successfully"
+
+    released_leave = await lock_manager.release_table_lock(
+        chat_id, token_leave, operation="leave"
+    )
+    assert released_leave, "Leave lock should release successfully"
 
 
 @pytest.mark.asyncio
@@ -156,7 +168,7 @@ async def test_concurrent_joins_unique_seats(lock_manager: LockManager):
         game = Game()
         for seat in assigned_seats:
             game.add_player(_build_existing_player(seat), seat)
-        return game, None
+        return game
 
     async def save_game(_: int, game: Game):
         for seat_index, player in enumerate(game.seats):

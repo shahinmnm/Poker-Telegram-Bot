@@ -2637,7 +2637,7 @@ class LockManager:
             normalized_chat = int(chat_id)
         except (TypeError, ValueError):
             normalized_chat = chat_id
-        return f"{prefix}{normalized_chat}"
+        return f"{prefix}{normalized_chat}:{operation}"
 
     async def _execute_release_lock_script(self, redis_key: str, token: str) -> int:
         try:
@@ -2724,8 +2724,24 @@ class LockManager:
         )
         return None
 
-    async def release_table_lock(self, chat_id: int, token: str) -> bool:
-        lock_key = self._make_table_lock_key(chat_id, "")
+    async def release_table_lock(
+        self,
+        chat_id: int,
+        token: str,
+        operation: str = "join",
+    ) -> bool:
+        """Release a table-level lock using token validation.
+
+        Args:
+            chat_id: Chat ID to release lock for
+            token: Lock token from acquire_table_lock
+            operation: Lock operation type ("join" or "leave")
+
+        Returns:
+            True if successfully released, False otherwise
+        """
+
+        lock_key = self._make_table_lock_key(chat_id, operation)
 
         try:
             result = await self._execute_release_lock_script(lock_key, token)
@@ -2735,6 +2751,7 @@ class LockManager:
                 extra={
                     "event_type": "table_lock_release_error",
                     "chat_id": chat_id,
+                    "operation": operation,
                     "token_prefix": token[:8],
                     "error": str(exc),
                 },
