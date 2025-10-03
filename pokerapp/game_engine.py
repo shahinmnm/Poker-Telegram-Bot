@@ -1122,6 +1122,162 @@ class GameEngine:
 
         return result
 
+    async def process_bet(self, chat_id: int, user_id: int, amount: int) -> bool:
+        """Process a betting request with table-level locking and retries."""
+
+        if amount is None or amount <= 0:
+            self._logger.warning(
+                "Bet rejected due to invalid amount",
+                extra={
+                    "event_type": "engine_bet_invalid_amount",
+                    "chat_id": chat_id,
+                    "user_id": user_id,
+                    "amount": amount,
+                },
+            )
+            return False
+
+        async def _process_once() -> Optional[bool]:
+            try:
+                game_data, version = await self._table_manager.load_game_with_version(
+                    chat_id
+                )
+            except Exception:
+                self._logger.exception(
+                    "Failed loading game for bet",
+                    extra={
+                        "event_type": "engine_bet_load_failed",
+                        "chat_id": chat_id,
+                        "user_id": user_id,
+                        "amount": amount,
+                    },
+                )
+                return False
+
+            current_game: Optional[Game]
+            if isinstance(game_data, tuple):
+                current_game = game_data[0]
+            else:
+                current_game = game_data
+
+            if current_game is None:
+                self._logger.warning(
+                    "No active game for bet",
+                    extra={
+                        "event_type": "engine_bet_no_game",
+                        "chat_id": chat_id,
+                        "user_id": user_id,
+                        "amount": amount,
+                    },
+                )
+                return False
+
+            log_context = {
+                "event_type": "engine_process_bet",
+                "chat_id": chat_id,
+                "game_id": getattr(current_game, "id", None),
+                "user_id": user_id,
+            }
+
+            player = self._find_player_by_user_id(current_game, user_id)
+            if player is None:
+                self._logger.warning(
+                    "Player not found in game during bet",
+                    extra={**log_context, "amount": amount},
+                )
+                return False
+
+            mention = getattr(
+                player, "mention_markdown", str(getattr(player, "user_id", user_id))
+            )
+            current_round_rate = int(getattr(player, "round_rate", 0))
+            max_round_rate = int(getattr(current_game, "max_round_rate", 0))
+            call_amount = max(0, max_round_rate - current_round_rate)
+            raise_amount = int(amount)
+            total_commit = call_amount + raise_amount
+
+            if total_commit <= 0:
+                self._logger.warning(
+                    "Bet rejected because no chips would be committed",
+                    extra={**log_context, "amount": amount},
+                )
+                return False
+
+            wallet = getattr(player, "wallet", None)
+            if wallet is not None and hasattr(wallet, "authorize"):
+                try:
+                    await wallet.authorize(current_game.id, total_commit)
+                except Exception:
+                    self._logger.warning(
+                        "Wallet authorization failed during bet",
+                        extra={**log_context, "amount": total_commit},
+                        exc_info=True,
+                    )
+                    return False
+
+            player.round_rate = current_round_rate + total_commit
+            player.total_bet = int(getattr(player, "total_bet", 0)) + total_commit
+            current_game.pot = int(getattr(current_game, "pot", 0)) + total_commit
+            current_game.max_round_rate = max(
+                int(getattr(current_game, "max_round_rate", 0)),
+                player.round_rate,
+            )
+
+            if hasattr(player, "has_acted"):
+                player.has_acted = True
+            if hasattr(current_game, "trading_end_user_id"):
+                current_game.trading_end_user_id = getattr(player, "user_id", None)
+
+            for other in getattr(current_game, "players", []):
+                if other is player:
+                    continue
+                if (
+                    getattr(other, "state", PlayerState.ACTIVE) == PlayerState.ACTIVE
+                    and hasattr(other, "has_acted")
+                ):
+                    other.has_acted = False
+
+            actions = getattr(current_game, "last_actions", None)
+            if isinstance(actions, list):
+                action_label = "رِیز" if call_amount > 0 else "بِت"
+                actions.append(f"{mention}: {action_label} {total_commit}$")
+                if len(actions) > 5:
+                    del actions[:-5]
+
+            self.refresh_turn_deadline(current_game)
+
+            try:
+                save_success = (
+                    await self._table_manager.save_game_with_version_check(
+                        chat_id, current_game, version
+                    )
+                )
+            except Exception:
+                self._logger.exception(
+                    "Failed saving game after bet",
+                    extra={**log_context, "amount": total_commit},
+                )
+                return False
+
+            if not save_success:
+                return None
+
+            return True
+
+        lock_manager = self._lock_manager
+
+        while True:
+            if lock_manager is None:
+                result = await _process_once()
+            else:
+                async with lock_manager.table_write_lock(chat_id):
+                    result = await _process_once()
+
+            if result is None:
+                continue
+
+            return bool(result)
+
     async def _execute_player_action(
         self,
         *,
