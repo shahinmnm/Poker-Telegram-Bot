@@ -74,7 +74,7 @@ def _make_service_logger(
     )
 
 
-def build_services(cfg: Config) -> ApplicationServices:
+def build_services(cfg: Config, *, skip_stats_buffer: bool = False) -> ApplicationServices:
     """Initialise logging and infrastructure dependencies for the bot."""
 
     setup_logging(logging.INFO, debug_mode=cfg.DEBUG)
@@ -140,13 +140,18 @@ def build_services(cfg: Config) -> ApplicationServices:
     )
     stats_service.bind_player_report_cache(adaptive_player_report_cache)
 
-    if isinstance(stats_service, StatsService):
+    if isinstance(stats_service, StatsService) and not skip_stats_buffer:
         stats_buffer = StatsBatchBuffer(
             session_maker=getattr(stats_service, "_sessionmaker", None),
             flush_callback=stats_service._flush_hand_batch_records,
             config=_SYSTEM_CONSTANTS,
         )
         stats_service.attach_buffer(stats_buffer)
+    elif skip_stats_buffer and isinstance(stats_service, StatsService):
+        stats_logger.info(
+            "Statistics batch buffer disabled via configuration",
+            extra={"event_type": "stats_buffer_disabled"},
+        )
 
     player_report_cache = PlayerReportCache(
         redis_ops,

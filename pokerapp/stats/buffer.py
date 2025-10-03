@@ -68,6 +68,7 @@ class StatsBatchBuffer:
             "total_flushes": 0,
             "failed_flushes": 0,
             "avg_batch_size": 0.0,
+            "average_batch_size": 0.0,
             "max_buffer_size_reached": 0,
             "last_flush_timestamp": None,
             "last_flush_duration_ms": 0.0,
@@ -180,9 +181,11 @@ class StatsBatchBuffer:
             self.metrics["last_flush_duration_ms"] = duration_ms
             total_flushes = self.metrics["total_flushes"]
             if total_flushes:
-                self.metrics["avg_batch_size"] = (
-                    self.metrics["total_records_flushed"] / total_flushes
-                )
+                average = self.metrics["total_records_flushed"] / total_flushes
+            else:
+                average = 0.0
+            self.metrics["avg_batch_size"] = average
+            self.metrics["average_batch_size"] = average
 
         logger.info(
             "Flushed %s statistics records in %.2f ms", len(records_to_flush), duration_ms
@@ -242,6 +245,8 @@ class StatsBatchBuffer:
             total_flushed = self.metrics["total_records_flushed"]
             total_flushes = self.metrics["total_flushes"] or 1
             avg_batch = total_flushed / total_flushes
+            self.metrics["avg_batch_size"] = avg_batch
+            self.metrics["average_batch_size"] = avg_batch
         else:
             total_flushed = 0
             avg_batch = 0.0

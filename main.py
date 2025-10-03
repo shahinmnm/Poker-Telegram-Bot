@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 
+import argparse
 import asyncio
 import os
 import sys
-from typing import Iterable, Mapping, Sequence
+from typing import Iterable, Mapping, Optional, Sequence
 
 from dotenv import load_dotenv
 
@@ -41,10 +42,21 @@ def _startup_log_extra(
     return extra
 
 
-def main() -> None:
+def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Run the Poker Telegram bot")
+    parser.add_argument(
+        "--skip-stats-buffer",
+        action="store_true",
+        help="Disable the asynchronous stats batching buffer (debugging only).",
+    )
+    return parser.parse_args(argv)
+
+
+def main(argv: Optional[Sequence[str]] = None) -> None:
+    args = parse_args(argv)
     load_dotenv()
     cfg: Config = Config()
-    services = build_services(cfg)
+    services = build_services(cfg, skip_stats_buffer=args.skip_stats_buffer)
     logger = services.logger.getChild(__name__)
 
     logger.info(
