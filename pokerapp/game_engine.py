@@ -2985,12 +2985,15 @@ class GameEngine:
         chat_id: ChatId,
         game: Game,
     ) -> bool:
+        deferred_tasks: List[Awaitable[Any]] = []
+
         async def _progress_locked() -> bool:
             return await self._matchmaking_service.progress_stage(
                 context=context,
                 chat_id=chat_id,
                 game=game,
                 finalize_game=self.finalize_game,
+                deferred_tasks=deferred_tasks,
             )
 
         lock_key = self._stage_lock_key(chat_id)
@@ -3016,6 +3019,19 @@ class GameEngine:
                 game=game,
             )
             raise
+
+        if deferred_tasks:
+            results = await asyncio.gather(*deferred_tasks, return_exceptions=True)
+            for index, item in enumerate(results):
+                if isinstance(item, Exception):
+                    self._logger.warning(
+                        "Deferred stage task failed",
+                        extra={
+                            "chat_id": chat_id,
+                            "task_index": index,
+                            "error": str(item),
+                        },
+                    )
 
         self.refresh_turn_deadline(game)
         return result
