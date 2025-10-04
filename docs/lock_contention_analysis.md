@@ -24,6 +24,14 @@ Because all of these were awaited while the `stage:<chat>` lock was held, parall
 * `PokerBotModel._clear_game_messages` supports a `collect_only` mode that returns the pending message IDs while clearing in-memory state; the new `GameEngine._delete_chat_messages` helper performs the actual deletions once the stage lock is free.
 * Startup and start-game paths now call `LockManager.detect_deadlock()` and log a JSON snapshot to simplify diagnostics of held or waiting locks.
 
+## Unprotected Mutations
+
+The audit identified a critical window in `_execute_player_action` where awaited wallet authorisations could run concurrently with other player requests, leading to interleaved updates of `game.pot` and betting metadata.  The Phase 2A-4 fix promotes this routine into the `stage:<chat>` guard so the betting pipeline is fully serialized while the wallet round-trips complete.
+
+## Reset Path Races
+
+Before the remediation, `_reset_core_game_state` reloaded and persisted hand state outside of the stage lock.  Parallel `/reset` or `/start` invocations could therefore overwrite the persisted version without detecting conflicts.  The Phase 2A-5 change binds the reset flow to the stage lock, captures the optimistic lock version prior to mutation, and retries once on conflict to preserve the settlement ordering guarantees.
+
 ## Follow-up Observability Ideas
 
 * Track per-lock holding durations (e.g. via an async context timer) and feed them into the existing request metrics to spot hot spots early.

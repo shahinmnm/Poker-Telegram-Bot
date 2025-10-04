@@ -1804,9 +1804,12 @@ class GameEngine:
         """
         Execute a validated player action on the in-memory game state.
 
-        Phase 2A lock audit: this operation now acquires the stage lock to
-        prevent concurrent mutations of ``game.pot`` and player betting
-        attributes while awaiting wallet authorisations.
+        Phase 2A-4 Lock Audit Fix (CRITICAL-1): acquires ``stage_lock`` to
+        prevent concurrent ``game.pot`` mutations during awaited wallet
+        authorisations, addressing the Lock Pattern Audit finding on
+        unguarded betting state.
+
+        Ref: docs/lock_contention_analysis.md, Section "Unprotected Mutations".
         """
 
         action_token = action.strip().lower()
@@ -3544,9 +3547,12 @@ class GameEngine:
         """
         Persist the final state of a hand while holding the stage lock.
 
-        The updated implementation captures the optimistic locking version
-        before persisting and retries once on conflict, aligning with the
-        locking guarantees validated during the Phase 2A audit.
+        Phase 2A-5 Lock Audit Fix (CRITICAL-1): captures optimistic locking
+        version metadata and retries once on conflict so the critical
+        settlement window remains serialised, resolving reset-path race
+        conditions from the Lock Pattern Audit.
+
+        Ref: docs/lock_contention_analysis.md, Section "Reset Path Races".
         """
 
         lock_key = self._stage_lock_key(chat_id)
