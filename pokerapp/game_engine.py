@@ -17,6 +17,7 @@ import asyncio
 import datetime
 import json
 import logging
+import warnings
 from collections import defaultdict
 from dataclasses import dataclass
 from contextlib import asynccontextmanager
@@ -31,6 +32,7 @@ from typing import (
     List,
     Mapping,
     Optional,
+    Protocol,
     Set,
     Tuple,
 )
@@ -242,6 +244,41 @@ class _GameStatsSnapshot:
     @property
     def players(self) -> List[Player]:
         return list(self._players)
+class MessagingProtocol(Protocol):
+    """Protocol capturing the messaging methods used by the engine."""
+
+    async def delete_message(
+        self,
+        chat_id: ChatId,
+        message_id: MessageId,
+        *,
+        allow_anchor_deletion: bool = False,
+        anchor_reason: Optional[str] = None,
+        game: Optional[Game] = None,
+        suppress_exceptions: bool = True,
+    ) -> None:
+        ...
+
+    async def send_message(
+        self,
+        chat_id: ChatId,
+        text: str,
+        reply_markup: Optional[Any] = None,
+        parse_mode: str = "Markdown",
+        request_category: Optional[Any] = None,
+        *,
+        game: Optional[Game] = None,
+    ) -> Optional[MessageId]:
+        ...
+
+
+class WinnerDeterminationProtocol(Protocol):
+    """Protocol for winner determination helpers."""
+
+    def determine_winner(self, game: Game) -> Optional[Player]:
+        ...
+
+
 class GameEngine:
     """Coordinates game-level constants and helpers."""
 
@@ -372,7 +409,7 @@ class GameEngine:
         self._old_players_key = old_players_key
         self._telegram_ops = telegram_safe_ops
         self._safe_ops = telegram_safe_ops
-        self._messaging = view
+        self._messaging: MessagingProtocol = view
         self._lock_manager = lock_manager
         self._logger = logger
         self.constants = constants or _CONSTANTS
@@ -2919,15 +2956,24 @@ class GameEngine:
     ) -> bool:
         """Progress to the next stage while supporting legacy call patterns."""
 
-        if chat_id is None:
-            raise ValueError("chat_id is required")
-
         if context is not None or game is not None:
+            warnings.warn(
+                "progress_stage(context=, game=) signature is deprecated. "
+                "Use progress_stage(chat_id=chat_id) instead."
+                " Legacy support will be removed in a future major release.",
+                DeprecationWarning,
+                stacklevel=2,
+            )
+            if chat_id is None:
+                raise ValueError("chat_id is required")
             return await self._progress_stage_legacy(
                 context=context,
                 chat_id=chat_id,
                 game=game,
             )
+
+        if chat_id is None:
+            raise ValueError("chat_id is required")
 
         return await self._progress_stage_snapshot(chat_id)
 
@@ -3051,19 +3097,54 @@ class GameEngine:
     async def _execute_deferred_stage_tasks(
         self, snapshot: StageProgressSnapshot
     ) -> None:
-        messaging = getattr(self, "_messaging", None)
-        if messaging is None:
-            return
+        tasks: List[asyncio.Task[Any]] = []
 
-        tasks: List[Awaitable[Any]] = []
-        delete_message = getattr(messaging, "delete_message", None)
-        for message_id in snapshot.message_ids_to_delete:
-            if callable(delete_message):
-                tasks.append(delete_message(snapshot.chat_id, message_id))
+        if hasattr(self._messaging, "delete_message"):
+            for message_id in snapshot.message_ids_to_delete:
+                try:
+                    tasks.append(
+                        asyncio.create_task(
+                            self._messaging.delete_message(
+                                snapshot.chat_id, message_id
+                            )
+                        )
+                    )
+                except Exception as exc:  # pragma: no cover - defensive guard
+                    self._logger.warning(
+                        "Deferred stage task scheduling failed",
+                        extra={
+                            "chat_id": snapshot.chat_id,
+                            "task_type": "delete_message",
+                            "error": str(exc),
+                            "error_type": type(exc).__name__,
+                            "stage": snapshot.stage,
+                        },
+                    )
 
-        send_message = getattr(messaging, "send_message", None)
-        if callable(send_message):
-            tasks.append(send_message(snapshot.chat_id, snapshot.new_message_text))
+        delete_task_count = len(tasks)
+
+        if snapshot.new_message_text and hasattr(self._messaging, "send_message"):
+            try:
+                tasks.append(
+                    asyncio.create_task(
+                        self._messaging.send_message(
+                            snapshot.chat_id,
+                            snapshot.new_message_text,
+                            parse_mode="Markdown",
+                        )
+                    )
+                )
+            except Exception as exc:  # pragma: no cover - defensive guard
+                self._logger.warning(
+                    "Deferred stage task scheduling failed",
+                    extra={
+                        "chat_id": snapshot.chat_id,
+                        "task_type": "send_message",
+                        "error": str(exc),
+                        "error_type": type(exc).__name__,
+                        "stage": snapshot.stage,
+                    },
+                )
 
         if not tasks:
             return
@@ -3071,12 +3152,20 @@ class GameEngine:
         results = await asyncio.gather(*tasks, return_exceptions=True)
         for index, result in enumerate(results):
             if isinstance(result, Exception):
+                task_type = (
+                    "send_message"
+                    if index >= delete_task_count and snapshot.new_message_text
+                    else "delete_message"
+                )
                 self._logger.warning(
                     "Deferred stage task failed",
                     extra={
                         "chat_id": snapshot.chat_id,
                         "task_index": index,
+                        "task_type": task_type,
                         "error": str(result),
+                        "error_type": type(result).__name__,
+                        "stage": snapshot.stage,
                     },
                 )
 
@@ -3086,10 +3175,17 @@ class GameEngine:
         context: Optional[ContextTypes.DEFAULT_TYPE] = None,
         game: Optional[Game] = None,
         chat_id: ChatId,
-    ) -> Optional[bool]:
+    ) -> None:
         """Finalize a game while maintaining backwards compatibility."""
 
         if context is not None or game is not None:
+            warnings.warn(
+                "finalize_game(context=, game=) signature is deprecated. "
+                "Use finalize_game(chat_id=chat_id) instead."
+                " Legacy support will be removed in a future major release.",
+                DeprecationWarning,
+                stacklevel=2,
+            )
             await self._finalize_game_legacy(
                 context=context,
                 game=game,
@@ -3097,7 +3193,8 @@ class GameEngine:
             )
             return None
 
-        return await self._finalize_game_snapshot(chat_id)
+        await self._finalize_game_snapshot(chat_id)
+        return None
 
     async def _finalize_game_snapshot(self, chat_id: int) -> bool:
         """Finalize game with early lock release using immutable snapshots."""
@@ -3260,41 +3357,103 @@ class GameEngine:
     async def _execute_finalization_tasks(
         self, snapshot: FinalizationSnapshot
     ) -> None:
-        messaging = getattr(self, "_messaging", None)
-        stats_service = getattr(self, "_stats_service", None)
+        scheduled: List[Tuple[str, asyncio.Task[Any]]] = []
 
-        tasks: List[Awaitable[Any]] = []
-
-        delete_message = getattr(messaging, "delete_message", None) if messaging else None
-        if callable(delete_message):
+        if hasattr(self._messaging, "delete_message"):
             for message_id in snapshot.message_ids_to_delete:
-                tasks.append(delete_message(snapshot.chat_id, message_id))
+                try:
+                    scheduled.append(
+                        (
+                            "delete_message",
+                            asyncio.create_task(
+                                self._messaging.delete_message(
+                                    snapshot.chat_id, message_id
+                                )
+                            ),
+                        )
+                    )
+                except Exception as exc:  # pragma: no cover - defensive guard
+                    self._logger.error(
+                        "Finalization task scheduling failed",
+                        extra={
+                            "chat_id": snapshot.chat_id,
+                            "task_type": "delete_message",
+                            "error": str(exc),
+                            "error_type": type(exc).__name__,
+                            "winner_user_id": snapshot.winner_user_id,
+                        },
+                    )
 
-        send_message = getattr(messaging, "send_message", None) if messaging else None
-        if callable(send_message):
+        if hasattr(self._messaging, "send_message"):
             winner_text = (
                 f"🏆 Winner: @{snapshot.winner_username}\n"
                 f"💰 Pot: {snapshot.pot}\n"
                 f"🎴 Hand: {snapshot.winning_hand}"
             )
-            tasks.append(send_message(snapshot.chat_id, winner_text))
+            try:
+                scheduled.append(
+                    (
+                        "send_message",
+                        asyncio.create_task(
+                            self._messaging.send_message(
+                                snapshot.chat_id, winner_text
+                            )
+                        ),
+                    )
+                )
+            except Exception as exc:  # pragma: no cover - defensive guard
+                self._logger.error(
+                    "Finalization task scheduling failed",
+                    extra={
+                        "chat_id": snapshot.chat_id,
+                        "task_type": "send_message",
+                        "error": str(exc),
+                        "error_type": type(exc).__name__,
+                        "winner_user_id": snapshot.winner_user_id,
+                    },
+                )
 
-        record_hand = getattr(stats_service, "record_hand", None)
-        if callable(record_hand):
-            tasks.append(record_hand(snapshot.stats_payload))
+        if hasattr(self._stats_service, "record_hand"):
+            try:
+                scheduled.append(
+                    (
+                        "record_hand",
+                        asyncio.create_task(
+                            self._stats_service.record_hand(
+                                snapshot.stats_payload
+                            )
+                        ),
+                    )
+                )
+            except Exception as exc:  # pragma: no cover - defensive guard
+                self._logger.error(
+                    "Finalization task scheduling failed",
+                    extra={
+                        "chat_id": snapshot.chat_id,
+                        "task_type": "record_hand",
+                        "error": str(exc),
+                        "error_type": type(exc).__name__,
+                        "winner_user_id": snapshot.winner_user_id,
+                    },
+                )
 
-        if not tasks:
+        if not scheduled:
             return
 
+        tasks = [item[1] for item in scheduled]
         results = await asyncio.gather(*tasks, return_exceptions=True)
         for index, result in enumerate(results):
             if isinstance(result, Exception):
+                task_type = scheduled[index][0]
                 self._logger.error(
                     "Finalization task failed",
                     extra={
                         "chat_id": snapshot.chat_id,
                         "task_index": index,
+                        "task_type": task_type,
                         "error": str(result),
+                        "error_type": type(result).__name__,
+                        "winner_user_id": snapshot.winner_user_id,
                     },
                 )
 
@@ -3302,9 +3461,22 @@ class GameEngine:
         evaluator = getattr(self, "_winner_selector", None)
         if callable(evaluator):
             return evaluator(game)
-        evaluator = getattr(self, "_winner_determination", None)
-        if evaluator and hasattr(evaluator, "determine_winner"):
-            return evaluator.determine_winner(game)
+
+        determination = getattr(self, "_winner_determination", None)
+        if determination and hasattr(determination, "determine_winner"):
+            try:
+                return determination.determine_winner(game)  # type: ignore[misc]
+            except Exception as exc:  # pragma: no cover - defensive guard
+                self._logger.exception(
+                    "Winner determination failed",
+                    extra={
+                        "error": str(exc),
+                        "error_type": type(exc).__name__,
+                        "stage": getattr(game, "stage", None),
+                        "chat_id": getattr(game, "chat_id", None),
+                    },
+                )
+
         return getattr(game, "winner", None)
 
     async def _determine_winners(
