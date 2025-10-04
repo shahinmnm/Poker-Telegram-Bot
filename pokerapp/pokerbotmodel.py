@@ -1744,7 +1744,7 @@ class PokerBotModel:
         return True
 
     async def _process_playing(
-        self, chat_id: ChatId, game: Game, context: CallbackContext
+        self, chat_id: ChatId, game: Game
     ) -> Optional[Player]:
         """
         مغز متفکر و کنترل‌کننده اصلی جریان بازی.
@@ -1765,23 +1765,19 @@ class PokerBotModel:
         contenders = game.players_by(states=(PlayerState.ACTIVE, PlayerState.ALL_IN))
         if len(contenders) <= 1:
             should_continue = await self._game_engine.progress_stage(
-                context=context,
                 chat_id=chat_id,
-                game=game,
             )
             if should_continue:
-                return await self._process_playing(chat_id, game, context)
+                return await self._process_playing(chat_id, game)
             return None
 
         # شرط ۲: آیا دور شرط‌بندی فعلی به پایان رسیده است؟
         if self._is_betting_round_over(game):
             should_continue = await self._game_engine.progress_stage(
-                context=context,
                 chat_id=chat_id,
-                game=game,
             )
             if should_continue:
-                return await self._process_playing(chat_id, game, context)
+                return await self._process_playing(chat_id, game)
             return None
 
         # شرط ۳: بازی ادامه دارد، نوبت را به بازیکن بعدی منتقل کن
@@ -1797,12 +1793,10 @@ class PokerBotModel:
 
         # اگر هیچ بازیکن فعالی برای حرکت بعدی وجود ندارد (مثلاً همه All-in هستند)
         should_continue = await self._game_engine.progress_stage(
-            context=context,
             chat_id=chat_id,
-            game=game,
         )
         if should_continue:
-            return await self._process_playing(chat_id, game, context)
+            return await self._process_playing(chat_id, game)
         return None
 
     async def _send_turn_message(
@@ -2054,7 +2048,7 @@ class PokerBotModel:
 
                 try:
                     next_player = await self._process_playing(
-                        chat_id, current_game, context
+                        chat_id, current_game
                     )
                 except Exception:
                     logger.exception(
