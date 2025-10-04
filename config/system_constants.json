@@ -24,7 +24,7 @@
   },
   "lock_manager": {
     "enable_fine_grained_locks": false,
-    "fine_grained_rollout_percentage": 0
+    "rollout_percentage": 0
   },
   "stats_batch_buffer": {
     "max_size": 100,
