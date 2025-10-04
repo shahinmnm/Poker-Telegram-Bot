@@ -9,6 +9,7 @@ import logging
 import math
 import random
 import time
+import traceback
 import uuid
 import zlib
 from contextlib import asynccontextmanager
@@ -31,6 +32,21 @@ from typing import (
 from weakref import WeakKeyDictionary
 
 import redis.asyncio as aioredis
+
+try:  # pragma: no cover - dependency optional in some environments
+    from prometheus_client import Counter
+except Exception:  # pragma: no cover - fallback when prometheus_client missing
+    class Counter:  # type: ignore[override]
+        """Minimal stub used when prometheus_client is unavailable."""
+
+        def __init__(self, *args: object, **kwargs: object) -> None:
+            pass
+
+        def labels(self, *args: object, **kwargs: object) -> "Counter":
+            return self
+
+        def inc(self, amount: float = 1.0) -> None:
+            return None
 
 from pokerapp.bootstrap import _make_service_logger
 from pokerapp.entities import ChatId, UserId
@@ -70,6 +86,11 @@ _LOCK_PREFIX_LEVELS: Tuple[Tuple[str, str], ...] = (
     ("pokerbot:wallet:", "wallet"),
 )
 
+_ALLOWED_DESCENDING_CATEGORIES: Dict[str, Set[str]] = {
+    "engine_stage": {"player_report"},
+    "wallet": {"table_write", "player"},
+}
+
 # Timeout configuration constants
 _TIMEOUT_BACKOFF_BASE = 0.1    # Base backoff delay in seconds
 _TIMEOUT_BACKOFF_MAX = 2.0     # Maximum backoff delay in seconds
@@ -101,6 +122,10 @@ class LockHierarchyViolation(LockOrderError):
     """Raised when hierarchical lock ordering constraints are violated."""
 
 
+class LockAlreadyHeld(LockOrderError):
+    """Raised when the current context attempts to reacquire the same lock."""
+
+
 @dataclass
 class _LockAcquisition:
     key: str
@@ -114,6 +139,20 @@ class _WaitingInfo:
     key: str
     level: int
     context: Dict[str, Any]
+
+
+LockLevel = int
+
+
+@dataclass
+class LockInfo:
+    """Information about a lock held by the current async context."""
+
+    lock_id: str
+    lock_type: str
+    level: LockLevel
+    caller: Optional[str] = None
+    stack_trace: Optional[str] = None
 
 
 def _event_factory() -> asyncio.Event:
@@ -405,6 +444,33 @@ class LockManager:
         self._level_state_var: ContextVar[Tuple[int, ...]] = ContextVar(
             f"lock_manager_levels_{id(self)}", default=()
         )
+        self._context_lock_var: ContextVar[Tuple[LockInfo, ...]] = ContextVar(
+            f"lock_manager_context_locks_{id(self)}", default=()
+        )
+        lock_manager_flags: Mapping[str, Any] = {}
+        flags_config = config
+        if flags_config is None:
+            try:  # pragma: no cover - defensive config resolution
+                from pokerapp.config import Config as _Config
+
+                flags_config = _Config()
+            except Exception:  # pragma: no cover - config optional for tests
+                flags_config = None
+        if flags_config is not None:
+            system_constants = getattr(flags_config, "system_constants", None)
+            if isinstance(system_constants, Mapping):
+                candidate = system_constants.get("lock_manager")
+                if isinstance(candidate, Mapping):
+                    lock_manager_flags = dict(candidate)
+        self._enforce_hierarchy: bool = bool(
+            lock_manager_flags.get("enable_hierarchy_enforcement", True)
+        )
+        self._enable_duplicate_detection: bool = bool(
+            lock_manager_flags.get("enable_duplicate_detection", False)
+        )
+        self._enable_stack_trace_logging: bool = bool(
+            lock_manager_flags.get("enable_stack_trace_logging", False)
+        )
         resolved_category_timeouts = category_timeouts
         if resolved_category_timeouts is None:
             config_instance = config
@@ -441,6 +507,16 @@ class LockManager:
             "action_lock_retry_failures": 0,
             "action_lock_retry_timeouts": 0,
         }
+        self.hierarchy_violations = Counter(
+            "poker_lock_hierarchy_violations_total",
+            "Lock hierarchy violations detected",
+            ["violation_type"],
+        )
+        self.duplicate_locks = Counter(
+            "poker_duplicate_lock_attempts_total",
+            "Duplicate lock acquisition attempts",
+            ["lock_id"],
+        )
         self._timeout_count: Dict[str, int] = {}
         self._circuit_reset_time: Dict[str, float] = {}
         self._circuit_breaker_threshold: int = 3
@@ -754,9 +830,11 @@ class LockManager:
         wait_start = loop.time()
         max_reader_wait = 0
         lock_key = f"table_write:{self._safe_int(chat_id)}"
-        self._validate_lock_hierarchy(
-            lock_key, self.LOCK_LEVELS.get("table_write", self._default_lock_level)
-        )
+        if self._enforce_hierarchy:
+            self._validate_lock_hierarchy(
+                lock_key, self.LOCK_LEVELS.get("table_write", self._default_lock_level)
+            )
+        self._check_duplicate_lock(lock_key, "table_write")
 
         await self._mark_writer_waiting(state)
         try:
@@ -794,7 +872,13 @@ class LockManager:
 
                 hold_start = loop.time()
                 try:
-                    yield
+                    self._track_lock_acquisition(
+                        lock_key, "table_write", self.LOCK_LEVELS.get("table_write", self._default_lock_level)
+                    )
+                    try:
+                        yield
+                    finally:
+                        self._release_lock_tracking(lock_key)
                 finally:
                     hold_duration = loop.time() - hold_start
                     state.metrics.total_write_hold_time += hold_duration
@@ -849,14 +933,22 @@ class LockManager:
         guard_context.setdefault("lock_type", "table_write")
         guard_context.setdefault("chat_id", self._safe_int(chat_id))
         lock_key = f"table_write:{self._safe_int(chat_id)}"
-        self._validate_lock_hierarchy(lock_key, self._TABLE_WRITE_LOCK_LEVEL)
+        if self._enforce_hierarchy:
+            self._validate_lock_hierarchy(lock_key, self._TABLE_WRITE_LOCK_LEVEL)
+        self._check_duplicate_lock(lock_key, "table_write")
         async with self.guard(
             lock_key,
             timeout=timeout,
             context=guard_context,
             level=self._TABLE_WRITE_LOCK_LEVEL,
         ):
-            yield
+            self._track_lock_acquisition(
+                lock_key, "table_write", self._TABLE_WRITE_LOCK_LEVEL
+            )
+            try:
+                yield
+            finally:
+                self._release_lock_tracking(lock_key)
 
     @asynccontextmanager
     async def acquire_player_lock(
@@ -876,14 +968,22 @@ class LockManager:
         lock_key = (
             f"player:{self._safe_int(chat_id)}:{self._safe_int(player_id)}"
         )
-        self._validate_lock_hierarchy(lock_key, self._PLAYER_LOCK_LEVEL)
+        if self._enforce_hierarchy:
+            self._validate_lock_hierarchy(lock_key, self._PLAYER_LOCK_LEVEL)
+        self._check_duplicate_lock(lock_key, "player")
         async with self.guard(
             lock_key,
             timeout=timeout,
             context=guard_context,
             level=self._PLAYER_LOCK_LEVEL,
         ):
-            yield
+            self._track_lock_acquisition(
+                lock_key, "player", self._PLAYER_LOCK_LEVEL
+            )
+            try:
+                yield
+            finally:
+                self._release_lock_tracking(lock_key)
 
     @asynccontextmanager
     async def acquire_wallet_lock(
@@ -899,14 +999,22 @@ class LockManager:
         guard_context.setdefault("lock_type", "wallet")
         guard_context.setdefault("user_id", self._safe_int(user_id))
         lock_key = f"wallet:{self._safe_int(user_id)}"
-        self._validate_lock_hierarchy(lock_key, self._WALLET_LOCK_LEVEL)
+        if self._enforce_hierarchy:
+            self._validate_lock_hierarchy(lock_key, self._WALLET_LOCK_LEVEL)
+        self._check_duplicate_lock(lock_key, "wallet")
         async with self.guard(
             lock_key,
             timeout=timeout,
             context=guard_context,
             level=self._WALLET_LOCK_LEVEL,
         ):
-            yield
+            self._track_lock_acquisition(
+                lock_key, "wallet", self._WALLET_LOCK_LEVEL
+            )
+            try:
+                yield
+            finally:
+                self._release_lock_tracking(lock_key)
 
     @asynccontextmanager
     async def _acquire_distributed_lock(
@@ -1600,7 +1708,131 @@ class LockManager:
         payload.setdefault("lock_key", key)
         payload.setdefault("lock_name", key)
         payload.setdefault("lock_level", level)
+        payload.setdefault(
+            "lock_level_display",
+            self._resolve_display_level(payload.get("lock_category"), level),
+        )
         return payload
+
+    def _resolve_display_level(
+        self, category: Optional[str], level: int
+    ) -> int:
+        if category in {"stage", "engine_stage"}:
+            return 1
+        return level
+
+    def _is_descend_allowed(
+        self, highest_category: Optional[str], new_category: Optional[str]
+    ) -> bool:
+        if highest_category is None or new_category is None:
+            return False
+        allowed = _ALLOWED_DESCENDING_CATEGORIES.get(highest_category)
+        if not allowed:
+            return False
+        return new_category in allowed
+
+    # ------------------------------------------------------------------
+    # Duplicate lock tracking utilities
+    # ------------------------------------------------------------------
+
+    def _get_context_locks(self) -> List[LockInfo]:
+        current = self._context_lock_var.get()
+        if not current:
+            return []
+        return list(current)
+
+    def _set_context_locks(self, locks: Sequence[LockInfo]) -> None:
+        self._context_lock_var.set(tuple(locks))
+
+    def _check_duplicate_lock(self, lock_id: str, lock_type: str) -> None:
+        if not self._enable_duplicate_detection:
+            return
+
+        for held_lock in self._get_context_locks():
+            if held_lock.lock_id == lock_id:
+                self.duplicate_locks.labels(lock_id=lock_id).inc()
+                caller = self._get_caller_info()
+                stack_trace = self._get_stack_trace() if self._enable_stack_trace_logging else None
+                log_payload = {
+                    "lock_id": lock_id,
+                    "lock_type": lock_type,
+                    "caller": caller,
+                    "held_lock_caller": held_lock.caller,
+                }
+                if stack_trace:
+                    log_payload["stack_trace"] = stack_trace
+                if held_lock.stack_trace:
+                    log_payload["held_lock_stack_trace"] = held_lock.stack_trace
+                self._logger.error(
+                    "Duplicate lock acquisition attempt detected for %s", lock_id,
+                    extra={
+                        "event_type": "lock_duplicate", **log_payload,
+                    },
+                )
+                raise LockAlreadyHeld(f"Lock {lock_id} already held by current context")
+
+    def _track_lock_acquisition(
+        self, lock_id: str, lock_type: str, level: LockLevel
+    ) -> None:
+        if not self._enable_duplicate_detection:
+            return
+
+        caller = self._get_caller_info()
+        stack_trace = self._get_stack_trace() if self._enable_stack_trace_logging else None
+        info = LockInfo(
+            lock_id=lock_id,
+            lock_type=lock_type,
+            level=level,
+            caller=caller,
+            stack_trace=stack_trace,
+        )
+        current = self._get_context_locks()
+        current.append(info)
+        self._set_context_locks(current)
+
+    def _release_lock_tracking(self, lock_id: str) -> None:
+        if not self._enable_duplicate_detection:
+            return
+
+        current = self._get_context_locks()
+        for index in range(len(current) - 1, -1, -1):
+            if current[index].lock_id == lock_id:
+                current.pop(index)
+                break
+        self._set_context_locks(current)
+
+    def _get_caller_info(self) -> str:
+        if not self._enable_stack_trace_logging:
+            return "unknown"
+
+        frame = inspect.currentframe()
+        try:
+            if frame is None:
+                return "unknown"
+            outer_frames = inspect.getouterframes(frame, 4)
+            if len(outer_frames) >= 4:
+                target = outer_frames[3]
+            elif len(outer_frames) >= 3:
+                target = outer_frames[2]
+            else:
+                target = outer_frames[-1]
+            filename = getattr(target, "filename", "<unknown>")
+            lineno = getattr(target, "lineno", 0)
+            function_name = getattr(target, "function", "unknown")
+            return f"{filename}:{lineno}#{function_name}"
+        except Exception:  # pragma: no cover - defensive fallback
+            return "unknown"
+        finally:
+            del frame
+
+    def _get_stack_trace(self) -> Optional[str]:
+        if not self._enable_stack_trace_logging:
+            return None
+        try:
+            formatted = traceback.format_stack()
+            return "".join(formatted)
+        except Exception:  # pragma: no cover - defensive fallback
+            return None
 
     async def _record_long_hold_context(
         self,
@@ -1641,11 +1873,12 @@ class LockManager:
     def _format_lock_identity(
         self, key: str, level: int, context: Mapping[str, Any]
     ) -> str:
+        display_level = context.get("lock_level_display", level)
         return (
             "Lock '%s' (level=%s, chat_id=%s, game_id=%s)"
             % (
                 key,
-                level,
+                display_level,
                 context.get("chat_id"),
                 context.get("game_id"),
             )
@@ -1723,6 +1956,8 @@ class LockManager:
                 )
 
                 try:
+                    if self._enforce_hierarchy:
+                        self._validate_lock_hierarchy(key, resolved_level)
                     self._validate_lock_order(
                         current_acquisitions, key, resolved_level, full_context
                     )
@@ -1872,7 +2107,8 @@ class LockManager:
                 self._reset_circuit_state(key)
                 return True
 
-        self._validate_lock_hierarchy(key, resolved_level)
+        if self._enforce_hierarchy:
+            self._validate_lock_hierarchy(key, resolved_level)
         self._validate_lock_order(
             current_acquisitions, key, resolved_level, context_payload
         )
@@ -3008,6 +3244,9 @@ class LockManager:
             )
 
             task = asyncio.current_task()
+            self.hierarchy_violations.labels(
+                violation_type="ascending"
+            ).inc()
             self._logger.error(
                 violation_msg,
                 extra={
@@ -3034,6 +3273,36 @@ class LockManager:
                     "held_locks": held_locks,
                 },
             )
+
+        if requested_level < max_held_level:
+            highest_acq = max(current_acquisitions, key=lambda acq: acq.level)
+            highest_category = self._resolve_lock_category(highest_acq.key)
+            new_category = self._resolve_lock_category(lock_key)
+            if self._is_descend_allowed(highest_category, new_category):
+                return
+            held_locks = [acq.key for acq in current_acquisitions]
+            violation_msg = (
+                f"Lock hierarchy violation: attempting to acquire {lock_key} "
+                f"(level {requested_level}) while holding higher level {max_held_level} locks. "
+                f"Current locks: {held_locks}"
+            )
+            task = asyncio.current_task()
+            self.hierarchy_violations.labels(
+                violation_type="descending"
+            ).inc()
+            self._logger.error(
+                violation_msg,
+                extra={
+                    "category": "lock_hierarchy_violation",
+                    "lock_key": lock_key,
+                    "requested_level": requested_level,
+                    "min_held_level": min_held_level,
+                    "max_held_level": max_held_level,
+                    "held_locks": held_locks,
+                    "task_name": getattr(task, "get_name", lambda: "unknown")(),
+                },
+            )
+            raise LockHierarchyViolation(violation_msg)
 
     def _extract_lock_type(self, lock_key: str) -> str:
         """Extract lock type from lock key for metrics and logging."""
@@ -3256,7 +3525,15 @@ class LockManager:
     def _format_context(self, context: Dict[str, Any]) -> str:
         if not context:
             return ""
-        parts = ", ".join(f"{key}={context[key]!r}" for key in sorted(context))
+        parts_list = []
+        for key in sorted(context):
+            if key == "lock_level_display":
+                continue
+            value = context[key]
+            if key == "lock_level" and "lock_level_display" in context:
+                value = context["lock_level_display"]
+            parts_list.append(f"{key}={value!r}")
+        parts = ", ".join(parts_list)
         return f" [context: {parts}]"
 
     @property

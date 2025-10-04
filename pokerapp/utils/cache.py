@@ -398,11 +398,12 @@ class AdaptivePlayerReportCache(PlayerReportCache):
                 )
                 return self._cache[key]
 
-        if self._persistent_store is not None:
-            value = await self._load_from_persistent_store(
-                key, ttl, ttl_event_type
-            )
-            if value is not None:
+            value = None
+            if self._persistent_store is not None:
+                value = await self._load_from_persistent_store(
+                    key, ttl, ttl_event_type
+                )
+                if value is not None:
                     self._hits += 1
                     self._event_metrics[metrics_key]["hits"] += 1
                     return value
@@ -495,8 +496,6 @@ class AdaptivePlayerReportCache(PlayerReportCache):
         if self._persistent_store is None:
             return None
         user_id, chat_id = key
-        if chat_id is None:
-            return None
         try:
             payload = await self._persistent_store.safe_get(
                 self._redis_key(user_id, chat_id),
@@ -557,8 +556,6 @@ class AdaptivePlayerReportCache(PlayerReportCache):
         if self._persistent_store is None:
             return
         user_id, chat_id = key
-        if chat_id is None:
-            return
         try:
             payload = self._serialize(value)
         except Exception:
@@ -641,9 +638,6 @@ class AdaptivePlayerReportCache(PlayerReportCache):
             return
 
         user_id, chat_id = key
-        if chat_id is None:
-            return
-
         async def _delete() -> None:
             try:
                 await self._persistent_store.safe_delete(
@@ -670,7 +664,7 @@ class AdaptivePlayerReportCache(PlayerReportCache):
 
     def _redis_key(self, user_id: int, chat_id: Optional[int] = None) -> str:
         if chat_id is None:
-            raise ValueError("chat_id is required when building a Redis key")
+            return f"{self._prefix}{int(user_id)}"
         return f"{self._prefix}{int(chat_id)}:{int(user_id)}"
 
     @staticmethod
