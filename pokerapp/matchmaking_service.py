@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import asyncio
 import logging
 import traceback
 from contextlib import asynccontextmanager
@@ -233,6 +234,46 @@ class MatchmakingService:
             current_player=current_player,
         )
 
+    async def collect_bets_for_pot(self, game: Game, chat_id: ChatId) -> None:
+        """Reset per-player round bets using fine-grained locks."""
+
+        lock_manager = self._lock_manager
+        if lock_manager is None:
+            for player in game.seated_players():
+                player.round_rate = 0
+            game.max_round_rate = 0
+            return
+
+        chat_key = self._safe_int(chat_id)
+        players_with_bets = [
+            player
+            for player in game.seated_players()
+            if int(getattr(player, "round_rate", 0)) > 0
+        ]
+
+        async def reset_player(player: Player) -> None:
+            async with lock_manager.player_state_lock(
+                chat_key,
+                self._safe_int(getattr(player, "user_id", 0)),
+            ):
+                player.round_rate = 0
+
+        if players_with_bets:
+            await asyncio.gather(*(reset_player(player) for player in players_with_bets))
+
+        async with lock_manager.betting_round_lock(
+            chat_key, context={"stage": "collect_bets"}
+        ):
+            game.max_round_rate = 0
+
+        self._logger.debug(
+            "Collected round bets for pot",
+            extra={
+                "chat_id": chat_key,
+                "player_count": len(players_with_bets),
+            },
+        )
+
     async def progress_stage(
         self,
         *,
@@ -257,7 +298,7 @@ class MatchmakingService:
         }
 
         while True:
-            self._round_rate.collect_bets_for_pot(game)
+            await self.collect_bets_for_pot(game, chat_id)
             for player in game.players:
                 player.has_acted = False
 
