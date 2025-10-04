@@ -91,6 +91,23 @@ _DEFAULT_SYSTEM_CONSTANTS_DATA: Dict[str, Any] = {
     "default_rate_limit_per_second": 1,
     "default_rate_limit_per_minute": 20,
     "default_timezone_name": "Asia/Tehran",
+    "locks": {
+        "category_timeouts_seconds": {
+            "engine_stage": 25.0,
+            "engine_stage_betting": 30.0,
+        },
+        "action": {
+            "ttl": 10,
+            "valid_types": ["fold", "check", "call", "raise"],
+        },
+        "retry_strategy": {
+            "max_retries": 3,
+            "initial_backoff_seconds": 0.5,
+            "backoff_multiplier": 1.5,
+            "total_timeout_seconds": 10.0,
+            "enable_queue_estimation": False,
+        },
+    },
 }
 
 _DEFAULT_TRANSLATIONS_DATA: Dict[str, Any] = {"default_language": "fa"}

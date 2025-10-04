@@ -175,12 +175,24 @@ def protect_against_races(handler: Callable) -> Callable:
                 return None
 
         callback_data = getattr(callback_query, "data", "")
-        lock_token = await lock_manager.acquire_action_lock(
-            chat_id,
-            user_id,
-            action_data=callback_data or None,
-        )
-        if not lock_token:
+        if hasattr(lock_manager, "acquire_action_lock_with_retry"):
+            lock_acquisition = await lock_manager.acquire_action_lock_with_retry(
+                chat_id,
+                user_id,
+                action_data=callback_data or None,
+            )
+        else:
+            token_only = await lock_manager.acquire_action_lock(
+                chat_id,
+                user_id,
+                action_data=callback_data or None,
+            )
+            lock_acquisition = (
+                (token_only, {"attempts": 1, "wait_time": 0.0, "queue_position": 0})
+                if token_only
+                else None
+            )
+        if not lock_acquisition:
             answer = getattr(callback_query, "answer", None)
             if callable(answer):
                 await answer(
@@ -190,6 +202,21 @@ def protect_against_races(handler: Callable) -> Callable:
                     )
                 )
             return None
+
+        lock_token, lock_metadata = lock_acquisition
+        if lock_metadata.get("attempts", 1) > 1:
+            logger.info(
+                "Action lock acquired after %d attempts (%.2fs wait)",
+                lock_metadata["attempts"],
+                lock_metadata.get("wait_time", 0.0),
+                extra={
+                    "event_type": "action_lock_retry_success",
+                    "chat_id": chat_id,
+                    "user_id": user_id,
+                    "attempts": lock_metadata["attempts"],
+                    "wait_time": round(lock_metadata.get("wait_time", 0.0), 3),
+                },
+            )
 
         try:
             try:
