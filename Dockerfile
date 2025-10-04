@@ -1,6 +1,12 @@
-FROM python:3.10.5-alpine3.16
+FROM python:3.11-slim
 
-RUN apk add make jpeg-dev zlib-dev alpine-sdk
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    make \
+    libjpeg-dev \
+    zlib1g-dev \
+    gcc \
+    g++ \
+    && rm -rf /var/lib/apt/lists/*
 
 COPY requirements.txt makefile ./
 RUN make install
