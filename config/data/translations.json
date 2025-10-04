@@ -122,5 +122,17 @@
         "en": "Only active players or the manager may vote."
       }
     }
+  },
+  "queue": {
+    "waiting_position": {
+      "en": "⏳ Queue position: {queue_position} ahead...",
+      "fa": "⏳ در صف ({queue_position} نفر جلوتر)...",
+      "ar": "⏳ في الطابور ({queue_position} أمامك)..."
+    },
+    "turn_ready": {
+      "en": "✅ Your turn has arrived",
+      "fa": "✅ نوبت شما فرا رسید",
+      "ar": "✅ حان دورك"
+    }
   }
 }
