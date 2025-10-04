@@ -1,5 +1,6 @@
 import json
 import logging
+from contextlib import asynccontextmanager
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
@@ -17,6 +18,10 @@ from pokerapp.utils.telegram_safeops import TelegramSafeOps
 def game_engine_setup():
     table_manager = MagicMock()
     table_manager.save_game = AsyncMock()
+    table_manager.load_game_with_version = AsyncMock(
+        return_value=(MagicMock(), 0)
+    )
+    table_manager.save_game_with_version_check = AsyncMock(return_value=True)
 
     view = MagicMock()
     view.send_message = AsyncMock()
@@ -41,6 +46,20 @@ def game_engine_setup():
         send_message_safe=AsyncMock(side_effect=_passthrough_send_message_safe),
     )
 
+    @asynccontextmanager
+    async def _noop_guard(*_args, **_kwargs):
+        yield
+
+    lock_manager = SimpleNamespace(
+        trace_guard=_noop_guard,
+        table_write_lock=_noop_guard,
+        table_read_lock=_noop_guard,
+        _resolve_lock_category=MagicMock(return_value="engine_stage"),
+        _resolve_level=MagicMock(return_value=1),
+        _log_lock_snapshot_on_timeout=MagicMock(),
+        detect_deadlock=MagicMock(return_value={}),
+    )
+
     engine = GameEngine(
         table_manager=table_manager,
         view=view,
@@ -55,7 +74,7 @@ def game_engine_setup():
         safe_int=int,
         old_players_key="old_players",
         telegram_safe_ops=telegram_safe_ops,
-        lock_manager=MagicMock(),
+        lock_manager=lock_manager,
         logger=MagicMock(),
         adaptive_player_report_cache=adaptive_cache,
     )
@@ -185,7 +204,13 @@ async def test_reset_game_state_clears_pot_and_persists(game_engine_setup):
     assert game.message_ids_to_delete == []
     game_engine_setup.request_metrics.end_cycle.assert_awaited_once()
     game_engine_setup.player_manager.clear_player_anchors.assert_awaited_once_with(game)
-    game_engine_setup.table_manager.save_game.assert_awaited_once_with(-400, game)
+    game_engine_setup.table_manager.load_game_with_version.assert_awaited_once_with(
+        -400
+    )
+    game_engine_setup.table_manager.save_game_with_version_check.assert_awaited_once_with(
+        -400, game, 0
+    )
+    game_engine_setup.table_manager.save_game.assert_not_awaited()
     game_engine_setup.view.send_message.assert_awaited_once_with(
         -400, game_engine_setup.engine.STOPPED_NOTIFICATION
     )

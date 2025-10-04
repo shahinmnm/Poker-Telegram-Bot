@@ -65,6 +65,16 @@ def _build_view_mock() -> MagicMock:
     return view
 
 
+def _make_table_manager_mock() -> MagicMock:
+    table_manager = MagicMock()
+    table_manager.save_game = AsyncMock()
+    table_manager.load_game_with_version = AsyncMock(
+        return_value=(MagicMock(), 0)
+    )
+    table_manager.save_game_with_version_check = AsyncMock(return_value=True)
+    return table_manager
+
+
 def _build_stats_service() -> MagicMock:
     stats = MagicMock(spec=BaseStatsService)
     stats.register_player_profile = AsyncMock()
@@ -86,7 +96,7 @@ async def test_hand_type_label_includes_translation_and_emoji():
     cfg.constants = get_game_constants()
     cfg.constants = get_game_constants()
     kv = fakeredis.aioredis.FakeRedis()
-    table_manager = MagicMock()
+    table_manager = _make_table_manager_mock()
     stats = _build_stats_service()
 
     private_match_service = _make_private_match_service(kv, table_manager)
@@ -113,7 +123,7 @@ async def test_process_fold_win_assigns_payout_and_announces_winner():
     cfg = MagicMock(DEBUG=False)
     cfg.constants = get_game_constants()
     kv = fakeredis.aioredis.FakeRedis()
-    table_manager = MagicMock()
+    table_manager = _make_table_manager_mock()
     stats = _build_stats_service()
 
     private_match_service = _make_private_match_service(kv, table_manager)
@@ -185,7 +195,7 @@ async def test_process_showdown_results_populates_payouts_and_labels():
     cfg = MagicMock(DEBUG=False)
     cfg.constants = get_game_constants()
     kv = fakeredis.aioredis.FakeRedis()
-    table_manager = MagicMock()
+    table_manager = _make_table_manager_mock()
     stats = _build_stats_service()
 
     private_match_service = _make_private_match_service(kv, table_manager)
@@ -272,7 +282,7 @@ async def test_process_showdown_results_handles_empty_winners():
     cfg = MagicMock(DEBUG=False)
     cfg.constants = get_game_constants()
     kv = fakeredis.aioredis.FakeRedis()
-    table_manager = MagicMock()
+    table_manager = _make_table_manager_mock()
     stats = _build_stats_service()
 
     private_match_service = _make_private_match_service(kv, table_manager)
@@ -339,7 +349,7 @@ async def test_determine_winners_returns_payouts_and_labels_for_showdown():
     cfg = MagicMock(DEBUG=False)
     cfg.constants = get_game_constants()
     kv = fakeredis.aioredis.FakeRedis()
-    table_manager = MagicMock()
+    table_manager = _make_table_manager_mock()
     stats = _build_stats_service()
 
     private_match_service = _make_private_match_service(kv, table_manager)
@@ -414,7 +424,7 @@ async def test_determine_winners_invokes_fold_processor_when_no_contenders():
     cfg = MagicMock(DEBUG=False)
     cfg.constants = get_game_constants()
     kv = fakeredis.aioredis.FakeRedis()
-    table_manager = MagicMock()
+    table_manager = _make_table_manager_mock()
     stats = _build_stats_service()
 
     private_match_service = _make_private_match_service(kv, table_manager)
@@ -460,7 +470,7 @@ async def test_execute_payouts_delegates_to_distribute_payouts():
     cfg = MagicMock(DEBUG=False)
     cfg.constants = get_game_constants()
     kv = fakeredis.aioredis.FakeRedis()
-    table_manager = MagicMock()
+    table_manager = _make_table_manager_mock()
     stats = _build_stats_service()
 
     private_match_service = _make_private_match_service(kv, table_manager)
@@ -497,7 +507,7 @@ async def test_notify_results_sends_all_announcements():
     cfg = MagicMock(DEBUG=False)
     cfg.constants = get_game_constants()
     kv = fakeredis.aioredis.FakeRedis()
-    table_manager = MagicMock()
+    table_manager = _make_table_manager_mock()
     stats = _build_stats_service()
 
     private_match_service = _make_private_match_service(kv, table_manager)
@@ -546,7 +556,7 @@ async def test_record_hand_results_updates_cache_and_stats():
     cfg = MagicMock(DEBUG=False)
     cfg.constants = get_game_constants()
     kv = fakeredis.aioredis.FakeRedis()
-    table_manager = MagicMock()
+    table_manager = _make_table_manager_mock()
     stats = _build_stats_service()
 
     private_match_service = _make_private_match_service(kv, table_manager)
@@ -609,7 +619,7 @@ async def test_finalize_game_defers_statistics_outside_lock():
     cfg = MagicMock(DEBUG=False)
     cfg.constants = get_game_constants()
     kv = fakeredis.aioredis.FakeRedis()
-    table_manager = MagicMock()
+    table_manager = _make_table_manager_mock()
     stats = _build_stats_service()
 
     private_match_service = _make_private_match_service(kv, table_manager)
@@ -699,7 +709,7 @@ async def test_finalize_game_statistics_failure_does_not_block_reset():
     cfg = MagicMock(DEBUG=False)
     cfg.constants = get_game_constants()
     kv = fakeredis.aioredis.FakeRedis()
-    table_manager = MagicMock()
+    table_manager = _make_table_manager_mock()
     stats = _build_stats_service()
 
     private_match_service = _make_private_match_service(kv, table_manager)
@@ -767,7 +777,7 @@ async def test_reset_game_state_resets_game_and_prompts_players():
     cfg = MagicMock(DEBUG=False)
     cfg.constants = get_game_constants()
     kv = fakeredis.aioredis.FakeRedis()
-    table_manager = MagicMock()
+    table_manager = _make_table_manager_mock()
     stats = _build_stats_service()
 
     private_match_service = _make_private_match_service(kv, table_manager)
@@ -824,7 +834,7 @@ async def test_distribute_payouts_updates_wallets():
     cfg = MagicMock(DEBUG=False)
     cfg.constants = get_game_constants()
     kv = fakeredis.aioredis.FakeRedis()
-    table_manager = MagicMock()
+    table_manager = _make_table_manager_mock()
     stats = _build_stats_service()
 
     private_match_service = _make_private_match_service(kv, table_manager)
@@ -862,8 +872,7 @@ async def test_reset_game_state_clears_pot_and_saves_game():
     cfg = MagicMock(DEBUG=False)
     cfg.constants = get_game_constants()
     kv = fakeredis.aioredis.FakeRedis()
-    table_manager = MagicMock()
-    table_manager.save_game = AsyncMock()
+    table_manager = _make_table_manager_mock()
     stats = _build_stats_service()
 
     private_match_service = _make_private_match_service(kv, table_manager)
@@ -907,7 +916,11 @@ async def test_reset_game_state_clears_pot_and_saves_game():
         chat_id, cycle_token=original_id
     )
     model._player_manager.clear_player_anchors.assert_awaited_once_with(game)
-    table_manager.save_game.assert_awaited_once_with(chat_id, game)
+    table_manager.load_game_with_version.assert_awaited_once_with(chat_id)
+    table_manager.save_game_with_version_check.assert_awaited_once_with(
+        chat_id, game, 0
+    )
+    table_manager.save_game.assert_not_called()
     assert game.state == GameState.INITIAL
     assert game.pot == 0
     assert game.players == []
@@ -918,8 +931,7 @@ async def test_finalize_game_single_winner_distributes_pot_and_updates_stats():
     cfg = MagicMock(DEBUG=False)
     cfg.constants = get_game_constants()
     kv = fakeredis.aioredis.FakeRedis()
-    table_manager = MagicMock()
-    table_manager.save_game = AsyncMock()
+    table_manager = _make_table_manager_mock()
     stats = _build_stats_service()
 
     private_match_service = _make_private_match_service(kv, table_manager)
@@ -988,7 +1000,9 @@ async def test_finalize_game_single_winner_distributes_pot_and_updates_stats():
     assert any(res.user_id == loser.user_id and res.result == "loss" for res in results)
 
     assert context.chat_data[KEY_OLD_PLAYERS] == [winner.user_id, loser.user_id]
-    table_manager.save_game.assert_awaited()
+    table_manager.load_game_with_version.assert_awaited()
+    table_manager.save_game_with_version_check.assert_awaited()
+    table_manager.save_game.assert_not_called()
     view.send_new_hand_ready_message.assert_awaited_once_with(chat_id)
     model._player_manager.send_join_prompt.assert_awaited_once()
 
@@ -999,8 +1013,7 @@ async def test_finalize_game_split_pot_between_tied_winners():
     bot = MagicMock()
     cfg = MagicMock(DEBUG=False)
     kv = fakeredis.aioredis.FakeRedis()
-    table_manager = MagicMock()
-    table_manager.save_game = AsyncMock()
+    table_manager = _make_table_manager_mock()
     stats = _build_stats_service()
 
     private_match_service = _make_private_match_service(kv, table_manager)
