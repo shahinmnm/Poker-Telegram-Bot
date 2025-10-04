@@ -388,6 +388,10 @@ class LockManager:
             "lock_pool_hits": 0,
             "lock_pool_misses": 0,
             "lock_cleanup_removed_count": 0,
+            "action_lock_retry_attempts": 0,
+            "action_lock_retry_success": 0,
+            "action_lock_retry_failures": 0,
+            "action_lock_retry_timeouts": 0,
         }
         self._timeout_count: Dict[str, int] = {}
         self._circuit_reset_time: Dict[str, float] = {}
@@ -451,6 +455,7 @@ class LockManager:
             )
 
         action_settings: Mapping[str, Any] | None = None
+        locks_section: Mapping[str, Any] | None = None
         config_for_action = config
         if config_for_action is None:
             try:
@@ -476,6 +481,13 @@ class LockManager:
         self._action_lock_default_ttl = 10
         self._valid_action_types: Set[str] = {"fold", "check", "call", "raise"}
         self._action_lock_feedback_text = "⚠️ Action in progress, please wait..."
+        self._action_lock_retry_defaults: Dict[str, Any] = {
+            "max_retries": 3,
+            "initial_backoff": 0.5,
+            "backoff_multiplier": 1.5,
+            "total_timeout": 10.0,
+            "enable_queue_estimation": False,
+        }
         if isinstance(action_settings, Mapping):
             ttl_candidate = action_settings.get("ttl")
             if isinstance(ttl_candidate, (int, float)):
@@ -490,6 +502,28 @@ class LockManager:
             feedback_candidate = action_settings.get("feedback_text")
             if isinstance(feedback_candidate, str) and feedback_candidate.strip():
                 self._action_lock_feedback_text = feedback_candidate.strip()
+
+        retry_settings: Mapping[str, Any] | None = None
+        if isinstance(action_settings, Mapping):
+            retry_settings = action_settings.get("retry_strategy")
+        if retry_settings is None and isinstance(locks_section, Mapping):
+            retry_settings = locks_section.get("retry_strategy")
+        if isinstance(retry_settings, Mapping):
+            max_retries_candidate = retry_settings.get("max_retries")
+            if isinstance(max_retries_candidate, int) and max_retries_candidate > 0:
+                self._action_lock_retry_defaults["max_retries"] = max_retries_candidate
+            initial_backoff_candidate = retry_settings.get("initial_backoff_seconds")
+            if isinstance(initial_backoff_candidate, (int, float)) and initial_backoff_candidate >= 0:
+                self._action_lock_retry_defaults["initial_backoff"] = float(initial_backoff_candidate)
+            multiplier_candidate = retry_settings.get("backoff_multiplier")
+            if isinstance(multiplier_candidate, (int, float)) and multiplier_candidate > 1.0:
+                self._action_lock_retry_defaults["backoff_multiplier"] = float(multiplier_candidate)
+            total_timeout_candidate = retry_settings.get("total_timeout_seconds")
+            if isinstance(total_timeout_candidate, (int, float)) and total_timeout_candidate > 0:
+                self._action_lock_retry_defaults["total_timeout"] = float(total_timeout_candidate)
+            enable_queue_estimation = retry_settings.get("enable_queue_estimation")
+            if isinstance(enable_queue_estimation, bool):
+                self._action_lock_retry_defaults["enable_queue_estimation"] = enable_queue_estimation
 
         self._release_lock_script = self.RELEASE_ACTION_LOCK_SCRIPT
 
@@ -2842,6 +2876,10 @@ class LockManager:
             "pool_size": len(self._lock_pool),
             "pool_hit_rate": self._compute_pool_hit_rate(),
             "fast_path_hit_rate": self._compute_fast_path_hit_rate(),
+            "action_lock_retry_attempts": self._metrics.get("action_lock_retry_attempts", 0),
+            "action_lock_retry_success": self._metrics.get("action_lock_retry_success", 0),
+            "action_lock_retry_failures": self._metrics.get("action_lock_retry_failures", 0),
+            "action_lock_retry_timeouts": self._metrics.get("action_lock_retry_timeouts", 0),
         }
 
         metrics["stage_lock_acquisitions"] = self._stage_lock_acquisitions
@@ -3280,6 +3318,132 @@ class LockManager:
                 "action_identifier": action_identifier,
             },
         )
+        return None
+
+    async def acquire_action_lock_with_retry(
+        self,
+        chat_id: int,
+        user_id: int,
+        *,
+        action_data: Optional[str] = None,
+        max_retries: Optional[int] = None,
+        initial_backoff: Optional[float] = None,
+        backoff_multiplier: Optional[float] = None,
+        total_timeout: Optional[float] = None,
+    ) -> Optional[Tuple[str, Dict[str, Any]]]:
+        """Acquire an action lock using exponential backoff retry strategy."""
+
+        defaults = self._action_lock_retry_defaults
+        attempts_limit = max(1, int(max_retries or defaults["max_retries"]))
+        backoff_delay = max(
+            0.0,
+            float(
+                initial_backoff
+                if initial_backoff is not None
+                else defaults["initial_backoff"]
+            ),
+        )
+        multiplier = float(
+            backoff_multiplier
+            if backoff_multiplier is not None
+            else defaults["backoff_multiplier"]
+        )
+        if multiplier < 1.0:
+            multiplier = 1.0
+        timeout_budget = (
+            float(total_timeout)
+            if total_timeout is not None
+            else float(defaults["total_timeout"])
+        )
+        if timeout_budget <= 0:
+            timeout_budget = float(defaults["total_timeout"])
+
+        loop = asyncio.get_running_loop()
+        start_time = loop.time()
+        metadata: Dict[str, Any] = {
+            "attempts": 0,
+            "wait_time": 0.0,
+            "queue_position": -1,
+        }
+
+        last_failure_reason = "contended"
+        for attempt_index in range(1, attempts_limit + 1):
+            metadata["attempts"] = attempt_index
+            self._metrics["action_lock_retry_attempts"] += 1
+
+            lock_token = await self.acquire_action_lock(
+                chat_id,
+                user_id,
+                action_data=action_data,
+            )
+            if lock_token:
+                elapsed = loop.time() - start_time
+                metadata["wait_time"] = elapsed
+                metadata["queue_position"] = max(0, attempt_index - 1)
+                self._metrics["action_lock_retry_success"] += 1
+                if attempt_index > 1:
+                    self._logger.info(
+                        "[ACTION_LOCK] Acquired after %d attempts (%.2fs wait)",
+                        attempt_index,
+                        elapsed,
+                        extra={
+                            "event_type": "action_lock_retry_success",
+                            "chat_id": chat_id,
+                            "user_id": user_id,
+                            "attempts": attempt_index,
+                            "wait_time": round(elapsed, 3),
+                        },
+                    )
+                return lock_token, metadata
+
+            elapsed = loop.time() - start_time
+            remaining_budget = timeout_budget - elapsed
+            if remaining_budget <= 0 or attempt_index == attempts_limit:
+                if remaining_budget <= 0:
+                    last_failure_reason = "timeout"
+                break
+
+            sleep_duration = max(0.0, min(backoff_delay, remaining_budget))
+            if sleep_duration > 0:
+                self._logger.debug(
+                    "[ACTION_LOCK] Retry %d in %.2fs (chat=%s user=%s)",
+                    attempt_index + 1,
+                    sleep_duration,
+                    chat_id,
+                    user_id,
+                    extra={
+                        "event_type": "action_lock_retry_backoff",
+                        "chat_id": chat_id,
+                        "user_id": user_id,
+                        "attempt": attempt_index + 1,
+                        "sleep": round(sleep_duration, 3),
+                    },
+                )
+                await asyncio.sleep(sleep_duration)
+
+            backoff_delay *= multiplier
+
+        elapsed_total = loop.time() - start_time
+        metadata["wait_time"] = elapsed_total
+        metadata["queue_position"] = max(0, attempts_limit - 1)
+        if last_failure_reason == "timeout":
+            self._metrics["action_lock_retry_timeouts"] += 1
+        self._metrics["action_lock_retry_failures"] += 1
+
+        self._logger.warning(
+            "[ACTION_LOCK] Failed to acquire after %d attempts (%.2fs elapsed)",
+            metadata["attempts"],
+            elapsed_total,
+            extra={
+                "event_type": "action_lock_retry_failed",
+                "chat_id": chat_id,
+                "user_id": user_id,
+                "attempts": metadata["attempts"],
+                "wait_time": round(elapsed_total, 3),
+                "reason": last_failure_reason,
+            },
+        )
+
         return None
 
     async def release_action_lock(
