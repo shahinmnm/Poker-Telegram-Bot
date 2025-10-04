@@ -322,7 +322,7 @@ class GameEngine:
         if game is None:
             return
 
-        current_index = getattr(game, "current_player_index", -1)
+        current_index = game.current_player_index
         if not isinstance(current_index, int) or current_index < 0:
             if hasattr(game, "turn_deadline"):
                 game.turn_deadline = None
