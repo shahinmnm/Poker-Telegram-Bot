@@ -17,7 +17,7 @@ from pokerapp.pokerbotmodel import PokerBotModel
 async def test_progress_stage_called_with_chat_id_only_single_contender():
     model = object.__new__(PokerBotModel)
     progress_stage = AsyncMock(return_value=False)
-    model._game_engine = SimpleNamespace(progress_stage=progress_stage)
+    model.game_service = SimpleNamespace(progress_stage=progress_stage)
     model._round_rate = SimpleNamespace(
         _find_next_active_player_index=MagicMock(return_value=-1)
     )
@@ -39,7 +39,7 @@ async def test_progress_stage_called_with_chat_id_only_single_contender():
 async def test_progress_stage_called_with_chat_id_only_when_round_over():
     model = object.__new__(PokerBotModel)
     progress_stage = AsyncMock(return_value=False)
-    model._game_engine = SimpleNamespace(progress_stage=progress_stage)
+    model.game_service = SimpleNamespace(progress_stage=progress_stage)
     model._round_rate = SimpleNamespace(
         _find_next_active_player_index=MagicMock(return_value=-1)
     )
@@ -61,7 +61,7 @@ async def test_progress_stage_called_with_chat_id_only_when_round_over():
 async def test_progress_stage_called_with_chat_id_only_when_all_in():
     model = object.__new__(PokerBotModel)
     progress_stage = AsyncMock(return_value=False)
-    model._game_engine = SimpleNamespace(progress_stage=progress_stage)
+    model.game_service = SimpleNamespace(progress_stage=progress_stage)
     model._round_rate = SimpleNamespace(
         _find_next_active_player_index=MagicMock(return_value=-1)
     )
