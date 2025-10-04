@@ -64,6 +64,7 @@ from pokerapp.services.countdown_worker import CountdownWorker
 from pokerapp.player_manager import PlayerManager
 from pokerapp.stats_reporter import StatsReporter
 from pokerapp.stats import PlayerIdentity
+from pokerapp.snapshots import FinalizationSnapshot, StageProgressSnapshot
 from pokerapp.winnerdetermination import (
     HAND_LANGUAGE_ORDER,
     HAND_NAMES_TRANSLATIONS,
@@ -362,13 +363,16 @@ class GameEngine:
         self._round_rate = round_rate
         self._player_manager = player_manager
         self._matchmaking_service = matchmaking_service
+        self._matchmaking = matchmaking_service
         self._stats_reporter = stats_reporter
+        self._stats_service = stats_reporter
         self._clear_game_messages = clear_game_messages
         self._build_identity_from_player = build_identity_from_player
         self._safe_int = safe_int
         self._old_players_key = old_players_key
         self._telegram_ops = telegram_safe_ops
         self._safe_ops = telegram_safe_ops
+        self._messaging = view
         self._lock_manager = lock_manager
         self._logger = logger
         self.constants = constants or _CONSTANTS
@@ -2909,10 +2913,75 @@ class GameEngine:
 
     async def progress_stage(
         self,
-        context: ContextTypes.DEFAULT_TYPE,
-        chat_id: ChatId,
-        game: Game,
+        context: Optional[ContextTypes.DEFAULT_TYPE] = None,
+        chat_id: Optional[ChatId] = None,
+        game: Optional[Game] = None,
     ) -> bool:
+        """Progress to the next stage while supporting legacy call patterns."""
+
+        if chat_id is None:
+            raise ValueError("chat_id is required")
+
+        if context is not None or game is not None:
+            return await self._progress_stage_legacy(
+                context=context,
+                chat_id=chat_id,
+                game=game,
+            )
+
+        return await self._progress_stage_snapshot(chat_id)
+
+    async def _progress_stage_snapshot(self, chat_id: int) -> bool:
+        """Progress to next stage with early lock release using snapshots."""
+
+        snapshot: Optional[StageProgressSnapshot] = None
+        lock_manager = getattr(self, "_lock_manager", None)
+        table_manager = getattr(self, "_table_manager", None)
+
+        if lock_manager is None or table_manager is None:
+            return False
+
+        async with lock_manager.stage_lock(chat_id):
+            game_data = await table_manager.load_game(chat_id)
+            game = game_data[0] if isinstance(game_data, tuple) else game_data
+            if not game or getattr(game, "stage", None) == "complete":
+                return False
+
+            old_message_ids = tuple(getattr(game, "message_ids", ()))
+            matchmaking = getattr(self, "_matchmaking", None)
+            if matchmaking is not None and hasattr(matchmaking, "deal_community_cards"):
+                await matchmaking.deal_community_cards(game)
+
+            next_stage = self._next_stage(getattr(game, "stage", ""))
+            setattr(game, "stage", next_stage)
+
+            snapshot = StageProgressSnapshot(
+                chat_id=chat_id,
+                pot=getattr(game, "pot", 0),
+                stage=next_stage,
+                community_cards=tuple(getattr(game, "community_cards", ())),
+                message_ids_to_delete=old_message_ids,
+                new_message_text=self._render_stage_message_snapshot(game),
+            )
+
+            if hasattr(table_manager, "save_game"):
+                await table_manager.save_game(chat_id, game)
+
+        if snapshot is not None:
+            await self._execute_deferred_stage_tasks(snapshot)
+
+        return True
+
+    async def _progress_stage_legacy(
+        self,
+        *,
+        context: Optional[ContextTypes.DEFAULT_TYPE],
+        chat_id: ChatId,
+        game: Optional[Game],
+    ) -> bool:
+        if game is None:
+            raise ValueError("game is required for legacy progress_stage usage")
+
         deferred_tasks: List[Awaitable[Any]] = []
 
         async def _progress_locked() -> bool:
@@ -2927,7 +2996,6 @@ class GameEngine:
         lock_key = self._stage_lock_key(chat_id)
         stage_label = "stage_lock:progress_stage"
         event_stage_label = "progress_stage"
-        # Migrated to _trace_lock_guard for audited stage lock acquisition
         result = False
         try:
             async with self._trace_lock_guard(
@@ -2961,16 +3029,130 @@ class GameEngine:
                         },
                     )
 
-        self.refresh_turn_deadline(game)
+        if game is not None:
+            self.refresh_turn_deadline(game)
         return result
+
+    def _next_stage(self, current_stage: str) -> str:
+        stages = ("preflop", "flop", "turn", "river", "complete")
+        try:
+            index = stages.index(current_stage)
+        except ValueError:
+            return stages[0]
+        return stages[min(index + 1, len(stages) - 1)]
+
+    def _render_stage_message_snapshot(self, game: Any) -> str:
+        pot = getattr(game, "pot", 0)
+        stage = getattr(game, "stage", "")
+        cards = getattr(game, "community_cards", ())
+        formatted_cards = " ".join(str(card) for card in cards)
+        return f"💰 Pot: {pot}\n🎴 Stage: {stage}\n{formatted_cards}".strip()
+
+    async def _execute_deferred_stage_tasks(
+        self, snapshot: StageProgressSnapshot
+    ) -> None:
+        messaging = getattr(self, "_messaging", None)
+        if messaging is None:
+            return
+
+        tasks: List[Awaitable[Any]] = []
+        delete_message = getattr(messaging, "delete_message", None)
+        for message_id in snapshot.message_ids_to_delete:
+            if callable(delete_message):
+                tasks.append(delete_message(snapshot.chat_id, message_id))
+
+        send_message = getattr(messaging, "send_message", None)
+        if callable(send_message):
+            tasks.append(send_message(snapshot.chat_id, snapshot.new_message_text))
+
+        if not tasks:
+            return
+
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        for index, result in enumerate(results):
+            if isinstance(result, Exception):
+                self._logger.warning(
+                    "Deferred stage task failed",
+                    extra={
+                        "chat_id": snapshot.chat_id,
+                        "task_index": index,
+                        "error": str(result),
+                    },
+                )
 
     async def finalize_game(
         self,
         *,
-        context: ContextTypes.DEFAULT_TYPE,
-        game: Game,
+        context: Optional[ContextTypes.DEFAULT_TYPE] = None,
+        game: Optional[Game] = None,
+        chat_id: ChatId,
+    ) -> Optional[bool]:
+        """Finalize a game while maintaining backwards compatibility."""
+
+        if context is not None or game is not None:
+            await self._finalize_game_legacy(
+                context=context,
+                game=game,
+                chat_id=chat_id,
+            )
+            return None
+
+        return await self._finalize_game_snapshot(chat_id)
+
+    async def _finalize_game_snapshot(self, chat_id: int) -> bool:
+        """Finalize game with early lock release using immutable snapshots."""
+
+        snapshot: Optional[FinalizationSnapshot] = None
+        lock_manager = getattr(self, "_lock_manager", None)
+        table_manager = getattr(self, "_table_manager", None)
+
+        if lock_manager is None or table_manager is None:
+            return False
+
+        async with lock_manager.stage_lock(chat_id):
+            game_data = await table_manager.load_game(chat_id)
+            game = game_data[0] if isinstance(game_data, tuple) else game_data
+            if not game:
+                return False
+
+            winner = self._evaluate_winner_snapshot(game)
+            if winner is None:
+                return False
+
+            snapshot = FinalizationSnapshot(
+                chat_id=chat_id,
+                winner_user_id=getattr(winner, "user_id", 0),
+                winner_username=str(getattr(winner, "username", "")),
+                pot=getattr(game, "pot", 0),
+                winning_hand=str(getattr(winner, "hand_rank", "")),
+                message_ids_to_delete=tuple(getattr(game, "message_ids", ())),
+                stats_payload={
+                    "hand_id": getattr(game, "hand_id", None),
+                    "chat_id": chat_id,
+                    "winner_id": getattr(winner, "user_id", 0),
+                    "pot": getattr(game, "pot", 0),
+                    "timestamp": getattr(game, "start_time", datetime.datetime.utcnow()).isoformat(),
+                },
+            )
+
+            if hasattr(table_manager, "delete_game"):
+                await table_manager.delete_game(chat_id)
+
+        if snapshot is not None:
+            await self._execute_finalization_tasks(snapshot)
+
+        return True
+
+    async def _finalize_game_legacy(
+        self,
+        *,
+        context: Optional[ContextTypes.DEFAULT_TYPE],
+        game: Optional[Game],
         chat_id: ChatId,
     ) -> None:
+        if game is None:
+            raise ValueError("game is required for legacy finalize_game usage")
+
         async def _finalize_locked() -> Tuple[
             Set[MessageId],
             List[Dict[str, Any]],
@@ -3074,6 +3256,56 @@ class GameEngine:
             )
 
         await self._player_manager.send_join_prompt(game, chat_id)
+
+    async def _execute_finalization_tasks(
+        self, snapshot: FinalizationSnapshot
+    ) -> None:
+        messaging = getattr(self, "_messaging", None)
+        stats_service = getattr(self, "_stats_service", None)
+
+        tasks: List[Awaitable[Any]] = []
+
+        delete_message = getattr(messaging, "delete_message", None) if messaging else None
+        if callable(delete_message):
+            for message_id in snapshot.message_ids_to_delete:
+                tasks.append(delete_message(snapshot.chat_id, message_id))
+
+        send_message = getattr(messaging, "send_message", None) if messaging else None
+        if callable(send_message):
+            winner_text = (
+                f"🏆 Winner: @{snapshot.winner_username}\n"
+                f"💰 Pot: {snapshot.pot}\n"
+                f"🎴 Hand: {snapshot.winning_hand}"
+            )
+            tasks.append(send_message(snapshot.chat_id, winner_text))
+
+        record_hand = getattr(stats_service, "record_hand", None)
+        if callable(record_hand):
+            tasks.append(record_hand(snapshot.stats_payload))
+
+        if not tasks:
+            return
+
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        for index, result in enumerate(results):
+            if isinstance(result, Exception):
+                self._logger.error(
+                    "Finalization task failed",
+                    extra={
+                        "chat_id": snapshot.chat_id,
+                        "task_index": index,
+                        "error": str(result),
+                    },
+                )
+
+    def _evaluate_winner_snapshot(self, game: Any) -> Any:
+        evaluator = getattr(self, "_winner_selector", None)
+        if callable(evaluator):
+            return evaluator(game)
+        evaluator = getattr(self, "_winner_determination", None)
+        if evaluator and hasattr(evaluator, "determine_winner"):
+            return evaluator.determine_winner(game)
+        return getattr(game, "winner", None)
 
     async def _determine_winners(
         self,
