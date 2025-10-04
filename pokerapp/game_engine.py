@@ -2602,11 +2602,13 @@ class GameEngine:
 
     async def emergency_reset(self, chat_id: int) -> None:
         """
-        Forcefully unwind timers and locks after a critical failure.
+        Force-reset game state during crash recovery or deadlock scenarios.
 
-        The post-audit implementation acquires the stage lock around the
-        crash-recovery path to avoid interleaving state resets with other
-        operations that may still be retrying.
+        Phase 2A-4 Lock Audit Fix (CRITICAL-2): acquires ``stage_lock`` to
+        prevent concurrent state mutations during emergency cleanup, ensuring
+        atomic reset even when multiple admin commands are issued simultaneously.
+
+        Ref: docs/lock_contention_analysis.md, Section "Unprotected Mutations".
         """
 
         normalized_chat = self._safe_int(chat_id)
