@@ -3094,6 +3094,44 @@ class GameEngine:
         formatted_cards = " ".join(str(card) for card in cards)
         return f"💰 Pot: {pot}\n🎴 Stage: {stage}\n{formatted_cards}".strip()
 
+    def _create_send_message_task(
+        self,
+        *,
+        chat_id: int,
+        text: str,
+        parse_mode: Optional[str] = None,
+    ) -> Optional[asyncio.Task[Any]]:
+        """Create a messaging task while tolerating minimal stub interfaces.
+
+        Test doubles frequently implement ``send_message`` without the optional
+        ``parse_mode`` keyword used by the production ``PokerBotViewer``.  To
+        keep the snapshot-based fast path compatible with these stubs we try the
+        rich signature first and transparently retry without ``parse_mode`` when
+        the callable rejects the argument.  Any other exception is surfaced to
+        the caller so it can be logged consistently with the existing defensive
+        guards.
+        """
+
+        if not hasattr(self._messaging, "send_message"):
+            return None
+
+        kwargs: Dict[str, Any] = {"chat_id": chat_id, "text": text}
+        if parse_mode:
+            kwargs["parse_mode"] = parse_mode
+
+        try:
+            coroutine = self._messaging.send_message(**kwargs)
+        except TypeError as exc:
+            if parse_mode and "parse_mode" in str(exc):
+                return self._create_send_message_task(
+                    chat_id=chat_id,
+                    text=text,
+                    parse_mode=None,
+                )
+            raise
+
+        return asyncio.create_task(coroutine)
+
     async def _execute_deferred_stage_tasks(
         self, snapshot: StageProgressSnapshot
     ) -> None:
@@ -3118,21 +3156,17 @@ class GameEngine:
                             "error": str(exc),
                             "error_type": type(exc).__name__,
                             "stage": snapshot.stage,
-                        },
-                    )
+                    },
+                )
 
         delete_task_count = len(tasks)
 
-        if snapshot.new_message_text and hasattr(self._messaging, "send_message"):
+        if snapshot.new_message_text:
             try:
-                tasks.append(
-                    asyncio.create_task(
-                        self._messaging.send_message(
-                            snapshot.chat_id,
-                            snapshot.new_message_text,
-                            parse_mode="Markdown",
-                        )
-                    )
+                send_task = self._create_send_message_task(
+                    chat_id=snapshot.chat_id,
+                    text=snapshot.new_message_text,
+                    parse_mode="Markdown",
                 )
             except Exception as exc:  # pragma: no cover - defensive guard
                 self._logger.warning(
@@ -3145,6 +3179,9 @@ class GameEngine:
                         "stage": snapshot.stage,
                     },
                 )
+            else:
+                if send_task is not None:
+                    tasks.append(send_task)
 
         if not tasks:
             return
