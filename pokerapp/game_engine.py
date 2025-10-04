@@ -88,7 +88,7 @@ def clear_all_message_ids(game: Game) -> None:
     if message_ids is not None and hasattr(message_ids, "clear"):
         message_ids.clear()
 
-    for player in getattr(game, "players", []):
+    for player in game.players:
         player.ready_message_id = None
 
 
@@ -981,7 +981,7 @@ class GameEngine:
             try:
                 players = game.seated_players()
             except Exception:  # pragma: no cover - fallback to attribute
-                players = list(getattr(game, "players", []))
+                players = list(game.players)
             for player in players:
                 snapshot.append(
                     {
@@ -1048,7 +1048,7 @@ class GameEngine:
                 if candidate is not None:
                     return candidate
 
-        for player in getattr(game, "players", []):
+        for player in game.players:
             if getattr(player, "user_id", None) == user_id:
                 return player
         return None
@@ -1899,7 +1899,7 @@ class GameEngine:
                 player.has_acted = True
             if hasattr(game, "trading_end_user_id"):
                 game.trading_end_user_id = getattr(player, "user_id", None)
-            for other in getattr(game, "players", []):
+            for other in game.players:
                 if other is player:
                     continue
                 if getattr(other, "state", PlayerState.ACTIVE) == PlayerState.ACTIVE and hasattr(other, "has_acted"):
@@ -2806,9 +2806,7 @@ class GameEngine:
                     )
                     return
 
-                seated_players = [
-                    player for player in getattr(game, "players", []) if player is not None
-                ]
+                seated_players = [player for player in game.players if player is not None]
                 seated_count = len(seated_players)
                 if seated_count < 2:
                     self._logger.warning(
