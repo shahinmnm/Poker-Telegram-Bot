@@ -13,3 +13,4 @@ fakeredis==2.19.0
 cachetools>=5.3
 pytest-asyncio>=1.2
 PyYAML>=6.0
+prometheus-client>=0.17.0

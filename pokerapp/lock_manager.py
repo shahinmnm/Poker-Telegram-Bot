@@ -36,10 +36,12 @@ from pokerapp.bootstrap import _make_service_logger
 from pokerapp.entities import ChatId, UserId
 from pokerapp.utils.locks import ReentrantAsyncLock
 from pokerapp.utils.logging_helpers import add_context, normalise_request_category
+from pokerapp.utils.request_metrics import increment_lock_hierarchy_violation
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from pokerapp.config import Config
     from pokerapp.feature_flags import FeatureFlagManager
+    from pokerapp.utils.rollout_metrics import RolloutMonitor
 
 
 LOCK_LEVELS: Dict[str, int] = {
@@ -365,6 +367,7 @@ class LockManager:
         writer_priority: bool = True,
         log_slow_lock_threshold: float = 0.5,
         feature_flags: Optional["FeatureFlagManager"] = None,
+        rollout_monitor: Optional["RolloutMonitor"] = None,
     ) -> None:
         base_logger = add_context(logger)
         self._logger = _make_service_logger(
@@ -377,6 +380,7 @@ class LockManager:
         self._enable_fine_grained_locks = (
             enable_fine_grained_locks or feature_flags is not None
         )
+        self._rollout_monitor = rollout_monitor
         self._locks: Dict[str, ReentrantAsyncLock] = {}
         self._locks_guard = asyncio.Lock()
         self._task_lock_state: "WeakKeyDictionary[asyncio.Task[Any], List[_LockAcquisition]]" = (
@@ -846,6 +850,22 @@ class LockManager:
         wait_time = 0.0
         hold_duration = 0.0
         success = False
+        metrics = getattr(self, "_request_metrics", None)
+        metrics_chat_id = 0
+        started_concurrency = False
+        if metrics is not None:
+            chat_id_metric = guard_context.get("chat_id")
+            metrics_chat_id = (
+                self._safe_int(chat_id_metric) if chat_id_metric is not None else 0
+            )
+            if metrics_chat_id and hasattr(metrics, "track_action_start"):
+                try:
+                    await metrics.track_action_start(metrics_chat_id)
+                    started_concurrency = True
+                except Exception:  # pragma: no cover - best-effort metrics
+                    self._logger.debug(
+                        "Failed to update concurrent action gauge", exc_info=True
+                    )
 
         try:
             async with self.guard(
@@ -865,19 +885,29 @@ class LockManager:
             success = False
             raise
         finally:
-            metrics = getattr(self, "_request_metrics", None)
+            if (
+                started_concurrency
+                and metrics is not None
+                and hasattr(metrics, "track_action_end")
+            ):
+                try:
+                    await metrics.track_action_end(metrics_chat_id)
+                except Exception:  # pragma: no cover - best-effort metrics
+                    self._logger.debug(
+                        "Failed to decrement concurrent action gauge", exc_info=True
+                    )
+
             if metrics is not None and hasattr(
                 metrics, "record_fine_grained_lock"
             ):
                 try:
-                    chat_id_metric = guard_context.get("chat_id")
-                    metrics.record_fine_grained_lock(
-                        lock_type=metrics_lock_type
-                        if metrics_lock_type is not None
-                        else self._extract_lock_type(lock_key),
-                        chat_id=self._safe_int(chat_id_metric)
-                        if chat_id_metric is not None
-                        else 0,
+                    await metrics.record_fine_grained_lock(
+                        lock_type=(
+                            metrics_lock_type
+                            if metrics_lock_type is not None
+                            else self._extract_lock_type(lock_key)
+                        ),
+                        chat_id=metrics_chat_id,
                         duration_ms=hold_duration * 1000.0,
                         wait_time_ms=wait_time * 1000.0,
                         success=success,
@@ -885,6 +915,25 @@ class LockManager:
                 except Exception:  # pragma: no cover - best-effort metrics
                     self._logger.debug(
                         "Failed to record fine-grained lock metric", exc_info=True
+                    )
+
+            monitor = getattr(self, "_rollout_monitor", None)
+            if monitor is not None and metrics_chat_id:
+                try:
+                    monitor.record_lock_metrics(
+                        chat_id=metrics_chat_id,
+                        wait_time=wait_time,
+                        hold_time=hold_duration,
+                        success=success,
+                    )
+                    monitor.record_action_metrics(
+                        chat_id=metrics_chat_id,
+                        duration=hold_duration,
+                        success=success,
+                    )
+                except Exception:  # pragma: no cover - best-effort metrics
+                    self._logger.debug(
+                        "Failed to record rollout monitor metrics", exc_info=True
                     )
 
     @asynccontextmanager
@@ -2939,6 +2988,8 @@ class LockManager:
                 },
             )
 
+            increment_lock_hierarchy_violation()
+
             raise LockOrderError(violation_msg)
 
         if requested_level < max_held_level - 1:
@@ -3940,6 +3991,16 @@ class LockManager:
             },
         )
         return False
+
+    def attach_request_metrics(self, metrics: Any) -> None:
+        """Attach a ``RequestMetrics`` instance for telemetry hooks."""
+
+        self._request_metrics = metrics
+
+    def attach_rollout_monitor(self, monitor: "RolloutMonitor") -> None:
+        """Attach a rollout monitor for health and rollback tracking."""
+
+        self._rollout_monitor = monitor
 
     async def clear_all_locks(self) -> int:
         """Remove all tracked locks and return how many were cleared."""
