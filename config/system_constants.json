@@ -6,6 +6,10 @@
   "default_rate_limit_per_minute": 20,
   "default_timezone_name": "Asia/Tehran",
   "locks": {
+    "category_timeouts_seconds": {
+      "engine_stage": 25.0,
+      "engine_stage_betting": 15.0
+    },
     "action": {
       "ttl": 10,
       "valid_types": ["fold", "check", "call", "raise"]
