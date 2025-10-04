@@ -21,8 +21,74 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Deque, DefaultDict, Dict, Iterable, Optional
 
+try:  # pragma: no cover - prometheus_client optional
+    from prometheus_client import Counter, Gauge, Histogram
+except Exception:  # pragma: no cover - optional dependency missing
+    Counter = Gauge = Histogram = None  # type: ignore[assignment]
+
 
 logger = logging.getLogger(__name__)
+
+if Gauge is not None:  # pragma: no branch - simple configuration
+    _PROM_ROLLOUT_PERCENTAGE = Gauge(
+        "poker_fine_grained_locks_rollout_percentage",
+        "Current rollout percentage for fine-grained locks",
+    )
+    _PROM_ACTION_DURATION = Histogram(
+        "poker_action_duration_seconds",
+        "Player action duration",
+        ("legacy",),
+    )
+    _PROM_LOCK_WAIT_TIME = Histogram(
+        "poker_lock_wait_time_seconds",
+        "Lock wait time",
+        ("lock_type",),
+    )
+    _PROM_CONCURRENT_ACTIONS = Gauge(
+        "poker_concurrent_actions",
+        "Number of concurrent actions",
+        ("chat_id",),
+    )
+else:  # pragma: no cover - dependency not installed during tests
+    _PROM_ROLLOUT_PERCENTAGE = None
+    _PROM_ACTION_DURATION = None
+    _PROM_LOCK_WAIT_TIME = None
+    _PROM_CONCURRENT_ACTIONS = None
+
+if Counter is not None:  # pragma: no branch - simple configuration
+    _PROM_ACTION_ERRORS = Counter(
+        "poker_action_errors_total",
+        "Total action errors",
+    )
+    _PROM_LOCK_HIERARCHY_VIOLATIONS = Counter(
+        "poker_lock_hierarchy_violations_total",
+        "Lock hierarchy violations",
+    )
+else:  # pragma: no cover - dependency not installed during tests
+    _PROM_ACTION_ERRORS = None
+    _PROM_LOCK_HIERARCHY_VIOLATIONS = None
+
+
+def set_rollout_percentage(value: float) -> None:
+    """Expose rollout gauge updates to feature flag manager."""
+
+    if _PROM_ROLLOUT_PERCENTAGE is not None:
+        try:
+            _PROM_ROLLOUT_PERCENTAGE.set(value)
+        except Exception:  # pragma: no cover - metrics best effort
+            logger.debug("Failed to update rollout percentage gauge", exc_info=True)
+
+
+def increment_lock_hierarchy_violation() -> None:
+    """Increment Prometheus counter for hierarchy violations."""
+
+    if _PROM_LOCK_HIERARCHY_VIOLATIONS is not None:
+        try:
+            _PROM_LOCK_HIERARCHY_VIOLATIONS.inc()
+        except Exception:  # pragma: no cover - metrics best effort
+            logger.debug(
+                "Failed to increment hierarchy violation counter", exc_info=True
+            )
 
 
 class RequestCategory(str, Enum):
@@ -66,12 +132,21 @@ class RequestMetrics:
         self._logger = logger_ or logger.getChild("metrics")
         self._lock = asyncio.Lock()
         self._cycles: Dict[int, _CycleSnapshot] = {}
+        self._concurrent_actions: DefaultDict[int, int] = defaultdict(int)
 
     async def start_cycle(self, chat_id: int, cycle_token: str) -> None:
         """Begin counting a new game cycle for ``chat_id``."""
 
         async with self._lock:
             self._cycles[chat_id] = _CycleSnapshot(cycle_token=cycle_token)
+            self._concurrent_actions.pop(chat_id, None)
+            if _PROM_CONCURRENT_ACTIONS is not None:
+                try:
+                    _PROM_CONCURRENT_ACTIONS.labels(chat_id=str(chat_id)).set(0)
+                except Exception:  # pragma: no cover - metrics best effort
+                    self._logger.debug(
+                        "Failed to reset concurrent action gauge", exc_info=True
+                    )
             self._logger.info(
                 "Request cycle started",
                 extra={"chat_id": chat_id, "cycle_token": cycle_token},
@@ -98,6 +173,14 @@ class RequestMetrics:
                 },
             )
             self._cycles.pop(chat_id, None)
+            self._concurrent_actions.pop(chat_id, None)
+            if _PROM_CONCURRENT_ACTIONS is not None:
+                try:
+                    _PROM_CONCURRENT_ACTIONS.labels(chat_id=str(chat_id)).set(0)
+                except Exception:  # pragma: no cover - metrics best effort
+                    self._logger.debug(
+                        "Failed to clear concurrent action gauge", exc_info=True
+                    )
 
     async def consume(
         self,
@@ -193,7 +276,44 @@ class RequestMetrics:
                 return []
             return list(snapshot.recent_calls)
 
-    def record_fine_grained_lock(
+    async def track_action_start(self, chat_id: int) -> None:
+        """Increment concurrent action gauge for ``chat_id``."""
+
+        if chat_id <= 0:
+            return
+        async with self._lock:
+            self._concurrent_actions[chat_id] += 1
+            count = self._concurrent_actions[chat_id]
+            if _PROM_CONCURRENT_ACTIONS is not None:
+                try:
+                    _PROM_CONCURRENT_ACTIONS.labels(chat_id=str(chat_id)).set(count)
+                except Exception:  # pragma: no cover - metrics best effort
+                    self._logger.debug(
+                        "Failed to increment concurrent action gauge", exc_info=True
+                    )
+
+    async def track_action_end(self, chat_id: int) -> None:
+        """Decrement concurrent action gauge for ``chat_id``."""
+
+        if chat_id <= 0:
+            return
+        async with self._lock:
+            current = self._concurrent_actions.get(chat_id, 0)
+            if current <= 1:
+                self._concurrent_actions.pop(chat_id, None)
+                count = 0
+            else:
+                count = current - 1
+                self._concurrent_actions[chat_id] = count
+            if _PROM_CONCURRENT_ACTIONS is not None:
+                try:
+                    _PROM_CONCURRENT_ACTIONS.labels(chat_id=str(chat_id)).set(count)
+                except Exception:  # pragma: no cover - metrics best effort
+                    self._logger.debug(
+                        "Failed to decrement concurrent action gauge", exc_info=True
+                    )
+
+    async def record_fine_grained_lock(
         self,
         *,
         lock_type: str,
@@ -216,6 +336,34 @@ class RequestMetrics:
                 "metric_type": "fine_grained_lock",
             },
         )
+
+        if _PROM_ACTION_DURATION is not None:
+            try:
+                _PROM_ACTION_DURATION.labels(legacy="false").observe(
+                    max(duration_ms, 0.0) / 1000.0
+                )
+            except Exception:  # pragma: no cover - metrics best effort
+                self._logger.debug(
+                    "Failed to observe action duration metric", exc_info=True
+                )
+
+        if _PROM_LOCK_WAIT_TIME is not None:
+            try:
+                _PROM_LOCK_WAIT_TIME.labels(lock_type=lock_type or "unknown").observe(
+                    max(wait_time_ms, 0.0) / 1000.0
+                )
+            except Exception:  # pragma: no cover - metrics best effort
+                self._logger.debug(
+                    "Failed to observe lock wait metric", exc_info=True
+                )
+
+        if not success and _PROM_ACTION_ERRORS is not None:
+            try:
+                _PROM_ACTION_ERRORS.inc()
+            except Exception:  # pragma: no cover - metrics best effort
+                self._logger.debug(
+                    "Failed to increment action error counter", exc_info=True
+                )
 
     def _build_cycle_summary(self, snapshot: _CycleSnapshot) -> Iterable[Dict[str, int]]:
         """Return a table comparing raw vs optimised request counts."""
@@ -242,5 +390,10 @@ class RequestMetrics:
         return rows
 
 
-__all__ = ["RequestMetrics", "RequestCategory"]
+__all__ = [
+    "RequestMetrics",
+    "RequestCategory",
+    "increment_lock_hierarchy_violation",
+    "set_rollout_percentage",
+]
 

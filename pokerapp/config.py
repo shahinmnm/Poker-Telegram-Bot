@@ -751,7 +751,10 @@ class Config:
     def reload_system_constants(self) -> None:
         """Reload cached system constants from disk."""
 
-        self.system_constants = deepcopy(_load_system_constants())
+        global _SYSTEM_CONSTANTS
+
+        _SYSTEM_CONSTANTS = _load_system_constants()
+        self.system_constants = deepcopy(_SYSTEM_CONSTANTS)
 
     @staticmethod
     def _normalize_webhook_path(path: str) -> str:

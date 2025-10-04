@@ -8,6 +8,7 @@ import redis.asyncio as aioredis
 from telegram.error import TelegramError
 from telegram.ext import ApplicationBuilder, ContextTypes, JobQueue
 
+from pokerapp.health_endpoints import fine_grained_locks_health
 from pokerapp.config import Config
 from pokerapp.pokerbotcontrol import PokerBotCotroller
 from pokerapp.pokerbotmodel import PokerBotModel
@@ -34,6 +35,9 @@ class WebhookSettings:
 
 if TYPE_CHECKING:
     from telegram.ext import Application
+
+    from pokerapp.feature_flags import FeatureFlagManager
+    from pokerapp.utils.rollout_metrics import RolloutMonitor
 
 
 MessagingServiceFactory = Callable[..., MessagingService]
@@ -67,6 +71,8 @@ class PokerBot:
         private_match_service: PrivateMatchService,
         messaging_service_factory: MessagingServiceFactory,
         telegram_safeops_factory: TelegramSafeOpsFactory,
+        feature_flags: "FeatureFlagManager",
+        rollout_monitor: Optional["RolloutMonitor"] = None,
     ):
         self._cfg = cfg
         self._token = token
@@ -97,6 +103,8 @@ class PokerBot:
         self._telegram_safeops_factory = telegram_safeops_factory
         self._player_report_cache = player_report_cache
         self._adaptive_player_report_cache = adaptive_player_report_cache
+        self._feature_flags = feature_flags
+        self._rollout_monitor = rollout_monitor
         self._build_application()
 
     def run(self) -> None:
@@ -217,6 +225,7 @@ class PokerBot:
         )
         self._application = builder.build()
         self._application.add_error_handler(self._handle_error)
+        self._configure_health_endpoints()
 
         # Viewer and model are created here so that both receive the injected
         # infrastructure dependencies (Redis, stats, metrics, messaging). The
@@ -242,9 +251,44 @@ class PokerBot:
             player_report_cache=self._player_report_cache,
             adaptive_player_report_cache=self._adaptive_player_report_cache,
             telegram_safe_ops=telegram_safe_ops,
+            feature_flags=self._feature_flags,
+            rollout_monitor=self._rollout_monitor,
         )
         self._register_game_engine()
         self._controller = PokerBotCotroller(self._model, self._application)
+
+    def _configure_health_endpoints(self) -> None:
+        if self._rollout_monitor is None or self._application is None:
+            return
+
+        web_app = getattr(self._application, "web_app", None)
+        if web_app is None:
+            self._logger.debug(
+                "Aiohttp web application unavailable; skipping health endpoints",
+                exc_info=False,
+            )
+            return
+
+        web_app["rollout_monitor"] = self._rollout_monitor
+        router = getattr(web_app, "router", None)
+        if router is None:
+            return
+
+        path = "/health/fine_grained_locks"
+        try:
+            existing_routes = list(router.routes()) if callable(router.routes) else []
+        except Exception:  # pragma: no cover - defensive
+            existing_routes = []
+
+        if any(getattr(route, "path", None) == path for route in existing_routes):
+            return
+
+        try:
+            router.add_get(path, fine_grained_locks_health)
+        except Exception:  # pragma: no cover - defensive
+            self._logger.debug(
+                "Failed to register fine-grained locks health endpoint", exc_info=True
+            )
 
     def _dispose_application(self) -> None:
         if self._application is None:
@@ -300,10 +344,22 @@ class PokerBot:
         except Exception:
             self._logger.exception("Failed to start GameEngine background workers")
             raise
+        if self._rollout_monitor is not None:
+            try:
+                self._rollout_monitor.start()
+            except Exception:  # pragma: no cover - defensive
+                self._logger.exception("Failed to start rollout monitor")
 
     async def _on_application_post_shutdown(self, application: "Application") -> None:
         game_engine = application.bot_data.get("game_engine") or self._resolve_game_engine()
         if game_engine is None:
+            if self._rollout_monitor is not None:
+                try:
+                    await self._rollout_monitor.stop()
+                except Exception:  # pragma: no cover - defensive
+                    self._logger.debug(
+                        "Failed to stop rollout monitor", exc_info=True
+                    )
             return
 
         try:
@@ -312,6 +368,13 @@ class PokerBot:
             self._logger.exception("Failed to stop GameEngine background workers")
         finally:
             application.bot_data.pop("game_engine", None)
+        if self._rollout_monitor is not None:
+            try:
+                await self._rollout_monitor.stop()
+            except Exception:  # pragma: no cover - defensive
+                self._logger.debug(
+                    "Failed to stop rollout monitor", exc_info=True
+                )
 
     def _should_force_polling_due_to_webhook_failure(self, exc: Exception) -> bool:
         for error in self._iter_exception_chain(exc):
