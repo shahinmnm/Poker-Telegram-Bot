@@ -97,6 +97,10 @@ class LockOrderError(RuntimeError):
     """Raised when locks are acquired out of the configured order."""
 
 
+class LockHierarchyViolation(LockOrderError):
+    """Raised when hierarchical lock ordering constraints are violated."""
+
+
 @dataclass
 class _LockAcquisition:
     key: str
@@ -349,6 +353,11 @@ class LockManager:
     """
 
     LOCK_LEVELS = LOCK_LEVELS
+
+    # Hierarchical helper levels used by high-level convenience wrappers.
+    _TABLE_WRITE_LOCK_LEVEL = 30
+    _PLAYER_LOCK_LEVEL = 35
+    _WALLET_LOCK_LEVEL = 40
 
     def __init__(
         self,
@@ -823,6 +832,79 @@ class LockManager:
             timeout=timeout,
             context=guard_context,
             level=level,
+        ):
+            yield
+
+    @asynccontextmanager
+    async def acquire_table_write_lock(
+        self,
+        chat_id: int,
+        *,
+        timeout: Optional[float] = None,
+        context: Optional[Mapping[str, Any]] = None,
+    ) -> AsyncIterator[None]:
+        """Convenience wrapper enforcing hierarchy for table write access."""
+
+        guard_context: Dict[str, Any] = dict(context or {})
+        guard_context.setdefault("lock_type", "table_write")
+        guard_context.setdefault("chat_id", self._safe_int(chat_id))
+        lock_key = f"table_write:{self._safe_int(chat_id)}"
+        self._validate_lock_hierarchy(lock_key, self._TABLE_WRITE_LOCK_LEVEL)
+        async with self.guard(
+            lock_key,
+            timeout=timeout,
+            context=guard_context,
+            level=self._TABLE_WRITE_LOCK_LEVEL,
+        ):
+            yield
+
+    @asynccontextmanager
+    async def acquire_player_lock(
+        self,
+        chat_id: int,
+        player_id: int,
+        *,
+        timeout: Optional[float] = None,
+        context: Optional[Mapping[str, Any]] = None,
+    ) -> AsyncIterator[None]:
+        """Acquire a player-scoped lock respecting hierarchical ordering."""
+
+        guard_context: Dict[str, Any] = dict(context or {})
+        guard_context.setdefault("lock_type", "player")
+        guard_context.setdefault("chat_id", self._safe_int(chat_id))
+        guard_context.setdefault("player_id", self._safe_int(player_id))
+        lock_key = (
+            f"player:{self._safe_int(chat_id)}:{self._safe_int(player_id)}"
+        )
+        self._validate_lock_hierarchy(lock_key, self._PLAYER_LOCK_LEVEL)
+        async with self.guard(
+            lock_key,
+            timeout=timeout,
+            context=guard_context,
+            level=self._PLAYER_LOCK_LEVEL,
+        ):
+            yield
+
+    @asynccontextmanager
+    async def acquire_wallet_lock(
+        self,
+        user_id: int,
+        *,
+        timeout: Optional[float] = None,
+        context: Optional[Mapping[str, Any]] = None,
+    ) -> AsyncIterator[None]:
+        """Acquire a wallet lock with strict hierarchy enforcement."""
+
+        guard_context: Dict[str, Any] = dict(context or {})
+        guard_context.setdefault("lock_type", "wallet")
+        guard_context.setdefault("user_id", self._safe_int(user_id))
+        lock_key = f"wallet:{self._safe_int(user_id)}"
+        self._validate_lock_hierarchy(lock_key, self._WALLET_LOCK_LEVEL)
+        async with self.guard(
+            lock_key,
+            timeout=timeout,
+            context=guard_context,
+            level=self._WALLET_LOCK_LEVEL,
         ):
             yield
 
@@ -2939,7 +3021,7 @@ class LockManager:
                 },
             )
 
-            raise LockOrderError(violation_msg)
+            raise LockHierarchyViolation(violation_msg)
 
         if requested_level < max_held_level - 1:
             held_locks = [acq.key for acq in current_acquisitions]
@@ -3949,4 +4031,4 @@ class LockManager:
             self._locks.clear()
         return cleared
 
-__all__ = ["LockManager", "LockOrderError"]
+__all__ = ["LockManager", "LockOrderError", "LockHierarchyViolation"]
