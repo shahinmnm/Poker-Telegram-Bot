@@ -16,6 +16,8 @@ from dataclasses import dataclass, field
 from typing import (
     Any,
     AsyncIterator,
+    Awaitable,
+    Callable,
     Dict,
     List,
     Mapping,
@@ -275,6 +277,20 @@ class _InMemoryActionLockBackend:
                 return 1
             return 0
 
+    async def keys(self, pattern: str) -> List[str]:
+        """Return keys matching ``pattern`` similar to Redis' KEYS command."""
+
+        async with self._lock:
+            self._purge_expired()
+            if pattern == "*":
+                return list(self._values.keys())
+
+            if pattern.endswith("*"):
+                prefix = pattern[:-1]
+                return [key for key in self._values if key.startswith(prefix)]
+
+            return [key for key in self._values if key == pattern]
+
     def get_metrics(self) -> Dict[str, Any]:
         """Return current backend metrics (for debugging/monitoring)."""
 
@@ -486,7 +502,7 @@ class LockManager:
             "initial_backoff": 0.5,
             "backoff_multiplier": 1.5,
             "total_timeout": 10.0,
-            "enable_queue_estimation": False,
+            "enable_queue_estimation": True,
         }
         if isinstance(action_settings, Mapping):
             ttl_candidate = action_settings.get("ttl")
@@ -3061,6 +3077,51 @@ class LockManager:
             return f"{base}:{str(action_identifier)}"
         return base
 
+    async def _estimate_queue_position(self, chat_id: int, user_id: int) -> int:
+        """Estimate how many action locks are queued ahead for ``chat_id``."""
+
+        if not self._action_lock_retry_defaults.get("enable_queue_estimation", False):
+            return -1
+
+        redis_client = getattr(self, "_redis_pool", None)
+        if redis_client is None or not hasattr(redis_client, "keys"):
+            return -1
+
+        try:
+            normalized_chat = int(chat_id)
+        except (TypeError, ValueError):
+            normalized_chat = chat_id
+
+        prefix = self._redis_keys.get("action_lock_prefix", "action:lock:")
+        pattern = f"{prefix}{normalized_chat}:*"
+
+        try:
+            keys = await redis_client.keys(pattern)
+        except Exception:
+            self._logger.debug(
+                "[ACTION_LOCK] Queue estimation failed",  # pragma: no cover - debug aid
+                extra={
+                    "event_type": "action_lock_queue_estimation_failed",
+                    "chat_id": chat_id,
+                    "user_id": user_id,
+                    "pattern": pattern,
+                },
+                exc_info=True,
+            )
+            return -1
+
+        if isinstance(keys, (list, tuple, set)):
+            count = len(keys)
+        elif isinstance(keys, dict):
+            count = len(keys)
+        else:
+            try:
+                count = int(keys)
+            except (TypeError, ValueError):
+                count = 0
+
+        return max(0, count)
+
     def _make_table_lock_key(self, chat_id: int, operation: str) -> str:
         engine_keys = self._redis_keys.get("engine", {})
         prefix = engine_keys.get("table_lock_prefix", "table:lock:")
@@ -3330,6 +3391,7 @@ class LockManager:
         initial_backoff: Optional[float] = None,
         backoff_multiplier: Optional[float] = None,
         total_timeout: Optional[float] = None,
+        progress_callback: Optional[Callable[[Dict[str, Any]], Awaitable[None]]] = None,
     ) -> Optional[Tuple[str, Dict[str, Any]]]:
         """Acquire an action lock using exponential backoff retry strategy."""
 
@@ -3365,6 +3427,7 @@ class LockManager:
             "wait_time": 0.0,
             "queue_position": -1,
         }
+        last_reported_position = -1
 
         last_failure_reason = "contended"
         for attempt_index in range(1, attempts_limit + 1):
@@ -3379,7 +3442,7 @@ class LockManager:
             if lock_token:
                 elapsed = loop.time() - start_time
                 metadata["wait_time"] = elapsed
-                metadata["queue_position"] = max(0, attempt_index - 1)
+                metadata["queue_position"] = 0
                 self._metrics["action_lock_retry_success"] += 1
                 if attempt_index > 1:
                     self._logger.info(
@@ -3403,6 +3466,31 @@ class LockManager:
                     last_failure_reason = "timeout"
                 break
 
+            queue_position = await self._estimate_queue_position(chat_id, user_id)
+            if queue_position >= 0:
+                metadata["queue_position"] = queue_position
+                if (
+                    progress_callback is not None
+                    and queue_position > 0
+                    and queue_position != last_reported_position
+                ):
+                    last_reported_position = queue_position
+                    try:
+                        await progress_callback(dict(metadata))
+                    except Exception:
+                        self._logger.debug(
+                            "[ACTION_LOCK] Queue progress callback failed",  # pragma: no cover - defensive logging
+                            extra={
+                                "event_type": "action_lock_queue_callback_error",
+                                "chat_id": chat_id,
+                                "user_id": user_id,
+                                "queue_position": queue_position,
+                            },
+                            exc_info=True,
+                        )
+            else:
+                metadata["queue_position"] = max(0, attempt_index)
+
             sleep_duration = max(0.0, min(backoff_delay, remaining_budget))
             if sleep_duration > 0:
                 self._logger.debug(
@@ -3425,7 +3513,8 @@ class LockManager:
 
         elapsed_total = loop.time() - start_time
         metadata["wait_time"] = elapsed_total
-        metadata["queue_position"] = max(0, attempts_limit - 1)
+        if metadata.get("queue_position", -1) < 0:
+            metadata["queue_position"] = max(0, attempts_limit - 1)
         if last_failure_reason == "timeout":
             self._metrics["action_lock_retry_timeouts"] += 1
         self._metrics["action_lock_retry_failures"] += 1

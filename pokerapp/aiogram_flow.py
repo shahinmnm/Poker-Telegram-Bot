@@ -175,11 +175,60 @@ def protect_against_races(handler: Callable) -> Callable:
                 return None
 
         callback_data = getattr(callback_query, "data", "")
+
+        async def _answer_callback(text: str) -> None:
+            bot = getattr(callback_query, "bot", None)
+            if bot is not None:
+                try:
+                    await bot.answer_callback_query(
+                        callback_query_id=callback_id,
+                        text=text,
+                        show_alert=False,
+                    )
+                    return
+                except TelegramBadRequest:
+                    logger.debug("Failed answering callback via bot", exc_info=True)
+
+            answer_method = getattr(callback_query, "answer", None)
+            if callable(answer_method):
+                try:
+                    await answer_method(text, show_alert=False)
+                except TelegramBadRequest:
+                    logger.debug(
+                        "Failed answering callback via CallbackQuery.answer",
+                        exc_info=True,
+                    )
+
+        last_queue_feedback = -1
+
+        async def _queue_feedback(metadata: Mapping[str, Any]) -> None:
+            nonlocal last_queue_feedback
+
+            queue_position = metadata.get("queue_position")
+            attempts = metadata.get("attempts", 0)
+            try:
+                queue_position_int = int(queue_position)
+                attempts_int = int(attempts)
+            except (TypeError, ValueError):
+                return
+
+            if queue_position_int <= 0 or attempts_int <= 0:
+                return
+
+            if queue_position_int == last_queue_feedback:
+                return
+
+            last_queue_feedback = queue_position_int
+            await _answer_callback(
+                f"⏳ در صف ({queue_position_int} نفر جلوتر)..."
+            )
+
         if hasattr(lock_manager, "acquire_action_lock_with_retry"):
             lock_acquisition = await lock_manager.acquire_action_lock_with_retry(
                 chat_id,
                 user_id,
                 action_data=callback_data or None,
+                progress_callback=_queue_feedback,
             )
         else:
             token_only = await lock_manager.acquire_action_lock(
@@ -193,14 +242,12 @@ def protect_against_races(handler: Callable) -> Callable:
                 else None
             )
         if not lock_acquisition:
-            answer = getattr(callback_query, "answer", None)
-            if callable(answer):
-                await answer(
-                    translate(
-                        "error.action_please_wait",
-                        "⚠️ Please wait for other players to finish their turn",
-                    )
+            await _answer_callback(
+                translate(
+                    "error.action_please_wait",
+                    "⚠️ Please wait for other players to finish their turn",
                 )
+            )
             return None
 
         lock_token, lock_metadata = lock_acquisition
@@ -217,6 +264,7 @@ def protect_against_races(handler: Callable) -> Callable:
                     "wait_time": round(lock_metadata.get("wait_time", 0.0), 3),
                 },
             )
+            await _answer_callback("✅ نوبت شما فرا رسید")
 
         try:
             try:
