@@ -9,7 +9,10 @@ from collections import defaultdict
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional
 
-from psycopg_pool import AsyncConnectionPool
+try:  # pragma: no cover - optional dependency
+    from psycopg_pool import AsyncConnectionPool
+except Exception:  # pragma: no cover - optional dependency missing
+    AsyncConnectionPool = None  # type: ignore[assignment]
 
 from pokerapp.feature_flags import FeatureFlagManager
 

@@ -185,6 +185,8 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
         private_match_service=services.private_match_service,
         messaging_service_factory=services.messaging_service_factory,
         telegram_safeops_factory=services.telegram_safeops_factory,
+        feature_flags=services.feature_flags,
+        rollout_monitor=services.rollout_monitor,
     )
     try:
         if use_polling:

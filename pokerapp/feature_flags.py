@@ -7,6 +7,7 @@ import hashlib
 import logging
 
 from pokerapp.config import Config
+from pokerapp.utils.request_metrics import set_rollout_percentage
 
 
 class FeatureFlagManager:
@@ -25,6 +26,11 @@ class FeatureFlagManager:
         lock_config = self._config.system_constants.get("lock_manager", {})
         self._enabled = lock_config.get("enable_fine_grained_locks", False)
         self._rollout_percentage = lock_config.get("rollout_percentage", 0)
+
+        if self._enabled:
+            set_rollout_percentage(float(self._rollout_percentage))
+        else:
+            set_rollout_percentage(0.0)
 
         self._logger.info(
             "Feature flags loaded",
@@ -77,6 +83,11 @@ class FeatureFlagManager:
                     "new_percentage": self._rollout_percentage,
                 },
             )
+
+        if self._enabled:
+            set_rollout_percentage(float(self._rollout_percentage))
+        else:
+            set_rollout_percentage(0.0)
 
 
 __all__ = ["FeatureFlagManager"]

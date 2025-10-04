@@ -9,7 +9,13 @@ from typing import Callable, Dict, Optional, Set
 
 import redis.asyncio as aioredis
 
+try:  # pragma: no cover - optional dependency
+    from psycopg_pool import AsyncConnectionPool
+except Exception:  # pragma: no cover - optional dependency missing
+    AsyncConnectionPool = None  # type: ignore[assignment]
+
 from pokerapp.config import Config, _SYSTEM_CONSTANTS
+from pokerapp.feature_flags import FeatureFlagManager
 from pokerapp.logging_config import setup_logging
 from pokerapp.stats import BaseStatsService, NullStatsService, StatsService
 from pokerapp.stats.buffer import StatsBatchBuffer
@@ -26,6 +32,7 @@ from pokerapp.utils.logging_helpers import ContextLoggerAdapter, enforce_context
 from pokerapp.state_validator import GameStateValidator
 from pokerapp.recovery_service import RecoveryService
 from pokerapp.telegram_retry_manager import TelegramRetryManager
+from pokerapp.utils.rollout_metrics import RolloutMonitor
 
 
 @dataclass(frozen=True)
@@ -45,6 +52,9 @@ class ApplicationServices:
     telegram_safeops_factory: Callable[..., TelegramSafeOps]
     retry_manager: TelegramRetryManager
     stats_buffer: Optional[StatsBatchBuffer]
+    feature_flags: FeatureFlagManager
+    rollout_monitor: Optional[RolloutMonitor]
+    db_pool: Optional[AsyncConnectionPool]
 
 
 def _build_stats_service(logger: ContextLoggerAdapter, cfg: Config) -> BaseStatsService:
@@ -79,6 +89,11 @@ def build_services(cfg: Config, *, skip_stats_buffer: bool = False) -> Applicati
 
     setup_logging(logging.INFO, debug_mode=cfg.DEBUG)
     logger = enforce_context(logging.getLogger("pokerbot"))
+
+    feature_flags = FeatureFlagManager(
+        config=cfg,
+        logger=logger.getChild("feature_flags"),
+    )
 
     init_translations("config/data/translations.json")
 
@@ -164,6 +179,37 @@ def build_services(cfg: Config, *, skip_stats_buffer: bool = False) -> Applicati
         logger_=_make_service_logger(logger, "metrics", "metrics")
     )
 
+    db_pool: Optional[AsyncConnectionPool] = None
+    rollout_monitor: Optional[RolloutMonitor] = None
+    database_url = getattr(cfg, "DATABASE_URL", "")
+    if (
+        AsyncConnectionPool is not None
+        and isinstance(database_url, str)
+        and database_url.startswith("postgresql")
+    ):
+        dsn = database_url
+        if "+asyncpg" in dsn:
+            dsn = dsn.replace("+asyncpg", "")
+        if "+psycopg" in dsn:
+            dsn = dsn.replace("+psycopg", "")
+        try:
+            db_pool = AsyncConnectionPool(dsn, min_size=1, max_size=5, open=False)
+            try:
+                asyncio.run(db_pool.open())
+            except RuntimeError:
+                loop = asyncio.new_event_loop()
+                try:
+                    loop.run_until_complete(db_pool.open())
+                finally:
+                    loop.close()
+            rollout_monitor = RolloutMonitor(
+                db_pool=db_pool,
+                feature_flags=feature_flags,
+                logger=logger.getChild("rollout_monitor"),
+            )
+        except Exception:  # pragma: no cover - defensive logging
+            logger.exception("Failed to initialise rollout monitor")
+
     private_match_service = PrivateMatchService(
         kv_async,
         table_manager,
@@ -222,5 +268,8 @@ def build_services(cfg: Config, *, skip_stats_buffer: bool = False) -> Applicati
         telegram_safeops_factory=telegram_safeops_factory,
         retry_manager=retry_manager,
         stats_buffer=stats_buffer,
+        feature_flags=feature_flags,
+        rollout_monitor=rollout_monitor,
+        db_pool=db_pool,
     )
 

@@ -70,6 +70,7 @@ from pokerapp.utils.request_metrics import RequestCategory, RequestMetrics
 from pokerapp.utils.redis_safeops import RedisSafeOps
 from pokerapp.lock_manager import LockManager
 from pokerapp.feature_flags import FeatureFlagManager
+from pokerapp.utils.rollout_metrics import RolloutMonitor
 from pokerapp.player_identity_manager import PlayerIdentityManager
 from pokerapp.player_manager import PlayerManager
 from pokerapp.matchmaking_service import MatchmakingService
@@ -225,6 +226,8 @@ class PokerBotModel:
         player_report_cache: Optional[RedisPlayerReportCache] = None,
         adaptive_player_report_cache: Optional[AdaptivePlayerReportCache] = None,
         telegram_safe_ops: Optional[TelegramSafeOps] = None,
+        feature_flags: Optional[FeatureFlagManager] = None,
+        rollout_monitor: Optional[RolloutMonitor] = None,
     ):
         self._view: PokerBotViewer = view
         self._bot: Bot = bot
@@ -285,7 +288,7 @@ class PokerBotModel:
             slow_threshold = float(slow_threshold)
         except (TypeError, ValueError):
             slow_threshold = 0.5
-        self._feature_flags = FeatureFlagManager(
+        self._feature_flags = feature_flags or FeatureFlagManager(
             config=cfg,
             logger=logger.getChild("feature_flags"),
         )
@@ -296,6 +299,7 @@ class PokerBotModel:
             writer_priority=writer_priority,
             log_slow_lock_threshold=slow_threshold,
             feature_flags=self._feature_flags,
+            rollout_monitor=rollout_monitor,
         )
         self._chat_guard_timeout_seconds = _CHAT_GUARD_TIMEOUT_SECONDS
         self._player_identity_manager = PlayerIdentityManager(
@@ -330,6 +334,9 @@ class PokerBotModel:
         if not isinstance(metrics_candidate, RequestMetrics):
             raise ValueError("PokerBotViewer must expose a RequestMetrics instance")
         self._request_metrics = metrics_candidate
+        self._lock_manager.attach_request_metrics(self._request_metrics)
+        if rollout_monitor is not None:
+            self._lock_manager.attach_rollout_monitor(rollout_monitor)
         self._matchmaking_service = MatchmakingService(
             view=self._view,
             round_rate=self._round_rate,
