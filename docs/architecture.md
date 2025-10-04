@@ -143,6 +143,34 @@ The action lock system prevents race conditions when multiple players interact w
 - Concurrency stress tests (12+ simultaneous locks)
 - Fallback tests for connection failures
 
+### Lock Retry Strategy (Phase 2B-2)
+
+The action lock system now includes an intelligent retry workflow with proactive user feedback to reduce frustration during lock contention.
+
+#### Retry Configuration
+
+```json
+{
+  "locks": {
+    "retry_strategy": {
+      "max_retries": 3,
+      "initial_backoff_seconds": 0.5,
+      "backoff_multiplier": 1.5,
+      "total_timeout_seconds": 10.0,
+      "enable_queue_estimation": true
+    }
+  }
+}
+```
+
+#### User Experience Flow
+
+1. First attempt fails → wait 0.5s.
+2. Queue notification → "⏳ در صف (3 نفر جلوتر)...".
+3. Retry after backoff → wait 0.75s.
+4. Queue update → "⏳ در صف (1 نفر جلوتر)...".
+5. Success → "✅ نوبت شما فرا رسید".
+
 ## Runtime Resilience (Task 6.1)
 
 ### Telegram API Retry Logic

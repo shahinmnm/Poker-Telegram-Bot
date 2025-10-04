@@ -219,9 +219,12 @@ def protect_against_races(handler: Callable) -> Callable:
                 return
 
             last_queue_feedback = queue_position_int
-            await _answer_callback(
-                f"⏳ در صف ({queue_position_int} نفر جلوتر)..."
+            waiting_template = translate(
+                "queue.waiting_position",
+                "⏳ در صف ({queue_position} نفر جلوتر)...",
+                queue_position=queue_position_int,
             )
+            await _answer_callback(waiting_template)
 
         if hasattr(lock_manager, "acquire_action_lock_with_retry"):
             lock_acquisition = await lock_manager.acquire_action_lock_with_retry(
@@ -264,7 +267,9 @@ def protect_against_races(handler: Callable) -> Callable:
                     "wait_time": round(lock_metadata.get("wait_time", 0.0), 3),
                 },
             )
-            await _answer_callback("✅ نوبت شما فرا رسید")
+            await _answer_callback(
+                translate("queue.turn_ready", "✅ نوبت شما فرا رسید")
+            )
 
         try:
             try:

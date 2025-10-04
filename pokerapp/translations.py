@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Sequence
 
 import json
 
@@ -12,6 +12,7 @@ class TranslationService:
 
     def __init__(self, translations_path: str = "config/data/translations.json"):
         self._translations: Dict[str, Any] = {}
+        self._language_order: Sequence[str] = ("fa", "en")
         self._load_translations(translations_path)
 
     def _load_translations(self, path: str) -> None:
@@ -22,8 +23,23 @@ class TranslationService:
                 self._translations = json.load(file_obj)
         except FileNotFoundError:
             self._translations = {}
+        default_language = "fa"
+        candidate = self._translations.get("default_language")
+        if isinstance(candidate, str) and candidate:
+            default_language = candidate
+        self._language_order = tuple(dict.fromkeys([default_language, "fa", "en"]))
 
-    def get(self, key: str, default: str = "") -> str:
+    def _resolve_value(self, value: Any) -> Optional[str]:
+        if isinstance(value, str):
+            return value
+        if isinstance(value, dict):
+            for language in self._language_order:
+                candidate = value.get(language)
+                if isinstance(candidate, str) and candidate:
+                    return candidate
+        return None
+
+    def get(self, key: str, default: str = "", **format_kwargs: Any) -> str:
         """Get translated message by dot-notation key."""
 
         keys = key.split(".")
@@ -33,11 +49,19 @@ class TranslationService:
             if isinstance(value, dict):
                 value = value.get(part)
             else:
-                return default
+                value = None
+                break
 
-        if value is None:
-            return default
-        return str(value)
+        resolved = self._resolve_value(value)
+        if resolved is None:
+            resolved = default
+
+        if format_kwargs:
+            try:
+                return resolved.format(**format_kwargs)
+            except Exception:
+                return resolved
+        return resolved
 
 
 _translation_service: Optional[TranslationService] = None
@@ -50,10 +74,15 @@ def init_translations(translations_path: str = "config/data/translations.json") 
     _translation_service = TranslationService(translations_path)
 
 
-def translate(key: str, default: str = "") -> str:
+def translate(key: str, default: str = "", **format_kwargs: Any) -> str:
     """Get translated message (convenience function)."""
 
     if _translation_service is None:
+        if format_kwargs:
+            try:
+                return default.format(**format_kwargs)
+            except Exception:
+                return default
         return default
-    return _translation_service.get(key, default)
+    return _translation_service.get(key, default, **format_kwargs)
 
