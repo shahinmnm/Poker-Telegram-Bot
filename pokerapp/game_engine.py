@@ -14,6 +14,7 @@ or a table is stopped. A more detailed, annotated diagram lives in
 from __future__ import annotations
 
 import asyncio
+import inspect
 import datetime
 import json
 import logging
@@ -3119,10 +3120,18 @@ class GameEngine:
         if parse_mode:
             kwargs["parse_mode"] = parse_mode
 
+            try:
+                signature = inspect.signature(self._messaging.send_message)
+            except (TypeError, ValueError):
+                signature = None
+
+            if signature and "parse_mode" not in signature.parameters:
+                kwargs.pop("parse_mode", None)
+
         try:
             coroutine = self._messaging.send_message(**kwargs)
-        except TypeError as exc:
-            if parse_mode and "parse_mode" in str(exc):
+        except TypeError:
+            if parse_mode and "parse_mode" not in kwargs:
                 return self._create_send_message_task(
                     chat_id=chat_id,
                     text=text,
