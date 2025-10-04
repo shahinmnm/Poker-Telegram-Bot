@@ -409,7 +409,13 @@ class GameEngine:
                 if isinstance(candidate, Mapping):
                     action_lock_config = candidate
 
-        self._valid_player_actions: Set[str] = {"fold", "check", "call", "raise"}
+        self._valid_player_actions: Set[str] = {
+            "fold",
+            "check",
+            "call",
+            "raise",
+            "all_in",
+        }
         self._action_lock_ttl: int = 10
         self._action_lock_feedback_text = "⚠️ Action in progress, please wait..."
         if isinstance(action_lock_config, Mapping):
@@ -1060,6 +1066,365 @@ class GameEngine:
                 return player
         return None
 
+    def _safe_int_value(self, value: object) -> int:
+        """Best-effort integer conversion tolerant of missing ``_safe_int``."""
+
+        converter = getattr(self, "_safe_int", None)
+        if callable(converter):
+            try:
+                return converter(value)
+            except Exception:  # pragma: no cover - defensive fallback
+                pass
+
+        try:
+            return int(value)  # type: ignore[arg-type]
+        except (TypeError, ValueError):
+            return 0
+
+    def _calculate_action_params(
+        self,
+        game: Game,
+        player: Player,
+        action: str,
+        amount: Optional[int],
+    ) -> Dict[str, Any]:
+        """Compute derived betting values without mutating state."""
+
+        params: Dict[str, Any] = {}
+        max_round_rate = int(getattr(game, "max_round_rate", 0))
+        player_round_rate = int(getattr(player, "round_rate", 0))
+
+        if action == "call":
+            params["call_amount"] = max(0, max_round_rate - player_round_rate)
+
+        elif action == "raise":
+            raise_amount = int(amount or 0)
+            call_amount = max(0, max_round_rate - player_round_rate)
+            params["call_amount"] = call_amount
+            params["raise_amount"] = max(0, raise_amount)
+            params["total_amount"] = call_amount + max(0, raise_amount)
+
+        elif action == "all_in":
+            params["call_amount"] = max(0, max_round_rate - player_round_rate)
+
+        return params
+
+    def _is_valid_action(
+        self,
+        game: Game,
+        player: Player,
+        action: str,
+        amount: Optional[int],
+    ) -> bool:
+        """Validate the requested ``action`` for ``player``."""
+
+        if action not in self._valid_player_actions:
+            return False
+
+        state = getattr(player, "state", PlayerState.ACTIVE)
+        if state == PlayerState.FOLD:
+            return False
+
+        if action == "raise" and (amount is None or amount <= 0):
+            return False
+
+        return True
+
+    @staticmethod
+    def _record_action_entry(game: Game, entry: str) -> None:
+        actions = getattr(game, "last_actions", None)
+        if not isinstance(actions, list) or not entry:
+            return
+
+        actions.append(entry)
+        if len(actions) > 5:
+            del actions[:-5]
+
+    async def handle_player_action(
+        self,
+        *,
+        context: Optional[Any],
+        chat_id: ChatId,
+        user_id: UserId,
+        action: str,
+        amount: Optional[int] = None,
+    ) -> bool:
+        """Execute ``action`` for ``user_id`` using fine-grained locking."""
+
+        action_token = (action or "").strip().lower()
+        lock_manager = self._lock_manager
+
+        if lock_manager is None:
+            game = await self._table_manager.get_game(chat_id)
+            player = self._find_player_by_user_id(game, int(user_id))
+            if player is None:
+                self._logger.warning(
+                    "Player not found for action",
+                    extra={
+                        "event_type": "engine_action_no_player",
+                        "chat_id": chat_id,
+                        "user_id": user_id,
+                        "action": action_token,
+                    },
+                )
+                return False
+
+            return await self._execute_player_action(
+                game=game,
+                player=player,
+                action=action_token,
+                amount=int(amount or 0),
+            )
+
+        lock_chat_id = self._safe_int_value(chat_id)
+        safe_user_id = self._safe_int_value(user_id)
+
+        game: Optional[Game] = None
+        player: Optional[Player] = None
+        mention = str(user_id)
+        game_id: Optional[str] = None
+
+        async with lock_manager.table_read_lock(lock_chat_id):
+            get_game_fn = getattr(self._table_manager, "get_game", None)
+            if callable(get_game_fn):
+                game = await get_game_fn(chat_id)
+            else:
+                snapshot = await self._table_manager.load_game_with_version(chat_id)
+                if isinstance(snapshot, tuple):
+                    game = snapshot[0]
+                else:
+                    game = snapshot
+            player = self._find_player_by_user_id(game, int(user_id))
+
+            if player is None:
+                self._logger.warning(
+                    "Player not found during action read phase",
+                    extra={
+                        "event_type": "engine_action_player_missing",
+                        "chat_id": chat_id,
+                        "user_id": user_id,
+                        "action": action_token,
+                    },
+                )
+                return False
+
+            if not self._is_valid_action(game, player, action_token, amount):
+                self._logger.warning(
+                    "Invalid action request",
+                    extra={
+                        "event_type": "engine_action_invalid",
+                        "chat_id": chat_id,
+                        "user_id": user_id,
+                        "action": action_token,
+                    },
+                )
+                return False
+
+            deadline = getattr(game, "turn_deadline", None)
+            if isinstance(deadline, (int, float)):
+                try:
+                    current_time = asyncio.get_running_loop().time()
+                except RuntimeError:  # pragma: no cover - compatibility fallback
+                    current_time = asyncio.get_event_loop().time()
+                if current_time > float(deadline):
+                    self._logger.info(
+                        "Action rejected due to expired turn deadline",
+                        extra={
+                            "event_type": "engine_action_timeout",
+                            "chat_id": chat_id,
+                            "user_id": user_id,
+                            "action": action_token,
+                        },
+                    )
+                    return False
+
+            mention = getattr(player, "mention_markdown", mention)
+            game_id = getattr(game, "id", None)
+
+        if game is None or player is None:
+            return False
+
+        log_context = {
+            "event_type": "engine_player_action",
+            "chat_id": chat_id,
+            "game_id": game_id,
+            "user_id": user_id,
+            "action": action_token,
+        }
+
+        pot_delta = 0
+        new_round_rate: Optional[int] = None
+        reset_other_players = False
+        action_entry: Optional[str] = None
+
+        async with lock_manager.player_state_lock(
+            lock_chat_id,
+            safe_user_id,
+            context={"action": action_token, "game_id": game_id},
+        ):
+            player = self._find_player_by_user_id(game, int(user_id))
+            if player is None:
+                return False
+
+            if not self._is_valid_action(game, player, action_token, amount):
+                return False
+
+            params = self._calculate_action_params(game, player, action_token, amount)
+            wallet = getattr(player, "wallet", None)
+
+            if action_token == "fold":
+                player.state = PlayerState.FOLD
+                if hasattr(player, "has_acted"):
+                    player.has_acted = True
+                action_entry = f"{mention}: فولد"
+
+                self._logger.info("Player folded", extra=log_context)
+
+            elif action_token == "check":
+                if hasattr(player, "has_acted"):
+                    player.has_acted = True
+                action_entry = f"{mention}: چک"
+
+                self._logger.info("Player checked", extra=log_context)
+
+            elif action_token == "call":
+                call_amount = int(params.get("call_amount", 0))
+                if call_amount > 0 and wallet is not None and hasattr(wallet, "authorize"):
+                    try:
+                        await wallet.authorize(game.id, call_amount)
+                    except Exception:
+                        self._logger.warning(
+                            "Wallet authorization failed during call",
+                            extra={**log_context, "amount": call_amount},
+                            exc_info=True,
+                        )
+                        return False
+
+                if call_amount > 0:
+                    player.round_rate = int(getattr(player, "round_rate", 0)) + call_amount
+                    player.total_bet = int(getattr(player, "total_bet", 0)) + call_amount
+                    pot_delta = call_amount
+                    action_entry = f"{mention}: کال {call_amount}$"
+                else:
+                    action_entry = f"{mention}: چک"
+
+                if hasattr(player, "has_acted"):
+                    player.has_acted = True
+
+                self._logger.info(
+                    "Player called",
+                    extra={**log_context, "amount": call_amount},
+                )
+
+            elif action_token == "raise":
+                total_amount = int(params.get("total_amount", 0))
+                if total_amount <= 0:
+                    return False
+
+                if wallet is not None and hasattr(wallet, "authorize"):
+                    try:
+                        await wallet.authorize(game.id, total_amount)
+                    except Exception:
+                        self._logger.warning(
+                            "Wallet authorization failed during raise",
+                            extra={**log_context, "amount": total_amount},
+                            exc_info=True,
+                        )
+                        return False
+
+                player.round_rate = int(getattr(player, "round_rate", 0)) + total_amount
+                player.total_bet = int(getattr(player, "total_bet", 0)) + total_amount
+                if hasattr(player, "has_acted"):
+                    player.has_acted = True
+
+                pot_delta = total_amount
+                new_round_rate = int(getattr(player, "round_rate", 0))
+                reset_other_players = True
+                action_entry = f"{mention}: رِیز {total_amount}$"
+
+                self._logger.info(
+                    "Player raised",
+                    extra={**log_context, "amount": total_amount},
+                )
+
+            elif action_token == "all_in":
+                all_in_amount = 0
+                if wallet is not None and hasattr(wallet, "authorize_all"):
+                    try:
+                        all_in_amount = int(await wallet.authorize_all(game.id))
+                    except Exception:
+                        self._logger.warning(
+                            "Wallet authorization failed during all-in",
+                            extra=log_context,
+                            exc_info=True,
+                        )
+                        return False
+
+                if all_in_amount > 0:
+                    player.round_rate = int(getattr(player, "round_rate", 0)) + all_in_amount
+                    player.total_bet = int(getattr(player, "total_bet", 0)) + all_in_amount
+                    pot_delta = all_in_amount
+                    action_entry = f"{mention}: آل این {all_in_amount}$"
+                else:
+                    action_entry = f"{mention}: آل این"
+
+                player.state = PlayerState.ALL_IN
+                if hasattr(player, "has_acted"):
+                    player.has_acted = True
+
+                new_round_rate = int(getattr(player, "round_rate", 0))
+                reset_other_players = True
+
+                self._logger.info("Player went all-in", extra=log_context)
+
+        if pot_delta > 0:
+            async with lock_manager.pot_lock(
+                lock_chat_id,
+                context={
+                    "action": action_token,
+                    "delta": pot_delta,
+                    "player_id": safe_user_id,
+                },
+            ):
+                game.pot = int(getattr(game, "pot", 0)) + pot_delta
+
+        async with lock_manager.betting_round_lock(
+            lock_chat_id,
+            context={"action": action_token, "player_id": safe_user_id},
+        ):
+            if new_round_rate is not None:
+                current_max = int(getattr(game, "max_round_rate", 0))
+                game.max_round_rate = max(current_max, new_round_rate)
+                if hasattr(game, "trading_end_user_id"):
+                    game.trading_end_user_id = getattr(player, "user_id", None)
+
+                if reset_other_players:
+                    for other in game.players:
+                        if other is player:
+                            continue
+                        if (
+                            getattr(other, "state", PlayerState.ACTIVE)
+                            == PlayerState.ACTIVE
+                            and hasattr(other, "has_acted")
+                        ):
+                            other.has_acted = False
+
+            if action_entry:
+                self._record_action_entry(game, action_entry)
+
+        self.refresh_turn_deadline(game)
+
+        try:
+            await self._table_manager.save_game(chat_id, game)
+        except Exception:
+            self._logger.exception(
+                "Failed to persist game after action",
+                extra={**log_context, "event_type": "engine_action_save_failed"},
+            )
+            return False
+
+        return True
+
     async def process_action(
         self,
         chat_id: int,
@@ -1083,7 +1448,6 @@ class GameEngine:
             return False
 
         lock_token: Optional[str] = None
-        retry_due_to_version_conflict = False
         result = False
 
         try:
@@ -1151,126 +1515,13 @@ class GameEngine:
                         )
                 return False
 
-            async def _process_under_table_lock() -> bool:
-                nonlocal retry_due_to_version_conflict
-
-                try:
-                    game, version = await self._table_manager.load_game_with_version(chat_id)
-                except Exception:
-                    self._logger.exception(
-                        "Failed loading game for action",
-                        extra={
-                            "event_type": "engine_action_load_failed",
-                            "chat_id": chat_id,
-                            "user_id": user_id,
-                            "action": action_token,
-                        },
-                    )
-                    return False
-
-                if isinstance(game, tuple):
-                    current_game = game[0]
-                else:
-                    current_game = game
-
-                if current_game is None:
-                    self._logger.warning(
-                        "No active game for action",
-                        extra={
-                            "event_type": "engine_action_no_game",
-                            "chat_id": chat_id,
-                            "user_id": user_id,
-                            "action": action_token,
-                        },
-                    )
-                    return False
-
-                player = self._find_player_by_user_id(current_game, user_id)
-                if player is None:
-                    self._logger.warning(
-                        "Player not found in game",
-                        extra={
-                            "event_type": "engine_action_no_player",
-                            "chat_id": chat_id,
-                            "user_id": user_id,
-                            "action": action_token,
-                            "game_id": getattr(current_game, "id", None),
-                        },
-                    )
-                    return False
-
-                deadline = getattr(current_game, "turn_deadline", None)
-                if isinstance(deadline, (int, float)):
-                    try:
-                        current_time = asyncio.get_running_loop().time()
-                    except RuntimeError:  # pragma: no cover - fallback for compatibility
-                        current_time = asyncio.get_event_loop().time()
-                    if current_time > float(deadline):
-                        self._logger.info(
-                            "Action rejected due to expired turn deadline",
-                            extra={
-                                "event_type": "engine_action_timeout",
-                                "chat_id": chat_id,
-                                "user_id": user_id,
-                                "action": action_token,
-                            },
-                        )
-                        return False
-
-                try:
-                    success = await self._execute_player_action(
-                        game=current_game,
-                        player=player,
-                        action=action_token,
-                        amount=amount,
-                    )
-                except Exception:
-                    self._logger.exception(
-                        "Unexpected error executing action",
-                        extra={
-                            "event_type": "engine_action_execute_error",
-                            "chat_id": chat_id,
-                            "user_id": user_id,
-                            "action": action_token,
-                        },
-                    )
-                    return False
-
-                if not success:
-                    return False
-
-                self.refresh_turn_deadline(current_game)
-
-                try:
-                    save_success = await self._table_manager.save_game_with_version_check(
-                        chat_id,
-                        current_game,
-                        version,
-                    )
-                except Exception:
-                    self._logger.exception(
-                        "Failed saving game after action",
-                        extra={
-                            "event_type": "engine_action_save_failed",
-                            "chat_id": chat_id,
-                            "user_id": user_id,
-                            "action": action_token,
-                        },
-                    )
-                    return False
-
-                if not save_success:
-                    retry_due_to_version_conflict = True
-                    return False
-
-                return True
-
-            lock_manager = self._lock_manager
-            if lock_manager is None:
-                result = await _process_under_table_lock()
-            else:
-                async with lock_manager.table_write_lock(chat_id):
-                    result = await _process_under_table_lock()
+            result = await self.handle_player_action(
+                context=None,
+                chat_id=chat_id,
+                user_id=user_id,
+                action=action_token,
+                amount=amount,
+            )
         finally:
             if lock_token is not None:
                 try:
@@ -1292,233 +1543,20 @@ class GameEngine:
                         exc_info=True,
                     )
 
-        if retry_due_to_version_conflict:
-            return await self.process_action(chat_id, user_id, action, amount)
-
         return result
 
     async def handle_call(self, chat_id: int, user_id: int) -> bool:
-        """Handle a player's call with table-level locking and version retries."""
+        """Backward-compatible wrapper around :meth:`process_action`."""
 
-        async def _process_once() -> Optional[bool]:
-            try:
-                game_data, version = await self._table_manager.load_game_with_version(
-                    chat_id
-                )
-            except Exception:
-                self._logger.exception(
-                    "Failed loading game for call",
-                    extra={
-                        "event_type": "engine_call_load_failed",
-                        "chat_id": chat_id,
-                        "user_id": user_id,
-                    },
-                )
-                return False
-
-            current_game: Optional[Game]
-            if isinstance(game_data, tuple):
-                current_game = game_data[0]
-            else:
-                current_game = game_data
-
-            if current_game is None:
-                self._logger.warning(
-                    "No active game for call",
-                    extra={
-                        "event_type": "engine_call_no_game",
-                        "chat_id": chat_id,
-                        "user_id": user_id,
-                    },
-                )
-                return False
-
-            player = self._find_player_by_user_id(current_game, user_id)
-            if player is None:
-                self._logger.warning(
-                    "Player not found in game during call",
-                    extra={
-                        "event_type": "engine_call_no_player",
-                        "chat_id": chat_id,
-                        "user_id": user_id,
-                        "game_id": getattr(current_game, "id", None),
-                    },
-                )
-                return False
-
-            try:
-                success = await self._execute_player_action(
-                    game=current_game,
-                    player=player,
-                    action="call",
-                    amount=0,
-                )
-            except Exception:
-                self._logger.exception(
-                    "Unexpected error executing call",
-                    extra={
-                        "event_type": "engine_call_execute_error",
-                        "chat_id": chat_id,
-                        "user_id": user_id,
-                        "game_id": getattr(current_game, "id", None),
-                    },
-                )
-                return False
-
-            if not success:
-                return False
-
-            self.refresh_turn_deadline(current_game)
-
-            try:
-                save_success = await self._table_manager.save_game_with_version_check(
-                    chat_id,
-                    current_game,
-                    version,
-                )
-            except Exception:
-                self._logger.exception(
-                    "Failed saving game after call",
-                    extra={
-                        "event_type": "engine_call_save_failed",
-                        "chat_id": chat_id,
-                        "user_id": user_id,
-                        "game_id": getattr(current_game, "id", None),
-                    },
-                )
-                return False
-
-            if not save_success:
-                return None
-
-            return True
-
-        lock_manager = self._lock_manager
-
-        while True:
-            if lock_manager is None:
-                result = await _process_once()
-            else:
-                async with lock_manager.table_write_lock(chat_id):
-                    result = await _process_once()
-
-            if result is None:
-                continue
-
-            return bool(result)
+        return await self.process_action(chat_id, user_id, "call", 0)
 
     async def handle_fold(self, chat_id: int, user_id: int) -> bool:
-        """Handle a player's fold with table-level locking and version retries."""
+        """Backward-compatible wrapper around :meth:`process_action`."""
 
-        async def _process_once() -> Optional[bool]:
-            try:
-                game_data, version = await self._table_manager.load_game_with_version(
-                    chat_id
-                )
-            except Exception:
-                self._logger.exception(
-                    "Failed loading game for fold",
-                    extra={
-                        "event_type": "engine_fold_load_failed",
-                        "chat_id": chat_id,
-                        "user_id": user_id,
-                    },
-                )
-                return False
-
-            current_game: Optional[Game]
-            if isinstance(game_data, tuple):
-                current_game = game_data[0]
-            else:
-                current_game = game_data
-
-            if current_game is None:
-                self._logger.warning(
-                    "No active game for fold",
-                    extra={
-                        "event_type": "engine_fold_no_game",
-                        "chat_id": chat_id,
-                        "user_id": user_id,
-                    },
-                )
-                return False
-
-            player = self._find_player_by_user_id(current_game, user_id)
-            if player is None:
-                self._logger.warning(
-                    "Player not found in game during fold",
-                    extra={
-                        "event_type": "engine_fold_no_player",
-                        "chat_id": chat_id,
-                        "user_id": user_id,
-                        "game_id": getattr(current_game, "id", None),
-                    },
-                )
-                return False
-
-            try:
-                success = await self._execute_player_action(
-                    game=current_game,
-                    player=player,
-                    action="fold",
-                    amount=0,
-                )
-            except Exception:
-                self._logger.exception(
-                    "Unexpected error executing fold",
-                    extra={
-                        "event_type": "engine_fold_execute_error",
-                        "chat_id": chat_id,
-                        "user_id": user_id,
-                        "game_id": getattr(current_game, "id", None),
-                    },
-                )
-                return False
-
-            if not success:
-                return False
-
-            self.refresh_turn_deadline(current_game)
-
-            try:
-                save_success = await self._table_manager.save_game_with_version_check(
-                    chat_id,
-                    current_game,
-                    version,
-                )
-            except Exception:
-                self._logger.exception(
-                    "Failed saving game after fold",
-                    extra={
-                        "event_type": "engine_fold_save_failed",
-                        "chat_id": chat_id,
-                        "user_id": user_id,
-                        "game_id": getattr(current_game, "id", None),
-                    },
-                )
-                return False
-
-            if not save_success:
-                return None
-
-            return True
-
-        lock_manager = self._lock_manager
-
-        while True:
-            if lock_manager is None:
-                result = await _process_once()
-            else:
-                async with lock_manager.table_write_lock(chat_id):
-                    result = await _process_once()
-
-            if result is None:
-                continue
-
-            return bool(result)
+        return await self.process_action(chat_id, user_id, "fold", 0)
 
     async def handle_raise(self, chat_id: int, user_id: int, amount: int) -> bool:
-        """Handle a player's raise with table-level locking and version retries."""
+        """Backward-compatible wrapper around :meth:`process_action`."""
 
         if amount is None or amount <= 0:
             self._logger.warning(
@@ -1532,117 +1570,7 @@ class GameEngine:
             )
             return False
 
-        async def _process_once() -> Optional[bool]:
-            try:
-                game_data, version = await self._table_manager.load_game_with_version(
-                    chat_id
-                )
-            except Exception:
-                self._logger.exception(
-                    "Failed loading game for raise",
-                    extra={
-                        "event_type": "engine_raise_load_failed",
-                        "chat_id": chat_id,
-                        "user_id": user_id,
-                        "amount": amount,
-                    },
-                )
-                return False
-
-            current_game: Optional[Game]
-            if isinstance(game_data, tuple):
-                current_game = game_data[0]
-            else:
-                current_game = game_data
-
-            if current_game is None:
-                self._logger.warning(
-                    "No active game for raise",
-                    extra={
-                        "event_type": "engine_raise_no_game",
-                        "chat_id": chat_id,
-                        "user_id": user_id,
-                        "amount": amount,
-                    },
-                )
-                return False
-
-            player = self._find_player_by_user_id(current_game, user_id)
-            if player is None:
-                self._logger.warning(
-                    "Player not found in game during raise",
-                    extra={
-                        "event_type": "engine_raise_no_player",
-                        "chat_id": chat_id,
-                        "user_id": user_id,
-                        "amount": amount,
-                        "game_id": getattr(current_game, "id", None),
-                    },
-                )
-                return False
-
-            try:
-                success = await self._execute_player_action(
-                    game=current_game,
-                    player=player,
-                    action="raise",
-                    amount=amount,
-                )
-            except Exception:
-                self._logger.exception(
-                    "Unexpected error executing raise",
-                    extra={
-                        "event_type": "engine_raise_execute_error",
-                        "chat_id": chat_id,
-                        "user_id": user_id,
-                        "amount": amount,
-                        "game_id": getattr(current_game, "id", None),
-                    },
-                )
-                return False
-
-            if not success:
-                return False
-
-            self.refresh_turn_deadline(current_game)
-
-            try:
-                save_success = await self._table_manager.save_game_with_version_check(
-                    chat_id,
-                    current_game,
-                    version,
-                )
-            except Exception:
-                self._logger.exception(
-                    "Failed saving game after raise",
-                    extra={
-                        "event_type": "engine_raise_save_failed",
-                        "chat_id": chat_id,
-                        "user_id": user_id,
-                        "amount": amount,
-                        "game_id": getattr(current_game, "id", None),
-                    },
-                )
-                return False
-
-            if not save_success:
-                return None
-
-            return True
-
-        lock_manager = self._lock_manager
-
-        while True:
-            if lock_manager is None:
-                result = await _process_once()
-            else:
-                async with lock_manager.table_write_lock(chat_id):
-                    result = await _process_once()
-
-            if result is None:
-                continue
-
-            return bool(result)
+        return await self.process_action(chat_id, user_id, "raise", amount)
 
     async def process_bet(self, chat_id: int, user_id: int, amount: int) -> bool:
         """Process a betting request with table-level locking and retries."""
