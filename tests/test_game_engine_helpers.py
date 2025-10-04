@@ -2,7 +2,7 @@ import json
 import logging
 from contextlib import asynccontextmanager
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, call
 
 import pytest
 from telegram.error import RetryAfter
@@ -214,6 +214,72 @@ async def test_reset_game_state_clears_pot_and_persists(game_engine_setup):
     game_engine_setup.view.send_message.assert_awaited_once_with(
         -400, game_engine_setup.engine.STOPPED_NOTIFICATION
     )
+
+
+@pytest.mark.asyncio
+async def test_reset_game_state_falls_back_when_version_missing(game_engine_setup):
+    game_engine_setup.table_manager.load_game_with_version.return_value = (
+        MagicMock(),
+        None,
+    )
+
+    game = Game()
+    game.pot = 120
+    player = Player(
+        user_id=10,
+        mention_markdown="@ten",
+        wallet=None,
+        ready_message_id="ready",
+    )
+    game.add_player(player, seat_index=0)
+
+    await game_engine_setup.engine._reset_core_game_state(
+        game=game,
+        chat_id=-401,
+        context=SimpleNamespace(chat_data={}),
+    )
+
+    game_engine_setup.table_manager.load_game_with_version.assert_awaited_once_with(
+        -401
+    )
+    game_engine_setup.table_manager.save_game_with_version_check.assert_not_awaited()
+    game_engine_setup.table_manager.save_game.assert_awaited_once_with(-401, game)
+
+
+@pytest.mark.asyncio
+async def test_reset_game_state_retries_on_version_conflict(game_engine_setup):
+    game_engine_setup.table_manager.load_game_with_version.side_effect = [
+        (MagicMock(), 2),
+        (MagicMock(), 3),
+    ]
+    game_engine_setup.table_manager.save_game_with_version_check.side_effect = [
+        False,
+        True,
+    ]
+
+    game = Game()
+    game.pot = 200
+    player = Player(
+        user_id=11,
+        mention_markdown="@eleven",
+        wallet=None,
+        ready_message_id="ready",
+    )
+    game.add_player(player, seat_index=0)
+
+    await game_engine_setup.engine._reset_core_game_state(
+        game=game,
+        chat_id=-402,
+        context=SimpleNamespace(chat_data={}),
+    )
+
+    assert game_engine_setup.table_manager.load_game_with_version.await_count == 2
+    game_engine_setup.table_manager.save_game_with_version_check.assert_awaited()
+    assert game_engine_setup.table_manager.save_game_with_version_check.await_args_list == [
+        call(-402, game, 2),
+        call(-402, game, 3),
+    ]
+    game_engine_setup.table_manager.save_game.assert_not_awaited()
 
 
 @pytest.mark.asyncio
