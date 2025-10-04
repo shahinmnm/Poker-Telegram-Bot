@@ -8,7 +8,7 @@
   "locks": {
     "category_timeouts_seconds": {
       "engine_stage": 25.0,
-      "engine_stage_betting": 15.0
+      "engine_stage_betting": 30.0
     },
     "action": {
       "ttl": 10,
