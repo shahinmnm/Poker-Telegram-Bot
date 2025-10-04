@@ -6,10 +6,19 @@ import asyncio
 import logging
 import traceback
 from contextlib import asynccontextmanager
-from typing import Any, Awaitable, Callable, Dict, Optional, Tuple
+from typing import Any, Awaitable, Callable, Dict, List, Optional, Tuple
 
 from pokerapp.cards import get_cards
-from pokerapp.entities import ChatId, Game, GameState, Money, Player, PlayerState, Wallet
+from pokerapp.entities import (
+    ChatId,
+    Game,
+    GameState,
+    MessageId,
+    Money,
+    Player,
+    PlayerState,
+    Wallet,
+)
 from pokerapp.config import Config, get_game_constants
 from pokerapp.player_manager import PlayerManager
 from pokerapp.pokerbotview import PokerBotViewer
@@ -231,6 +240,7 @@ class MatchmakingService:
         chat_id: ChatId,
         game: Game,
         finalize_game: Callable[[Any, Game, ChatId], Awaitable[None]],
+        deferred_tasks: Optional[List[Awaitable[Any]]] = None,
     ) -> bool:
         game.chat_id = chat_id
 
@@ -268,6 +278,7 @@ class MatchmakingService:
                     chat_id=chat_id,
                     street_name=stage_label,
                     send_message=True,
+                    deferred_tasks=deferred_tasks,
                 )
             elif game.state == GameState.ROUND_RIVER:
                 await finalize_game(context=context, game=game, chat_id=chat_id)
@@ -317,6 +328,7 @@ class MatchmakingService:
         chat_id: ChatId,
         street_name: str,
         send_message: bool,
+        deferred_tasks: Optional[List[Awaitable[Any]]] = None,
     ) -> None:
         await self._add_cards_to_table(
             count=count,
@@ -324,6 +336,7 @@ class MatchmakingService:
             chat_id=chat_id,
             street_name=street_name,
             send_message=send_message,
+            deferred_tasks=deferred_tasks,
         )
 
     # ------------------------------------------------------------------
@@ -500,6 +513,7 @@ class MatchmakingService:
         chat_id: ChatId,
         street_name: str,
         send_message: bool,
+        deferred_tasks: Optional[List[Awaitable[Any]]] = None,
     ) -> None:
         game.chat_id = chat_id
         should_refresh_anchors = count > 0
@@ -509,25 +523,50 @@ class MatchmakingService:
                     game.cards_table.append(game.remain_cards.pop())
 
         if should_refresh_anchors:
-            await self._view.update_player_anchors_and_keyboards(game=game)
+            refresh_coro = self._view.update_player_anchors_and_keyboards(game=game)
+            if deferred_tasks is not None:
+                deferred_tasks.append(refresh_coro)
+            else:
+                await refresh_coro
 
         if not send_message:
             return
 
-        if game.board_message_id:
-            try:
-                await self._view.delete_message(chat_id, game.board_message_id)
-                if game.board_message_id in game.message_ids_to_delete:
-                    game.message_ids_to_delete.remove(game.board_message_id)
-            except Exception:  # pragma: no cover - best effort cleanup
-                self._logger.debug(
-                    "Failed to delete board message",
-                    extra={
-                        "chat_id": chat_id,
-                        "message_id": game.board_message_id,
-                    },
-                )
-            game.board_message_id = None
+        board_message_id = getattr(game, "board_message_id", None)
+        if not board_message_id:
+            return
+
+        game.board_message_id = None
+        delete_coro = self._delete_board_message(
+            chat_id=chat_id,
+            game=game,
+            message_id=board_message_id,
+        )
+        if deferred_tasks is not None:
+            deferred_tasks.append(delete_coro)
+        else:
+            await delete_coro
+
+    async def _delete_board_message(
+        self,
+        *,
+        chat_id: ChatId,
+        game: Game,
+        message_id: MessageId,
+    ) -> None:
+        try:
+            await self._view.delete_message(chat_id, message_id)
+            message_ids = getattr(game, "message_ids_to_delete", None)
+            if isinstance(message_ids, list) and message_id in message_ids:
+                message_ids.remove(message_id)
+        except Exception:  # pragma: no cover - best effort cleanup
+            self._logger.debug(
+                "Failed to delete board message",
+                extra={
+                    "chat_id": chat_id,
+                    "message_id": message_id,
+                },
+            )
 
     def _stage_lock_key(self, chat_id: ChatId) -> str:
         return f"{_STAGE_LOCK_PREFIX}{self._safe_int(chat_id)}"
