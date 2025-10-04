@@ -6,7 +6,7 @@ import inspect
 import json
 import math
 import random
-from contextlib import asynccontextmanager
+from contextlib import AsyncExitStack, asynccontextmanager
 from dataclasses import dataclass
 from typing import Any, Awaitable, Callable, Dict, Iterable, List, Optional, Set, Tuple
 
@@ -470,6 +470,43 @@ class PokerBotModel:
                 detailed=detailed_flag,
             )
             return
+
+    async def load_game_with_version(
+        self, chat_id: ChatId
+    ) -> Tuple[Optional[Game], int]:
+        """Load the game and associated optimistic lock version for ``chat_id``.
+
+        Returns a tuple of ``(game, version)`` where ``game`` may be ``None`` when
+        no table is stored or when the read lock could not be acquired in time.
+        In these cases the version defaults to ``0`` to keep the return contract
+        consistent for all callers.
+        """
+
+        stack = AsyncExitStack()
+        try:
+            try:
+                await asyncio.wait_for(
+                    stack.enter_async_context(
+                        self._lock_manager.table_read_lock(chat_id)
+                    ),
+                    timeout=5.0,
+                )
+            except asyncio.TimeoutError:
+                logger.warning(
+                    "Failed to acquire read lock for load_game_with_version",
+                    extra={
+                        "chat_id": chat_id,
+                        "event_type": "model_load_game_lock_timeout",
+                    },
+                )
+                return (None, 0)
+
+            game, version = await self._table_manager.load_game_with_version(chat_id)
+            if game is None:
+                return (None, 0)
+            return (game, version)
+        finally:
+            await stack.aclose()
 
     @asynccontextmanager
     async def _chat_guard(
