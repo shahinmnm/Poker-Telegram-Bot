@@ -995,7 +995,7 @@ class GameEngine:
             extra.update(
                 {
                     "debug_stage": getattr(getattr(game, "state", None), "name", None),
-                    "debug_pot": getattr(game, "pot", None),
+                    "debug_pot": game.pot,
                     "debug_player_snapshot": snapshot,
                 }
             )
@@ -1855,7 +1855,7 @@ class GameEngine:
                         return False
                 player.round_rate = int(getattr(player, "round_rate", 0)) + call_amount
                 player.total_bet = int(getattr(player, "total_bet", 0)) + call_amount
-                game.pot = int(getattr(game, "pot", 0)) + call_amount
+                game.pot = game.pot + call_amount
             if hasattr(player, "has_acted"):
                 player.has_acted = True
             if call_amount > 0:
@@ -1890,7 +1890,7 @@ class GameEngine:
                     return False
             player.round_rate = int(getattr(player, "round_rate", 0)) + total_amount
             player.total_bet = int(getattr(player, "total_bet", 0)) + total_amount
-            game.pot = int(getattr(game, "pot", 0)) + total_amount
+            game.pot = game.pot + total_amount
             game.max_round_rate = max(
                 int(getattr(game, "max_round_rate", 0)),
                 player.round_rate,
