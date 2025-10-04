@@ -26,7 +26,12 @@ Because all of these were awaited while the `stage:<chat>` lock was held, parall
 
 ## Unprotected Mutations
 
-The audit identified a critical window in `_execute_player_action` where awaited wallet authorisations could run concurrently with other player requests, leading to interleaved updates of `game.pot` and betting metadata.  The Phase 2A-4 fix promotes this routine into the `stage:<chat>` guard so the betting pipeline is fully serialized while the wallet round-trips complete.
+The audit identified critical windows where concurrent operations could corrupt game state:
+
+1. **`_execute_player_action`**: Awaited wallet authorisations allowed interleaved updates of `game.pot` and betting metadata.
+2. **`emergency_reset`**: Multiple admin reset commands could execute concurrently, leading to partial cleanup or inconsistent state.
+
+The Phase 2A-4 fixes serialize both operations within the `stage:<chat>` guard so state mutations remain atomic during async I/O.
 
 ## Reset Path Races
 
