@@ -1764,7 +1764,7 @@ class PokerBotModel:
         # شرط ۱: آیا فقط یک بازیکن (یا کمتر) در بازی باقی مانده؟
         contenders = game.players_by(states=(PlayerState.ACTIVE, PlayerState.ALL_IN))
         if len(contenders) <= 1:
-            should_continue = await self._game_engine.progress_stage(
+            should_continue = await self.game_service.progress_stage(
                 chat_id=chat_id,
             )
             if should_continue:
@@ -1773,7 +1773,7 @@ class PokerBotModel:
 
         # شرط ۲: آیا دور شرط‌بندی فعلی به پایان رسیده است؟
         if self._is_betting_round_over(game):
-            should_continue = await self._game_engine.progress_stage(
+            should_continue = await self.game_service.progress_stage(
                 chat_id=chat_id,
             )
             if should_continue:
@@ -1787,12 +1787,12 @@ class PokerBotModel:
 
         if next_player_index != -1:
             game.current_player_index = next_player_index
-            engine = getattr(self, "_game_engine", None)
+            engine = getattr(self, "game_service", None)
             _refresh_turn_deadline_safe(game, engine)
             return game.players[next_player_index]
 
         # اگر هیچ بازیکن فعالی برای حرکت بعدی وجود ندارد (مثلاً همه All-in هستند)
-        should_continue = await self._game_engine.progress_stage(
+        should_continue = await self.game_service.progress_stage(
             chat_id=chat_id,
         )
         if should_continue:
