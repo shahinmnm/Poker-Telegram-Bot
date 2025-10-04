@@ -272,6 +272,10 @@ class GameEngine:
         _CATEGORY_TIMEOUTS.get("engine_stage"),
         25.0,
     )
+    BETTING_ROUND_TIMEOUT_SECONDS = _non_negative_float(
+        _CATEGORY_TIMEOUTS.get("engine_stage_betting"),
+        15.0,
+    )
     KEY_START_COUNTDOWN_LAST_TEXT = _ENGINE_CONSTANTS.get(
         "key_start_countdown_last_text",
         "start_countdown_last_text",
@@ -370,6 +374,9 @@ class GameEngine:
         self.constants = constants or _CONSTANTS
         self._adaptive_player_report_cache = adaptive_player_report_cache
         self._stage_lock_timeout = self.STAGE_LOCK_TIMEOUT_SECONDS
+        self._betting_round_timeout = max(
+            self._stage_lock_timeout, self.BETTING_ROUND_TIMEOUT_SECONDS
+        )
         self._max_players = _positive_int(
             _GAME_CONSTANTS.get("max_players"), 8
         )
@@ -1940,7 +1947,7 @@ class GameEngine:
                 game=game,
                 stage_label=stage_label,
                 event_stage_label=event_stage_label,
-                timeout=self._stage_lock_timeout,
+                timeout=self._betting_round_timeout,
             ):
                 return await _run_locked()
         except TimeoutError:
