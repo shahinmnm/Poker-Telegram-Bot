@@ -193,6 +193,30 @@ class RequestMetrics:
                 return []
             return list(snapshot.recent_calls)
 
+    def record_fine_grained_lock(
+        self,
+        *,
+        lock_type: str,
+        chat_id: int,
+        duration_ms: float,
+        wait_time_ms: float,
+        success: bool,
+    ) -> None:
+        """Record metrics for fine-grained lock operations."""
+
+        self._logger.info(
+            "Fine-grained lock operation",
+            extra={
+                "category": "lock_metrics",
+                "lock_type": lock_type,
+                "chat_id": chat_id,
+                "duration_ms": duration_ms,
+                "wait_time_ms": wait_time_ms,
+                "success": success,
+                "metric_type": "fine_grained_lock",
+            },
+        )
+
     def _build_cycle_summary(self, snapshot: _CycleSnapshot) -> Iterable[Dict[str, int]]:
         """Return a table comparing raw vs optimised request counts."""
 

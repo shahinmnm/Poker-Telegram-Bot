@@ -10,6 +10,7 @@ import math
 import random
 import time
 import uuid
+import zlib
 from contextlib import asynccontextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, field
@@ -32,6 +33,7 @@ from weakref import WeakKeyDictionary
 import redis.asyncio as aioredis
 
 from pokerapp.bootstrap import _make_service_logger
+from pokerapp.entities import ChatId, UserId
 from pokerapp.utils.locks import ReentrantAsyncLock
 from pokerapp.utils.logging_helpers import add_context, normalise_request_category
 
@@ -40,13 +42,23 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
 
 
 LOCK_LEVELS: Dict[str, int] = {
-    "engine_stage": 1,
+    "engine_stage": 4,
+    "table_write": 3,
+    "deck": 2,
+    "betting": 2,
+    "pot": 1,
+    "player": 0,
     "player_report": 2,
     "wallet": 3,
     "chat": 4,
 }
 
 _LOCK_PREFIX_LEVELS: Tuple[Tuple[str, str], ...] = (
+    ("player:", "player"),
+    ("pot:", "pot"),
+    ("deck:", "deck"),
+    ("betting:", "betting"),
+    ("table_write:", "table_write"),
     ("stage:", "engine_stage"),
     ("engine_stage:", "engine_stage"),
     ("chat:", "chat"),
@@ -335,10 +347,13 @@ class LockManager:
     end
     """
 
+    LOCK_LEVELS = LOCK_LEVELS
+
     def __init__(
         self,
         *,
         logger: logging.Logger,
+        enable_fine_grained_locks: bool = False,
         redis_pool: Optional[aioredis.Redis] = None,
         redis_keys: Optional[Mapping[str, Any]] = None,
         default_timeout_seconds: Optional[float] = 5,
@@ -356,6 +371,7 @@ class LockManager:
         self._default_timeout_seconds = default_timeout_seconds
         self._max_retries = max(0, max_retries)
         self._retry_backoff_seconds = max(0.0, retry_backoff_seconds)
+        self._enable_fine_grained_locks = enable_fine_grained_locks
         self._locks: Dict[str, ReentrantAsyncLock] = {}
         self._locks_guard = asyncio.Lock()
         self._task_lock_state: "WeakKeyDictionary[asyncio.Task[Any], List[_LockAcquisition]]" = (
@@ -365,7 +381,9 @@ class LockManager:
             WeakKeyDictionary()
         )
         self._lock_acquire_times: Dict[Tuple[int, str], List[float]] = {}
-        self._default_lock_level = (max(LOCK_LEVELS.values()) if LOCK_LEVELS else 0) + 10
+        self._default_lock_level = (
+            (max(self.LOCK_LEVELS.values()) if self.LOCK_LEVELS else 0) + 10
+        )
         self._lock_state_var: ContextVar[Tuple[_LockAcquisition, ...]] = ContextVar(
             f"lock_manager_state_{id(self)}",
             default=(),
@@ -550,6 +568,19 @@ class LockManager:
             self._cached_metrics = None
             self._cached_metrics_ts = 0.0
 
+    def _safe_int(self, value: object) -> int:
+        """Best-effort conversion of identifiers to an integer."""
+
+        if isinstance(value, int):
+            return value
+        try:
+            return int(str(value))
+        except (TypeError, ValueError):
+            encoded = str(value).encode("utf-8", "ignore")
+            if not encoded:
+                return 0
+            return zlib.crc32(encoded) & 0xFFFFFFFF
+
     def _normalize_chat_id(self, chat_id: object) -> object:
         """Best-effort normalisation of chat identifiers for dict keys."""
 
@@ -685,6 +716,10 @@ class LockManager:
         loop = asyncio.get_running_loop()
         wait_start = loop.time()
         max_reader_wait = 0
+        lock_key = f"table_write:{self._safe_int(chat_id)}"
+        self._validate_lock_hierarchy(
+            lock_key, self.LOCK_LEVELS.get("table_write", self._default_lock_level)
+        )
 
         await self._mark_writer_waiting(state)
         try:
@@ -742,6 +777,220 @@ class LockManager:
                     )
         finally:
             await self._unmark_writer_waiting(state)
+
+    @asynccontextmanager
+    async def _compat_table_guard(
+        self,
+        chat_id: ChatId,
+        *,
+        timeout: Optional[float],
+        context: Optional[Dict[str, Any]],
+    ) -> AsyncIterator[None]:
+        guard_context: Dict[str, Any] = dict(context or {})
+        guard_context.setdefault("lock_type", "table_write")
+        guard_context.setdefault("chat_id", self._safe_int(chat_id))
+        level = self.LOCK_LEVELS.get("table_write", self._default_lock_level)
+        async with self.guard(
+            f"table_write:{self._safe_int(chat_id)}",
+            timeout=timeout,
+            context=guard_context,
+            level=level,
+        ):
+            yield
+
+    @asynccontextmanager
+    async def _acquire_distributed_lock(
+        self,
+        lock_key: str,
+        *,
+        timeout: Optional[float],
+        level: int,
+        context: Dict[str, Any],
+        metrics_lock_type: Optional[str] = None,
+    ) -> AsyncIterator[None]:
+        guard_context = dict(context)
+        guard_context.setdefault("lock_key", lock_key)
+        chat_id_value = guard_context.get("chat_id")
+        if chat_id_value is not None:
+            guard_context["chat_id"] = self._safe_int(chat_id_value)
+
+        acquire_start = time.perf_counter()
+        wait_time = 0.0
+        hold_duration = 0.0
+        success = False
+
+        try:
+            async with self.guard(
+                lock_key,
+                timeout=timeout,
+                context=guard_context,
+                level=level,
+            ):
+                wait_time = time.perf_counter() - acquire_start
+                hold_start = time.perf_counter()
+                success = True
+                try:
+                    yield
+                finally:
+                    hold_duration = time.perf_counter() - hold_start
+        except Exception:
+            success = False
+            raise
+        finally:
+            metrics = getattr(self, "_request_metrics", None)
+            if metrics is not None and hasattr(
+                metrics, "record_fine_grained_lock"
+            ):
+                try:
+                    chat_id_metric = guard_context.get("chat_id")
+                    metrics.record_fine_grained_lock(
+                        lock_type=metrics_lock_type
+                        if metrics_lock_type is not None
+                        else self._extract_lock_type(lock_key),
+                        chat_id=self._safe_int(chat_id_metric)
+                        if chat_id_metric is not None
+                        else 0,
+                        duration_ms=hold_duration * 1000.0,
+                        wait_time_ms=wait_time * 1000.0,
+                        success=success,
+                    )
+                except Exception:  # pragma: no cover - best-effort metrics
+                    self._logger.debug(
+                        "Failed to record fine-grained lock metric", exc_info=True
+                    )
+
+    @asynccontextmanager
+    async def player_state_lock(
+        self,
+        chat_id: ChatId,
+        player_id: UserId,
+        *,
+        timeout: Optional[float] = None,
+        context: Optional[Dict[str, Any]] = None,
+    ) -> AsyncIterator[None]:
+        if not self._enable_fine_grained_locks:
+            async with self._compat_table_guard(
+                chat_id, timeout=timeout, context=context
+            ):
+                yield
+            return
+
+        effective_timeout = timeout or 5.0
+        player_identifier = str(player_id)
+        lock_key = f"player:{self._safe_int(chat_id)}:{player_identifier}"
+        ctx: Dict[str, Any] = dict(context or {})
+        ctx.update(
+            {
+                "lock_type": "player_state",
+                "chat_id": self._safe_int(chat_id),
+                "player_id": player_id,
+            }
+        )
+
+        async with self._acquire_distributed_lock(
+            lock_key,
+            timeout=effective_timeout,
+            level=self.LOCK_LEVELS.get("player", 0),
+            context=ctx,
+            metrics_lock_type="player",
+        ):
+            yield
+
+    @asynccontextmanager
+    async def pot_lock(
+        self,
+        chat_id: ChatId,
+        *,
+        timeout: Optional[float] = None,
+        context: Optional[Dict[str, Any]] = None,
+    ) -> AsyncIterator[None]:
+        if not self._enable_fine_grained_locks:
+            async with self._compat_table_guard(
+                chat_id, timeout=timeout, context=context
+            ):
+                yield
+            return
+
+        effective_timeout = timeout or 3.0
+        lock_key = f"pot:{self._safe_int(chat_id)}"
+        ctx: Dict[str, Any] = dict(context or {})
+        ctx.update({
+            "lock_type": "pot",
+            "chat_id": self._safe_int(chat_id),
+        })
+
+        async with self._acquire_distributed_lock(
+            lock_key,
+            timeout=effective_timeout,
+            level=self.LOCK_LEVELS.get("pot", 1),
+            context=ctx,
+            metrics_lock_type="pot",
+        ):
+            yield
+
+    @asynccontextmanager
+    async def deck_lock(
+        self,
+        chat_id: ChatId,
+        *,
+        timeout: Optional[float] = None,
+        context: Optional[Dict[str, Any]] = None,
+    ) -> AsyncIterator[None]:
+        if not self._enable_fine_grained_locks:
+            async with self._compat_table_guard(
+                chat_id, timeout=timeout, context=context
+            ):
+                yield
+            return
+
+        effective_timeout = timeout or 2.0
+        lock_key = f"deck:{self._safe_int(chat_id)}"
+        ctx: Dict[str, Any] = dict(context or {})
+        ctx.update({
+            "lock_type": "deck",
+            "chat_id": self._safe_int(chat_id),
+        })
+
+        async with self._acquire_distributed_lock(
+            lock_key,
+            timeout=effective_timeout,
+            level=self.LOCK_LEVELS.get("deck", 2),
+            context=ctx,
+            metrics_lock_type="deck",
+        ):
+            yield
+
+    @asynccontextmanager
+    async def betting_round_lock(
+        self,
+        chat_id: ChatId,
+        *,
+        timeout: Optional[float] = None,
+        context: Optional[Dict[str, Any]] = None,
+    ) -> AsyncIterator[None]:
+        if not self._enable_fine_grained_locks:
+            async with self._compat_table_guard(
+                chat_id, timeout=timeout, context=context
+            ):
+                yield
+            return
+
+        effective_timeout = timeout or 4.0
+        lock_key = f"betting:{self._safe_int(chat_id)}"
+        ctx: Dict[str, Any] = dict(context or {})
+        ctx.update({
+            "lock_type": "betting_round",
+            "chat_id": self._safe_int(chat_id),
+        })
+
+        async with self._acquire_distributed_lock(
+            lock_key,
+            timeout=effective_timeout,
+            level=self.LOCK_LEVELS.get("betting", 2),
+            context=ctx,
+            metrics_lock_type="betting",
+        ):
+            yield
 
     @asynccontextmanager
     async def player_lock(self, chat_id: int, player_id: int) -> AsyncIterator[None]:
@@ -1513,7 +1762,10 @@ class LockManager:
                 self._reset_circuit_state(key)
                 return True
 
-        self._validate_lock_order(current_acquisitions, key, resolved_level, context_payload)
+        self._validate_lock_hierarchy(key, resolved_level)
+        self._validate_lock_order(
+            current_acquisitions, key, resolved_level, context_payload
+        )
         acquisition_order = self._get_current_levels()
         acquiring_extra = self._log_extra(
             context_payload,
@@ -2443,7 +2695,7 @@ class LockManager:
         category = self._resolve_lock_category(key)
         if category is None:
             return self._default_lock_level
-        return LOCK_LEVELS.get(category, self._default_lock_level)
+        return self.LOCK_LEVELS.get(category, self._default_lock_level)
 
     def _resolve_timeout(
         self, key: str, override: Optional[float]
@@ -2622,6 +2874,81 @@ class LockManager:
                 ),
             )
 
+    def _validate_lock_hierarchy(
+        self,
+        lock_key: str,
+        requested_level: int,
+    ) -> None:
+        """Ensure higher-level locks are not acquired while holding lower ones."""
+
+        current_acquisitions = self._get_current_acquisitions()
+        if not current_acquisitions:
+            return
+
+        held_levels = [acq.level for acq in current_acquisitions]
+        min_held_level = min(held_levels)
+        max_held_level = max(held_levels)
+
+        if requested_level > min_held_level:
+            held_locks = [acq.key for acq in current_acquisitions]
+            violation_msg = (
+                f"Lock hierarchy violation: attempting to acquire {lock_key} "
+                f"(level {requested_level}) while holding level {min_held_level} locks. "
+                f"Current locks: {held_locks}"
+            )
+
+            task = asyncio.current_task()
+            self._logger.error(
+                violation_msg,
+                extra={
+                    "category": "lock_hierarchy_violation",
+                    "lock_key": lock_key,
+                    "requested_level": requested_level,
+                    "min_held_level": min_held_level,
+                    "max_held_level": max_held_level,
+                    "held_locks": held_locks,
+                    "task_name": getattr(task, "get_name", lambda: "unknown")(),
+                },
+            )
+
+            raise LockOrderError(violation_msg)
+
+        if requested_level < max_held_level - 1:
+            held_locks = [acq.key for acq in current_acquisitions]
+            self._logger.warning(
+                "Unusual lock acquisition pattern: skipping levels",
+                extra={
+                    "lock_key": lock_key,
+                    "requested_level": requested_level,
+                    "max_held_level": max_held_level,
+                    "held_locks": held_locks,
+                },
+            )
+
+    def _extract_lock_type(self, lock_key: str) -> str:
+        """Extract lock type from lock key for metrics and logging."""
+
+        if lock_key.startswith("pokerbot:wallet"):
+            return "wallet"
+        if lock_key.startswith("pokerbot:player_report"):
+            return "player_report"
+
+        prefix = lock_key.split(":", 1)[0]
+        prefix_map = {
+            "player": "player",
+            "pot": "pot",
+            "deck": "deck",
+            "betting": "betting",
+            "stage": "engine_stage",
+            "chat": "chat",
+            "wallet": "wallet",
+            "player_report": "player_report",
+            "table_write": "table_write",
+            "engine_stage": "engine_stage",
+        }
+
+        return prefix_map.get(prefix, prefix)
+
     def _validate_lock_order(
         self,
         current_acquisitions: List[_LockAcquisition],
@@ -2644,47 +2971,8 @@ class LockManager:
         max_held_level = max(held_levels)
 
         if new_level < max_held_level:
-            # Attempting to acquire a lower-level lock while holding a higher-level lock
-            # This can cause AA deadlock if another task acquires in opposite order
-
-            # Find the acquisition with the highest level
-            violating_acquisition = max(
-                current_acquisitions, key=lambda acq: acq.level
-            )
-
-            # Build detailed error message
-            held_keys = [acq.key for acq in current_acquisitions]
-            held_levels_str = ", ".join(
-                f"{acq.key}(L{acq.level})" for acq in current_acquisitions
-            )
-
-            error_message = (
-                f"Lock order violation: Attempting to acquire '{new_key}' (level {new_level}) "
-                f"while holding higher-level lock '{violating_acquisition.key}' (level {violating_acquisition.level}). "
-                f"Currently held locks: [{held_levels_str}]. "
-                "Locks must be acquired in ascending level order to prevent deadlock."
-            )
-
-            # Log the violation with full context
-            task = asyncio.current_task()
-            self._logger.error(
-                "[LOCK_ORDER_VIOLATION] %s task=%s",
-                error_message,
-                self._describe_task(task),
-                extra=self._log_extra(
-                    context,
-                    event_type="lock_order_violation",
-                    lock_key=new_key,
-                    lock_level=new_level,
-                    held_keys=held_keys,
-                    held_levels=held_levels,
-                    max_held_level=max_held_level,
-                    violating_key=violating_acquisition.key,
-                    violating_level=violating_acquisition.level,
-                ),
-            )
-
-            raise LockOrderError(error_message)
+            # Descending acquisitions are allowed with the hierarchy validation.
+            return
 
         # Additional check: Warn if acquiring the same level (potential design smell)
         if new_level == max_held_level:
