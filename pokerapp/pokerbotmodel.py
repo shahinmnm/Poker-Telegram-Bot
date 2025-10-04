@@ -69,6 +69,7 @@ from pokerapp.utils.player_report_cache import (
 from pokerapp.utils.request_metrics import RequestCategory, RequestMetrics
 from pokerapp.utils.redis_safeops import RedisSafeOps
 from pokerapp.lock_manager import LockManager
+from pokerapp.feature_flags import FeatureFlagManager
 from pokerapp.player_identity_manager import PlayerIdentityManager
 from pokerapp.player_manager import PlayerManager
 from pokerapp.matchmaking_service import MatchmakingService
@@ -284,12 +285,17 @@ class PokerBotModel:
             slow_threshold = float(slow_threshold)
         except (TypeError, ValueError):
             slow_threshold = 0.5
+        self._feature_flags = FeatureFlagManager(
+            config=cfg,
+            logger=logger.getChild("feature_flags"),
+        )
         self._lock_manager = LockManager(
             logger=logger.getChild("lock_manager"),
             category_timeouts=getattr(cfg, "LOCK_TIMEOUTS", None),
             config=cfg,
             writer_priority=writer_priority,
             log_slow_lock_threshold=slow_threshold,
+            feature_flags=self._feature_flags,
         )
         self._chat_guard_timeout_seconds = _CHAT_GUARD_TIMEOUT_SECONDS
         self._player_identity_manager = PlayerIdentityManager(

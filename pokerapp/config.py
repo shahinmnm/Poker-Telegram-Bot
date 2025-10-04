@@ -500,6 +500,7 @@ def get_game_constants() -> GameConstants:
 class Config:
     def __init__(self):
         self.constants: GameConstants = GAME_CONSTANTS
+        self.system_constants: Dict[str, Any] = deepcopy(_SYSTEM_CONSTANTS)
         locks_section = self.constants.section("locks")
         raw_lock_timeouts = locks_section.get("category_timeouts_seconds")
         if not isinstance(raw_lock_timeouts, Mapping):
@@ -746,6 +747,11 @@ class Config:
             )
             timezone_candidate = DEFAULT_TIMEZONE_NAME
         self.TIMEZONE_NAME: str = timezone_candidate
+
+    def reload_system_constants(self) -> None:
+        """Reload cached system constants from disk."""
+
+        self.system_constants = deepcopy(_load_system_constants())
 
     @staticmethod
     def _normalize_webhook_path(path: str) -> str:

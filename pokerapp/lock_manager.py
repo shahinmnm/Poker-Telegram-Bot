@@ -39,6 +39,7 @@ from pokerapp.utils.logging_helpers import add_context, normalise_request_catego
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from pokerapp.config import Config
+    from pokerapp.feature_flags import FeatureFlagManager
 
 
 LOCK_LEVELS: Dict[str, int] = {
@@ -363,6 +364,7 @@ class LockManager:
         config: Optional["Config"] = None,
         writer_priority: bool = True,
         log_slow_lock_threshold: float = 0.5,
+        feature_flags: Optional["FeatureFlagManager"] = None,
     ) -> None:
         base_logger = add_context(logger)
         self._logger = _make_service_logger(
@@ -371,7 +373,10 @@ class LockManager:
         self._default_timeout_seconds = default_timeout_seconds
         self._max_retries = max(0, max_retries)
         self._retry_backoff_seconds = max(0.0, retry_backoff_seconds)
-        self._enable_fine_grained_locks = enable_fine_grained_locks
+        self._feature_flags = feature_flags
+        self._enable_fine_grained_locks = (
+            enable_fine_grained_locks or feature_flags is not None
+        )
         self._locks: Dict[str, ReentrantAsyncLock] = {}
         self._locks_guard = asyncio.Lock()
         self._task_lock_state: "WeakKeyDictionary[asyncio.Task[Any], List[_LockAcquisition]]" = (
@@ -567,6 +572,29 @@ class LockManager:
         if hasattr(self, "_cached_metrics"):
             self._cached_metrics = None
             self._cached_metrics_ts = 0.0
+
+    def _is_fine_grained_enabled_for_chat(self, chat_id: ChatId) -> bool:
+        """Return ``True`` if fine-grained locks should be used for this chat."""
+
+        if not self._enable_fine_grained_locks:
+            return False
+
+        if self._feature_flags is None:
+            return True
+
+        try:
+            normalized_chat = self._safe_int(chat_id)
+            return self._feature_flags.is_enabled_for_chat(normalized_chat)
+        except Exception:  # pragma: no cover - best-effort logging
+            self._logger.warning(
+                "Feature flag evaluation failed; falling back to table lock",
+                extra={
+                    "event_type": "feature_flag_evaluation_failed",
+                    "chat_id": self._normalize_chat_id(chat_id),
+                },
+                exc_info=True,
+            )
+            return False
 
     def _safe_int(self, value: object) -> int:
         """Best-effort conversion of identifiers to an integer."""
@@ -868,7 +896,7 @@ class LockManager:
         timeout: Optional[float] = None,
         context: Optional[Dict[str, Any]] = None,
     ) -> AsyncIterator[None]:
-        if not self._enable_fine_grained_locks:
+        if not self._is_fine_grained_enabled_for_chat(chat_id):
             async with self._compat_table_guard(
                 chat_id, timeout=timeout, context=context
             ):
@@ -904,7 +932,7 @@ class LockManager:
         timeout: Optional[float] = None,
         context: Optional[Dict[str, Any]] = None,
     ) -> AsyncIterator[None]:
-        if not self._enable_fine_grained_locks:
+        if not self._is_fine_grained_enabled_for_chat(chat_id):
             async with self._compat_table_guard(
                 chat_id, timeout=timeout, context=context
             ):
@@ -936,7 +964,7 @@ class LockManager:
         timeout: Optional[float] = None,
         context: Optional[Dict[str, Any]] = None,
     ) -> AsyncIterator[None]:
-        if not self._enable_fine_grained_locks:
+        if not self._is_fine_grained_enabled_for_chat(chat_id):
             async with self._compat_table_guard(
                 chat_id, timeout=timeout, context=context
             ):
@@ -968,7 +996,7 @@ class LockManager:
         timeout: Optional[float] = None,
         context: Optional[Dict[str, Any]] = None,
     ) -> AsyncIterator[None]:
-        if not self._enable_fine_grained_locks:
+        if not self._is_fine_grained_enabled_for_chat(chat_id):
             async with self._compat_table_guard(
                 chat_id, timeout=timeout, context=context
             ):
