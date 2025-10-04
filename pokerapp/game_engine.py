@@ -1801,7 +1801,13 @@ class GameEngine:
         action: str,
         amount: int,
     ) -> bool:
-        """Execute a validated player action on the in-memory game state."""
+        """
+        Execute a validated player action on the in-memory game state.
+
+        Phase 2A lock audit: this operation now acquires the stage lock to
+        prevent concurrent mutations of ``game.pot`` and player betting
+        attributes while awaiting wallet authorisations.
+        """
 
         action_token = action.strip().lower()
         mention = getattr(player, "mention_markdown", str(getattr(player, "user_id", "")))
@@ -1821,97 +1827,127 @@ class GameEngine:
                 if len(actions) > 5:
                     del actions[:-5]
 
-        if action_token == "fold":
-            if hasattr(player, "state"):
-                player.state = PlayerState.FOLD
-            if hasattr(player, "has_acted"):
-                player.has_acted = True
-            record_action(f"{mention}: فولد")
-            return True
+        async def _run_locked() -> bool:
+            if action_token == "fold":
+                if hasattr(player, "state"):
+                    player.state = PlayerState.FOLD
+                if hasattr(player, "has_acted"):
+                    player.has_acted = True
+                record_action(f"{mention}: فولد")
+                return True
 
-        if action_token == "check":
-            if hasattr(player, "has_acted"):
-                player.has_acted = True
-            record_action(f"{mention}: چک")
-            return True
+            if action_token == "check":
+                if hasattr(player, "has_acted"):
+                    player.has_acted = True
+                record_action(f"{mention}: چک")
+                return True
 
-        if action_token == "call":
-            call_amount = max(
-                0,
-                int(getattr(game, "max_round_rate", 0))
-                - int(getattr(player, "round_rate", 0)),
-            )
-            if call_amount > 0:
+            if action_token == "call":
+                call_amount = max(
+                    0,
+                    int(getattr(game, "max_round_rate", 0))
+                    - int(getattr(player, "round_rate", 0)),
+                )
+                if call_amount > 0:
+                    wallet = getattr(player, "wallet", None)
+                    if wallet is not None and hasattr(wallet, "authorize"):
+                        try:
+                            await wallet.authorize(game.id, call_amount)
+                        except Exception:
+                            self._logger.warning(
+                                "Wallet authorization failed during call",
+                                extra={**log_context, "amount": call_amount},
+                                exc_info=True,
+                            )
+                            return False
+                    player.round_rate = int(getattr(player, "round_rate", 0)) + call_amount
+                    player.total_bet = int(getattr(player, "total_bet", 0)) + call_amount
+                    game.pot = game.pot + call_amount
+                if hasattr(player, "has_acted"):
+                    player.has_acted = True
+                if call_amount > 0:
+                    record_action(f"{mention}: کال {call_amount}$")
+                else:
+                    record_action(f"{mention}: چک")
+                return True
+
+            if action_token == "raise":
+                if amount is None or amount <= 0:
+                    self._logger.warning(
+                        "Raise rejected due to invalid amount",
+                        extra={**log_context, "amount": amount},
+                    )
+                    return False
+                call_amount = max(
+                    0,
+                    int(getattr(game, "max_round_rate", 0))
+                    - int(getattr(player, "round_rate", 0)),
+                )
+                total_amount = call_amount + int(amount)
                 wallet = getattr(player, "wallet", None)
                 if wallet is not None and hasattr(wallet, "authorize"):
                     try:
-                        await wallet.authorize(game.id, call_amount)
+                        await wallet.authorize(game.id, total_amount)
                     except Exception:
                         self._logger.warning(
-                            "Wallet authorization failed during call",
-                            extra={**log_context, "amount": call_amount},
+                            "Wallet authorization failed during raise",
+                            extra={**log_context, "amount": total_amount},
                             exc_info=True,
                         )
                         return False
-                player.round_rate = int(getattr(player, "round_rate", 0)) + call_amount
-                player.total_bet = int(getattr(player, "total_bet", 0)) + call_amount
-                game.pot = game.pot + call_amount
-            if hasattr(player, "has_acted"):
-                player.has_acted = True
-            if call_amount > 0:
-                record_action(f"{mention}: کال {call_amount}$")
-            else:
-                record_action(f"{mention}: چک")
-            return True
-
-        if action_token == "raise":
-            if amount is None or amount <= 0:
-                self._logger.warning(
-                    "Raise rejected due to invalid amount",
-                    extra={**log_context, "amount": amount},
+                player.round_rate = int(getattr(player, "round_rate", 0)) + total_amount
+                player.total_bet = int(getattr(player, "total_bet", 0)) + total_amount
+                game.pot = game.pot + total_amount
+                game.max_round_rate = max(
+                    int(getattr(game, "max_round_rate", 0)),
+                    player.round_rate,
                 )
-                return False
-            call_amount = max(
-                0,
-                int(getattr(game, "max_round_rate", 0))
-                - int(getattr(player, "round_rate", 0)),
-            )
-            total_amount = call_amount + int(amount)
-            wallet = getattr(player, "wallet", None)
-            if wallet is not None and hasattr(wallet, "authorize"):
-                try:
-                    await wallet.authorize(game.id, total_amount)
-                except Exception:
-                    self._logger.warning(
-                        "Wallet authorization failed during raise",
-                        extra={**log_context, "amount": total_amount},
-                        exc_info=True,
-                    )
-                    return False
-            player.round_rate = int(getattr(player, "round_rate", 0)) + total_amount
-            player.total_bet = int(getattr(player, "total_bet", 0)) + total_amount
-            game.pot = game.pot + total_amount
-            game.max_round_rate = max(
-                int(getattr(game, "max_round_rate", 0)),
-                player.round_rate,
-            )
-            if hasattr(player, "has_acted"):
-                player.has_acted = True
-            if hasattr(game, "trading_end_user_id"):
-                game.trading_end_user_id = getattr(player, "user_id", None)
-            for other in game.players:
-                if other is player:
-                    continue
-                if getattr(other, "state", PlayerState.ACTIVE) == PlayerState.ACTIVE and hasattr(other, "has_acted"):
-                    other.has_acted = False
-            record_action(f"{mention}: رِیز {total_amount}$")
-            return True
+                if hasattr(player, "has_acted"):
+                    player.has_acted = True
+                if hasattr(game, "trading_end_user_id"):
+                    game.trading_end_user_id = getattr(player, "user_id", None)
+                for other in game.players:
+                    if other is player:
+                        continue
+                    if (
+                        getattr(other, "state", PlayerState.ACTIVE) == PlayerState.ACTIVE
+                        and hasattr(other, "has_acted")
+                    ):
+                        other.has_acted = False
+                record_action(f"{mention}: رِیز {total_amount}$")
+                return True
 
-        self._logger.warning(
-            "Unsupported action encountered during execution",
-            extra=log_context,
-        )
-        return False
+            self._logger.warning(
+                "Unsupported action encountered during execution",
+                extra=log_context,
+            )
+            return False
+
+        if chat_id is None or self._lock_manager is None:
+            return await _run_locked()
+
+        lock_key = self._stage_lock_key(chat_id)
+        stage_label = "stage_lock:execute_player_action"
+        event_stage_label = "execute_player_action"
+
+        try:
+            async with self._trace_lock_guard(
+                lock_key=lock_key,
+                chat_id=chat_id,
+                game=game,
+                stage_label=stage_label,
+                event_stage_label=event_stage_label,
+                timeout=self._stage_lock_timeout,
+            ):
+                return await _run_locked()
+        except TimeoutError:
+            self._log_engine_event_lock_failure(
+                lock_key=lock_key,
+                event_stage_label=event_stage_label,
+                chat_id=chat_id,
+                game=game,
+            )
+            raise
 
     @staticmethod
     def state_token(state: Any) -> str:
@@ -2562,7 +2598,13 @@ class GameEngine:
             raise
 
     async def emergency_reset(self, chat_id: int) -> None:
-        """Forcefully unwind timers and locks after a critical failure."""
+        """
+        Forcefully unwind timers and locks after a critical failure.
+
+        The post-audit implementation acquires the stage lock around the
+        crash-recovery path to avoid interleaving state resets with other
+        operations that may still be retrying.
+        """
 
         normalized_chat = self._safe_int(chat_id)
         self._logger.warning(
@@ -2577,13 +2619,37 @@ class GameEngine:
             await self._cancel_all_timers_internal(chat_id)
             await self._force_release_locks(chat_id)
 
-            game = await self._table_manager.get_game(chat_id)
-            if game:
-                game.stage = GameState.WAITING
-                game.current_bet = 0
-                game.pot = 0
-                game.active_players = []
-                await self._table_manager.save_game(chat_id, game)
+            async def _run_locked() -> None:
+                game = await self._table_manager.get_game(chat_id)
+                if game:
+                    game.stage = GameState.WAITING
+                    game.current_bet = 0
+                    game.pot = 0
+                    game.active_players = []
+                    await self._table_manager.save_game(chat_id, game)
+
+            lock_key = self._stage_lock_key(chat_id)
+            stage_label = "stage_lock:emergency_reset"
+            event_stage_label = "emergency_reset"
+
+            try:
+                async with self._trace_lock_guard(
+                    lock_key=lock_key,
+                    chat_id=chat_id,
+                    game=None,
+                    stage_label=stage_label,
+                    event_stage_label=event_stage_label,
+                    timeout=self._stage_lock_timeout,
+                ):
+                    await _run_locked()
+            except TimeoutError:
+                self._log_engine_event_lock_failure(
+                    lock_key=lock_key,
+                    event_stage_label=event_stage_label,
+                    chat_id=chat_id,
+                    game=None,
+                )
+                raise
 
             reset_message = (
                 "⚠️ **سیستم به حالت اضطراری بازنشانی شد**\n\n"
@@ -3475,49 +3541,136 @@ class GameEngine:
         chat_id: ChatId,
         send_stop_notification: bool = False,
     ) -> None:
-        game.pot = 0
-        game.state = GameState.FINISHED
+        """
+        Persist the final state of a hand while holding the stage lock.
 
-        remaining_players = []
-        for player in game.players:
-            wallet = getattr(player, "wallet", None)
-            if wallet is None:
-                continue
+        The updated implementation captures the optimistic locking version
+        before persisting and retries once on conflict, aligning with the
+        locking guarantees validated during the Phase 2A audit.
+        """
+
+        lock_key = self._stage_lock_key(chat_id)
+        stage_label = "stage_lock:reset_core_game_state"
+        event_stage_label = "reset_core_game_state"
+
+        async def _run_locked() -> None:
+            version: Optional[int] = None
             try:
-                balance = await wallet.value()
-            except TypeError:
-                balance = 0
-            if isinstance(balance, (int, float)) and balance > 0:
-                remaining_players.append(player)
+                _, version = await self._table_manager.load_game_with_version(chat_id)
+            except Exception:
+                self._logger.exception(
+                    "Failed to load version before resetting core state",
+                    extra=self._log_extra(
+                        stage="reset_core_game_state:load_version_failed",
+                        chat_id=chat_id,
+                        game=game,
+                        event_type="reset_core_state_version_load_failed",
+                    ),
+                )
 
-        context.chat_data[self._old_players_key] = [
-            player.user_id for player in remaining_players
-        ]
+            game.pot = 0
+            game.state = GameState.FINISHED
 
-        await self._request_metrics.end_cycle(
-            self._safe_int(chat_id), cycle_token=game.id
-        )
-        clear_all_message_ids(game)
-        await self._player_manager.clear_player_anchors(game)
-        game.reset()
-        if hasattr(game, "increment_callback_version"):
-            game.increment_callback_version()
-        await self._table_manager.save_game(chat_id, game)
-        if send_stop_notification:
-            await self._telegram_ops.send_message_safe(
-                call=lambda text=self.STOPPED_NOTIFICATION: self._view.send_message(
-                    chat_id, text
-                ),
-                chat_id=chat_id,
-                operation="send_stop_notification",
-                log_extra=self._build_telegram_log_extra(
-                    chat_id=chat_id,
-                    message_id=None,
-                    game_id=getattr(game, "id", None),
-                    operation="send_stop_notification",
-                    request_category=RequestCategory.GENERAL,
-                ),
+            remaining_players = []
+            for player in game.players:
+                wallet = getattr(player, "wallet", None)
+                if wallet is None:
+                    continue
+                try:
+                    balance = await wallet.value()
+                except TypeError:
+                    balance = 0
+                if isinstance(balance, (int, float)) and balance > 0:
+                    remaining_players.append(player)
+
+            context.chat_data[self._old_players_key] = [
+                player.user_id for player in remaining_players
+            ]
+
+            await self._request_metrics.end_cycle(
+                self._safe_int(chat_id), cycle_token=game.id
             )
+            clear_all_message_ids(game)
+            await self._player_manager.clear_player_anchors(game)
+            game.reset()
+            if hasattr(game, "increment_callback_version"):
+                game.increment_callback_version()
+
+            if version is None:
+                await self._table_manager.save_game(chat_id, game)
+            else:
+                save_success = await self._table_manager.save_game_with_version_check(
+                    chat_id, game, version
+                )
+                if not save_success:
+                    self._logger.warning(
+                        "Version conflict during core game state reset, retrying",
+                        extra=self._log_extra(
+                            stage="reset_core_game_state:version_conflict",
+                            chat_id=chat_id,
+                            game=game,
+                            event_type="reset_core_state_version_conflict",
+                            expected_version=version,
+                        ),
+                    )
+                    try:
+                        _, retry_version = await self._table_manager.load_game_with_version(
+                            chat_id
+                        )
+                    except Exception:
+                        self._logger.exception(
+                            "Failed to reload version after conflict",
+                            extra=self._log_extra(
+                                stage="reset_core_game_state:version_reload_failed",
+                                chat_id=chat_id,
+                                game=game,
+                                event_type="reset_core_state_version_reload_failed",
+                            ),
+                        )
+                    else:
+                        if retry_version is not None:
+                            await self._table_manager.save_game_with_version_check(
+                                chat_id, game, retry_version
+                            )
+                        else:
+                            await self._table_manager.save_game(chat_id, game)
+
+            if send_stop_notification:
+                await self._telegram_ops.send_message_safe(
+                    call=lambda text=self.STOPPED_NOTIFICATION: self._view.send_message(
+                        chat_id, text
+                    ),
+                    chat_id=chat_id,
+                    operation="send_stop_notification",
+                    log_extra=self._build_telegram_log_extra(
+                        chat_id=chat_id,
+                        message_id=None,
+                        game_id=getattr(game, "id", None),
+                        operation="send_stop_notification",
+                        request_category=RequestCategory.GENERAL,
+                    ),
+                )
+
+        try:
+            async with self._trace_lock_guard(
+                lock_key=lock_key,
+                chat_id=chat_id,
+                game=game,
+                stage_label=stage_label,
+                event_stage_label=event_stage_label,
+                timeout=self._stage_lock_timeout,
+                retry_without_timeout=True,
+                retry_stage_label="chat_guard_timeout:reset_core_game_state",
+            ):
+                await _run_locked()
+        except TimeoutError:
+            self._log_engine_event_lock_failure(
+                lock_key=lock_key,
+                event_stage_label=event_stage_label,
+                chat_id=chat_id,
+                game=game,
+            )
+            raise
 
     def _evaluate_contender_hands(
         self, game: Game, contenders: Iterable[Player]
