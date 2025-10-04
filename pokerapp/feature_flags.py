@@ -22,7 +22,11 @@ class FeatureFlagManager:
     def _load_config(self) -> None:
         """Load rollout configuration from system constants."""
 
-        lock_config = self._config.system_constants.get("lock_manager", {})
+        system_constants = getattr(self._config, "system_constants", None)
+        if isinstance(system_constants, dict):
+            lock_config = system_constants.get("lock_manager", {})
+        else:
+            lock_config = {}
         self._enabled = lock_config.get("enable_fine_grained_locks", False)
         self._rollout_percentage = lock_config.get("rollout_percentage", 0)
 

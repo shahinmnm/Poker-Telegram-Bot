@@ -108,6 +108,13 @@ _DEFAULT_SYSTEM_CONSTANTS_DATA: Dict[str, Any] = {
             "enable_queue_estimation": False,
         },
     },
+    "lock_manager": {
+        "enable_fine_grained_locks": False,
+        "rollout_percentage": 0,
+        "enable_hierarchy_enforcement": True,
+        "enable_duplicate_detection": True,
+        "enable_stack_trace_logging": True,
+    },
 }
 
 _DEFAULT_TRANSLATIONS_DATA: Dict[str, Any] = {"default_language": "fa"}
