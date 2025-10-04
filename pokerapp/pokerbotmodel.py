@@ -6,7 +6,7 @@ import inspect
 import json
 import math
 import random
-from contextlib import AsyncExitStack, asynccontextmanager
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from typing import Any, Awaitable, Callable, Dict, Iterable, List, Optional, Set, Tuple
 
@@ -480,33 +480,32 @@ class PokerBotModel:
         no table is stored or when the read lock could not be acquired in time.
         In these cases the version defaults to ``0`` to keep the return contract
         consistent for all callers.
+
+        Notes:
+        - Uses 5-second timeout for read lock acquisition
+        - Logs 'model_load_game_lock_timeout' event on lock failure
+        - Delegates version loading to TableManager.load_game_with_version()
         """
 
-        stack = AsyncExitStack()
         try:
-            try:
-                await asyncio.wait_for(
-                    stack.enter_async_context(
-                        self._lock_manager.table_read_lock(chat_id)
-                    ),
-                    timeout=5.0,
-                )
-            except asyncio.TimeoutError:
-                logger.warning(
-                    "Failed to acquire read lock for load_game_with_version",
-                    extra={
-                        "chat_id": chat_id,
-                        "event_type": "model_load_game_lock_timeout",
-                    },
-                )
-                return (None, 0)
+            async with asyncio.timeout(5.0):
+                async with self._lock_manager.table_read_lock(chat_id):
+                    game, version = await self._table_manager.load_game_with_version(
+                        chat_id
+                    )
+                    if game is None:
+                        return (None, 0)
+                    return (game, version)
 
-            game, version = await self._table_manager.load_game_with_version(chat_id)
-            if game is None:
-                return (None, 0)
-            return (game, version)
-        finally:
-            await stack.aclose()
+        except asyncio.TimeoutError:
+            logger.warning(
+                "Failed to acquire read lock for load_game_with_version",
+                extra={
+                    "chat_id": chat_id,
+                    "event_type": "model_load_game_lock_timeout",
+                },
+            )
+            return (None, 0)
 
     @asynccontextmanager
     async def _chat_guard(
