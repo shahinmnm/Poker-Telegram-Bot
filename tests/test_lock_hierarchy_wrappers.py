@@ -30,7 +30,8 @@ async def test_player_lock_between_wallet_and_table():
     manager = LockManager(logger=logging.getLogger("hierarchy-player"))
 
     async with manager.acquire_wallet_lock(user_id=9):
-        async with manager.acquire_player_lock(chat_id=103, player_id=9):
+        async with manager.acquire_player_lock(chat_id=103, user_id=9) as acquired:
+            assert acquired
             async with manager.acquire_table_write_lock(chat_id=103):
                 # The canonical acquisition order should not raise.
                 pass
@@ -42,5 +43,5 @@ async def test_table_then_player_lock_violates_hierarchy():
 
     with pytest.raises(LockHierarchyViolation):
         async with manager.acquire_table_write_lock(chat_id=104):
-            async with manager.acquire_player_lock(chat_id=104, player_id=10):
+            async with manager.acquire_player_lock(chat_id=104, user_id=10):
                 pass  # pragma: no cover - hierarchy violation should raise
