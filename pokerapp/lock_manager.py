@@ -3528,38 +3528,6 @@ class LockManager:
             )
             raise LockHierarchyViolation(violation_msg)
 
-        allowed_ascending_pairs = {("table_read", "player")}
-
-        if (highest_category, requested_category) not in allowed_ascending_pairs:
-            held_locks = [acq.key for acq in current_acquisitions]
-            violation_msg = (
-                f"Lock hierarchy violation: attempting to acquire {lock_key} "
-                f"(level {requested_level}) while holding {highest_hierarchy_acq.key} "
-                f"(level {highest_hierarchy_level}). Current locks: {held_locks}"
-            )
-            task = asyncio.current_task()
-            held_lock_label = held_locks[0] if held_locks else "unknown"
-            LOCK_HIERARCHY_VIOLATIONS.labels(
-                acquired_lock=lock_key,
-                held_lock=held_lock_label,
-            ).inc()
-            self.hierarchy_violations.labels(
-                violation_type="ascending"
-            ).inc()
-            self._logger.error(
-                violation_msg,
-                extra={
-                    "category": "lock_hierarchy_violation",
-                    "lock_key": lock_key,
-                    "requested_level": requested_level,
-                    "min_held_level": min_held_level,
-                    "max_held_level": max_held_level,
-                    "held_locks": held_locks,
-                    "task_name": getattr(task, "get_name", lambda: "unknown")(),
-                },
-            )
-            raise LockHierarchyViolation(violation_msg)
-
     def _extract_lock_type(self, lock_key: str) -> str:
         """Extract lock type from lock key for metrics and logging."""
 
