@@ -34,19 +34,31 @@ from weakref import WeakKeyDictionary
 import redis.asyncio as aioredis
 
 try:  # pragma: no cover - dependency optional in some environments
-    from prometheus_client import Counter
+    from prometheus_client import Counter, Histogram
 except Exception:  # pragma: no cover - fallback when prometheus_client missing
-    class Counter:  # type: ignore[override]
+    class _MetricBase:  # type: ignore[override]
         """Minimal stub used when prometheus_client is unavailable."""
 
         def __init__(self, *args: object, **kwargs: object) -> None:
-            pass
+            self._value = 0.0
 
-        def labels(self, *args: object, **kwargs: object) -> "Counter":
+        def labels(self, *args: object, **kwargs: object) -> "_MetricBase":
             return self
 
         def inc(self, amount: float = 1.0) -> None:
-            return None
+            self._value += float(amount)
+
+        def observe(self, value: float) -> None:
+            self._value = float(value)
+
+        def get(self) -> float:
+            return float(self._value)
+
+    class Counter(_MetricBase):
+        pass
+
+    class Histogram(_MetricBase):
+        pass
 
 from pokerapp.bootstrap import _make_service_logger
 from pokerapp.entities import ChatId, UserId
@@ -475,6 +487,7 @@ class LockManager:
             f"lock_manager_context_locks_{id(self)}", default=()
         )
         lock_manager_flags: Mapping[str, Any] = {}
+        system_constants_mapping: Dict[str, Any] = {}
         flags_config = config
         if flags_config is None:
             try:  # pragma: no cover - defensive config resolution
@@ -486,9 +499,12 @@ class LockManager:
         if flags_config is not None:
             system_constants = getattr(flags_config, "system_constants", None)
             if isinstance(system_constants, Mapping):
-                candidate = system_constants.get("lock_manager")
+                system_constants_mapping = dict(system_constants)
+                candidate = system_constants_mapping.get("lock_manager")
                 if isinstance(candidate, Mapping):
                     lock_manager_flags = dict(candidate)
+        self._system_constants = system_constants_mapping
+        self._lock_manager_flags: Dict[str, Any] = dict(lock_manager_flags)
         self._enforce_hierarchy: bool = bool(
             lock_manager_flags.get("enable_hierarchy_enforcement", True)
         )
@@ -497,6 +513,9 @@ class LockManager:
         )
         self._enable_stack_trace_logging: bool = bool(
             lock_manager_flags.get("enable_stack_trace_logging", False)
+        )
+        self._smart_retry_enabled: bool = bool(
+            self._lock_manager_flags.get("enable_smart_retry", True)
         )
         resolved_category_timeouts = category_timeouts
         if resolved_category_timeouts is None:
@@ -534,6 +553,50 @@ class LockManager:
             "action_lock_retry_failures": 0,
             "action_lock_retry_timeouts": 0,
         }
+        self.lock_queue_depth = Counter(
+            "poker_lock_queue_depth_total",
+            "Current depth of lock acquisition queues",
+            ["lock_type"],
+            registry=None,
+        )
+        self.lock_retry_attempts = Counter(
+            "poker_lock_retry_attempts_total",
+            "Number of lock retry attempts",
+            ["lock_type", "attempt_number"],
+            registry=None,
+        )
+        self.lock_retry_success = Counter(
+            "poker_lock_retry_success_total",
+            "Number of successful lock acquisitions after retry",
+            ["lock_type"],
+            registry=None,
+        )
+        self.lock_acquisition_success = Counter(
+            "poker_lock_acquisition_success_total",
+            "Successful lock acquisitions by attempt number",
+            ["lock_type", "attempt_number"],
+            registry=None,
+        )
+        self.lock_acquisition_failures = Counter(
+            "poker_lock_acquisition_failures_total",
+            "Failed lock acquisitions by reason",
+            ["lock_type", "failure_reason"],
+            registry=None,
+        )
+        self.lock_wait_time = Histogram(
+            "poker_lock_wait_time_seconds",
+            "Time spent waiting for lock acquisition",
+            ["lock_type"],
+            buckets=[0.1, 0.5, 1.0, 2.5, 5.0, 10.0, 25.0, 60.0],
+            registry=None,
+        )
+        self.estimated_queue_wait = Histogram(
+            "poker_lock_estimated_queue_wait_seconds",
+            "Estimated wait time based on queue depth",
+            ["lock_type"],
+            buckets=[0.5, 2.0, 5.0, 10.0, 25.0, 60.0, 120.0],
+            registry=None,
+        )
         self.hierarchy_violations = Counter(
             "poker_lock_hierarchy_violations_total",
             "Lock hierarchy violations detected",
@@ -598,7 +661,12 @@ class LockManager:
             "engine": engine_defaults,
             "lock_queue_prefix": "lock:queue:",
         }
-        self._redis_pool: Any = redis_pool or _InMemoryActionLockBackend()
+        if redis_pool is None:
+            self._redis_pool = _InMemoryActionLockBackend()
+            self._redis_client = None
+        else:
+            self._redis_pool = redis_pool
+            self._redis_client = redis_pool
         self._redis = self._redis_pool
         if isinstance(self._redis_pool, _InMemoryActionLockBackend):
             self._logger.warning(
@@ -725,6 +793,19 @@ class LockManager:
                 return 0
             return zlib.crc32(encoded) & 0xFFFFFFFF
 
+    def _get_lock_timeout(self, lock_type: str) -> float:
+        """Resolve timeout for a given lock type with sensible defaults."""
+
+        timeout_value = self._category_timeouts.get(lock_type)
+        if isinstance(timeout_value, (int, float)) and timeout_value > 0:
+            return float(timeout_value)
+
+        default_timeout = self._default_timeout_seconds
+        if isinstance(default_timeout, (int, float)) and default_timeout > 0:
+            return float(default_timeout)
+
+        return 5.0
+
     def _normalize_chat_id(self, chat_id: object) -> object:
         """Best-effort normalisation of chat identifiers for dict keys."""
 
@@ -834,11 +915,23 @@ class LockManager:
         context_payload = {
             "lock_type": "table_read",
             "chat_id": self._safe_int(chat_id),
+            "hierarchy_level": hierarchy_level,
         }
         if self._enforce_hierarchy:
             self._validate_lock_hierarchy(lock_key, hierarchy_level)
             self._record_acquired(lock_key, hierarchy_level, context_payload)
         self._track_lock_acquisition(lock_key, "table_read", hierarchy_level)
+        smart_retry_acquired = False
+        if self._smart_retry_enabled:
+            timeout = self._get_lock_timeout("table_read")
+            acquired = await self._acquire_lock_with_smart_retry(
+                lock_key, timeout, context_payload
+            )
+            if not acquired:
+                raise TimeoutError(
+                    f"Failed to acquire {lock_key} after smart retry"
+                )
+            smart_retry_acquired = True
         try:
             yield
         finally:
@@ -863,6 +956,8 @@ class LockManager:
                     "remaining_readers": state.reader_count,
                 },
             )
+            if smart_retry_acquired:
+                await self._release_lock_internal(lock_key)
             if self._enforce_hierarchy:
                 self._remove_acquisition_record(lock_key)
             self._release_lock_tracking(lock_key)
@@ -874,13 +969,40 @@ class LockManager:
         wait_start = loop.time()
         max_reader_wait = 0
         lock_key = f"table_write:{self._safe_int(chat_id)}"
+        hierarchy_level = self.LOCK_LEVELS.get("table_write", self._default_lock_level)
+        context_payload = {
+            "lock_type": "table_write",
+            "chat_id": self._safe_int(chat_id),
+            "hierarchy_level": hierarchy_level,
+        }
         if self._enforce_hierarchy:
-            self._validate_lock_hierarchy(
-                lock_key, self.LOCK_LEVELS.get("table_write", self._default_lock_level)
-            )
+            self._validate_lock_hierarchy(lock_key, hierarchy_level)
         self._check_duplicate_lock(lock_key, "table_write")
 
+        tracked_externally = False
+        smart_retry_acquired = False
+        if self._smart_retry_enabled:
+            if self._enforce_hierarchy:
+                self._record_acquired(lock_key, hierarchy_level, context_payload)
+            self._track_lock_acquisition(lock_key, "table_write", hierarchy_level)
+            tracked_externally = True
+            timeout = self._get_lock_timeout("table_write")
+            acquired = await self._acquire_lock_with_smart_retry(
+                lock_key, timeout, context_payload
+            )
+            if not acquired:
+                raise TimeoutError(
+                    f"Failed to acquire {lock_key} after smart retry"
+                )
+            smart_retry_acquired = True
+
+        writer_marked = False
+        if not tracked_externally and self._enforce_hierarchy:
+            # Record acquisition for hierarchy tracking when using legacy path
+            self._record_acquired(lock_key, hierarchy_level, context_payload)
+
         await self._mark_writer_waiting(state)
+        writer_marked = True
         try:
             async with state.write_lock:
                 while True:
@@ -916,13 +1038,15 @@ class LockManager:
 
                 hold_start = loop.time()
                 try:
-                    self._track_lock_acquisition(
-                        lock_key, "table_write", self.LOCK_LEVELS.get("table_write", self._default_lock_level)
-                    )
+                    if not tracked_externally:
+                        self._track_lock_acquisition(
+                            lock_key, "table_write", hierarchy_level
+                        )
                     try:
                         yield
                     finally:
-                        self._release_lock_tracking(lock_key)
+                        if not tracked_externally:
+                            self._release_lock_tracking(lock_key)
                 finally:
                     hold_duration = loop.time() - hold_start
                     state.metrics.total_write_hold_time += hold_duration
@@ -941,7 +1065,14 @@ class LockManager:
                         },
                     )
         finally:
-            await self._unmark_writer_waiting(state)
+            if writer_marked:
+                await self._unmark_writer_waiting(state)
+            if smart_retry_acquired:
+                await self._release_lock_internal(lock_key)
+            if self._enforce_hierarchy:
+                self._remove_acquisition_record(lock_key)
+            if tracked_externally:
+                self._release_lock_tracking(lock_key)
 
     @asynccontextmanager
     async def _compat_table_guard(
@@ -1256,6 +1387,73 @@ class LockManager:
         chat_id_value = guard_context.get("chat_id")
         if chat_id_value is not None:
             guard_context["chat_id"] = self._safe_int(chat_id_value)
+
+        lock_type_label = (
+            metrics_lock_type if metrics_lock_type is not None else self._extract_lock_type(lock_key)
+        )
+
+        if self._smart_retry_enabled:
+            wait_time = 0.0
+            hold_duration = 0.0
+            success = False
+            acquired_lock = False
+            hierarchy_level = level
+            if self._enforce_hierarchy:
+                self._validate_lock_hierarchy(lock_key, hierarchy_level)
+                self._record_acquired(lock_key, hierarchy_level, guard_context)
+            self._track_lock_acquisition(lock_key, lock_type_label, hierarchy_level)
+            wait_start = time.perf_counter()
+            try:
+                effective_timeout = (
+                    float(timeout)
+                    if timeout is not None
+                    else self._get_lock_timeout(lock_type_label)
+                )
+                acquired_lock = await self._acquire_lock_with_smart_retry(
+                    lock_key, effective_timeout, guard_context
+                )
+                wait_time = time.perf_counter() - wait_start
+                if not acquired_lock:
+                    raise TimeoutError(
+                        f"Failed to acquire {lock_key} after smart retry"
+                    )
+                success = True
+                hold_start = time.perf_counter()
+                try:
+                    yield
+                finally:
+                    hold_duration = time.perf_counter() - hold_start
+            except Exception:
+                success = False
+                raise
+            finally:
+                if acquired_lock:
+                    await self._release_lock_internal(lock_key)
+                if self._enforce_hierarchy:
+                    self._remove_acquisition_record(lock_key)
+                self._release_lock_tracking(lock_key)
+                metrics = getattr(self, "_request_metrics", None)
+                if metrics is not None and hasattr(
+                    metrics, "record_fine_grained_lock"
+                ):
+                    try:
+                        chat_id_metric = guard_context.get("chat_id")
+                        metrics.record_fine_grained_lock(
+                            lock_type=metrics_lock_type
+                            if metrics_lock_type is not None
+                            else self._extract_lock_type(lock_key),
+                            chat_id=self._safe_int(chat_id_metric)
+                            if chat_id_metric is not None
+                            else 0,
+                            duration_ms=hold_duration * 1000.0,
+                            wait_time_ms=wait_time * 1000.0,
+                            success=success,
+                        )
+                    except Exception:  # pragma: no cover - best-effort metrics
+                        self._logger.debug(
+                            "Failed to record fine-grained lock metric", exc_info=True
+                        )
+            return
 
         acquire_start = time.perf_counter()
         wait_time = 0.0
@@ -3867,36 +4065,288 @@ class LockManager:
             extra={"event_type": "lock_metrics_reset"},
         )
 
-    async def get_lock_queue_depth(self, chat_id: int) -> int:
-        """
-        Sample the current lock queue depth for a specific table.
+    async def get_lock_queue_depth(self, lock_key: str) -> int:
+        """Get current queue depth for a specific lock using Redis."""
 
-        Returns the number of operations waiting in the sorted set
-        representing pending lock requests for the given chat_id.
+        redis_client = getattr(self, "_redis_client", None)
+        if redis_client is None or not hasattr(redis_client, "llen"):
+            return 0
 
-        Args:
-            chat_id: The table identifier
+        queue_key = f"lock_queue:{lock_key}"
+        try:
+            depth = await redis_client.llen(queue_key)
+            depth_value = int(depth) if depth is not None else 0
+            try:
+                self.lock_queue_depth.labels(
+                    lock_type=self._extract_lock_type(lock_key)
+                ).inc(depth_value)
+            except Exception:  # pragma: no cover - metrics best effort
+                pass
+            return depth_value
+        except Exception as exc:
+            self._logger.warning(
+                f"Failed to get queue depth for {lock_key}: {exc}",
+                extra={"lock_key": lock_key, "error": str(exc)},
+            )
+            return 0
 
-        Returns:
-            Integer count of queued operations (0 if queue doesn't exist or on error)
-        """
-        redis_key = f"lock:queue:{chat_id}"
+    async def _enqueue_lock_waiter(self, lock_key: str, task_id: str) -> None:
+        """Add task to lock queue for depth tracking."""
+
+        redis_client = getattr(self, "_redis_client", None)
+        if redis_client is None or not hasattr(redis_client, "lpush"):
+            return
+
+        queue_key = f"lock_queue:{lock_key}"
+        try:
+            await redis_client.lpush(queue_key, task_id)
+            if hasattr(redis_client, "expire"):
+                await redis_client.expire(queue_key, 300)
+        except Exception as exc:  # pragma: no cover - best-effort logging
+            self._logger.warning(
+                f"Failed to enqueue waiter: {exc}",
+                extra={"lock_key": lock_key, "task_id": task_id},
+            )
+
+    async def _dequeue_lock_waiter(self, lock_key: str, task_id: str) -> None:
+        """Remove task from lock queue."""
+
+        redis_client = getattr(self, "_redis_client", None)
+        if redis_client is None or not hasattr(redis_client, "lrem"):
+            return
+
+        queue_key = f"lock_queue:{lock_key}"
+        try:
+            await redis_client.lrem(queue_key, 1, task_id)
+        except Exception as exc:  # pragma: no cover - best-effort logging
+            self._logger.warning(
+                f"Failed to dequeue waiter: {exc}",
+                extra={"lock_key": lock_key, "task_id": task_id},
+            )
+
+    def _generate_task_id(self) -> str:
+        """Generate unique task identifier for queue tracking."""
+
+        task = None
+        try:
+            task = asyncio.current_task()
+        except RuntimeError:  # pragma: no cover - no running loop
+            task = None
+
+        task_name = "unknown"
+        if task is not None:
+            get_name = getattr(task, "get_name", None)
+            if callable(get_name):
+                task_name = str(get_name())
+            else:
+                task_name = f"task-{id(task):x}"
+
+        return f"{task_name}:{uuid.uuid4().hex[:8]}"
+
+    async def _acquire_lock_with_smart_retry(
+        self,
+        lock_key: str,
+        timeout: float,
+        context: Optional[Dict[str, Any]] = None,
+    ) -> bool:
+        """Acquire lock with intelligent retry and queue estimation."""
+
+        retry_config = {}
+        if isinstance(self._system_constants, Mapping):
+            retry_config = self._system_constants.get("lock_retry", {})  # type: ignore[index]
+        if not isinstance(retry_config, Mapping):
+            retry_config = {}
+
+        max_attempts = int(retry_config.get("max_attempts", 3))
+        if max_attempts <= 0:
+            max_attempts = 1
+
+        backoff_delays = list(retry_config.get("backoff_delays_seconds", [1, 2, 4, 8]))
+        if not backoff_delays:
+            backoff_delays = [1.0]
+        backoff_delays = [max(0.0, float(value)) or 0.5 for value in backoff_delays]
+
+        queue_threshold = float(retry_config.get("queue_depth_threshold", 5))
+        wait_threshold = float(retry_config.get("estimated_wait_threshold_seconds", 25))
+        grace_buffer = float(retry_config.get("grace_buffer_seconds", 30))
+        jitter_enabled = bool(retry_config.get("enable_jitter", True))
+        jitter_range = retry_config.get("jitter_range", [0.75, 1.25])
+        try:
+            jitter_low = float(jitter_range[0])
+            jitter_high = float(jitter_range[1])
+        except Exception:
+            jitter_low, jitter_high = 0.75, 1.25
+        queue_multiplier = float(retry_config.get("queue_wait_multiplier", 0.5))
+        max_queue_multiplier = float(retry_config.get("max_queue_multiplier", 3.0))
+        per_task_wait = float(retry_config.get("estimated_task_seconds", 2.5))
+
+        lock_type = self._extract_lock_type(lock_key)
+        loop = asyncio.get_running_loop()
+        start_time = loop.time()
+        attempt = 0
+        total_wait_time = 0.0
+        task_id = self._generate_task_id()
+
+        while attempt < max_attempts:
+            attempt += 1
+
+            queue_depth = await self.get_lock_queue_depth(lock_key)
+            estimated_wait = max(0.0, queue_depth * per_task_wait)
+            try:
+                if estimated_wait > 0:
+                    self.estimated_queue_wait.labels(lock_type=lock_type).observe(
+                        estimated_wait
+                    )
+            except Exception:  # pragma: no cover - metrics best effort
+                pass
+
+            if queue_depth > queue_threshold and estimated_wait >= wait_threshold:
+                self._logger.warning(
+                    "Aborting lock acquisition due to deep queue",
+                    extra={
+                        "lock_key": lock_key,
+                        "queue_depth": queue_depth,
+                        "estimated_wait": estimated_wait,
+                        "threshold": wait_threshold,
+                    },
+                )
+                try:
+                    self.lock_acquisition_failures.labels(
+                        lock_type=lock_type, failure_reason="queue_too_deep"
+                    ).inc()
+                    self.lock_wait_time.labels(lock_type=lock_type).observe(
+                        loop.time() - start_time
+                    )
+                except Exception:  # pragma: no cover - metrics best effort
+                    pass
+                return False
+
+            await self._enqueue_lock_waiter(lock_key, task_id)
+
+            try:
+                acquired = await self._acquire_lock_internal(lock_key, timeout)
+                if acquired:
+                    await self._dequeue_lock_waiter(lock_key, task_id)
+                    actual_wait = loop.time() - start_time
+                    try:
+                        self.lock_acquisition_success.labels(
+                            lock_type=lock_type, attempt_number=str(attempt)
+                        ).inc()
+                        if attempt > 1:
+                            self.lock_retry_success.labels(lock_type=lock_type).inc()
+                        self.lock_wait_time.labels(lock_type=lock_type).observe(
+                            actual_wait
+                        )
+                    except Exception:  # pragma: no cover - metrics best effort
+                        pass
+                    return True
+
+                if attempt < max_attempts:
+                    delay_index = min(attempt - 1, len(backoff_delays) - 1)
+                    base_delay = float(backoff_delays[delay_index])
+                    jitter = 1.0
+                    if jitter_enabled:
+                        jitter = random.uniform(jitter_low, jitter_high)
+                    actual_delay = base_delay * jitter
+                    queue_factor = min(queue_depth * queue_multiplier, max_queue_multiplier)
+                    adjusted_delay = actual_delay * (1.0 + queue_factor)
+                    total_wait_time += adjusted_delay
+
+                    if total_wait_time > grace_buffer:
+                        self._logger.warning(
+                            "Aborting retry due to grace buffer exceeded",
+                            extra={
+                                "lock_key": lock_key,
+                                "total_wait_time": total_wait_time,
+                                "grace_buffer": grace_buffer,
+                            },
+                        )
+                        break
+
+                    self._logger.info(
+                        "Lock acquisition failed, retrying in %.2fs",
+                        adjusted_delay,
+                        extra={
+                            "lock_key": lock_key,
+                            "attempt": attempt,
+                            "max_attempts": max_attempts,
+                            "queue_depth": queue_depth,
+                            "base_delay": base_delay,
+                            "adjusted_delay": adjusted_delay,
+                        },
+                    )
+                    try:
+                        self.lock_retry_attempts.labels(
+                            lock_type=lock_type, attempt_number=str(attempt)
+                        ).inc()
+                    except Exception:  # pragma: no cover - metrics best effort
+                        pass
+                    await asyncio.sleep(adjusted_delay)
+
+            except Exception as exc:
+                await self._dequeue_lock_waiter(lock_key, task_id)
+                self._logger.error(
+                    f"Exception during lock acquisition attempt {attempt}",
+                    extra={"lock_key": lock_key, "error": str(exc)},
+                    exc_info=True,
+                )
+                if attempt >= max_attempts:
+                    self.lock_wait_time.labels(lock_type=lock_type).observe(
+                        loop.time() - start_time
+                    )
+                    raise
+
+        await self._dequeue_lock_waiter(lock_key, task_id)
+        try:
+            self.lock_acquisition_failures.labels(
+                lock_type=lock_type, failure_reason="max_retries_exceeded"
+            ).inc()
+            self.lock_wait_time.labels(lock_type=lock_type).observe(
+                loop.time() - start_time
+            )
+        except Exception:  # pragma: no cover - metrics best effort
+            pass
+        return False
+
+    async def _acquire_lock_internal(self, lock_key: str, timeout: float) -> bool:
+        """Internal lock acquisition without retry logic."""
+
+        if getattr(self, "_redis_client", None) is None:
+            return True
 
         try:
-            # ZCARD returns cardinality (number of elements) in sorted set
-            depth = await self._redis.zcard(redis_key)
-            return int(depth) if depth is not None else 0
-        except Exception as e:
-            self.logger.warning(
-                f"Failed to sample lock queue depth for chat_id={chat_id}: {e}",
-                extra={
-                    "chat_id": chat_id,
-                    "redis_key": redis_key,
-                    "error_type": type(e).__name__
-                },
-                exc_info=True
+            expire_seconds = max(1, int(math.ceil(float(timeout))))
+        except Exception:
+            expire_seconds = max(1, int(math.ceil(1.0)))
+
+        try:
+            result = await self._redis_pool.set(
+                lock_key,
+                "locked",
+                nx=True,
+                ex=expire_seconds,
             )
-            return 0  # Fail-safe: return 0 to avoid blocking on errors
+            return bool(result)
+        except Exception as exc:
+            self._logger.error(
+                f"Redis lock acquisition failed: {exc}",
+                extra={"lock_key": lock_key, "timeout": timeout},
+            )
+            return False
+
+    async def _release_lock_internal(self, lock_key: str) -> None:
+        """Internal lock release."""
+
+        if getattr(self, "_redis_client", None) is None:
+            return
+
+        try:
+            await self._redis_pool.delete(lock_key)
+        except Exception as exc:  # pragma: no cover - best-effort logging
+            self._logger.warning(
+                f"Failed to release lock {lock_key}: {exc}",
+                extra={"lock_key": lock_key, "error": str(exc)},
+            )
 
     async def estimate_wait_time(self, queue_depth: int) -> float:
         """

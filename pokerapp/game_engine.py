@@ -1303,21 +1303,27 @@ class GameEngine:
 
     def _is_valid_action(
         self,
-        game: Game,
-        player: Player,
+        game_state: Mapping[str, Any] | Game,
+        player: Mapping[str, Any] | Player,
         action: str,
         amount: Optional[int],
     ) -> bool:
         """Validate the requested ``action`` for ``player``."""
 
-        if action not in self._valid_player_actions:
+        normalized_action = (action or "").strip().lower()
+        if normalized_action not in self._valid_player_actions:
             return False
 
-        state = getattr(player, "state", PlayerState.ACTIVE)
-        if state == PlayerState.FOLD:
+        player_state = None
+        if isinstance(player, Mapping):
+            player_state = player.get("state", "active")
+        else:
+            player_state = getattr(player, "state", PlayerState.ACTIVE)
+
+        if str(player_state).lower() in {"fold", "folded"}:
             return False
 
-        if action == "raise" and (amount is None or amount <= 0):
+        if normalized_action == "raise" and (amount is None or amount <= 0):
             return False
 
         return True
@@ -1341,147 +1347,100 @@ class GameEngine:
         action: str,
         amount: int = 0
     ) -> dict:
-        """Handle player action with fine-grained locking."""
+        """Handle player action with smart retry fine-grained locking."""
 
         action = (action or "").strip().lower()
-        required_amount = 0
-        current_bet = 0
-        player_bet = 0
-        state: Optional[Dict[str, Any]] = None
-        player: Optional[Dict[str, Any]] = None
+        current_state: Optional[Dict[str, Any]] = None
+        player_snapshot: Optional[Dict[str, Any]] = None
 
-        # Step 1: Acquire table read lock to inspect state
-        async with self._lock_manager.acquire_table_read_lock(chat_id) as read_acquired:
-            if not read_acquired:
-                self._logger.warning(
-                    "Failed to acquire table read lock for player action",
-                    extra={"chat_id": chat_id, "user_id": user_id, "action": action},
-                )
-                return {"success": False, "message": "Table is busy, please retry"}
-
-            loaded_state = await self.load_game_state(chat_id)
-            if not isinstance(loaded_state, dict):
-                return {"success": False, "message": "Game not found"}
-
-            state = loaded_state
-            current_player = self._get_current_player(state)
-            if current_player is None:
-                return {"success": False, "message": "No active player"}
-
-            player = self._find_player(state, user_id)
-            if player is None:
-                return {"success": False, "message": "Player not found"}
-
-            current_bet = state.get("current_bet", 0)
-            player_bet = player.get("bet", 0)
-
-        required_amount = self._calculate_required_amount(
-            action,
-            current_bet,
-            player_bet,
-            player.get("chips", 0),
-            amount,
-        )
-
-        # Step 2: Acquire player lock to mutate player state
-        async with self._lock_manager.acquire_player_lock(chat_id, user_id) as player_acquired:
-            if not player_acquired:
-                self._logger.warning(
-                    "Failed to acquire player lock",
-                    extra={"chat_id": chat_id, "user_id": user_id},
-                )
-                return {"success": False, "message": "Failed to acquire player lock"}
-
-            state = await self.load_game_state(chat_id)
-            if not isinstance(state, dict):
-                return {"success": False, "message": "Game not found"}
-
-            player = self._find_player(state, user_id)
-            if player is None:
-                return {"success": False, "message": "Player not found"}
-            if player.get("has_acted"):
-                return {"success": False, "message": "Player has already acted"}
-
-            if action == "fold":
-                player["state"] = "folded"
-                player["has_acted"] = True
-            elif action in ["call", "raise", "all_in"]:
-                if player["chips"] < required_amount:
-                    return {"success": False, "message": "Insufficient chips"}
-
-                player["chips"] -= required_amount
-                player["bet"] += required_amount
-                player["has_acted"] = True
-
-                if action == "raise":
-                    state["current_bet"] = player["bet"]
-            elif action == "check":
-                current_bet = state.get("current_bet", 0)
-                player_bet = player.get("bet", 0)
-                if current_bet > player_bet:
-                    return {"success": False, "message": "Cannot check, must call or fold"}
-                player["has_acted"] = True
-            else:
-                return {"success": False, "message": "Invalid action"}
-
-        # Step 3: Acquire pot lock if we need to collect bets
-        needs_pot_update = action in ["call", "raise", "all_in"] and self._is_betting_round_complete(state)
-
-        if needs_pot_update:
-            async with self._lock_manager.acquire_pot_lock(chat_id) as pot_acquired:
-                if not pot_acquired:
-                    self._logger.warning(
-                        "Failed to acquire pot lock",
-                        extra={"chat_id": chat_id},
-                    )
-                    return {"success": False, "message": "Failed to update pot"}
-
+        try:
+            # Step 1: Validate request under table read lock
+            async with self._lock_manager.table_read_lock(chat_id):
                 state = await self.load_game_state(chat_id)
                 if not isinstance(state, dict):
                     return {"success": False, "message": "Game not found"}
 
-                total_bets = sum(p.get("bet", 0) for p in state.get("players", []))
-                state["pot"] = state.get("pot", 0) + total_bets
+                player = self._find_player(state, user_id)
+                if player is None:
+                    return {"success": False, "message": "Player not found"}
 
-                for p in state.get("players", []):
-                    p["bet"] = 0
+                if not self._is_valid_action(state, player, action, amount):
+                    return {"success": False, "message": "Invalid action"}
 
-        # Step 4: Advance to next player
-        self._advance_to_next_player(state)
+            # Step 2: Update player state under dedicated lock
+            async with self._lock_manager.player_state_lock(chat_id, user_id):
+                state = await self.load_game_state(chat_id)
+                if not isinstance(state, dict):
+                    return {"success": False, "message": "Game not found"}
 
-        # Step 5: Acquire table write lock to persist
-        try:
-            async with self._lock_manager.acquire_table_write_lock(chat_id):
-                expected_version = state.get("version", 0)
-                state["version"] = expected_version + 1
+                player = self._find_player(state, user_id)
+                if player is None or player.get("has_acted"):
+                    return {"success": False, "message": "Player cannot act"}
 
-                save_success = await self.save_game_state(chat_id, state)
-
-                if not save_success:
-                    return {"success": False, "message": "State conflict, please retry"}
-
-                self._logger.info(
-                    "Player action completed successfully",
-                    extra={
-                        "chat_id": chat_id,
-                        "user_id": user_id,
-                        "action": action,
-                        "amount": required_amount,
-                        "new_version": state["version"],
-                    },
+                required_amount = self._calculate_required_amount(
+                    action,
+                    state.get("current_bet", 0),
+                    player.get("bet", 0),
+                    player.get("chips", 0),
+                    amount,
                 )
+
+                success = self._apply_player_action(
+                    player, action, required_amount, state
+                )
+                if not success:
+                    return {"success": False, "message": "Action failed"}
+
+                current_state = state
+                player_snapshot = player
+
+            # Step 3: Update pot if the round progressed
+            if current_state is not None and self._needs_pot_update(action, current_state):
+                async with self._lock_manager.pot_lock(chat_id):
+                    self._update_pot_from_bets(current_state)
+
+            # Step 4: Persist updated table state
+            async with self._lock_manager.table_write_lock(chat_id):
+                final_state = current_state
+                if final_state is None:
+                    final_state = await self.load_game_state(chat_id)
+
+                if not isinstance(final_state, dict):
+                    return {"success": False, "message": "Game not found"}
+
+                if player_snapshot is not None:
+                    # Ensure the persisted state reflects the player's latest data
+                    persisted_player = self._find_player(final_state, user_id)
+                    if persisted_player is not None:
+                        persisted_player.update(player_snapshot)
+
+                self._advance_to_next_player(final_state)
+                final_state["version"] = final_state.get("version", 0) + 1
+
+                save_success = await self.save_game_state(chat_id, final_state)
+                if not save_success:
+                    return {"success": False, "message": "State conflict, retry"}
 
                 return {
                     "success": True,
                     "message": f"{action.capitalize()} successful",
-                    "new_state": state,
+                    "new_state": final_state,
                 }
+
         except TimeoutError:
-            self._logger.error(
-                "Failed to acquire table write lock for persistence",
-                extra={"chat_id": chat_id, "user_id": user_id},
+            self._logger.warning(
+                "Lock timeout during player action",
+                extra={"chat_id": chat_id, "user_id": user_id, "action": action},
             )
-            return {"success": False, "message": "Failed to save game state"}
+            return {"success": False, "message": "Server busy, please retry"}
+
+        except Exception as exc:
+            self._logger.error(
+                "Unexpected error in player action",
+                extra={"chat_id": chat_id, "user_id": user_id, "error": str(exc)},
+                exc_info=True,
+            )
+            return {"success": False, "message": "Internal error"}
 
     def _get_current_player(self, state: dict) -> Optional[dict]:
         """Get the player whose turn it is."""
@@ -1520,6 +1479,60 @@ class GameEngine:
         elif action == "all_in":
             return player_chips
         return 0
+
+    def _apply_player_action(
+        self,
+        player: Dict[str, Any],
+        action: str,
+        amount: int,
+        state: Optional[Dict[str, Any]] = None,
+    ) -> bool:
+        """Apply the requested action to the player state."""
+
+        normalized_action = (action or "").strip().lower()
+        if normalized_action == "fold":
+            player["state"] = "folded"
+            player["has_acted"] = True
+            return True
+
+        if normalized_action == "check":
+            player["has_acted"] = True
+            return True
+
+        if normalized_action in {"call", "raise", "all_in"}:
+            contribution = max(0, int(amount))
+            chips_available = int(player.get("chips", 0))
+            if contribution > chips_available:
+                return False
+
+            player["chips"] = chips_available - contribution
+            player["bet"] = player.get("bet", 0) + contribution
+            player["has_acted"] = True
+
+            if state is not None and normalized_action in {"raise", "all_in"}:
+                state["current_bet"] = max(
+                    state.get("current_bet", 0), player.get("bet", 0)
+                )
+            return True
+
+        return False
+
+    def _needs_pot_update(self, action: str, state: Mapping[str, Any]) -> bool:
+        """Determine whether the pot should be updated after the action."""
+
+        normalized_action = (action or "").strip().lower()
+        return normalized_action in {"call", "raise", "all_in"} and self._is_betting_round_complete(
+            state
+        )
+
+    def _update_pot_from_bets(self, state: Dict[str, Any]) -> None:
+        """Aggregate player bets into the pot and reset individual bets."""
+
+        players = state.get("players", [])
+        total_bets = sum(max(0, int(p.get("bet", 0))) for p in players)
+        state["pot"] = state.get("pot", 0) + total_bets
+        for player in players:
+            player["bet"] = 0
 
     def _is_betting_round_complete(self, state: dict) -> bool:
         """Check if all active players have acted in current round."""

@@ -1,0 +1,51 @@
+{
+  "dashboard": {
+    "title": "Poker Bot - Smart Lock Retry Monitoring",
+    "panels": [
+      {
+        "title": "Lock Queue Depths",
+        "type": "graph",
+        "targets": [
+          {
+            "expr": "poker_lock_queue_depth_total",
+            "legendFormat": "{{lock_type}} Queue Depth"
+          }
+        ]
+      },
+      {
+        "title": "Retry Success Rate",
+        "type": "stat",
+        "targets": [
+          {
+            "expr": "rate(poker_lock_retry_success_total[5m]) / rate(poker_lock_retry_attempts_total[5m]) * 100",
+            "legendFormat": "Success Rate %"
+          }
+        ]
+      },
+      {
+        "title": "Lock Wait Times",
+        "type": "heatmap",
+        "targets": [
+          {
+            "expr": "poker_lock_wait_time_seconds_bucket",
+            "legendFormat": "{{lock_type}}"
+          }
+        ]
+      },
+      {
+        "title": "Queue Estimation Accuracy",
+        "type": "graph",
+        "targets": [
+          {
+            "expr": "poker_lock_estimated_queue_wait_seconds_bucket",
+            "legendFormat": "Estimated Wait"
+          },
+          {
+            "expr": "poker_lock_wait_time_seconds_bucket",
+            "legendFormat": "Actual Wait"
+          }
+        ]
+      }
+    ]
+  }
+}
