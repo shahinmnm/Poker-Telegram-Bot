@@ -441,6 +441,66 @@ class GameEngine:
         self._redis_client = redis_client
         self._game_state_ttl_ms = 15 * 60 * 1000  # 15 minutes of inactivity tolerance
 
+        self._max_players = _positive_int(
+            _GAME_CONSTANTS.get("max_players"), 8
+        )
+        self._default_money = _positive_int(
+            _GAME_CONSTANTS.get("default_money"), 1000
+        )
+        self._player_factory = player_factory
+        self._initialize_stop_translations()
+        self._countdown_queue = CountdownMessageQueue(max_size=100)
+        self._countdown_worker = CountdownWorker(
+            queue=self._countdown_queue,
+            safe_ops=self._safe_ops,
+            edit_interval=1.0,
+        )
+        self._countdown_contexts: Dict[int, ContextTypes.DEFAULT_TYPE] = {}
+
+        locks_config = getattr(self.constants, "locks", None)
+        action_lock_config: Optional[Mapping[str, Any]] = None
+        if isinstance(locks_config, Mapping):
+            candidate = locks_config.get("action")
+            if isinstance(candidate, Mapping):
+                action_lock_config = candidate
+        if action_lock_config is None and hasattr(self.constants, "section"):
+            try:
+                locks_section = self.constants.section("locks")  # type: ignore[attr-defined]
+            except Exception:  # pragma: no cover - defensive fallback
+                locks_section = None
+            if isinstance(locks_section, Mapping):
+                candidate = locks_section.get("action")
+                if isinstance(candidate, Mapping):
+                    action_lock_config = candidate
+
+        self._valid_player_actions: Set[str] = {
+            "fold",
+            "check",
+            "call",
+            "raise",
+            "all_in",
+        }
+        self._action_lock_ttl: int = 10
+        self._action_lock_feedback_text = "⚠️ Action in progress, please wait..."
+        if isinstance(action_lock_config, Mapping):
+            ttl_candidate = action_lock_config.get("ttl")
+            if isinstance(ttl_candidate, (int, float)):
+                ttl_value = int(ttl_candidate)
+                if ttl_value > 0:
+                    self._action_lock_ttl = ttl_value
+            valid_types_candidate = action_lock_config.get("valid_types")
+            if isinstance(valid_types_candidate, (list, tuple, set)):
+                normalized = {
+                    str(value).strip().lower()
+                    for value in valid_types_candidate
+                    if str(value).strip()
+                }
+                if normalized:
+                    self._valid_player_actions = normalized
+            feedback_candidate = action_lock_config.get("feedback_text")
+            if isinstance(feedback_candidate, str) and feedback_candidate.strip():
+                self._action_lock_feedback_text = feedback_candidate.strip()
+
     async def load_game_state_with_version(
         self, chat_id: int
     ) -> Optional[Dict[str, Any]]:
@@ -569,65 +629,6 @@ class GameEngine:
 
     def _state_key(self, chat_id: int) -> str:
         return _GAME_STATE_KEY_TEMPLATE.format(chat_id=int(chat_id))
-        self._max_players = _positive_int(
-            _GAME_CONSTANTS.get("max_players"), 8
-        )
-        self._default_money = _positive_int(
-            _GAME_CONSTANTS.get("default_money"), 1000
-        )
-        self._player_factory = player_factory
-        self._initialize_stop_translations()
-        self._countdown_queue = CountdownMessageQueue(max_size=100)
-        self._countdown_worker = CountdownWorker(
-            queue=self._countdown_queue,
-            safe_ops=self._safe_ops,
-            edit_interval=1.0,
-        )
-        self._countdown_contexts: Dict[int, ContextTypes.DEFAULT_TYPE] = {}
-
-        locks_config = getattr(self.constants, "locks", None)
-        action_lock_config: Optional[Mapping[str, Any]] = None
-        if isinstance(locks_config, Mapping):
-            candidate = locks_config.get("action")
-            if isinstance(candidate, Mapping):
-                action_lock_config = candidate
-        if action_lock_config is None and hasattr(self.constants, "section"):
-            try:
-                locks_section = self.constants.section("locks")  # type: ignore[attr-defined]
-            except Exception:  # pragma: no cover - defensive fallback
-                locks_section = None
-            if isinstance(locks_section, Mapping):
-                candidate = locks_section.get("action")
-                if isinstance(candidate, Mapping):
-                    action_lock_config = candidate
-
-        self._valid_player_actions: Set[str] = {
-            "fold",
-            "check",
-            "call",
-            "raise",
-            "all_in",
-        }
-        self._action_lock_ttl: int = 10
-        self._action_lock_feedback_text = "⚠️ Action in progress, please wait..."
-        if isinstance(action_lock_config, Mapping):
-            ttl_candidate = action_lock_config.get("ttl")
-            if isinstance(ttl_candidate, (int, float)):
-                ttl_value = int(ttl_candidate)
-                if ttl_value > 0:
-                    self._action_lock_ttl = ttl_value
-            valid_types_candidate = action_lock_config.get("valid_types")
-            if isinstance(valid_types_candidate, (list, tuple, set)):
-                normalized = {
-                    str(value).strip().lower()
-                    for value in valid_types_candidate
-                    if str(value).strip()
-                }
-                if normalized:
-                    self._valid_player_actions = normalized
-            feedback_candidate = action_lock_config.get("feedback_text")
-            if isinstance(feedback_candidate, str) and feedback_candidate.strip():
-                self._action_lock_feedback_text = feedback_candidate.strip()
 
     async def join_game(
         self,
