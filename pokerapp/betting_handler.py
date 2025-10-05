@@ -47,6 +47,7 @@ class BettingHandler:
         self._wallet = wallet_service
         self._engine = game_engine
         self._locks = lock_manager
+        self.logger = logger
         self._retry_policy = self._initialise_retry_policy(
             config=config, overrides=retry_settings
         )
@@ -389,21 +390,52 @@ class BettingHandler:
         self,
         reservation_id: Optional[str],
         reason: str,
-        *,
         allow_committed: bool = False,
     ) -> None:
-        if not reservation_id:
-            return
+        """
+        Safely rollback a wallet reservation with full error isolation.
+
+        Logs the rollback attempt and any failures encountered.
+        Does NOT re-raise exceptions to prevent cascading failures.
+
+        Args:
+            reservation_id: The reservation to rollback (None is no-op)
+            reason: Human-readable explanation for rollback
+            allow_committed: If True, attempt rollback even if already committed
+        """
+        if reservation_id is None:
+            return  # Nothing to rollback
+
+        self.logger.info(
+            f"Initiating rollback for reservation_id={reservation_id}",
+            extra={
+                "reservation_id": reservation_id,
+                "reason": reason,
+                "allow_committed": allow_committed
+            }
+        )
+
         try:
             await self._wallet.rollback_reservation(
                 reservation_id,
-                reason,
+                reason=reason,
                 allow_committed=allow_committed,
             )
-        except Exception:  # pragma: no cover - defensive logging
-            logger.exception(
-                "Failed to rollback reservation",
-                extra={"reservation_id": reservation_id, "reason": reason},
+            self.logger.info(
+                f"Rollback successful for reservation_id={reservation_id}",
+                extra={"reservation_id": reservation_id}
+            )
+        except Exception as e:
+            # CRITICAL: Log but do NOT re-raise
+            # Prevents rollback failures from masking the original error
+            self.logger.exception(
+                f"CRITICAL: Rollback failed for reservation_id={reservation_id}",
+                extra={
+                    "reservation_id": reservation_id,
+                    "reason": reason,
+                    "error": str(e),
+                    "error_type": type(e).__name__
+                },
             )
 
     def _select_backoff_delay(self, attempt: int) -> float:
@@ -480,82 +512,149 @@ class BettingHandler:
         required_amount: int,
         reservation_id: Optional[str],
     ) -> tuple[BettingResult, bool]:
-        state = await self._engine.load_game_state(chat_id)
-        if not isinstance(state, Mapping):
-            if reservation_id:
-                await self._wallet.rollback_reservation(
-                    reservation_id, "game_not_found"
-                )
-            return BettingResult(False, "Game not found or has ended"), False
+        """
+        Execute the commit phase of 2PC within the table lock.
 
-        if not self._is_players_turn(state, user_id):
-            if reservation_id:
-                await self._wallet.rollback_reservation(
-                    reservation_id, "not_players_turn"
-                )
-            return BettingResult(False, "It is not your turn"), False
+        Phase 2 Workflow:
+        1. Load game state with optimistic lock version
+        2. Validate player turn
+        3. Commit wallet reservation (if exists)
+        4. Apply betting action to game state
+        5. Save state with version check
+        6. Rollback on any failure
 
-        expected_version = self._extract_version(state)
+        Args:
+            user_id: Player executing the action
+            chat_id: Table identifier
+            action: Betting action (e.g., "call", "raise")
+            required_amount: Chip amount for the action
+            reservation_id: Optional wallet reservation from Phase 1
+
+        Returns:
+            Tuple of (BettingResult, committed_flag)
+            committed_flag=True means wallet was updated (must rollback on save failure)
+        """
         committed = False
+        save_success = False
 
-        if reservation_id is not None:
-            commit_success, commit_message = await self._wallet.commit_reservation(
-                reservation_id
-            )
-            if not commit_success:
-                await self._wallet.rollback_reservation(
-                    reservation_id,
-                    f"commit_failed:{commit_message}",
-                    allow_committed=True,
+        try:
+            # Step 1: Load game state with version
+            state = await self._engine.load_game_state(chat_id)
+            if not isinstance(state, Mapping):
+                await self._rollback(reservation_id, "game_not_found")
+                return (
+                    BettingResult(False, "Game not found or has ended"),
+                    committed,
                 )
-                return BettingResult(False, commit_message), committed
-            committed = True
 
-        updated_state = await self._apply_action(
-            state, user_id, action, required_amount
-        )
+            # Step 2: Validate player turn
+            if not self._is_players_turn(state, user_id):
+                await self._rollback(reservation_id, "not_players_turn")
+                return (
+                    BettingResult(False, "It is not your turn"),
+                    committed,
+                )
 
-        save_success = await self._engine.save_game_state_with_version(
-            chat_id,
-            updated_state,
-            expected_version=expected_version,
-        )
+            expected_version = self._extract_version(state)
 
-        if not save_success:
+            # Step 3: Commit wallet reservation (Phase 2 of 2PC)
             if reservation_id is not None:
-                await self._wallet.rollback_reservation(
+                commit_success, commit_message = await self._wallet.commit_reservation(
+                    reservation_id
+                )
+                if not commit_success:
+                    await self._rollback(
+                        reservation_id,
+                        f"commit_failed:{commit_message}",
+                        allow_committed=True,  # Wallet may have partial state
+                    )
+                    return (
+                        BettingResult(False, f"Wallet commit failed: {commit_message}"),
+                        committed,
+                    )
+                committed = True  # Wallet updated successfully
+
+            # Step 4: Apply action to game state
+            updated_state = await self._apply_action(
+                state, user_id, action, required_amount
+            )
+
+            # Step 5: Save state with optimistic lock version check
+            save_success = await self._engine.save_game_state_with_version(
+                chat_id,
+                updated_state,
+                expected_version=expected_version,
+            )
+
+            if not save_success:
+                # Optimistic lock conflict detected
+                await self._rollback(
                     reservation_id,
                     "version_conflict",
                     allow_committed=committed,
                 )
+                return (
+                    BettingResult(
+                        False,
+                        "State update conflict detected – please retry",
+                    ),
+                    committed,
+                )
+
+            # SUCCESS PATH
+            self.logger.info(
+                "Betting action committed and saved successfully",
+                extra={
+                    "user_id": user_id,
+                    "chat_id": chat_id,
+                    "action": action,
+                    "amount": required_amount,
+                    "reservation_id": reservation_id,
+                    "committed": committed,
+                    "new_version": self._extract_version(updated_state),
+                },
+            )
+
             return (
                 BettingResult(
-                    False,
-                    "State update conflict detected – action cancelled",
+                    True,
+                    f"{action.replace('_', ' ').title()} successful",
+                    new_state=dict(updated_state),
+                    reservation_id=reservation_id,
                 ),
                 committed,
             )
 
-        logger.info(
-            "Betting action succeeded",
-            extra={
-                "user_id": user_id,
-                "chat_id": chat_id,
-                "action": action,
-                "amount": required_amount,
-                "reservation_id": reservation_id,
-            },
-        )
+        except Exception as e:
+            # CRITICAL ERROR during commit/save phase
+            self.logger.exception(
+                f"CRITICAL: Unhandled exception in _commit_and_save",
+                extra={
+                    "user_id": user_id,
+                    "chat_id": chat_id,
+                    "action": action,
+                    "reservation_id": reservation_id,
+                    "committed": committed,
+                    "save_success": save_success,
+                    "error_type": type(e).__name__,
+                },
+            )
 
-        return (
-            BettingResult(
-                True,
-                f"{action.replace('_', ' ').title()} successful",
-                new_state=dict(updated_state),
-                reservation_id=reservation_id,
-            ),
-            committed,
-        )
+            # Attempt rollback if wallet was committed but save failed
+            if committed and not save_success:
+                await self._rollback(
+                    reservation_id,
+                    f"commit_save_exception:{type(e).__name__}",
+                    allow_committed=True,
+                )
+
+            return (
+                BettingResult(
+                    False,
+                    "An unexpected error occurred. Please retry.",
+                ),
+                committed,
+            )
 
     async def _validate_action(
         self,

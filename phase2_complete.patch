@@ -1,0 +1,447 @@
+diff --git a/config/system_constants.json b/config/system_constants.json
+index 067750e..b172b7e 100644
+--- a/config/system_constants.json
++++ b/config/system_constants.json
+@@ -34,7 +34,8 @@
+     "backoff_delays_seconds": [1, 2, 4, 8],
+     "queue_depth_threshold": 5,
+     "estimated_wait_threshold_seconds": 25,
+-    "grace_buffer_seconds": 30
++    "grace_buffer_seconds": 30,
++    "enable_smart_retry": true
+   },
+   "stats_batch_buffer": {
+     "max_size": 100,
+diff --git a/pokerapp/betting_handler.py b/pokerapp/betting_handler.py
+index af88b69..f03f97e 100644
+--- a/pokerapp/betting_handler.py
++++ b/pokerapp/betting_handler.py
+@@ -47,6 +47,7 @@ class BettingHandler:
+         self._wallet = wallet_service
+         self._engine = game_engine
+         self._locks = lock_manager
++        self.logger = logger
+         self._retry_policy = self._initialise_retry_policy(
+             config=config, overrides=retry_settings
+         )
+@@ -389,21 +390,52 @@ class BettingHandler:
+         self,
+         reservation_id: Optional[str],
+         reason: str,
+-        *,
+         allow_committed: bool = False,
+     ) -> None:
+-        if not reservation_id:
+-            return
++        """
++        Safely rollback a wallet reservation with full error isolation.
++
++        Logs the rollback attempt and any failures encountered.
++        Does NOT re-raise exceptions to prevent cascading failures.
++
++        Args:
++            reservation_id: The reservation to rollback (None is no-op)
++            reason: Human-readable explanation for rollback
++            allow_committed: If True, attempt rollback even if already committed
++        """
++        if reservation_id is None:
++            return  # Nothing to rollback
++
++        self.logger.info(
++            f"Initiating rollback for reservation_id={reservation_id}",
++            extra={
++                "reservation_id": reservation_id,
++                "reason": reason,
++                "allow_committed": allow_committed
++            }
++        )
++
+         try:
+             await self._wallet.rollback_reservation(
+                 reservation_id,
+-                reason,
++                reason=reason,
+                 allow_committed=allow_committed,
+             )
+-        except Exception:  # pragma: no cover - defensive logging
+-            logger.exception(
+-                "Failed to rollback reservation",
+-                extra={"reservation_id": reservation_id, "reason": reason},
++            self.logger.info(
++                f"Rollback successful for reservation_id={reservation_id}",
++                extra={"reservation_id": reservation_id}
++            )
++        except Exception as e:
++            # CRITICAL: Log but do NOT re-raise
++            # Prevents rollback failures from masking the original error
++            self.logger.exception(
++                f"CRITICAL: Rollback failed for reservation_id={reservation_id}",
++                extra={
++                    "reservation_id": reservation_id,
++                    "reason": reason,
++                    "error": str(e),
++                    "error_type": type(e).__name__
++                },
+             )
+ 
+     def _select_backoff_delay(self, attempt: int) -> float:
+@@ -480,82 +512,149 @@ class BettingHandler:
+         required_amount: int,
+         reservation_id: Optional[str],
+     ) -> tuple[BettingResult, bool]:
+-        state = await self._engine.load_game_state(chat_id)
+-        if not isinstance(state, Mapping):
+-            if reservation_id:
+-                await self._wallet.rollback_reservation(
+-                    reservation_id, "game_not_found"
++        """
++        Execute the commit phase of 2PC within the table lock.
++
++        Phase 2 Workflow:
++        1. Load game state with optimistic lock version
++        2. Validate player turn
++        3. Commit wallet reservation (if exists)
++        4. Apply betting action to game state
++        5. Save state with version check
++        6. Rollback on any failure
++
++        Args:
++            user_id: Player executing the action
++            chat_id: Table identifier
++            action: Betting action (e.g., "call", "raise")
++            required_amount: Chip amount for the action
++            reservation_id: Optional wallet reservation from Phase 1
++
++        Returns:
++            Tuple of (BettingResult, committed_flag)
++            committed_flag=True means wallet was updated (must rollback on save failure)
++        """
++        committed = False
++        save_success = False
++
++        try:
++            # Step 1: Load game state with version
++            state = await self._engine.load_game_state(chat_id)
++            if not isinstance(state, Mapping):
++                await self._rollback(reservation_id, "game_not_found")
++                return (
++                    BettingResult(False, "Game not found or has ended"),
++                    committed,
+                 )
+-            return BettingResult(False, "Game not found or has ended"), False
+ 
+-        if not self._is_players_turn(state, user_id):
+-            if reservation_id:
+-                await self._wallet.rollback_reservation(
+-                    reservation_id, "not_players_turn"
++            # Step 2: Validate player turn
++            if not self._is_players_turn(state, user_id):
++                await self._rollback(reservation_id, "not_players_turn")
++                return (
++                    BettingResult(False, "It is not your turn"),
++                    committed,
+                 )
+-            return BettingResult(False, "It is not your turn"), False
+ 
+-        expected_version = self._extract_version(state)
+-        committed = False
++            expected_version = self._extract_version(state)
+ 
+-        if reservation_id is not None:
+-            commit_success, commit_message = await self._wallet.commit_reservation(
+-                reservation_id
+-            )
+-            if not commit_success:
+-                await self._wallet.rollback_reservation(
+-                    reservation_id,
+-                    f"commit_failed:{commit_message}",
+-                    allow_committed=True,
++            # Step 3: Commit wallet reservation (Phase 2 of 2PC)
++            if reservation_id is not None:
++                commit_success, commit_message = await self._wallet.commit_reservation(
++                    reservation_id
+                 )
+-                return BettingResult(False, commit_message), committed
+-            committed = True
++                if not commit_success:
++                    await self._rollback(
++                        reservation_id,
++                        f"commit_failed:{commit_message}",
++                        allow_committed=True,  # Wallet may have partial state
++                    )
++                    return (
++                        BettingResult(False, f"Wallet commit failed: {commit_message}"),
++                        committed,
++                    )
++                committed = True  # Wallet updated successfully
+ 
+-        updated_state = await self._apply_action(
+-            state, user_id, action, required_amount
+-        )
++            # Step 4: Apply action to game state
++            updated_state = await self._apply_action(
++                state, user_id, action, required_amount
++            )
+ 
+-        save_success = await self._engine.save_game_state_with_version(
+-            chat_id,
+-            updated_state,
+-            expected_version=expected_version,
+-        )
++            # Step 5: Save state with optimistic lock version check
++            save_success = await self._engine.save_game_state_with_version(
++                chat_id,
++                updated_state,
++                expected_version=expected_version,
++            )
+ 
+-        if not save_success:
+-            if reservation_id is not None:
+-                await self._wallet.rollback_reservation(
++            if not save_success:
++                # Optimistic lock conflict detected
++                await self._rollback(
+                     reservation_id,
+                     "version_conflict",
+                     allow_committed=committed,
+                 )
++                return (
++                    BettingResult(
++                        False,
++                        "State update conflict detected – please retry",
++                    ),
++                    committed,
++                )
++
++            # SUCCESS PATH
++            self.logger.info(
++                "Betting action committed and saved successfully",
++                extra={
++                    "user_id": user_id,
++                    "chat_id": chat_id,
++                    "action": action,
++                    "amount": required_amount,
++                    "reservation_id": reservation_id,
++                    "committed": committed,
++                    "new_version": self._extract_version(updated_state),
++                },
++            )
++
+             return (
+                 BettingResult(
+-                    False,
+-                    "State update conflict detected – action cancelled",
++                    True,
++                    f"{action.replace('_', ' ').title()} successful",
++                    new_state=dict(updated_state),
++                    reservation_id=reservation_id,
+                 ),
+                 committed,
+             )
+ 
+-        logger.info(
+-            "Betting action succeeded",
+-            extra={
+-                "user_id": user_id,
+-                "chat_id": chat_id,
+-                "action": action,
+-                "amount": required_amount,
+-                "reservation_id": reservation_id,
+-            },
+-        )
++        except Exception as e:
++            # CRITICAL ERROR during commit/save phase
++            self.logger.exception(
++                f"CRITICAL: Unhandled exception in _commit_and_save",
++                extra={
++                    "user_id": user_id,
++                    "chat_id": chat_id,
++                    "action": action,
++                    "reservation_id": reservation_id,
++                    "committed": committed,
++                    "save_success": save_success,
++                    "error_type": type(e).__name__,
++                },
++            )
+ 
+-        return (
+-            BettingResult(
+-                True,
+-                f"{action.replace('_', ' ').title()} successful",
+-                new_state=dict(updated_state),
+-                reservation_id=reservation_id,
+-            ),
+-            committed,
+-        )
++            # Attempt rollback if wallet was committed but save failed
++            if committed and not save_success:
++                await self._rollback(
++                    reservation_id,
++                    f"commit_save_exception:{type(e).__name__}",
++                    allow_committed=True,
++                )
++
++            return (
++                BettingResult(
++                    False,
++                    "An unexpected error occurred. Please retry.",
++                ),
++                committed,
++            )
+ 
+     async def _validate_action(
+         self,
+diff --git a/pokerapp/lock_manager.py b/pokerapp/lock_manager.py
+index 5e96fd9..3f94bbc 100644
+--- a/pokerapp/lock_manager.py
++++ b/pokerapp/lock_manager.py
+@@ -418,6 +418,7 @@ class LockManager:
+         self._logger = _make_service_logger(
+             base_logger, "lock_manager", "lock_manager"
+         )
++        self.logger = self._logger
+         self._default_timeout_seconds = default_timeout_seconds
+         self._max_retries = max(0, max_retries)
+         self._retry_backoff_seconds = max(0.0, retry_backoff_seconds)
+@@ -570,6 +571,7 @@ class LockManager:
+             "lock_queue_prefix": "lock:queue:",
+         }
+         self._redis_pool: Any = redis_pool or _InMemoryActionLockBackend()
++        self._redis = self._redis_pool
+         if isinstance(self._redis_pool, _InMemoryActionLockBackend):
+             self._logger.warning(
+                 "[ACTION_LOCK] Using in-memory backend (single-instance only)",
+@@ -3631,52 +3633,68 @@ class LockManager:
+         )
+ 
+     async def get_lock_queue_depth(self, chat_id: int) -> int:
+-        """Return the number of queued operations for the table lock."""
++        """
++        Sample the current lock queue depth for a specific table.
+ 
+-        prefix = self._redis_keys.get("lock_queue_prefix", "lock:queue:")
+-        redis_key = f"{prefix}{self._safe_int(chat_id)}"
+-        backend = getattr(self, "_redis_pool", None)
+-        if backend is None:
+-            return 0
++        Returns the number of operations waiting in the sorted set
++        representing pending lock requests for the given chat_id.
++
++        Args:
++            chat_id: The table identifier
++
++        Returns:
++            Integer count of queued operations (0 if queue doesn't exist or on error)
++        """
++        redis_key = f"lock:queue:{chat_id}"
+ 
+         try:
+-            if hasattr(backend, "zcard"):
+-                depth = await backend.zcard(redis_key)
+-            elif hasattr(backend, "zcount"):
+-                depth = await backend.zcount(redis_key, "-inf", "+inf")
+-            elif hasattr(backend, "zrange"):
+-                members = await backend.zrange(redis_key, 0, -1)
+-                depth = len(members)
+-            else:
+-                return 0
+-        except Exception:
+-            self._logger.debug(
+-                "[LOCK_QUEUE] Unable to fetch queue depth",  # pragma: no cover - defensive
+-                exc_info=True,
++            # ZCARD returns cardinality (number of elements) in sorted set
++            depth = await self._redis.zcard(redis_key)
++            return int(depth) if depth is not None else 0
++        except Exception as e:
++            self.logger.warning(
++                f"Failed to sample lock queue depth for chat_id={chat_id}: {e}",
+                 extra={
+-                    "event_type": "lock_queue_depth_error",
+-                    "chat_id": self._safe_int(chat_id),
++                    "chat_id": chat_id,
+                     "redis_key": redis_key,
++                    "error_type": type(e).__name__
+                 },
++                exc_info=True
+             )
+-            return 0
+-
+-        try:
+-            return max(0, int(depth))
+-        except (TypeError, ValueError):
+-            return 0
++            return 0  # Fail-safe: return 0 to avoid blocking on errors
+ 
+     async def estimate_wait_time(self, queue_depth: int) -> float:
+-        """Estimate wait time (seconds) from the queue depth heuristic."""
++        """
++        Estimate expected wait time based on queue depth using empirical heuristics.
++
++        Assumes average operation (lock acquire + action + release) takes ~6 seconds.
++        Applies random jitter (±10%) to simulate real-world variance.
++        Caps estimate at 45 seconds to prevent unrealistic predictions.
++
++        Args:
++            queue_depth: Number of operations ahead in queue
+ 
+-        depth = max(0, int(queue_depth))
+-        if depth == 0:
++        Returns:
++            Estimated wait time in seconds (float)
++        """
++        if queue_depth <= 0:
+             return 0.0
+-        if depth <= 2:
+-            return 7.5
+-        if depth <= 4:
+-            return 17.5
+-        return 27.5
++
++        # Empirical constant: 6 seconds per queued operation
++        # (derived from P95 action latency + lock overhead)
++        SECONDS_PER_OPERATION = 6.0
++
++        base_estimate = queue_depth * SECONDS_PER_OPERATION
++
++        # Add ±10% jitter to avoid thundering herd on retries
++        import random
++        jitter_factor = random.uniform(0.9, 1.1)
++
++        estimated_seconds = base_estimate * jitter_factor
++
++        # Cap at 45 seconds (beyond this, fail-fast is preferred)
++        MAX_ESTIMATE = 45.0
++        return min(estimated_seconds, MAX_ESTIMATE)
+ 
+     def export_prometheus(self) -> str:
+         """Export metrics in Prometheus format for scraping."""
+diff --git a/pokerapp/metrics.py b/pokerapp/metrics.py
+index d6e1c4f..0599155 100644
+--- a/pokerapp/metrics.py
++++ b/pokerapp/metrics.py
+@@ -82,3 +82,25 @@ LOCK_WAIT_DURATION = Histogram(
+     buckets=[0.1, 0.5, 1, 2, 5, 10, 15, 20, 25, 30],
+ )
+ 
++# ============================================================================
++# PHASE 2: SMART LOCK RETRY METRICS
++# ============================================================================
++
++LOCK_RETRY_TOTAL = Counter(
++    "poker_lock_retry_total",
++    "Total number of lock retry attempts categorized by final outcome",
++    labelnames=["outcome"]  # Values: success, abandoned, timeout, max_retries
++)
++
++LOCK_QUEUE_DEPTH = Histogram(
++    "poker_lock_queue_depth",
++    "Observed lock queue depth during retry attempts (number of waiting operations)",
++    buckets=[0, 1, 2, 3, 5, 8, 13, 21, 34]  # Fibonacci sequence for geometric growth
++)
++
++LOCK_WAIT_DURATION = Histogram(
++    "poker_lock_wait_duration_seconds",
++    "Time spent waiting for table lock acquisition during retry cycle",
++    buckets=[0.1, 0.5, 1.0, 2.0, 5.0, 10.0, 20.0, 30.0, 45.0, 60.0]
++)
++
