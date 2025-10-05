@@ -34,7 +34,8 @@
     "backoff_delays_seconds": [1, 2, 4, 8],
     "queue_depth_threshold": 5,
     "estimated_wait_threshold_seconds": 25,
-    "grace_buffer_seconds": 30
+    "grace_buffer_seconds": 30,
+    "enable_smart_retry": true
   },
   "stats_batch_buffer": {
     "max_size": 100,

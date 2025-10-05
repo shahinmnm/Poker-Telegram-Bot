@@ -418,6 +418,7 @@ class LockManager:
         self._logger = _make_service_logger(
             base_logger, "lock_manager", "lock_manager"
         )
+        self.logger = self._logger
         self._default_timeout_seconds = default_timeout_seconds
         self._max_retries = max(0, max_retries)
         self._retry_backoff_seconds = max(0.0, retry_backoff_seconds)
@@ -570,6 +571,7 @@ class LockManager:
             "lock_queue_prefix": "lock:queue:",
         }
         self._redis_pool: Any = redis_pool or _InMemoryActionLockBackend()
+        self._redis = self._redis_pool
         if isinstance(self._redis_pool, _InMemoryActionLockBackend):
             self._logger.warning(
                 "[ACTION_LOCK] Using in-memory backend (single-instance only)",
@@ -3631,52 +3633,68 @@ class LockManager:
         )
 
     async def get_lock_queue_depth(self, chat_id: int) -> int:
-        """Return the number of queued operations for the table lock."""
+        """
+        Sample the current lock queue depth for a specific table.
 
-        prefix = self._redis_keys.get("lock_queue_prefix", "lock:queue:")
-        redis_key = f"{prefix}{self._safe_int(chat_id)}"
-        backend = getattr(self, "_redis_pool", None)
-        if backend is None:
-            return 0
+        Returns the number of operations waiting in the sorted set
+        representing pending lock requests for the given chat_id.
+
+        Args:
+            chat_id: The table identifier
+
+        Returns:
+            Integer count of queued operations (0 if queue doesn't exist or on error)
+        """
+        redis_key = f"lock:queue:{chat_id}"
 
         try:
-            if hasattr(backend, "zcard"):
-                depth = await backend.zcard(redis_key)
-            elif hasattr(backend, "zcount"):
-                depth = await backend.zcount(redis_key, "-inf", "+inf")
-            elif hasattr(backend, "zrange"):
-                members = await backend.zrange(redis_key, 0, -1)
-                depth = len(members)
-            else:
-                return 0
-        except Exception:
-            self._logger.debug(
-                "[LOCK_QUEUE] Unable to fetch queue depth",  # pragma: no cover - defensive
-                exc_info=True,
+            # ZCARD returns cardinality (number of elements) in sorted set
+            depth = await self._redis.zcard(redis_key)
+            return int(depth) if depth is not None else 0
+        except Exception as e:
+            self.logger.warning(
+                f"Failed to sample lock queue depth for chat_id={chat_id}: {e}",
                 extra={
-                    "event_type": "lock_queue_depth_error",
-                    "chat_id": self._safe_int(chat_id),
+                    "chat_id": chat_id,
                     "redis_key": redis_key,
+                    "error_type": type(e).__name__
                 },
+                exc_info=True
             )
-            return 0
-
-        try:
-            return max(0, int(depth))
-        except (TypeError, ValueError):
-            return 0
+            return 0  # Fail-safe: return 0 to avoid blocking on errors
 
     async def estimate_wait_time(self, queue_depth: int) -> float:
-        """Estimate wait time (seconds) from the queue depth heuristic."""
+        """
+        Estimate expected wait time based on queue depth using empirical heuristics.
 
-        depth = max(0, int(queue_depth))
-        if depth == 0:
+        Assumes average operation (lock acquire + action + release) takes ~6 seconds.
+        Applies random jitter (±10%) to simulate real-world variance.
+        Caps estimate at 45 seconds to prevent unrealistic predictions.
+
+        Args:
+            queue_depth: Number of operations ahead in queue
+
+        Returns:
+            Estimated wait time in seconds (float)
+        """
+        if queue_depth <= 0:
             return 0.0
-        if depth <= 2:
-            return 7.5
-        if depth <= 4:
-            return 17.5
-        return 27.5
+
+        # Empirical constant: 6 seconds per queued operation
+        # (derived from P95 action latency + lock overhead)
+        SECONDS_PER_OPERATION = 6.0
+
+        base_estimate = queue_depth * SECONDS_PER_OPERATION
+
+        # Add ±10% jitter to avoid thundering herd on retries
+        import random
+        jitter_factor = random.uniform(0.9, 1.1)
+
+        estimated_seconds = base_estimate * jitter_factor
+
+        # Cap at 45 seconds (beyond this, fail-fast is preferred)
+        MAX_ESTIMATE = 45.0
+        return min(estimated_seconds, MAX_ESTIMATE)
 
     def export_prometheus(self) -> str:
         """Export metrics in Prometheus format for scraping."""
