@@ -1,10 +1,11 @@
-"""
-Integration tests for fine-grained locking in GameEngine.
-"""
+"""Integration tests for fine-grained locking in GameEngine."""
+
 import asyncio
+import copy
 import logging
 from collections import defaultdict
 from contextlib import asynccontextmanager
+from typing import Dict
 
 import pytest
 import pytest_asyncio
@@ -83,8 +84,8 @@ async def game_engine():
         logger=logging.getLogger("test-engine"),
     )
     
-    # Mock load_game_state to return a valid poker game
-    engine.load_game_state = AsyncMock(return_value={
+    # Shared mutable state that mimics persisted storage
+    state_template: Dict[str, object] = {
         "chat_id": 12345,
         "version": 1,
         "current_bet": 10,
@@ -95,11 +96,21 @@ async def game_engine():
             {"user_id": 2, "chips": 1000, "bet": 0, "state": "active", "has_acted": False},
             {"user_id": 3, "chips": 1000, "bet": 0, "state": "active", "has_acted": False},
         ]
-    })
-    
-    # Mock save_game_state to always succeed
-    engine.save_game_state = AsyncMock(return_value=True)
-    
+    }
+
+    async def load_state(_: int) -> Dict[str, object]:
+        return copy.deepcopy(state_template)
+
+    async def save_state(chat_id: int, new_state: Dict[str, object]) -> bool:
+        assert chat_id == state_template["chat_id"]
+        state_template.clear()
+        state_template.update(copy.deepcopy(new_state))
+        return True
+
+    engine.load_game_state = AsyncMock(side_effect=load_state)
+    engine.save_game_state = AsyncMock(side_effect=save_state)
+    engine._state_template = state_template  # type: ignore[attr-defined]
+
     return engine
 
 
@@ -182,12 +193,13 @@ async def test_pot_lock_serializes_bet_collection(game_engine):
     - Final pot amount is correct
     """
     # Mock all players as having acted
-    game_engine.load_game_state.return_value["players"] = [
+    state_template = game_engine._state_template  # type: ignore[attr-defined]
+    state_template["players"] = [
         {"user_id": 1, "chips": 900, "bet": 100, "state": "active", "has_acted": True},
         {"user_id": 2, "chips": 900, "bet": 100, "state": "active", "has_acted": True},
         {"user_id": 3, "chips": 900, "bet": 100, "state": "active", "has_acted": False},
     ]
-    game_engine.load_game_state.return_value["current_bet"] = 100
+    state_template["current_bet"] = 100
     
     # Player 3 completes the round
     result = await game_engine.handle_player_action(12345, 3, "call")

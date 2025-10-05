@@ -777,7 +777,7 @@ class GameEngine:
             if lock_manager is None:
                 result = await _process_once()
             else:
-                async with lock_manager.table_write_lock(chat_id):
+                async with lock_manager.acquire_table_write_lock(chat_id):
                     result = await _process_once()
 
             if result is None:
@@ -879,7 +879,7 @@ class GameEngine:
             if lock_manager is None:
                 result = await _process_once()
             else:
-                async with lock_manager.table_write_lock(chat_id):
+                async with lock_manager.acquire_table_write_lock(chat_id):
                     result = await _process_once()
 
             if result is not None:
@@ -1013,7 +1013,7 @@ class GameEngine:
             if lock_manager is None:
                 result = await _process_once()
             else:
-                async with lock_manager.table_write_lock(chat_id):
+                async with lock_manager.acquire_table_write_lock(chat_id):
                     result = await _process_once()
 
             if result is not None:
@@ -1861,7 +1861,7 @@ class GameEngine:
             if lock_manager is None:
                 result = await _process_once()
             else:
-                async with lock_manager.table_write_lock(chat_id):
+                async with lock_manager.acquire_table_write_lock(chat_id):
                     result = await _process_once()
 
             if result is None:
