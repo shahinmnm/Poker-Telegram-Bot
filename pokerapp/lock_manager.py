@@ -3687,7 +3687,6 @@ class LockManager:
         base_estimate = queue_depth * SECONDS_PER_OPERATION
 
         # Add ±10% jitter to avoid thundering herd on retries
-        import random
         jitter_factor = random.uniform(0.9, 1.1)
 
         estimated_seconds = base_estimate * jitter_factor
