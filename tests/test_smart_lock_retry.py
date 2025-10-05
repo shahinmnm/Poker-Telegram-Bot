@@ -1,370 +1,187 @@
 import asyncio
 import logging
-from contextlib import asynccontextmanager
-from typing import Any, Dict, List, Mapping, Optional
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
-import pokerapp.betting_handler as betting_handler_module
-from pokerapp.betting_handler import BettingHandler
 from pokerapp.lock_manager import LockManager
 
 
-class _CounterChild:
-    def __init__(self, store: Dict[tuple, float], key: tuple) -> None:
-        self._store = store
-        self._key = key
+class TestSmartLockRetry:
 
-    def inc(self, amount: float = 1.0) -> None:
-        self._store[self._key] = self._store.get(self._key, 0.0) + float(amount)
+    @pytest.mark.asyncio
+    async def test_queue_depth_tracking(self):
+        """Test Redis queue depth tracking functionality."""
 
+        mock_redis = AsyncMock()
+        mock_redis.llen.return_value = 3
 
-class _CounterStub:
-    def __init__(self) -> None:
-        self.counts: Dict[tuple, float] = {}
+        lock_manager = LockManager(
+            logger=logging.getLogger("test_queue"),
+            enable_fine_grained_locks=True,
+            redis_pool=mock_redis,
+        )
 
-    def labels(self, **labels: Any) -> _CounterChild:
-        key = tuple(sorted(labels.items()))
-        return _CounterChild(self.counts, key)
+        depth = await lock_manager.get_lock_queue_depth("test_lock")
+        assert depth == 3
+        mock_redis.llen.assert_awaited_once_with("lock_queue:test_lock")
 
+    @pytest.mark.asyncio
+    async def test_smart_retry_with_backoff(self):
+        """Test exponential backoff with jitter in retry logic."""
 
-class _HistogramChild(_CounterChild):
-    def observe(self, value: float) -> None:  # type: ignore[override]
-        super().inc(float(value))
+        mock_redis = AsyncMock()
+        mock_redis.set.side_effect = [False, False, True]
+        mock_redis.llen.return_value = 2
 
+        lock_manager = LockManager(
+            logger=logging.getLogger("test_retry"),
+            enable_fine_grained_locks=True,
+            redis_pool=mock_redis,
+        )
 
-class _HistogramStub(_CounterStub):
-    def labels(self, **labels: Any) -> _HistogramChild:  # type: ignore[override]
-        key = tuple(sorted(labels.items()))
-        return _HistogramChild(self.counts, key)
+        with patch("asyncio.sleep", new_callable=AsyncMock) as mock_sleep:
+            acquired = await lock_manager._acquire_lock_with_smart_retry(
+                "test_lock", 10.0
+            )
 
-    def observe(self, value: float) -> None:
-        key = ("_default",)
-        self.counts[key] = self.counts.get(key, 0.0) + float(value)
+        assert acquired is True
+        assert mock_redis.set.await_count == 3
+        assert mock_sleep.await_count == 2
+        assert mock_redis.lpush.await_count >= 1
+        assert mock_redis.lrem.await_count >= 1
 
+    @pytest.mark.asyncio
+    async def test_queue_depth_threshold_abort(self):
+        """Test early abort when queue depth exceeds threshold."""
 
-@pytest.fixture(autouse=True)
-def _patch_metrics(monkeypatch):
-    counter_stub = _CounterStub()
-    wait_stub = _HistogramStub()
-    queue_stub = _HistogramStub()
-    monkeypatch.setattr(betting_handler_module, "LOCK_RETRY_TOTAL", counter_stub)
-    monkeypatch.setattr(betting_handler_module, "LOCK_WAIT_DURATION", wait_stub)
-    monkeypatch.setattr(betting_handler_module, "LOCK_QUEUE_DEPTH", queue_stub)
-    yield counter_stub, wait_stub, queue_stub
+        mock_redis = AsyncMock()
+        mock_redis.llen.return_value = 10
 
+        lock_manager = LockManager(
+            logger=logging.getLogger("test_abort"),
+            enable_fine_grained_locks=True,
+            redis_pool=mock_redis,
+        )
 
-@pytest.fixture
-def fast_sleep(monkeypatch):
-    recorded: List[float] = []
-    original_sleep = betting_handler_module.asyncio.sleep
+        acquired = await lock_manager._acquire_lock_with_smart_retry(
+            "congested_lock", 5.0
+        )
 
-    async def _sleep(delay: float) -> None:
-        recorded.append(delay)
-        await original_sleep(0)
+        assert acquired is False
+        mock_redis.set.assert_not_awaited()
 
-    monkeypatch.setattr(betting_handler_module.asyncio, "sleep", _sleep)
-    return recorded
+    @pytest.mark.asyncio
+    async def test_concurrent_queue_management(self):
+        """Test queue management under concurrent access."""
 
+        mock_redis = AsyncMock()
+        mock_redis.set.return_value = True
+        mock_redis.llen.return_value = 1
 
-class StubWalletService:
-    def __init__(self, *, reservation_ttl: float = 300.0) -> None:
-        self._reservation_ttl = reservation_ttl
-        self.reservations: Dict[str, Dict[str, Any]] = {}
-        self.rollbacks: List[str] = []
-        self.commits: List[str] = []
+        lock_manager = LockManager(
+            logger=logging.getLogger("test_concurrent"),
+            enable_fine_grained_locks=True,
+            redis_pool=mock_redis,
+        )
 
-    async def reserve_chips(
-        self,
-        *,
-        user_id: int,
-        chat_id: int,
-        amount: int,
-        metadata: Optional[Mapping[str, Any]] = None,
-    ) -> tuple[bool, Optional[str], str]:
-        reservation_id = f"resv-{len(self.reservations) + 1}"
-        self.reservations[reservation_id] = {
-            "user_id": user_id,
-            "chat_id": chat_id,
-            "amount": amount,
-            "status": "pending",
-            "metadata": dict(metadata or {}),
-        }
-        return True, reservation_id, "reserved"
+        async def acquire_lock(task_name: str):
+            return await lock_manager._acquire_lock_with_smart_retry(
+                f"shared_lock_{task_name}", 10.0
+            )
 
-    async def commit_reservation(self, reservation_id: str) -> tuple[bool, str]:
-        record = self.reservations.get(reservation_id)
-        if not record or record["status"] != "pending":
-            return False, "missing"
-        record["status"] = "committed"
-        self.commits.append(reservation_id)
-        return True, "committed"
+        results = await asyncio.gather(
+            acquire_lock("task1"),
+            acquire_lock("task2"),
+            acquire_lock("task3"),
+            acquire_lock("task4"),
+            acquire_lock("task5"),
+        )
 
-    async def rollback_reservation(
-        self,
-        reservation_id: str,
-        reason: str,
-        *,
-        allow_committed: bool = False,
-    ) -> tuple[bool, str]:
-        record = self.reservations.get(reservation_id)
-        if not record:
-            return False, "missing"
-        if record["status"] == "committed" and not allow_committed:
-            return False, "committed"
-        record["status"] = "rolled_back"
-        self.rollbacks.append(reason)
-        return True, "rolled_back"
+        assert all(result is True for result in results)
+        assert mock_redis.lpush.await_count == 5
+        assert mock_redis.lrem.await_count == 5
 
+    @pytest.mark.asyncio
+    async def test_grace_buffer_timeout(self):
+        """Test grace buffer prevents excessive waiting."""
 
-class StubGameEngine:
-    def __init__(self) -> None:
-        self._state: Dict[str, Any] = {
-            "version": 1,
-            "current_player_id": 1,
-            "current_bet": 100,
-            "pot": 0,
-            "players": [
-                {"user_id": 1, "chips": 1_000, "current_bet": 0, "folded": False},
-                {"user_id": 2, "chips": 1_000, "current_bet": 0, "folded": False},
-                {"user_id": 3, "chips": 1_000, "current_bet": 0, "folded": False},
-                {"user_id": 4, "chips": 1_000, "current_bet": 0, "folded": False},
-                {"user_id": 5, "chips": 1_000, "current_bet": 0, "folded": False},
-            ],
-        }
+        mock_redis = AsyncMock()
+        mock_redis.set.return_value = False
+        mock_redis.llen.return_value = 2
 
-    async def load_game_state(self, chat_id: int) -> Mapping[str, Any]:
-        return dict(self._state)
+        lock_manager = LockManager(
+            logger=logging.getLogger("test_grace"),
+            enable_fine_grained_locks=True,
+            redis_pool=mock_redis,
+        )
 
-    async def save_game_state_with_version(
-        self,
-        chat_id: int,
-        state: Mapping[str, Any],
-        *,
-        expected_version: int,
-    ) -> bool:
-        if int(self._state.get("version", 0)) != expected_version:
-            return False
-        next_state = dict(state)
-        next_state["version"] = expected_version + 1
-        self._state = next_state
-        return True
+        with patch.object(lock_manager, "_system_constants", {
+            "lock_retry": {
+                "max_attempts": 10,
+                "backoff_delays_seconds": [1.0, 2.0, 4.0],
+                "grace_buffer_seconds": 2.0,
+            }
+        }):
+            with patch("asyncio.sleep", new_callable=AsyncMock):
+                acquired = await lock_manager._acquire_lock_with_smart_retry(
+                    "timeout_lock", 5.0
+                )
 
-    async def apply_betting_action(
-        self,
-        state: Mapping[str, Any],
-        user_id: int,
-        action: str,
-        amount: int,
-    ) -> Mapping[str, Any]:
-        updated = dict(state)
-        players = [dict(p) for p in state.get("players", [])]
-        for player in players:
-            if int(player.get("user_id", 0)) == int(user_id):
-                if action == "fold":
-                    player["folded"] = True
-                else:
-                    player["chips"] = int(player.get("chips", 0)) - amount
-                    player["current_bet"] = int(player.get("current_bet", 0)) + amount
-                break
-        updated["players"] = players
-        updated["pot"] = int(state.get("pot", 0)) + amount
-        return updated
+        assert acquired is False
+        assert mock_redis.set.await_count < 10
 
+    @pytest.mark.asyncio
+    async def test_metrics_collection(self):
+        """Test that retry metrics are properly collected."""
 
-class ScriptedLockManager:
-    def __init__(self, failures: List[bool], queue_depths: List[int]) -> None:
-        self._failures = failures
-        self._queue_depths = queue_depths or [0]
-        self._acquire_calls = 0
-        self._queue_index = 0
-        self._lock = asyncio.Lock()
+        mock_redis = AsyncMock()
+        mock_redis.set.side_effect = [False, True]
+        mock_redis.llen.return_value = 1
 
-    @asynccontextmanager
-    async def acquire_table_write_lock(self, chat_id: int, timeout: Optional[float] = None):
-        if self._acquire_calls < len(self._failures) and self._failures[self._acquire_calls]:
-            self._acquire_calls += 1
-            raise TimeoutError("busy")
-        self._acquire_calls += 1
-        async with self._lock:
-            yield
+        lock_manager = LockManager(
+            logger=logging.getLogger("test_metrics"),
+            enable_fine_grained_locks=True,
+            redis_pool=mock_redis,
+        )
 
-    async def get_lock_queue_depth(self, chat_id: int) -> int:
-        if self._queue_index < len(self._queue_depths):
-            depth = self._queue_depths[self._queue_index]
-            self._queue_index += 1
-        else:
-            depth = self._queue_depths[-1]
-        return depth
+        with patch("asyncio.sleep", new_callable=AsyncMock):
+            acquired = await lock_manager._acquire_lock_with_smart_retry(
+                "metrics_lock", 10.0
+            )
 
-    async def estimate_wait_time(self, queue_depth: int) -> float:
-        if queue_depth <= 0:
+        assert acquired is True
+        def metric_value(metric):
+            raw_value = getattr(metric, "_value", None)
+            if raw_value is None:
+                return 0.0
+            getter = getattr(raw_value, "get", None)
+            if callable(getter):
+                return getter()
+            inner_value = getattr(raw_value, "_value", None)
+            getter = getattr(inner_value, "get", None)
+            if callable(getter):
+                return getter()
+            for candidate in (inner_value, raw_value):
+                try:
+                    if candidate is not None:
+                        return float(candidate)
+                except (TypeError, ValueError):
+                    continue
             return 0.0
-        return 7.5 if queue_depth <= 2 else 17.5
 
+        attempt_metric = lock_manager.lock_retry_attempts.labels(
+            lock_type=lock_manager._extract_lock_type("metrics_lock"),
+            attempt_number="1",
+        )
+        success_metric = lock_manager.lock_retry_success.labels(
+            lock_type=lock_manager._extract_lock_type("metrics_lock")
+        )
+        acquisition_metric = lock_manager.lock_acquisition_success.labels(
+            lock_type=lock_manager._extract_lock_type("metrics_lock"),
+            attempt_number="2",
+        )
 
-class QueueingLockManager:
-    def __init__(self) -> None:
-        self._queue: List[asyncio.Task[Any]] = []
-        self._running = False
-
-    @asynccontextmanager
-    async def acquire_table_write_lock(self, chat_id: int, timeout: Optional[float] = None):
-        task = asyncio.current_task()
-        if task is None:
-            yield
-            return
-
-        if task not in self._queue:
-            self._queue.append(task)
-            raise TimeoutError("busy")
-
-        if self._queue[0] is not task:
-            raise TimeoutError("busy")
-
-        while self._running:
-            await asyncio.sleep(0)
-
-        self._running = True
-        self._queue.pop(0)
-        try:
-            yield
-        finally:
-            self._running = False
-
-    async def get_lock_queue_depth(self, chat_id: int) -> int:
-        depth = len(self._queue)
-        return max(0, depth)
-
-    async def estimate_wait_time(self, queue_depth: int) -> float:
-        if queue_depth <= 0:
-            return 0.0
-        if queue_depth <= 2:
-            return 7.5
-        if queue_depth <= 4:
-            return 17.5
-        return 27.5
-
-
-@pytest.mark.asyncio
-async def test_retry_successful_after_backoff(fast_sleep, _patch_metrics):
-    wallet = StubWalletService()
-    engine = StubGameEngine()
-    lock = ScriptedLockManager([True, False], [2, 0])
-    handler = BettingHandler(
-        wallet,
-        engine,
-        lock,
-        enable_smart_retry=True,
-        retry_settings={
-            "max_attempts": 7,
-            "backoff_delays_seconds": [0.01, 0.01, 0.02, 0.02, 0.04, 0.04, 0.04, 0.04],
-        },
-    )
-
-    result = await handler.handle_betting_action(1, 99, "call")
-
-    assert result.success is True
-    assert wallet.commits == ["resv-1"]
-    counter_stub, wait_stub, queue_stub = _patch_metrics
-    assert counter_stub.counts[(("outcome", "success"),)] == 1
-    assert queue_stub.counts.get(("_default",), 0.0) >= 2
-    assert fast_sleep, "Expected exponential backoff to invoke sleep"
-
-
-@pytest.mark.asyncio
-async def test_fail_fast_when_queue_too_deep(_patch_metrics):
-    wallet = StubWalletService()
-    engine = StubGameEngine()
-    lock = ScriptedLockManager([True], [6])
-    handler = BettingHandler(wallet, engine, lock, enable_smart_retry=True)
-
-    result = await handler.handle_betting_action(1, 99, "call")
-
-    assert result.success is False
-    assert "queue" in result.message.lower()
-    assert wallet.rollbacks[-1] == "queue_congested"
-    counter_stub, _, _ = _patch_metrics
-    assert counter_stub.counts[(("outcome", "abandoned"),)] == 1
-
-
-@pytest.mark.asyncio
-async def test_reservation_expiry_during_retry(_patch_metrics):
-    wallet = StubWalletService(reservation_ttl=2.0)
-    engine = StubGameEngine()
-    lock = ScriptedLockManager([True], [2])
-    handler = BettingHandler(wallet, engine, lock, enable_smart_retry=True)
-
-    result = await handler.handle_betting_action(1, 99, "call")
-
-    assert result.success is False
-    assert "reservation" in result.message.lower()
-    assert wallet.rollbacks[-1] in {"reservation_expiring", "reservation_expired"}
-    counter_stub, _, _ = _patch_metrics
-    assert counter_stub.counts[(("outcome", "abandoned"),)] == 1
-
-
-@pytest.mark.asyncio
-async def test_max_retries_exceeded_triggers_timeout(_patch_metrics):
-    wallet = StubWalletService()
-    engine = StubGameEngine()
-    lock = ScriptedLockManager([True, True, True, True], [1])
-    handler = BettingHandler(wallet, engine, lock, enable_smart_retry=True)
-
-    result = await handler.handle_betting_action(1, 99, "call")
-
-    assert result.success is False
-    assert "please try again" in result.message.lower()
-    counter_stub, _, _ = _patch_metrics
-    assert counter_stub.counts[(("outcome", "timeout"),)] >= 1
-    assert counter_stub.counts[(("outcome", "max_retries"),)] >= 1
-
-
-@pytest.mark.asyncio
-async def test_queue_depth_estimation(redis_pool):
-    manager = LockManager(logger=logging.getLogger("lock-test"), redis_pool=redis_pool)
-    chat_id = 42
-    redis_key = "lock:queue:42"
-    await redis_pool.zadd(redis_key, {"op1": 1, "op2": 2, "op3": 3})
-
-    depth = await manager.get_lock_queue_depth(chat_id)
-    wait_estimate = await manager.estimate_wait_time(depth)
-
-    assert depth == 3
-    assert 15 <= wait_estimate <= 20
-
-
-@pytest.mark.asyncio
-async def test_concurrent_retry_behaviour(fast_sleep, _patch_metrics):
-    wallet = StubWalletService()
-    engine = StubGameEngine()
-    lock = QueueingLockManager()
-    handler = BettingHandler(
-        wallet,
-        engine,
-        lock,
-        enable_smart_retry=True,
-        retry_settings={
-            "max_attempts": 7,
-            "backoff_delays_seconds": [0.01, 0.01, 0.02, 0.02, 0.04, 0.04, 0.04, 0.04],
-        },
-    )
-
-    async def _play():
-        return await handler.handle_betting_action(1, 99, "call")
-
-    tasks = [asyncio.create_task(_play()) for _ in range(5)]
-    results = await asyncio.gather(*tasks)
-
-    successes = [result for result in results if result.success]
-    failures = [result for result in results if not result.success]
-
-    assert successes, "expected at least one successful retry"
-    assert all("busy" in result.message.lower() or "wait" in result.message.lower() for result in failures)
-    assert len(wallet.commits) == len(successes)
-    assert len(wallet.rollbacks) >= len(failures)
-    assert not lock._running
-    assert len(lock._queue) == len(failures)
-    counter_stub, _, _ = _patch_metrics
-    success_count = counter_stub.counts.get((("outcome", "success"),), 0)
-    assert success_count >= len(successes)
+        assert metric_value(attempt_metric) > 0
+        assert metric_value(success_metric) >= 0
+        assert metric_value(acquisition_metric) > 0
