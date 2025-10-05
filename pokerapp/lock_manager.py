@@ -382,7 +382,26 @@ def _resolve_action_lock_prefix(source: Optional[Mapping[str, Any]]) -> str:
 
 
 class LockManager:
-    """Manage keyed re-entrant async locks with timeout and retry support."""
+    """Manage keyed re-entrant async locks with timeout and retry support.
+
+    Lock hierarchy (strict ascending order):
+
+    1. TABLE_READ    (level 1) - read-only table inspection
+    2. PLAYER_STATE  (level 2) - individual player mutations
+    3. POT           (level 3) - pot collection/distribution
+    4. DECK          (level 4) - card dealing operations
+    5. TABLE_WRITE   (level 5) - full table state mutations
+
+    Acquisition rules:
+    - Locks must be acquired in ascending order without skipping levels and
+      generally may not be held together across hierarchy boundaries.
+    - ``table_read`` may be held while acquiring ``player`` to support read →
+      player upgrades, but all other transitions require releasing existing
+      hierarchy locks first.
+    - Same-level acquisitions are allowed for locks that share a category.
+    - Descending acquisitions are forbidden unless explicitly whitelisted
+      via ``_is_descend_allowed``.
+    """
 
     _LONG_HOLD_THRESHOLD_SECONDS = 2.0
     RELEASE_ACTION_LOCK_SCRIPT = """
@@ -771,6 +790,8 @@ class LockManager:
         wait_start = loop.time()
         waited = False
         last_wait_snapshot = (False, False)
+        lock_key = f"table_read:{self._safe_int(chat_id)}"
+        hierarchy_level = self.LOCK_LEVELS.get("table_read", self._default_lock_level)
 
         while True:
             async with state.reader_lock:
@@ -807,9 +828,17 @@ class LockManager:
                         "writer_waiting": writer_waiting,
                         "wait_seconds": wait_duration,
                     },
-                )
+                    )
 
         hold_start = loop.time()
+        context_payload = {
+            "lock_type": "table_read",
+            "chat_id": self._safe_int(chat_id),
+        }
+        if self._enforce_hierarchy:
+            self._validate_lock_hierarchy(lock_key, hierarchy_level)
+            self._record_acquired(lock_key, hierarchy_level, context_payload)
+        self._track_lock_acquisition(lock_key, "table_read", hierarchy_level)
         try:
             yield
         finally:
@@ -834,6 +863,9 @@ class LockManager:
                     "remaining_readers": state.reader_count,
                 },
             )
+            if self._enforce_hierarchy:
+                self._remove_acquisition_record(lock_key)
+            self._release_lock_tracking(lock_key)
 
     @asynccontextmanager
     async def table_write_lock(self, chat_id: int) -> AsyncIterator[None]:
@@ -3418,83 +3450,58 @@ class LockManager:
         lock_key: str,
         requested_level: int,
     ) -> None:
-        """Ensure higher-level locks are not acquired while holding lower ones."""
+        """Ensure strict ascending lock acquisition for hierarchy-sensitive locks."""
 
         current_acquisitions = self._get_current_acquisitions()
         if not current_acquisitions:
+            return
+
+        hierarchy_map = {
+            "table_read": self.LOCK_LEVELS.get("table_read"),
+            "player": self.LOCK_LEVELS.get("player"),
+            "pot": self.LOCK_LEVELS.get("pot"),
+            "deck": self.LOCK_LEVELS.get("deck"),
+            "table_write": self.LOCK_LEVELS.get("table_write"),
+        }
+
+        requested_category = self._resolve_lock_category(lock_key)
+        requested_hierarchy_level = hierarchy_map.get(requested_category)
+        if requested_hierarchy_level is None:
+            return
+
+        hierarchy_acquisitions = [
+            acq
+            for acq in current_acquisitions
+            if hierarchy_map.get(self._resolve_lock_category(acq.key)) is not None
+        ]
+        if not hierarchy_acquisitions:
             return
 
         held_levels = [acq.level for acq in current_acquisitions]
         min_held_level = min(held_levels)
         max_held_level = max(held_levels)
 
-        strict_sequence_levels = {
-            level
-            for key in ("table_read", "player", "pot", "deck", "table_write")
-            for level in (self.LOCK_LEVELS.get(key),)
-            if level is not None
-        }
-        if requested_level in strict_sequence_levels:
-            held_sequence_levels = [
-                acq.level
-                for acq in current_acquisitions
-                if acq.level in strict_sequence_levels
-            ]
-            if held_sequence_levels:
-                max_sequence_level = max(held_sequence_levels)
-                if requested_level > max_sequence_level + 1:
-                    held_locks = [acq.key for acq in current_acquisitions]
-                    violation_msg = (
-                        f"Lock hierarchy violation: attempting to acquire {lock_key} "
-                        f"(level {requested_level}) without acquiring intermediate level "
-                        f"{max_sequence_level + 1}. Current locks: {held_locks}"
-                    )
-                    task = asyncio.current_task()
-                    held_lock_label = held_locks[0] if held_locks else "unknown"
-                    LOCK_HIERARCHY_VIOLATIONS.labels(
-                        acquired_lock=lock_key,
-                        held_lock=held_lock_label,
-                    ).inc()
-                    self.hierarchy_violations.labels(
-                        violation_type="ascending"
-                    ).inc()
-                    self._logger.error(
-                        violation_msg,
-                        extra={
-                            "category": "lock_hierarchy_violation",
-                            "lock_key": lock_key,
-                            "requested_level": requested_level,
-                            "min_held_level": min_held_level,
-                            "max_held_level": max_held_level,
-                            "held_locks": held_locks,
-                            "task_name": getattr(task, "get_name", lambda: "unknown")(),
-                        },
-                    )
-                    raise LockHierarchyViolation(violation_msg)
+        highest_hierarchy_acq = max(
+            hierarchy_acquisitions,
+            key=lambda acq: hierarchy_map[self._resolve_lock_category(acq.key)],
+        )
+        highest_category = self._resolve_lock_category(highest_hierarchy_acq.key)
+        highest_hierarchy_level = hierarchy_map[highest_category]
 
-        if requested_level < max_held_level - 1:
-            held_locks = [acq.key for acq in current_acquisitions]
-            self._logger.warning(
-                "Unusual lock acquisition pattern: skipping levels",
-                extra={
-                    "lock_key": lock_key,
-                    "requested_level": requested_level,
-                    "max_held_level": max_held_level,
-                    "held_locks": held_locks,
-                },
-            )
+        # Allow re-entrant acquisition of the same hierarchy lock.
+        if any(acq.key == lock_key for acq in hierarchy_acquisitions):
+            return
 
-        if requested_level < max_held_level:
-            highest_acq = max(current_acquisitions, key=lambda acq: acq.level)
-            highest_category = self._resolve_lock_category(highest_acq.key)
-            new_category = self._resolve_lock_category(lock_key)
-            if self._is_descend_allowed(highest_category, new_category):
+        # Enforce strict ascending order: requested must be higher than all held.
+        if requested_hierarchy_level <= highest_hierarchy_level:
+            if self._is_descend_allowed(highest_category, requested_category):
                 return
+
             held_locks = [acq.key for acq in current_acquisitions]
             violation_msg = (
                 f"Lock hierarchy violation: attempting to acquire {lock_key} "
-                f"(level {requested_level}) while holding higher level {max_held_level} locks. "
-                f"Current locks: {held_locks}"
+                f"(level {requested_level}) while holding {highest_hierarchy_acq.key} "
+                f"(level {highest_hierarchy_level}). Current locks: {held_locks}"
             )
             task = asyncio.current_task()
             held_lock_label = held_locks[0] if held_locks else "unknown"
@@ -3504,6 +3511,40 @@ class LockManager:
             ).inc()
             self.hierarchy_violations.labels(
                 violation_type="descending"
+                if requested_hierarchy_level < highest_hierarchy_level
+                else "same_level"
+            ).inc()
+            self._logger.error(
+                violation_msg,
+                extra={
+                    "category": "lock_hierarchy_violation",
+                    "lock_key": lock_key,
+                    "requested_level": requested_level,
+                    "min_held_level": min_held_level,
+                    "max_held_level": max_held_level,
+                    "held_locks": held_locks,
+                    "task_name": getattr(task, "get_name", lambda: "unknown")(),
+                },
+            )
+            raise LockHierarchyViolation(violation_msg)
+
+        allowed_ascending_pairs = {("table_read", "player")}
+
+        if (highest_category, requested_category) not in allowed_ascending_pairs:
+            held_locks = [acq.key for acq in current_acquisitions]
+            violation_msg = (
+                f"Lock hierarchy violation: attempting to acquire {lock_key} "
+                f"(level {requested_level}) while holding {highest_hierarchy_acq.key} "
+                f"(level {highest_hierarchy_level}). Current locks: {held_locks}"
+            )
+            task = asyncio.current_task()
+            held_lock_label = held_locks[0] if held_locks else "unknown"
+            LOCK_HIERARCHY_VIOLATIONS.labels(
+                acquired_lock=lock_key,
+                held_lock=held_lock_label,
+            ).inc()
+            self.hierarchy_violations.labels(
+                violation_type="ascending"
             ).inc()
             self._logger.error(
                 violation_msg,
@@ -3604,6 +3645,20 @@ class LockManager:
             _LockAcquisition(key=key, level=level, context=dict(context), count=1)
         )
         self._set_current_acquisitions(acquisitions)
+
+    def _remove_acquisition_record(self, key: str) -> None:
+        acquisitions = self._get_current_acquisitions()
+        for index in range(len(acquisitions) - 1, -1, -1):
+            record = acquisitions[index]
+            if record.key != key:
+                continue
+            if record.count > 1:
+                record.count -= 1
+                self._set_current_acquisitions(acquisitions)
+                return
+            acquisitions.pop(index)
+            self._set_current_acquisitions(acquisitions)
+            return
 
     def _find_lock_record(
         self, task: asyncio.Task[Any], key: str

@@ -121,6 +121,42 @@ class TestFineGrainedLocks:
         assert "hierarchy violation" in str(exc_info.value).lower()
 
     @pytest.mark.asyncio
+    async def test_player_to_pot_lock_violates_hierarchy(self):
+        """Ascending directly from player to pot should be rejected."""
+
+        lock_manager = LockManager(
+            logger=logging.getLogger("fine_grained_player_pot"),
+            enable_fine_grained_locks=True,
+            redis_pool=None,
+        )
+        chat_id = 654
+
+        async with lock_manager.player_state_lock(chat_id, "player3"):
+            with pytest.raises(LockOrderError) as exc_info:
+                async with lock_manager.pot_lock(chat_id):
+                    pass
+
+        assert "hierarchy violation" in str(exc_info.value).lower()
+
+    @pytest.mark.asyncio
+    async def test_read_to_pot_lock_skips_player_and_violates_hierarchy(self):
+        """Skipping the player level between read and pot must raise."""
+
+        lock_manager = LockManager(
+            logger=logging.getLogger("fine_grained_read_pot"),
+            enable_fine_grained_locks=True,
+            redis_pool=None,
+        )
+        chat_id = 987
+
+        async with lock_manager.table_read_lock(chat_id):
+            with pytest.raises(LockOrderError) as exc_info:
+                async with lock_manager.pot_lock(chat_id):
+                    pass
+
+        assert "hierarchy violation" in str(exc_info.value).lower()
+
+    @pytest.mark.asyncio
     async def test_lock_released_after_exception(self):
         """Locks are released when an error occurs inside the guard."""
 
@@ -171,3 +207,25 @@ class TestFineGrainedLocks:
         async with lock_manager.player_state_lock(chat_id, "player1"):
             async with lock_manager.table_write_lock(chat_id):
                 pass
+
+    @pytest.mark.asyncio
+    async def test_full_hierarchy_sequence_allowed(self):
+        """Acquiring every hierarchy level in order should succeed."""
+
+        lock_manager = LockManager(
+            logger=logging.getLogger("fine_grained_full_sequence"),
+            enable_fine_grained_locks=True,
+            redis_pool=None,
+        )
+        chat_id = 246
+
+        async with lock_manager.table_read_lock(chat_id):
+            pass
+        async with lock_manager.player_state_lock(chat_id, "player4"):
+            pass
+        async with lock_manager.pot_lock(chat_id):
+            pass
+        async with lock_manager.deck_lock(chat_id):
+            pass
+        async with lock_manager.table_write_lock(chat_id):
+            pass
