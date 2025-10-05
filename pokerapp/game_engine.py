@@ -57,6 +57,7 @@ from pokerapp.config import GameConstants, get_game_constants
 from pokerapp.pokerbotview import PokerBotViewer
 from pokerapp.lock_manager import LockManager
 from pokerapp.table_manager import TableManager
+from pokerapp.redis_client import RedisClient
 from pokerapp.utils.request_metrics import RequestCategory, RequestMetrics
 from pokerapp.utils.telegram_safeops import TelegramSafeOps
 from pokerapp.utils.cache import AdaptivePlayerReportCache
@@ -129,6 +130,23 @@ def _compute_language_order(translations_root: Any) -> Tuple[str, ...]:
 
 
 _LANGUAGE_ORDER = _compute_language_order(_TRANSLATIONS_ROOT)
+
+
+_GAME_STATE_KEY_TEMPLATE = "game:{chat_id}:state"
+
+_SAVE_GAME_STATE_LUA = """-- game_state_save
+local current_version = redis.call('HGET', KEYS[1], 'version')
+if not current_version then
+  current_version = '0'
+end
+if tonumber(current_version) ~= tonumber(ARGV[2]) then
+  return 0
+end
+redis.call('HSET', KEYS[1], 'state', ARGV[1])
+redis.call('HSET', KEYS[1], 'version', tonumber(ARGV[2]) + 1)
+redis.call('PEXPIRE', KEYS[1], ARGV[3])
+return 1
+"""
 
 
 def _select_translation(
@@ -393,6 +411,7 @@ class GameEngine:
         constants: Optional[GameConstants] = None,
         adaptive_player_report_cache: Optional[AdaptivePlayerReportCache] = None,
         player_factory: Optional[Callable[[int, str], Player]] = None,
+        redis_client: Optional[RedisClient] = None,
     ) -> None:
         self._table_manager = table_manager
         self._view = view
@@ -419,11 +438,16 @@ class GameEngine:
         self._betting_round_timeout = max(
             self._stage_lock_timeout, self.BETTING_ROUND_TIMEOUT_SECONDS
         )
+        self._redis_client = redis_client
+        self._game_state_ttl_ms = 15 * 60 * 1000  # 15 minutes of inactivity tolerance
 
     async def load_game_state_with_version(
         self, chat_id: int
     ) -> Optional[Dict[str, Any]]:
         """Load game state alongside its optimistic locking version."""
+
+        if self._redis_client is not None:
+            return await self._load_state_from_redis(chat_id)
 
         table_manager = self._table_manager
         if not hasattr(table_manager, "load_game_with_version"):
@@ -442,10 +466,25 @@ class GameEngine:
 
         return {"state": game_state, "version": version}
 
+    async def load_game_state(self, chat_id: int) -> Optional[Dict[str, Any]]:
+        """Load game state with embedded version metadata."""
+
+        state = await self.load_game_state_with_version(chat_id)
+        if state is None:
+            return None
+        if isinstance(state, dict):
+            return dict(state)
+        return state
+
     async def save_game_state_with_version(
         self, chat_id: int, state: Dict[str, Any], *, expected_version: int
     ) -> bool:
         """Persist game state when the supplied version matches Redis."""
+
+        if self._redis_client is not None:
+            return await self._save_state_to_redis(
+                chat_id, state, expected_version
+            )
 
         table_manager = self._table_manager
         if not hasattr(table_manager, "save_game_with_version_check"):
@@ -463,6 +502,64 @@ class GameEngine:
         return await table_manager.save_game_with_version_check(
             chat_id, game_obj, expected_version
         )
+
+    async def _load_state_from_redis(
+        self, chat_id: int
+    ) -> Optional[Dict[str, Any]]:
+        redis_client = self._redis_client
+        if redis_client is None:
+            return None
+
+        raw = await redis_client.hgetall(self._state_key(chat_id))
+        if not raw:
+            return None
+
+        state_blob = raw.get("state")
+        if isinstance(state_blob, bytes):
+            state_blob = state_blob.decode("utf-8", "ignore")
+
+        version_value = raw.get("version", 0)
+        if isinstance(version_value, bytes):
+            version_value = version_value.decode("utf-8", "ignore")
+
+        try:
+            version = int(version_value)
+        except (TypeError, ValueError):
+            version = 0
+
+        try:
+            decoded = json.loads(state_blob or "{}")
+        except json.JSONDecodeError:
+            decoded = {}
+
+        if isinstance(decoded, dict):
+            state: Dict[str, Any] = dict(decoded)
+        else:
+            state = {"state": decoded}
+
+        state["version"] = version
+        return state
+
+    async def _save_state_to_redis(
+        self, chat_id: int, state: Mapping[str, Any], expected_version: int
+    ) -> bool:
+        redis_client = self._redis_client
+        if redis_client is None:
+            return False
+
+        serialisable = dict(state)
+        serialisable.pop("version", None)
+        payload = json.dumps(serialisable, default=str)
+
+        result = await redis_client.eval(
+            _SAVE_GAME_STATE_LUA,
+            [self._state_key(chat_id)],
+            [payload, str(expected_version), str(self._game_state_ttl_ms)],
+        )
+        return bool(int(result or 0))
+
+    def _state_key(self, chat_id: int) -> str:
+        return _GAME_STATE_KEY_TEMPLATE.format(chat_id=int(chat_id))
         self._max_players = _positive_int(
             _GAME_CONSTANTS.get("max_players"), 8
         )
