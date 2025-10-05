@@ -205,6 +205,12 @@ class FakeLockManager:
         async with self._lock:
             yield
 
+    async def get_lock_queue_depth(self, chat_id: int) -> int:
+        return 0
+
+    async def estimate_wait_time(self, queue_depth: int) -> float:
+        return 0.0
+
 
 @pytest.fixture
 def redis_client() -> FakeRedisClient:
