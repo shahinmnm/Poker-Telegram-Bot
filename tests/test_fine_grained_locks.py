@@ -70,6 +70,21 @@ class TestFineGrainedLocks:
         assert acquired[1] == acquired[0].replace("start", "end")
 
     @pytest.mark.asyncio
+    async def test_table_read_then_player_lock_respects_hierarchy(self):
+        """Read locks can be upgraded to player locks without violation."""
+
+        lock_manager = LockManager(
+            logger=logging.getLogger("fine_grained_read_player"),
+            enable_fine_grained_locks=True,
+            redis_pool=None,
+        )
+        chat_id = 321
+
+        async with lock_manager.table_read_lock(chat_id):
+            async with lock_manager.player_state_lock(chat_id, "player1"):
+                pass
+
+    @pytest.mark.asyncio
     async def test_lock_hierarchy_validation_raises_error(self):
         """Acquiring higher lock while holding lower raises error."""
 
@@ -86,6 +101,46 @@ class TestFineGrainedLocks:
                     pass
 
         assert "hierarchy violation" in str(exc_info.value).lower()
+
+    @pytest.mark.asyncio
+    async def test_pot_to_player_lock_violates_hierarchy(self):
+        """Descending from pot to player lock raises hierarchy error."""
+
+        lock_manager = LockManager(
+            logger=logging.getLogger("fine_grained_pot_player"),
+            enable_fine_grained_locks=True,
+            redis_pool=None,
+        )
+        chat_id = 456
+
+        async with lock_manager.pot_lock(chat_id):
+            with pytest.raises(LockOrderError) as exc_info:
+                async with lock_manager.player_state_lock(chat_id, "player2"):
+                    pass
+
+        assert "hierarchy violation" in str(exc_info.value).lower()
+
+    @pytest.mark.asyncio
+    async def test_lock_released_after_exception(self):
+        """Locks are released when an error occurs inside the guard."""
+
+        lock_manager = LockManager(
+            logger=logging.getLogger("fine_grained_cleanup"),
+            enable_fine_grained_locks=True,
+            redis_pool=None,
+        )
+        chat_id = 789
+
+        class TestError(RuntimeError):
+            pass
+
+        with pytest.raises(TestError):
+            async with lock_manager.deck_lock(chat_id):
+                raise TestError()
+
+        # After exception the lock should be available again.
+        async with lock_manager.deck_lock(chat_id):
+            pass
 
     @pytest.mark.asyncio
     async def test_same_level_locks_allowed(self):
