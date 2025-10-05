@@ -23,6 +23,7 @@ Because all of these were awaited while the `stage:<chat>` lock was held, parall
 * `_reset_game_state` accepts `defer_notifications=True` so finalisation can emit the “new hand ready” message and join prompt after the lock is released, avoiding double work and contention.
 * `PokerBotModel._clear_game_messages` supports a `collect_only` mode that returns the pending message IDs while clearing in-memory state; the new `GameEngine._delete_chat_messages` helper performs the actual deletions once the stage lock is free.
 * Startup and start-game paths now call `LockManager.detect_deadlock()` and log a JSON snapshot to simplify diagnostics of held or waiting locks.
+* Lock debugging can be enabled incrementally through the `lock_manager` options in `config/system_constants.json`, covering duplicate detection, hierarchy enforcement, fine-grained lock rollout, and optional stack trace logging for long-lived acquisitions.
 
 ## Unprotected Mutations
 
