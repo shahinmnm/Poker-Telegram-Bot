@@ -1,26 +1,21 @@
-from __future__ import annotations
+"""Betting handler orchestrating Two-Phase Commit betting actions."""
 
-"""
-Betting Handler - Atomic Betting with Two-Phase Commit
-Handles all betting actions (fold, check, call, raise) with guaranteed atomicity.
-"""
+from __future__ import annotations
 
 import logging
 import time
 from dataclasses import dataclass
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Mapping, Optional
 
-from pokerapp.wallet_service import WalletService
-from pokerapp.game_engine import GameEngine
 from pokerapp.lock_manager import LockManager
+from pokerapp.metrics import ACTION_DURATION
+from pokerapp.wallet_service import WalletService
 
 logger = logging.getLogger(__name__)
 
 
 @dataclass
 class BettingResult:
-    """Result of a betting action."""
-
     success: bool
     message: str
     new_state: Optional[Dict[str, Any]] = None
@@ -28,17 +23,19 @@ class BettingResult:
 
 
 class BettingHandler:
-    """Handles betting actions with a Two-Phase Commit protocol."""
+    """Coordinates the 2PC flow between the wallet and the game engine."""
+
+    _LOCK_TIMEOUT_SECONDS = 30.0
 
     def __init__(
         self,
         wallet_service: WalletService,
-        game_engine: GameEngine,
+        game_engine: Any,
         lock_manager: LockManager,
     ) -> None:
-        self.wallet = wallet_service
-        self.engine = game_engine
-        self.locks = lock_manager
+        self._wallet = wallet_service
+        self._engine = game_engine
+        self._locks = lock_manager
 
     async def handle_betting_action(
         self,
@@ -47,132 +44,134 @@ class BettingHandler:
         action: str,
         amount: Optional[int] = None,
     ) -> BettingResult:
-        """Process a betting action with full atomicity guarantee."""
+        """Execute a betting action using the Two-Phase Commit protocol."""
 
+        start_time = time.perf_counter()
+        normalized_action = (action or "").strip().lower()
         reservation_id: Optional[str] = None
-        committed_reservation_id: Optional[str] = None
-        committed_amount = 0
+        committed = False
 
         try:
-            validation_result = await self._validate_action(
-                user_id, chat_id, action, amount
+            validation = await self._validate_action(
+                user_id=user_id,
+                chat_id=chat_id,
+                action=normalized_action,
+                amount=amount,
             )
-            if not validation_result["valid"]:
-                return BettingResult(success=False, message=validation_result["error"])
 
-            required_amount: int = validation_result["required_amount"]
+            if not validation["valid"]:
+                return BettingResult(False, validation["error"])
+
+            required_amount = int(validation["required_amount"])
 
             if required_amount > 0:
-                success, reservation_id, message = await self.wallet.reserve_chips(
-                    user_id=user_id,
-                    chat_id=chat_id,
-                    amount=required_amount,
-                    metadata={
-                        "action": action,
-                        "stage": validation_result.get("stage"),
-                        "timestamp": validation_result.get("timestamp"),
-                    },
-                )
-
-                if not success:
-                    return BettingResult(success=False, message=message)
-
-            async with self.locks.acquire_table_write_lock(
-                chat_id,
-                timeout=30.0,
-            ):
-                game_state = await self._load_state_with_version(chat_id)
-
-                if not game_state:
-                    if reservation_id:
-                        await self.wallet.rollback_reservation(
-                            reservation_id, reason="game_not_found"
-                        )
-                    return BettingResult(
-                        success=False,
-                        message="Game not found or ended",
+                reserve_success, reservation_id, reserve_message = (
+                    await self._wallet.reserve_chips(
+                        user_id=user_id,
+                        chat_id=chat_id,
+                        amount=required_amount,
+                        metadata={
+                            "action": normalized_action,
+                            "chat_id": chat_id,
+                        },
                     )
+                )
+                if not reserve_success or reservation_id is None:
+                    return BettingResult(False, reserve_message)
 
-                current_player_id = self._extract_current_player_id(game_state)
-                if current_player_id is not None and current_player_id != user_id:
+            async with self._locks.acquire_table_write_lock(
+                chat_id, timeout=self._LOCK_TIMEOUT_SECONDS
+            ):
+                state = await self._engine.load_game_state(chat_id)
+                if not isinstance(state, Mapping):
                     if reservation_id:
-                        await self.wallet.rollback_reservation(
-                            reservation_id, reason="not_players_turn"
+                        await self._wallet.rollback_reservation(
+                            reservation_id, "game_not_found"
                         )
-                    return BettingResult(success=False, message="Not your turn")
+                    return BettingResult(False, "Game not found or has ended")
 
-                if reservation_id:
-                    commit_success, commit_message = await self.wallet.commit_reservation(
+                if not self._is_players_turn(state, user_id):
+                    if reservation_id:
+                        await self._wallet.rollback_reservation(
+                            reservation_id, "not_players_turn"
+                        )
+                    return BettingResult(False, "It is not your turn")
+
+                expected_version = self._extract_version(state)
+
+                if reservation_id is not None:
+                    commit_success, commit_message = await self._wallet.commit_reservation(
                         reservation_id
                     )
                     if not commit_success:
-                        return BettingResult(
-                            success=False,
-                            message=f"Failed to commit bet: {commit_message}",
+                        await self._wallet.rollback_reservation(
+                            reservation_id,
+                            f"commit_failed:{commit_message}",
+                            allow_committed=True,
                         )
-                    committed_reservation_id = reservation_id
-                    reservation_id = None
-                    committed_amount = required_amount
+                        return BettingResult(False, commit_message)
+                    committed = True
 
-                new_state = await self.engine.apply_betting_action(
-                    game_state,
-                    user_id,
-                    action,
-                    required_amount,
+                updated_state = await self._apply_action(
+                    state, user_id, normalized_action, required_amount
                 )
 
-                expected_version = self._extract_version(game_state)
-                save_success = await self.engine.save_game_state_with_version(
-                    chat_id, new_state, expected_version=expected_version
+                save_success = await self._engine.save_game_state_with_version(
+                    chat_id,
+                    updated_state,
+                    expected_version=expected_version,
                 )
 
                 if not save_success:
-                    logger.error(
-                        "Version conflict detected for chat %s. Triggering refund.",
-                        chat_id,
-                    )
-                    if committed_amount > 0:
-                        await self.wallet._credit_to_wallet(
-                            user_id, chat_id, committed_amount
+                    if reservation_id is not None:
+                        await self._wallet.rollback_reservation(
+                            reservation_id,
+                            "version_conflict",
+                            allow_committed=committed,
                         )
                     return BettingResult(
-                        success=False,
-                        message="State conflict - action cancelled, funds returned",
+                        False,
+                        "State update conflict detected – action cancelled",
                     )
 
                 logger.info(
-                    "Betting action successful: user=%s chat=%s action=%s amount=%s",
-                    user_id,
-                    chat_id,
-                    action,
-                    required_amount,
+                    "Betting action succeeded",
+                    extra={
+                        "user_id": user_id,
+                        "chat_id": chat_id,
+                        "action": normalized_action,
+                        "amount": required_amount,
+                        "reservation_id": reservation_id,
+                    },
                 )
 
                 return BettingResult(
-                    success=True,
-                    message=f"{action.capitalize()} successful",
-                    new_state=new_state,
-                    reservation_id=committed_reservation_id,
+                    True,
+                    f"{normalized_action.replace('_', ' ').title()} successful",
+                    new_state=dict(updated_state),
+                    reservation_id=reservation_id,
                 )
-
         except Exception as exc:  # pragma: no cover - defensive logging
-            logger.error(
-                "Betting action failed: user=%s chat=%s action=%s error=%s",
-                user_id,
-                chat_id,
-                action,
-                exc,
-                exc_info=True,
+            logger.exception(
+                "Betting action failed",
+                extra={
+                    "user_id": user_id,
+                    "chat_id": chat_id,
+                    "action": normalized_action,
+                    "reservation_id": reservation_id,
+                },
             )
-
-            if reservation_id:
-                await self.wallet.rollback_reservation(
-                    reservation_id, reason=f"exception: {exc}"
+            if reservation_id is not None:
+                await self._wallet.rollback_reservation(
+                    reservation_id,
+                    f"exception:{exc}",
+                    allow_committed=committed,
                 )
-            elif committed_amount > 0:
-                await self.wallet._credit_to_wallet(user_id, chat_id, committed_amount)
-
-            return BettingResult(success=False, message=f"Action failed: {exc}")
+            return BettingResult(False, f"Action failed: {exc}")
+        finally:
+            ACTION_DURATION.labels(action=normalized_action or "unknown").observe(
+                time.perf_counter() - start_time
+            )
 
     async def _validate_action(
         self,
@@ -181,80 +180,71 @@ class BettingHandler:
         action: str,
         amount: Optional[int],
     ) -> Dict[str, Any]:
-        """Validate the betting action before processing."""
+        engine_state = await self._engine.load_game_state(chat_id)
+        if not isinstance(engine_state, Mapping):
+            return {"valid": False, "error": "Game state not available"}
 
-        load_state = getattr(self.engine, "load_game_state", None)
-        if load_state is None:
-            raise AttributeError("GameEngine is missing load_game_state method")
-
-        game_state = await load_state(chat_id)
-        if not game_state:
-            return {"valid": False, "error": "No active game"}
-
-        players = list(game_state.get("players", []))
-        player_data = next((p for p in players if p.get("user_id") == user_id), None)
-
-        if not player_data:
-            return {"valid": False, "error": "You are not in this game"}
+        players = list(engine_state.get("players", []))
+        player_data = next(
+            (p for p in players if int(p.get("user_id", 0)) == int(user_id)),
+            None,
+        )
+        if player_data is None:
+            return {"valid": False, "error": "Player not seated at the table"}
 
         if player_data.get("folded"):
-            return {"valid": False, "error": "You have already folded"}
+            return {"valid": False, "error": "Player already folded"}
 
-        current_bet = int(game_state.get("current_bet", 0))
-        player_current_bet = int(player_data.get("current_bet", 0))
-        to_call = max(current_bet - player_current_bet, 0)
+        current_bet = int(engine_state.get("current_bet", 0))
+        player_bet = int(player_data.get("current_bet", 0))
+        to_call = max(current_bet - player_bet, 0)
 
         if action == "fold":
-            required_amount = 0
+            required = 0
         elif action == "check":
             if to_call > 0:
-                return {"valid": False, "error": "Cannot check - must call or fold"}
-            required_amount = 0
+                return {"valid": False, "error": "Cannot check – call or fold"}
+            required = 0
         elif action == "call":
-            required_amount = to_call
+            required = to_call
         elif action == "raise":
             if amount is None or amount <= current_bet:
                 return {"valid": False, "error": "Invalid raise amount"}
-            required_amount = amount - player_current_bet
+            required = amount - player_bet
         elif action == "all_in":
-            required_amount = int(player_data.get("chips", 0))
+            required = int(player_data.get("chips", 0))
         else:
-            return {"valid": False, "error": f"Unknown action: {action}"}
+            return {"valid": False, "error": f"Unknown action '{action}'"}
 
-        return {
-            "valid": True,
-            "error": None,
-            "required_amount": required_amount,
-            "stage": game_state.get("stage", "unknown"),
-            "timestamp": time.time(),
-        }
+        return {"valid": True, "required_amount": max(required, 0)}
 
-    async def _load_state_with_version(self, chat_id: int) -> Optional[Dict[str, Any]]:
-        load_with_version = getattr(self.engine, "load_game_state_with_version", None)
-        if load_with_version is None:
-            state = await getattr(self.engine, "load_game_state")(chat_id)
-            if state is None:
-                return None
-            if isinstance(state, dict):
-                state.setdefault("version", 0)
-                return state
-            return {"state": state, "version": 0}
-
-        state = await load_with_version(chat_id)
-        return state
+    async def _apply_action(
+        self,
+        state: Mapping[str, Any],
+        user_id: int,
+        action: str,
+        amount: int,
+    ) -> Mapping[str, Any]:
+        apply_handler = getattr(self._engine, "apply_betting_action", None)
+        if apply_handler is None:
+            raise AttributeError("Game engine does not implement apply_betting_action")
+        updated_state = await apply_handler(state, user_id, action, amount)
+        if not isinstance(updated_state, Mapping):
+            raise TypeError("apply_betting_action must return mapping state")
+        return updated_state
 
     @staticmethod
-    def _extract_version(state: Dict[str, Any]) -> int:
-        version = state.get("version")
+    def _extract_version(state: Mapping[str, Any]) -> int:
         try:
-            return int(version)
+            return int(state.get("version", 0))
         except (TypeError, ValueError):
             return 0
 
     @staticmethod
-    def _extract_current_player_id(state: Dict[str, Any]) -> Optional[int]:
-        value = state.get("current_player_id")
+    def _is_players_turn(state: Mapping[str, Any], user_id: int) -> bool:
+        current_player = state.get("current_player_id")
         try:
-            return int(value) if value is not None else None
+            return int(current_player) == int(user_id)
         except (TypeError, ValueError):
-            return None
+            return False
+
