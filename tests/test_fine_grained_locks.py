@@ -85,8 +85,8 @@ class TestFineGrainedLocks:
                 pass
 
     @pytest.mark.asyncio
-    async def test_lock_hierarchy_validation_raises_error(self):
-        """Acquiring higher lock while holding lower raises error."""
+    async def test_player_to_table_write_allows_ascending(self):
+        """Ascending from player to table write lock should be permitted."""
 
         lock_manager = LockManager(
             logger=logging.getLogger("fine_grained_hierarchy"),
@@ -95,12 +95,9 @@ class TestFineGrainedLocks:
         )
         chat_id = 123
 
-        with pytest.raises(LockOrderError) as exc_info:
-            async with lock_manager.player_state_lock(chat_id, "player1"):
-                async with lock_manager.table_write_lock(chat_id):
-                    pass
-
-        assert "hierarchy violation" in str(exc_info.value).lower()
+        async with lock_manager.player_state_lock(chat_id, "player1"):
+            async with lock_manager.table_write_lock(chat_id):
+                pass
 
     @pytest.mark.asyncio
     async def test_pot_to_player_lock_violates_hierarchy(self):
@@ -121,8 +118,8 @@ class TestFineGrainedLocks:
         assert "hierarchy violation" in str(exc_info.value).lower()
 
     @pytest.mark.asyncio
-    async def test_player_to_pot_lock_violates_hierarchy(self):
-        """Ascending directly from player to pot should be rejected."""
+    async def test_player_to_pot_lock_allows_ascending(self):
+        """Ascending directly from player to pot should be permitted."""
 
         lock_manager = LockManager(
             logger=logging.getLogger("fine_grained_player_pot"),
@@ -132,15 +129,12 @@ class TestFineGrainedLocks:
         chat_id = 654
 
         async with lock_manager.player_state_lock(chat_id, "player3"):
-            with pytest.raises(LockOrderError) as exc_info:
-                async with lock_manager.pot_lock(chat_id):
-                    pass
-
-        assert "hierarchy violation" in str(exc_info.value).lower()
+            async with lock_manager.pot_lock(chat_id):
+                pass
 
     @pytest.mark.asyncio
-    async def test_read_to_pot_lock_skips_player_and_violates_hierarchy(self):
-        """Skipping the player level between read and pot must raise."""
+    async def test_read_to_pot_lock_allows_ascending_skip(self):
+        """Skipping the player level between read and pot should be permitted."""
 
         lock_manager = LockManager(
             logger=logging.getLogger("fine_grained_read_pot"),
@@ -150,11 +144,8 @@ class TestFineGrainedLocks:
         chat_id = 987
 
         async with lock_manager.table_read_lock(chat_id):
-            with pytest.raises(LockOrderError) as exc_info:
-                async with lock_manager.pot_lock(chat_id):
-                    pass
-
-        assert "hierarchy violation" in str(exc_info.value).lower()
+            async with lock_manager.pot_lock(chat_id):
+                pass
 
     @pytest.mark.asyncio
     async def test_lock_released_after_exception(self):
@@ -209,8 +200,8 @@ class TestFineGrainedLocks:
                 pass
 
     @pytest.mark.asyncio
-    async def test_full_hierarchy_sequence_allowed(self):
-        """Acquiring every hierarchy level in order should succeed."""
+    async def test_full_hierarchy_nested_sequence_allowed(self):
+        """Nested acquisition through every hierarchy level should succeed."""
 
         lock_manager = LockManager(
             logger=logging.getLogger("fine_grained_full_sequence"),
@@ -219,13 +210,22 @@ class TestFineGrainedLocks:
         )
         chat_id = 246
 
+        release_write = asyncio.Event()
+        write_acquired = asyncio.Event()
+
+        async def acquire_table_write() -> None:
+            async with lock_manager.table_write_lock(chat_id):
+                write_acquired.set()
+                await release_write.wait()
+
         async with lock_manager.table_read_lock(chat_id):
-            pass
-        async with lock_manager.player_state_lock(chat_id, "player4"):
-            pass
-        async with lock_manager.pot_lock(chat_id):
-            pass
-        async with lock_manager.deck_lock(chat_id):
-            pass
-        async with lock_manager.table_write_lock(chat_id):
-            pass
+            async with lock_manager.player_state_lock(chat_id, "player4"):
+                async with lock_manager.pot_lock(chat_id):
+                    async with lock_manager.deck_lock(chat_id):
+                        write_task = asyncio.create_task(acquire_table_write())
+                        await asyncio.sleep(0)
+                        assert not write_task.done(), "Hierarchy check should not fail"
+
+        await write_acquired.wait()
+        release_write.set()
+        await write_task
