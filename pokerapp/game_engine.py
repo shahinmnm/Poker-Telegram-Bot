@@ -503,6 +503,15 @@ class GameEngine:
             chat_id, game_obj, expected_version
         )
 
+    async def save_game_state(self, chat_id: int, state: Dict[str, Any]) -> bool:
+        """Persist game state using optimistic locking semantics."""
+
+        current_version = int(state.get("version", 0))
+        optimistic_version = current_version - 1 if current_version > 0 else 0
+        return await self.save_game_state_with_version(
+            chat_id, state, expected_version=optimistic_version
+        )
+
     async def _load_state_from_redis(
         self, chat_id: int
     ) -> Optional[Dict[str, Any]]:
@@ -1323,290 +1332,236 @@ class GameEngine:
         if len(actions) > 5:
             del actions[:-5]
 
+
+
     async def handle_player_action(
         self,
-        *,
-        context: Optional[Any],
-        chat_id: ChatId,
-        user_id: UserId,
+        chat_id: int,
+        user_id: int,
         action: str,
-        amount: Optional[int] = None,
-    ) -> bool:
-        """Execute ``action`` for ``user_id`` using fine-grained locking."""
+        amount: int = 0
+    ) -> dict:
+        """Handle player action with fine-grained locking."""
 
-        action_token = (action or "").strip().lower()
-        lock_manager = self._lock_manager
+        action = (action or "").strip().lower()
+        required_amount = 0
+        current_bet = 0
+        player_bet = 0
+        state: Optional[Dict[str, Any]] = None
+        player: Optional[Dict[str, Any]] = None
 
-        if lock_manager is None:
-            game = await self._table_manager.get_game(chat_id)
-            player = self._find_player_by_user_id(game, int(user_id))
-            if player is None:
+        # Step 1: Acquire table read lock to inspect state
+        async with self._lock_manager.acquire_table_read_lock(chat_id) as read_acquired:
+            if not read_acquired:
                 self._logger.warning(
-                    "Player not found for action",
-                    extra={
-                        "event_type": "engine_action_no_player",
-                        "chat_id": chat_id,
-                        "user_id": user_id,
-                        "action": action_token,
-                    },
+                    "Failed to acquire table read lock for player action",
+                    extra={"chat_id": chat_id, "user_id": user_id, "action": action},
                 )
-                return False
+                return {"success": False, "message": "Table is busy, please retry"}
 
-            return await self._execute_player_action(
-                game=game,
-                player=player,
-                action=action_token,
-                amount=int(amount or 0),
-            )
+            loaded_state = await self.load_game_state(chat_id)
+            if not isinstance(loaded_state, dict):
+                return {"success": False, "message": "Game not found"}
 
-        lock_chat_id = self._safe_int_value(chat_id)
-        safe_user_id = self._safe_int_value(user_id)
+            state = loaded_state
+            current_player = self._get_current_player(state)
+            if current_player is None:
+                return {"success": False, "message": "No active player"}
 
-        game: Optional[Game] = None
-        player: Optional[Player] = None
-        mention = str(user_id)
-        game_id: Optional[str] = None
+            player = self._find_player(state, user_id)
+            if player is None:
+                return {"success": False, "message": "Player not found"}
 
-        async with lock_manager.table_read_lock(lock_chat_id):
-            get_game_fn = getattr(self._table_manager, "get_game", None)
-            if callable(get_game_fn):
-                game = await get_game_fn(chat_id)
+            current_bet = state.get("current_bet", 0)
+            player_bet = player.get("bet", 0)
+
+        required_amount = self._calculate_required_amount(
+            action,
+            current_bet,
+            player_bet,
+            player.get("chips", 0),
+            amount,
+        )
+
+        # Step 2: Acquire player lock to mutate player state
+        async with self._lock_manager.acquire_player_lock(chat_id, user_id) as player_acquired:
+            if not player_acquired:
+                self._logger.warning(
+                    "Failed to acquire player lock",
+                    extra={"chat_id": chat_id, "user_id": user_id},
+                )
+                return {"success": False, "message": "Failed to acquire player lock"}
+
+            state = await self.load_game_state(chat_id)
+            if not isinstance(state, dict):
+                return {"success": False, "message": "Game not found"}
+
+            player = self._find_player(state, user_id)
+            if player is None:
+                return {"success": False, "message": "Player not found"}
+            if player.get("has_acted"):
+                return {"success": False, "message": "Player has already acted"}
+
+            if action == "fold":
+                player["state"] = "folded"
+                player["has_acted"] = True
+            elif action in ["call", "raise", "all_in"]:
+                if player["chips"] < required_amount:
+                    return {"success": False, "message": "Insufficient chips"}
+
+                player["chips"] -= required_amount
+                player["bet"] += required_amount
+                player["has_acted"] = True
+
+                if action == "raise":
+                    state["current_bet"] = player["bet"]
+            elif action == "check":
+                current_bet = state.get("current_bet", 0)
+                player_bet = player.get("bet", 0)
+                if current_bet > player_bet:
+                    return {"success": False, "message": "Cannot check, must call or fold"}
+                player["has_acted"] = True
             else:
-                snapshot = await self._table_manager.load_game_with_version(chat_id)
-                if isinstance(snapshot, tuple):
-                    game = snapshot[0]
-                else:
-                    game = snapshot
-            player = self._find_player_by_user_id(game, int(user_id))
+                return {"success": False, "message": "Invalid action"}
 
-            if player is None:
-                self._logger.warning(
-                    "Player not found during action read phase",
-                    extra={
-                        "event_type": "engine_action_player_missing",
-                        "chat_id": chat_id,
-                        "user_id": user_id,
-                        "action": action_token,
-                    },
-                )
-                return False
+        # Step 3: Acquire pot lock if we need to collect bets
+        needs_pot_update = action in ["call", "raise", "all_in"] and self._is_betting_round_complete(state)
 
-            if not self._is_valid_action(game, player, action_token, amount):
-                self._logger.warning(
-                    "Invalid action request",
-                    extra={
-                        "event_type": "engine_action_invalid",
-                        "chat_id": chat_id,
-                        "user_id": user_id,
-                        "action": action_token,
-                    },
-                )
-                return False
-
-            deadline = getattr(game, "turn_deadline", None)
-            if isinstance(deadline, (int, float)):
-                try:
-                    current_time = asyncio.get_running_loop().time()
-                except RuntimeError:  # pragma: no cover - compatibility fallback
-                    current_time = asyncio.get_event_loop().time()
-                if current_time > float(deadline):
-                    self._logger.info(
-                        "Action rejected due to expired turn deadline",
-                        extra={
-                            "event_type": "engine_action_timeout",
-                            "chat_id": chat_id,
-                            "user_id": user_id,
-                            "action": action_token,
-                        },
+        if needs_pot_update:
+            async with self._lock_manager.acquire_pot_lock(chat_id) as pot_acquired:
+                if not pot_acquired:
+                    self._logger.warning(
+                        "Failed to acquire pot lock",
+                        extra={"chat_id": chat_id},
                     )
-                    return False
+                    return {"success": False, "message": "Failed to update pot"}
 
-            mention = getattr(player, "mention_markdown", mention)
-            game_id = getattr(game, "id", None)
+                state = await self.load_game_state(chat_id)
+                if not isinstance(state, dict):
+                    return {"success": False, "message": "Game not found"}
 
-        if game is None or player is None:
-            return False
+                total_bets = sum(p.get("bet", 0) for p in state.get("players", []))
+                state["pot"] = state.get("pot", 0) + total_bets
 
-        log_context = {
-            "event_type": "engine_player_action",
-            "chat_id": chat_id,
-            "game_id": game_id,
-            "user_id": user_id,
-            "action": action_token,
-        }
+                for p in state.get("players", []):
+                    p["bet"] = 0
 
-        pot_delta = 0
-        new_round_rate: Optional[int] = None
-        reset_other_players = False
-        action_entry: Optional[str] = None
+        # Step 4: Advance to next player
+        self._advance_to_next_player(state)
 
-        async with lock_manager.player_state_lock(
-            lock_chat_id,
-            safe_user_id,
-            context={"action": action_token, "game_id": game_id},
-        ):
-            player = self._find_player_by_user_id(game, int(user_id))
-            if player is None:
-                return False
-
-            if not self._is_valid_action(game, player, action_token, amount):
-                return False
-
-            params = self._calculate_action_params(game, player, action_token, amount)
-            wallet = getattr(player, "wallet", None)
-
-            if action_token == "fold":
-                player.state = PlayerState.FOLD
-                if hasattr(player, "has_acted"):
-                    player.has_acted = True
-                action_entry = f"{mention}: فولد"
-
-                self._logger.info("Player folded", extra=log_context)
-
-            elif action_token == "check":
-                if hasattr(player, "has_acted"):
-                    player.has_acted = True
-                action_entry = f"{mention}: چک"
-
-                self._logger.info("Player checked", extra=log_context)
-
-            elif action_token == "call":
-                call_amount = int(params.get("call_amount", 0))
-                if call_amount > 0 and wallet is not None and hasattr(wallet, "authorize"):
-                    try:
-                        await wallet.authorize(game.id, call_amount)
-                    except Exception:
-                        self._logger.warning(
-                            "Wallet authorization failed during call",
-                            extra={**log_context, "amount": call_amount},
-                            exc_info=True,
-                        )
-                        return False
-
-                if call_amount > 0:
-                    player.round_rate = int(getattr(player, "round_rate", 0)) + call_amount
-                    player.total_bet = int(getattr(player, "total_bet", 0)) + call_amount
-                    pot_delta = call_amount
-                    action_entry = f"{mention}: کال {call_amount}$"
-                else:
-                    action_entry = f"{mention}: چک"
-
-                if hasattr(player, "has_acted"):
-                    player.has_acted = True
-
-                self._logger.info(
-                    "Player called",
-                    extra={**log_context, "amount": call_amount},
-                )
-
-            elif action_token == "raise":
-                total_amount = int(params.get("total_amount", 0))
-                if total_amount <= 0:
-                    return False
-
-                if wallet is not None and hasattr(wallet, "authorize"):
-                    try:
-                        await wallet.authorize(game.id, total_amount)
-                    except Exception:
-                        self._logger.warning(
-                            "Wallet authorization failed during raise",
-                            extra={**log_context, "amount": total_amount},
-                            exc_info=True,
-                        )
-                        return False
-
-                player.round_rate = int(getattr(player, "round_rate", 0)) + total_amount
-                player.total_bet = int(getattr(player, "total_bet", 0)) + total_amount
-                if hasattr(player, "has_acted"):
-                    player.has_acted = True
-
-                pot_delta = total_amount
-                new_round_rate = int(getattr(player, "round_rate", 0))
-                reset_other_players = True
-                action_entry = f"{mention}: رِیز {total_amount}$"
-
-                self._logger.info(
-                    "Player raised",
-                    extra={**log_context, "amount": total_amount},
-                )
-
-            elif action_token == "all_in":
-                all_in_amount = 0
-                if wallet is not None and hasattr(wallet, "authorize_all"):
-                    try:
-                        all_in_amount = int(await wallet.authorize_all(game.id))
-                    except Exception:
-                        self._logger.warning(
-                            "Wallet authorization failed during all-in",
-                            extra=log_context,
-                            exc_info=True,
-                        )
-                        return False
-
-                if all_in_amount > 0:
-                    player.round_rate = int(getattr(player, "round_rate", 0)) + all_in_amount
-                    player.total_bet = int(getattr(player, "total_bet", 0)) + all_in_amount
-                    pot_delta = all_in_amount
-                    action_entry = f"{mention}: آل این {all_in_amount}$"
-                else:
-                    action_entry = f"{mention}: آل این"
-
-                player.state = PlayerState.ALL_IN
-                if hasattr(player, "has_acted"):
-                    player.has_acted = True
-
-                new_round_rate = int(getattr(player, "round_rate", 0))
-                reset_other_players = True
-
-                self._logger.info("Player went all-in", extra=log_context)
-
-        if pot_delta > 0:
-            async with lock_manager.pot_lock(
-                lock_chat_id,
-                context={
-                    "action": action_token,
-                    "delta": pot_delta,
-                    "player_id": safe_user_id,
-                },
-            ):
-                game.pot = int(getattr(game, "pot", 0)) + pot_delta
-
-        async with lock_manager.betting_round_lock(
-            lock_chat_id,
-            context={"action": action_token, "player_id": safe_user_id},
-        ):
-            if new_round_rate is not None:
-                current_max = int(getattr(game, "max_round_rate", 0))
-                game.max_round_rate = max(current_max, new_round_rate)
-                if hasattr(game, "trading_end_user_id"):
-                    game.trading_end_user_id = getattr(player, "user_id", None)
-
-                if reset_other_players:
-                    for other in game.players:
-                        if other is player:
-                            continue
-                        if (
-                            getattr(other, "state", PlayerState.ACTIVE)
-                            == PlayerState.ACTIVE
-                            and hasattr(other, "has_acted")
-                        ):
-                            other.has_acted = False
-
-            if action_entry:
-                self._record_action_entry(game, action_entry)
-
-        self.refresh_turn_deadline(game)
-
+        # Step 5: Acquire table write lock to persist
         try:
-            await self._table_manager.save_game(chat_id, game)
-        except Exception:
-            self._logger.exception(
-                "Failed to persist game after action",
-                extra={**log_context, "event_type": "engine_action_save_failed"},
-            )
-            return False
+            async with self._lock_manager.acquire_table_write_lock(chat_id):
+                expected_version = state.get("version", 0)
+                state["version"] = expected_version + 1
 
-        return True
+                save_success = await self.save_game_state(chat_id, state)
+
+                if not save_success:
+                    return {"success": False, "message": "State conflict, please retry"}
+
+                self._logger.info(
+                    "Player action completed successfully",
+                    extra={
+                        "chat_id": chat_id,
+                        "user_id": user_id,
+                        "action": action,
+                        "amount": required_amount,
+                        "new_version": state["version"],
+                    },
+                )
+
+                return {
+                    "success": True,
+                    "message": f"{action.capitalize()} successful",
+                    "new_state": state,
+                }
+        except TimeoutError:
+            self._logger.error(
+                "Failed to acquire table write lock for persistence",
+                extra={"chat_id": chat_id, "user_id": user_id},
+            )
+            return {"success": False, "message": "Failed to save game state"}
+
+    def _get_current_player(self, state: dict) -> Optional[dict]:
+        """Get the player whose turn it is."""
+
+        players = state.get("players", [])
+        current_index = state.get("current_player_index", 0)
+
+        if 0 <= current_index < len(players):
+            return players[current_index]
+        return None
+
+    def _find_player(self, state: dict, user_id: int) -> Optional[dict]:
+        """Find player by user_id in game state."""
+
+        for player in state.get("players", []):
+            if player.get("user_id") == user_id:
+                return player
+        return None
+
+    def _calculate_required_amount(
+        self,
+        action: str,
+        current_bet: int,
+        player_bet: int,
+        player_chips: int,
+        raise_amount: int
+    ) -> int:
+        """Calculate chips required for action."""
+
+        if action == "fold" or action == "check":
+            return 0
+        elif action == "call":
+            return current_bet - player_bet
+        elif action == "raise":
+            return (current_bet - player_bet) + raise_amount
+        elif action == "all_in":
+            return player_chips
+        return 0
+
+    def _is_betting_round_complete(self, state: dict) -> bool:
+        """Check if all active players have acted in current round."""
+
+        players = state.get("players", [])
+        active_players = [p for p in players if p.get("state") != "folded"]
+
+        if len(active_players) <= 1:
+            return True
+
+        # Check if all active players have acted
+        all_acted = all(p.get("has_acted", False) for p in active_players)
+
+        # Check if all bets are equal
+        current_bet = state.get("current_bet", 0)
+        all_bets_equal = all(
+            p.get("bet", 0) == current_bet or p.get("chips", 0) == 0
+            for p in active_players
+        )
+
+        return all_acted and all_bets_equal
+
+    def _advance_to_next_player(self, state: dict) -> None:
+        """Move to next active player (mutates state in-place)."""
+
+        players = state.get("players", [])
+        current_index = state.get("current_player_index", 0)
+
+        # Find next non-folded player
+        for offset in range(1, len(players) + 1):
+            next_index = (current_index + offset) % len(players)
+            next_player = players[next_index]
+
+            if next_player.get("state") != "folded":
+                state["current_player_index"] = next_index
+                return
+
+        # No active players found (shouldn't happen)
+        self._logger.warning(
+            "No active players found when advancing",
+            extra={"chat_id": state.get("chat_id")}
+        )
 
     async def process_action(
         self,
@@ -1631,7 +1586,7 @@ class GameEngine:
             return False
 
         lock_token: Optional[str] = None
-        result = False
+        result_success = False
 
         try:
             try:
@@ -1698,13 +1653,16 @@ class GameEngine:
                         )
                 return False
 
-            result = await self.handle_player_action(
-                context=None,
-                chat_id=chat_id,
-                user_id=user_id,
-                action=action_token,
+            response = await self.handle_player_action(
+                chat_id,
+                user_id,
+                action_token,
                 amount=amount,
             )
+            if isinstance(response, dict):
+                result_success = bool(response.get("success"))
+            else:
+                result_success = bool(response)
         finally:
             if lock_token is not None:
                 try:
@@ -1726,7 +1684,7 @@ class GameEngine:
                         exc_info=True,
                     )
 
-        return result
+        return result_success
 
     async def handle_call(self, chat_id: int, user_id: int) -> bool:
         """Backward-compatible wrapper around :meth:`process_action`."""

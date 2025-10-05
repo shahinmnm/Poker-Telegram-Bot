@@ -50,6 +50,11 @@ except Exception:  # pragma: no cover - fallback when prometheus_client missing
 
 from pokerapp.bootstrap import _make_service_logger
 from pokerapp.entities import ChatId, UserId
+from pokerapp.metrics import (
+    LOCK_ACQUISITIONS,
+    LOCK_HIERARCHY_VIOLATIONS,
+    LOCK_HOLD_TIME,
+)
 from pokerapp.utils.locks import ReentrantAsyncLock
 from pokerapp.utils.logging_helpers import add_context, normalise_request_category
 
@@ -65,6 +70,7 @@ LOCK_LEVELS: Dict[str, int] = {
     "betting": 2,
     "pot": 1,
     "player": 0,
+    "table_read": -1,
     "player_report": 2,
     "wallet": 3,
     "chat": 4,
@@ -75,6 +81,7 @@ _LOCK_PREFIX_LEVELS: Tuple[Tuple[str, str], ...] = (
     ("pot:", "pot"),
     ("deck:", "deck"),
     ("betting:", "betting"),
+    ("table_read:", "table_read"),
     ("table_write:", "table_write"),
     ("stage:", "engine_stage"),
     ("engine_stage:", "engine_stage"),
@@ -512,11 +519,13 @@ class LockManager:
             "poker_lock_hierarchy_violations_total",
             "Lock hierarchy violations detected",
             ["violation_type"],
+            registry=None,
         )
         self.duplicate_locks = Counter(
             "poker_duplicate_lock_attempts_total",
             "Duplicate lock acquisition attempts",
             ["lock_id"],
+            registry=None,
         )
         self._timeout_count: Dict[str, int] = {}
         self._circuit_reset_time: Dict[str, float] = {}
@@ -957,36 +966,220 @@ class LockManager:
     async def acquire_player_lock(
         self,
         chat_id: int,
-        player_id: int,
-        *,
-        timeout: Optional[float] = None,
-        context: Optional[Mapping[str, Any]] = None,
-    ) -> AsyncIterator[None]:
-        """Acquire a player-scoped lock respecting hierarchical ordering."""
+        user_id: int,
+        timeout: float = 10.0
+    ) -> AsyncIterator[bool]:
+        """Acquire exclusive lock for a single player's mutable state."""
 
-        guard_context: Dict[str, Any] = dict(context or {})
-        guard_context.setdefault("lock_type", "player")
-        guard_context.setdefault("chat_id", self._safe_int(chat_id))
-        guard_context.setdefault("player_id", self._safe_int(player_id))
-        lock_key = (
-            f"player:{self._safe_int(chat_id)}:{self._safe_int(player_id)}"
-        )
-        if self._enforce_hierarchy:
-            self._validate_lock_hierarchy(lock_key, self._PLAYER_LOCK_LEVEL)
-        self._check_duplicate_lock(lock_key, "player")
-        async with self.guard(
+        safe_chat = self._safe_int(chat_id)
+        safe_user = self._safe_int(user_id)
+        lock_key = f"player:{safe_chat}:{safe_user}"
+
+        async with self._acquire_lock(
             lock_key,
             timeout=timeout,
-            context=guard_context,
+            lock_type="player",
             level=self._PLAYER_LOCK_LEVEL,
-        ):
-            self._track_lock_acquisition(
-                lock_key, "player", self._PLAYER_LOCK_LEVEL
-            )
+            context={"chat_id": safe_chat, "user_id": safe_user},
+        ) as acquired:
+            if acquired:
+                LOCK_ACQUISITIONS.labels(lock_type="player", outcome="success").inc()
+                start_time = time.time()
+                try:
+                    yield True
+                finally:
+                    duration = time.time() - start_time
+                    LOCK_HOLD_TIME.labels(lock_type="player").observe(duration)
+            else:
+                LOCK_ACQUISITIONS.labels(lock_type="player", outcome="timeout").inc()
+                yield False
+
+    @asynccontextmanager
+    async def acquire_pot_lock(
+        self,
+        chat_id: int,
+        timeout: float = 10.0
+    ) -> AsyncIterator[bool]:
+        """Acquire exclusive lock for pot mutations."""
+
+        safe_chat = self._safe_int(chat_id)
+        lock_key = f"pot:{safe_chat}"
+
+        async with self._acquire_lock(
+            lock_key,
+            timeout=timeout,
+            lock_type="pot",
+            level=self.LOCK_LEVELS.get("pot", self._default_lock_level),
+            context={"chat_id": safe_chat},
+        ) as acquired:
+            if acquired:
+                LOCK_ACQUISITIONS.labels(lock_type="pot", outcome="success").inc()
+                start_time = time.time()
+                try:
+                    yield True
+                finally:
+                    duration = time.time() - start_time
+                    LOCK_HOLD_TIME.labels(lock_type="pot").observe(duration)
+            else:
+                LOCK_ACQUISITIONS.labels(lock_type="pot", outcome="timeout").inc()
+                yield False
+
+    @asynccontextmanager
+    async def acquire_deck_lock(
+        self,
+        chat_id: int,
+        timeout: float = 10.0
+    ) -> AsyncIterator[bool]:
+        """Acquire exclusive lock for deck operations."""
+
+        safe_chat = self._safe_int(chat_id)
+        lock_key = f"deck:{safe_chat}"
+
+        async with self._acquire_lock(
+            lock_key,
+            timeout=timeout,
+            lock_type="deck",
+            level=self.LOCK_LEVELS.get("deck", self._default_lock_level),
+            context={"chat_id": safe_chat},
+        ) as acquired:
+            if acquired:
+                LOCK_ACQUISITIONS.labels(lock_type="deck", outcome="success").inc()
+                start_time = time.time()
+                try:
+                    yield True
+                finally:
+                    duration = time.time() - start_time
+                    LOCK_HOLD_TIME.labels(lock_type="deck").observe(duration)
+            else:
+                LOCK_ACQUISITIONS.labels(lock_type="deck", outcome="timeout").inc()
+                yield False
+
+    @asynccontextmanager
+    async def acquire_table_read_lock(
+        self,
+        chat_id: int,
+        timeout: float = 5.0
+    ) -> AsyncIterator[bool]:
+        """Acquire shared read lock for table state inspection."""
+
+        safe_chat = self._safe_int(chat_id)
+        lock_key = f"table_read:{safe_chat}"
+
+        async with self._acquire_lock(
+            lock_key,
+            timeout=timeout,
+            lock_type="table_read",
+            level=self.LOCK_LEVELS.get("table_read", self._default_lock_level),
+            context={"chat_id": safe_chat},
+        ) as acquired:
+            if acquired:
+                LOCK_ACQUISITIONS.labels(lock_type="table_read", outcome="success").inc()
+                start_time = time.time()
+                try:
+                    yield True
+                finally:
+                    duration = time.time() - start_time
+                    LOCK_HOLD_TIME.labels(lock_type="table_read").observe(duration)
+            else:
+                LOCK_ACQUISITIONS.labels(lock_type="table_read", outcome="timeout").inc()
+                yield False
+
+    @asynccontextmanager
+    async def _acquire_lock(
+        self,
+        lock_key: str,
+        *,
+        timeout: float,
+        lock_type: Optional[str] = None,
+        level: Optional[int] = None,
+        context: Optional[Mapping[str, Any]] = None,
+    ) -> AsyncIterator[bool]:
+        """Internal helper to acquire locks with uniform timeout semantics."""
+
+        resolved_type = lock_type or self._resolve_lock_category(lock_key) or "generic"
+        resolved_level = (
+            level if level is not None else self.LOCK_LEVELS.get(resolved_type, self._default_lock_level)
+        )
+        guard_context: Dict[str, Any] = dict(context or {})
+        guard_context.setdefault("lock_key", lock_key)
+        guard_context.setdefault("lock_type", resolved_type)
+
+        if resolved_type == "table_read":
+            if self._enforce_hierarchy:
+                self._validate_lock_hierarchy(lock_key, resolved_level)
+            self._check_duplicate_lock(lock_key, resolved_type)
+
+            chat_identifier = guard_context.get("chat_id")
+            if chat_identifier is None:
+                _, _, remainder = lock_key.partition(":")
+                chat_identifier = remainder
+
+            normalized_chat = self._safe_int(chat_identifier)
+            guard_context.setdefault("chat_id", normalized_chat)
+
+            cm = self.table_read_lock(normalized_chat)
             try:
-                yield
+                await asyncio.wait_for(cm.__aenter__(), timeout)
+            except asyncio.TimeoutError:
+                yield False
+                return
+
+            self._track_lock_acquisition(lock_key, resolved_type, resolved_level)
+            acquisitions = self._get_current_acquisitions()
+            acquisitions.append(
+                _LockAcquisition(
+                    key=lock_key,
+                    level=resolved_level,
+                    context=dict(guard_context),
+                    count=1,
+                )
+            )
+            self._set_current_acquisitions(acquisitions)
+
+            captured: Optional[BaseException] = None
+            try:
+                yield True
+            except BaseException as exc:  # pragma: no cover - defensive
+                captured = exc
+                raise
             finally:
+                current = self._get_current_acquisitions()
+                for index in range(len(current) - 1, -1, -1):
+                    record = current[index]
+                    if record.key != lock_key:
+                        continue
+                    if record.count > 1:
+                        record.count -= 1
+                    else:
+                        current.pop(index)
+                    break
+                self._set_current_acquisitions(current)
                 self._release_lock_tracking(lock_key)
+                await cm.__aexit__(
+                    captured.__class__ if captured else None,
+                    captured,
+                    captured.__traceback__ if captured else None,
+                )
+            return
+
+        if self._enforce_hierarchy:
+            self._validate_lock_hierarchy(lock_key, resolved_level)
+        self._check_duplicate_lock(lock_key, resolved_type)
+
+        try:
+            async with self.guard(
+                lock_key,
+                timeout=timeout,
+                context=guard_context,
+                level=resolved_level,
+            ):
+                self._track_lock_acquisition(lock_key, resolved_type, resolved_level)
+                try:
+                    yield True
+                finally:
+                    self._release_lock_tracking(lock_key)
+        except TimeoutError:
+            yield False
 
     @asynccontextmanager
     async def acquire_wallet_lock(
@@ -3247,6 +3440,11 @@ class LockManager:
             )
 
             task = asyncio.current_task()
+            held_lock_label = held_locks[0] if held_locks else "unknown"
+            LOCK_HIERARCHY_VIOLATIONS.labels(
+                acquired_lock=lock_key,
+                held_lock=held_lock_label,
+            ).inc()
             self.hierarchy_violations.labels(
                 violation_type="ascending"
             ).inc()
@@ -3290,6 +3488,11 @@ class LockManager:
                 f"Current locks: {held_locks}"
             )
             task = asyncio.current_task()
+            held_lock_label = held_locks[0] if held_locks else "unknown"
+            LOCK_HIERARCHY_VIOLATIONS.labels(
+                acquired_lock=lock_key,
+                held_lock=held_lock_label,
+            ).inc()
             self.hierarchy_violations.labels(
                 violation_type="descending"
             ).inc()

@@ -82,3 +82,26 @@ LOCK_WAIT_DURATION = Histogram(
     buckets=[0.1, 0.5, 1.0, 2.0, 5.0, 10.0, 20.0, 30.0, 45.0, 60.0]
 )
 
+
+# ============================================================================
+# PHASE 3: FINE-GRAINED LOCKING METRICS
+# ============================================================================
+
+LOCK_ACQUISITIONS = Counter(
+    "poker_lock_acquisitions_total",
+    "Lock acquisition attempts grouped by lock type and outcome",
+    labelnames=["lock_type", "outcome"],
+)
+
+LOCK_HOLD_TIME = Histogram(
+    "poker_lock_hold_time_seconds",
+    "Observed hold duration for fine-grained locks",
+    labelnames=["lock_type"],
+)
+
+LOCK_HIERARCHY_VIOLATIONS = Counter(
+    "poker_lock_hierarchy_violations_total",
+    "Total number of lock hierarchy violations detected",
+    ["acquired_lock", "held_lock"],
+)
+
