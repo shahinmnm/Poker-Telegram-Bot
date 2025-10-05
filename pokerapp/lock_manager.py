@@ -567,6 +567,7 @@ class LockManager:
         self._redis_keys: Dict[str, Any] = {
             "action_lock_prefix": _resolve_action_lock_prefix(redis_keys_source),
             "engine": engine_defaults,
+            "lock_queue_prefix": "lock:queue:",
         }
         self._redis_pool: Any = redis_pool or _InMemoryActionLockBackend()
         if isinstance(self._redis_pool, _InMemoryActionLockBackend):
@@ -3628,6 +3629,54 @@ class LockManager:
             "Lock metrics reset",
             extra={"event_type": "lock_metrics_reset"},
         )
+
+    async def get_lock_queue_depth(self, chat_id: int) -> int:
+        """Return the number of queued operations for the table lock."""
+
+        prefix = self._redis_keys.get("lock_queue_prefix", "lock:queue:")
+        redis_key = f"{prefix}{self._safe_int(chat_id)}"
+        backend = getattr(self, "_redis_pool", None)
+        if backend is None:
+            return 0
+
+        try:
+            if hasattr(backend, "zcard"):
+                depth = await backend.zcard(redis_key)
+            elif hasattr(backend, "zcount"):
+                depth = await backend.zcount(redis_key, "-inf", "+inf")
+            elif hasattr(backend, "zrange"):
+                members = await backend.zrange(redis_key, 0, -1)
+                depth = len(members)
+            else:
+                return 0
+        except Exception:
+            self._logger.debug(
+                "[LOCK_QUEUE] Unable to fetch queue depth",  # pragma: no cover - defensive
+                exc_info=True,
+                extra={
+                    "event_type": "lock_queue_depth_error",
+                    "chat_id": self._safe_int(chat_id),
+                    "redis_key": redis_key,
+                },
+            )
+            return 0
+
+        try:
+            return max(0, int(depth))
+        except (TypeError, ValueError):
+            return 0
+
+    async def estimate_wait_time(self, queue_depth: int) -> float:
+        """Estimate wait time (seconds) from the queue depth heuristic."""
+
+        depth = max(0, int(queue_depth))
+        if depth == 0:
+            return 0.0
+        if depth <= 2:
+            return 7.5
+        if depth <= 4:
+            return 17.5
+        return 27.5
 
     def export_prometheus(self) -> str:
         """Export metrics in Prometheus format for scraping."""
