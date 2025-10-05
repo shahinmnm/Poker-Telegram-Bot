@@ -924,7 +924,7 @@ class LockManager:
         smart_retry_acquired = False
         if self._smart_retry_enabled:
             timeout = self._get_lock_timeout("table_read")
-            acquired = await self._acquire_lock_with_smart_retry(
+            acquired = await self.acquire_with_smart_retry(
                 lock_key, timeout, context_payload
             )
             if not acquired:
@@ -987,7 +987,7 @@ class LockManager:
             self._track_lock_acquisition(lock_key, "table_write", hierarchy_level)
             tracked_externally = True
             timeout = self._get_lock_timeout("table_write")
-            acquired = await self._acquire_lock_with_smart_retry(
+            acquired = await self.acquire_with_smart_retry(
                 lock_key, timeout, context_payload
             )
             if not acquired:
@@ -1409,7 +1409,7 @@ class LockManager:
                     if timeout is not None
                     else self._get_lock_timeout(lock_type_label)
                 )
-                acquired_lock = await self._acquire_lock_with_smart_retry(
+                acquired_lock = await self.acquire_with_smart_retry(
                     lock_key, effective_timeout, guard_context
                 )
                 wait_time = time.perf_counter() - wait_start
@@ -4065,6 +4065,20 @@ class LockManager:
             extra={"event_type": "lock_metrics_reset"},
         )
 
+    def _get_lock_retry_config(self) -> Mapping[str, Any]:
+        """Return the merged smart retry configuration."""
+
+        retry_config: Mapping[str, Any]
+        if isinstance(self._system_constants, Mapping):
+            config_candidate = self._system_constants.get("lock_retry", {})
+        else:
+            config_candidate = {}
+        if not isinstance(config_candidate, Mapping):
+            retry_config = {}
+        else:
+            retry_config = config_candidate
+        return retry_config
+
     async def get_lock_queue_depth(self, lock_key: str) -> int:
         """Get current queue depth for a specific lock using Redis."""
 
@@ -4072,7 +4086,8 @@ class LockManager:
         if redis_client is None or not hasattr(redis_client, "llen"):
             return 0
 
-        queue_key = f"lock_queue:{lock_key}"
+        prefix = str(self._redis_keys.get("lock_queue_prefix", "lock_queue:"))
+        queue_key = f"{prefix}{lock_key}"
         try:
             depth = await redis_client.llen(queue_key)
             depth_value = int(depth) if depth is not None else 0
@@ -4097,7 +4112,8 @@ class LockManager:
         if redis_client is None or not hasattr(redis_client, "lpush"):
             return
 
-        queue_key = f"lock_queue:{lock_key}"
+        prefix = str(self._redis_keys.get("lock_queue_prefix", "lock_queue:"))
+        queue_key = f"{prefix}{lock_key}"
         try:
             await redis_client.lpush(queue_key, task_id)
             if hasattr(redis_client, "expire"):
@@ -4115,9 +4131,10 @@ class LockManager:
         if redis_client is None or not hasattr(redis_client, "lrem"):
             return
 
-        queue_key = f"lock_queue:{lock_key}"
+        prefix = str(self._redis_keys.get("lock_queue_prefix", "lock_queue:"))
+        queue_key = f"{prefix}{lock_key}"
         try:
-            await redis_client.lrem(queue_key, 1, task_id)
+            await redis_client.lrem(queue_key, 0, task_id)
         except Exception as exc:  # pragma: no cover - best-effort logging
             self._logger.warning(
                 f"Failed to dequeue waiter: {exc}",
@@ -4143,32 +4160,17 @@ class LockManager:
 
         return f"{task_name}:{uuid.uuid4().hex[:8]}"
 
-    async def _acquire_lock_with_smart_retry(
+    async def _calculate_backoff_with_jitter(
         self,
-        lock_key: str,
-        timeout: float,
-        context: Optional[Dict[str, Any]] = None,
-    ) -> bool:
-        """Acquire lock with intelligent retry and queue estimation."""
+        attempt: int,
+        base_delay: float,
+        *,
+        config: Optional[Mapping[str, Any]] = None,
+        queue_depth: Optional[int] = None,
+    ) -> float:
+        """Calculate an exponential backoff delay with optional jitter."""
 
-        retry_config = {}
-        if isinstance(self._system_constants, Mapping):
-            retry_config = self._system_constants.get("lock_retry", {})  # type: ignore[index]
-        if not isinstance(retry_config, Mapping):
-            retry_config = {}
-
-        max_attempts = int(retry_config.get("max_attempts", 3))
-        if max_attempts <= 0:
-            max_attempts = 1
-
-        backoff_delays = list(retry_config.get("backoff_delays_seconds", [1, 2, 4, 8]))
-        if not backoff_delays:
-            backoff_delays = [1.0]
-        backoff_delays = [max(0.0, float(value)) or 0.5 for value in backoff_delays]
-
-        queue_threshold = float(retry_config.get("queue_depth_threshold", 5))
-        wait_threshold = float(retry_config.get("estimated_wait_threshold_seconds", 25))
-        grace_buffer = float(retry_config.get("grace_buffer_seconds", 30))
+        retry_config = config or self._get_lock_retry_config()
         jitter_enabled = bool(retry_config.get("enable_jitter", True))
         jitter_range = retry_config.get("jitter_range", [0.75, 1.25])
         try:
@@ -4176,63 +4178,138 @@ class LockManager:
             jitter_high = float(jitter_range[1])
         except Exception:
             jitter_low, jitter_high = 0.75, 1.25
-        queue_multiplier = float(retry_config.get("queue_wait_multiplier", 0.5))
-        max_queue_multiplier = float(retry_config.get("max_queue_multiplier", 3.0))
-        per_task_wait = float(retry_config.get("estimated_task_seconds", 2.5))
+
+        jitter = 1.0
+        if jitter_enabled:
+            jitter = random.uniform(jitter_low, jitter_high)
+
+        max_backoff = float(retry_config.get("max_backoff_seconds", 8.0))
+        exponential_delay = min(base_delay * (2 ** max(0, attempt - 1)), max_backoff)
+        delay = max(0.0, exponential_delay * jitter)
+
+        if queue_depth is not None:
+            queue_multiplier = float(retry_config.get("queue_wait_multiplier", 0.5))
+            max_queue_multiplier = float(retry_config.get("max_queue_multiplier", 3.0))
+            queue_factor = min(queue_depth * queue_multiplier, max_queue_multiplier)
+            delay *= 1.0 + queue_factor
+
+        return delay
+
+    async def _should_retry_based_on_queue(
+        self,
+        lock_key: str,
+        attempt: int,
+        *,
+        queue_depth: Optional[int] = None,
+        estimated_wait: Optional[float] = None,
+        config: Optional[Mapping[str, Any]] = None,
+    ) -> bool:
+        """Determine whether another retry should be attempted based on queue depth."""
+
+        retry_config = config or self._get_lock_retry_config()
+        if queue_depth is None:
+            queue_depth = await self.get_lock_queue_depth(lock_key)
+
+        if estimated_wait is None:
+            estimated_wait = await self.estimate_wait_time(queue_depth)
+
+        queue_threshold = float(retry_config.get("queue_depth_threshold", 5))
+        wait_threshold = float(
+            retry_config.get("estimated_wait_threshold_seconds", 25)
+        )
+
+        if queue_depth <= queue_threshold:
+            return True
+
+        if estimated_wait <= wait_threshold:
+            return True
+
+        self._logger.warning(
+            "Queue depth %s with estimated wait %.2fs exceeded thresholds for %s",
+            queue_depth,
+            estimated_wait,
+            lock_key,
+            extra={
+                "event_type": "lock_queue_abort",
+                "lock_key": lock_key,
+                "queue_depth": queue_depth,
+                "estimated_wait": estimated_wait,
+                "attempt": attempt,
+            },
+        )
+        return False
+
+    async def acquire_with_smart_retry(
+        self,
+        lock_key: str,
+        timeout: float,
+        context: Optional[Dict[str, Any]] = None,
+    ) -> bool:
+        """Acquire a Redis-backed lock using smart retry semantics."""
+
+        retry_config = self._get_lock_retry_config()
+        max_attempts = int(retry_config.get("max_attempts", 3))
+        if max_attempts <= 0:
+            max_attempts = 1
+
+        initial_backoff = float(retry_config.get("initial_backoff_seconds", 0.5))
+        grace_buffer = float(retry_config.get("grace_buffer_seconds", 30))
 
         lock_type = self._extract_lock_type(lock_key)
         loop = asyncio.get_running_loop()
         start_time = loop.time()
-        attempt = 0
         total_wait_time = 0.0
         task_id = self._generate_task_id()
+        enqueued = False
+        failure_reason = "max_retries_exceeded"
 
-        while attempt < max_attempts:
-            attempt += 1
+        try:
+            for attempt in range(max_attempts):
+                queue_depth = await self.get_lock_queue_depth(lock_key)
+                estimated_wait = await self.estimate_wait_time(queue_depth)
 
-            queue_depth = await self.get_lock_queue_depth(lock_key)
-            estimated_wait = max(0.0, queue_depth * per_task_wait)
-            try:
-                if estimated_wait > 0:
-                    self.estimated_queue_wait.labels(lock_type=lock_type).observe(
-                        estimated_wait
-                    )
-            except Exception:  # pragma: no cover - metrics best effort
-                pass
-
-            if queue_depth > queue_threshold and estimated_wait >= wait_threshold:
-                self._logger.warning(
-                    "Aborting lock acquisition due to deep queue",
-                    extra={
-                        "lock_key": lock_key,
-                        "queue_depth": queue_depth,
-                        "estimated_wait": estimated_wait,
-                        "threshold": wait_threshold,
-                    },
-                )
                 try:
-                    self.lock_acquisition_failures.labels(
-                        lock_type=lock_type, failure_reason="queue_too_deep"
-                    ).inc()
-                    self.lock_wait_time.labels(lock_type=lock_type).observe(
-                        loop.time() - start_time
-                    )
+                    if estimated_wait > 0:
+                        self.estimated_queue_wait.labels(
+                            lock_type=lock_type
+                        ).observe(estimated_wait)
                 except Exception:  # pragma: no cover - metrics best effort
                     pass
-                return False
 
-            await self._enqueue_lock_waiter(lock_key, task_id)
+                should_continue = await self._should_retry_based_on_queue(
+                    lock_key,
+                    attempt + 1,
+                    queue_depth=queue_depth,
+                    estimated_wait=estimated_wait,
+                    config=retry_config,
+                )
+                if not should_continue:
+                    failure_reason = "queue_too_deep"
+                    break
 
-            try:
-                acquired = await self._acquire_lock_internal(lock_key, timeout)
+                if not enqueued:
+                    await self._enqueue_lock_waiter(lock_key, task_id)
+                    enqueued = True
+
+                try:
+                    acquired = await self._acquire_lock_internal(lock_key, timeout)
+                except Exception:
+                    if enqueued:
+                        await self._dequeue_lock_waiter(lock_key, task_id)
+                        enqueued = False
+                    raise
+
                 if acquired:
-                    await self._dequeue_lock_waiter(lock_key, task_id)
+                    if enqueued:
+                        await self._dequeue_lock_waiter(lock_key, task_id)
+                        enqueued = False
                     actual_wait = loop.time() - start_time
                     try:
                         self.lock_acquisition_success.labels(
-                            lock_type=lock_type, attempt_number=str(attempt)
+                            lock_type=lock_type,
+                            attempt_number=str(attempt + 1),
                         ).inc()
-                        if attempt > 1:
+                        if attempt > 0:
                             self.lock_retry_success.labels(lock_type=lock_type).inc()
                         self.lock_wait_time.labels(lock_type=lock_type).observe(
                             actual_wait
@@ -4241,72 +4318,71 @@ class LockManager:
                         pass
                     return True
 
-                if attempt < max_attempts:
-                    delay_index = min(attempt - 1, len(backoff_delays) - 1)
-                    base_delay = float(backoff_delays[delay_index])
-                    jitter = 1.0
-                    if jitter_enabled:
-                        jitter = random.uniform(jitter_low, jitter_high)
-                    actual_delay = base_delay * jitter
-                    queue_factor = min(queue_depth * queue_multiplier, max_queue_multiplier)
-                    adjusted_delay = actual_delay * (1.0 + queue_factor)
-                    total_wait_time += adjusted_delay
+                if attempt == max_attempts - 1:
+                    break
 
-                    if total_wait_time > grace_buffer:
-                        self._logger.warning(
-                            "Aborting retry due to grace buffer exceeded",
-                            extra={
-                                "lock_key": lock_key,
-                                "total_wait_time": total_wait_time,
-                                "grace_buffer": grace_buffer,
-                            },
-                        )
-                        break
+                backoff_base = max(0.0, initial_backoff)
+                delay = await self._calculate_backoff_with_jitter(
+                    attempt + 1,
+                    backoff_base,
+                    config=retry_config,
+                    queue_depth=queue_depth,
+                )
 
-                    self._logger.info(
-                        "Lock acquisition failed, retrying in %.2fs",
-                        adjusted_delay,
+                total_wait_time += delay
+                if grace_buffer > 0 and total_wait_time > grace_buffer:
+                    self._logger.warning(
+                        "Aborting retry due to grace buffer exceeded",
                         extra={
                             "lock_key": lock_key,
-                            "attempt": attempt,
-                            "max_attempts": max_attempts,
-                            "queue_depth": queue_depth,
-                            "base_delay": base_delay,
-                            "adjusted_delay": adjusted_delay,
+                            "lock_type": lock_type,
+                            "total_wait_time": total_wait_time,
+                            "grace_buffer": grace_buffer,
+                            "context": dict(context or {}),
                         },
                     )
+                    failure_reason = "grace_buffer_exceeded"
+                    break
+
+                if attempt >= 0:
                     try:
                         self.lock_retry_attempts.labels(
-                            lock_type=lock_type, attempt_number=str(attempt)
+                            lock_type=lock_type, attempt_number=str(attempt + 1)
                         ).inc()
                     except Exception:  # pragma: no cover - metrics best effort
                         pass
-                    await asyncio.sleep(adjusted_delay)
 
-            except Exception as exc:
+                await asyncio.sleep(delay)
+
+        finally:
+            if enqueued:
                 await self._dequeue_lock_waiter(lock_key, task_id)
-                self._logger.error(
-                    f"Exception during lock acquisition attempt {attempt}",
-                    extra={"lock_key": lock_key, "error": str(exc)},
-                    exc_info=True,
-                )
-                if attempt >= max_attempts:
-                    self.lock_wait_time.labels(lock_type=lock_type).observe(
-                        loop.time() - start_time
-                    )
-                    raise
 
-        await self._dequeue_lock_waiter(lock_key, task_id)
         try:
             self.lock_acquisition_failures.labels(
-                lock_type=lock_type, failure_reason="max_retries_exceeded"
+                lock_type=lock_type, failure_reason=failure_reason
             ).inc()
             self.lock_wait_time.labels(lock_type=lock_type).observe(
                 loop.time() - start_time
             )
         except Exception:  # pragma: no cover - metrics best effort
             pass
+
         return False
+
+    async def _acquire_lock_with_smart_retry(
+        self,
+        lock_key: str,
+        timeout: float,
+        context: Optional[Dict[str, Any]] = None,
+    ) -> bool:
+        """Backward-compatible wrapper for the public smart retry helper."""
+
+        return await self.acquire_with_smart_retry(
+            lock_key,
+            timeout,
+            context=context,
+        )
 
     async def _acquire_lock_internal(self, lock_key: str, timeout: float) -> bool:
         """Internal lock acquisition without retry logic."""
