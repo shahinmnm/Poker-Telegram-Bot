@@ -419,6 +419,50 @@ class GameEngine:
         self._betting_round_timeout = max(
             self._stage_lock_timeout, self.BETTING_ROUND_TIMEOUT_SECONDS
         )
+
+    async def load_game_state_with_version(
+        self, chat_id: int
+    ) -> Optional[Dict[str, Any]]:
+        """Load game state alongside its optimistic locking version."""
+
+        table_manager = self._table_manager
+        if not hasattr(table_manager, "load_game_with_version"):
+            raise AttributeError(
+                "Table manager does not support load_game_with_version"
+            )
+
+        game_state, version = await table_manager.load_game_with_version(chat_id)
+        if game_state is None:
+            return None
+
+        if isinstance(game_state, dict):
+            state: Dict[str, Any] = dict(game_state)
+            state["version"] = version
+            return state
+
+        return {"state": game_state, "version": version}
+
+    async def save_game_state_with_version(
+        self, chat_id: int, state: Dict[str, Any], *, expected_version: int
+    ) -> bool:
+        """Persist game state when the supplied version matches Redis."""
+
+        table_manager = self._table_manager
+        if not hasattr(table_manager, "save_game_with_version_check"):
+            raise AttributeError(
+                "Table manager does not support save_game_with_version_check"
+            )
+
+        game_obj: Any = state
+        if isinstance(state, dict):
+            if "state" in state:
+                game_obj = state["state"]
+            elif "game" in state:
+                game_obj = state["game"]
+
+        return await table_manager.save_game_with_version_check(
+            chat_id, game_obj, expected_version
+        )
         self._max_players = _positive_int(
             _GAME_CONSTANTS.get("max_players"), 8
         )
