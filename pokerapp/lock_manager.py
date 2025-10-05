@@ -963,11 +963,48 @@ class LockManager:
                 self._release_lock_tracking(lock_key)
 
     @asynccontextmanager
+    async def _acquire_tracked_lock(
+        self,
+        lock_key: str,
+        *,
+        timeout: float,
+        lock_type: str,
+        level: Optional[int],
+        context: Mapping[str, Any],
+    ) -> AsyncIterator[bool]:
+        """Centralise common bookkeeping for the fine-grained lock helpers."""
+
+        resolved_level = level if level is not None else self.LOCK_LEVELS.get(
+            lock_type, self._default_lock_level
+        )
+        context_mapping = dict(context)
+
+        async with self._acquire_lock(
+            lock_key,
+            timeout=timeout,
+            lock_type=lock_type,
+            level=resolved_level,
+            context=context_mapping,
+        ) as acquired:
+            if not acquired:
+                LOCK_ACQUISITIONS.labels(lock_type=lock_type, outcome="timeout").inc()
+                yield False
+                return
+
+            LOCK_ACQUISITIONS.labels(lock_type=lock_type, outcome="success").inc()
+            start_time = time.time()
+            try:
+                yield True
+            finally:
+                duration = time.time() - start_time
+                LOCK_HOLD_TIME.labels(lock_type=lock_type).observe(duration)
+
+    @asynccontextmanager
     async def acquire_player_lock(
         self,
         chat_id: int,
         user_id: int,
-        timeout: float = 10.0
+        timeout: float = 10.0,
     ) -> AsyncIterator[bool]:
         """Acquire exclusive lock for a single player's mutable state."""
 
@@ -975,114 +1012,74 @@ class LockManager:
         safe_user = self._safe_int(user_id)
         lock_key = f"player:{safe_chat}:{safe_user}"
 
-        async with self._acquire_lock(
+        async with self._acquire_tracked_lock(
             lock_key,
             timeout=timeout,
             lock_type="player",
             level=self._PLAYER_LOCK_LEVEL,
             context={"chat_id": safe_chat, "user_id": safe_user},
         ) as acquired:
-            if acquired:
-                LOCK_ACQUISITIONS.labels(lock_type="player", outcome="success").inc()
-                start_time = time.time()
-                try:
-                    yield True
-                finally:
-                    duration = time.time() - start_time
-                    LOCK_HOLD_TIME.labels(lock_type="player").observe(duration)
-            else:
-                LOCK_ACQUISITIONS.labels(lock_type="player", outcome="timeout").inc()
-                yield False
+            yield acquired
 
     @asynccontextmanager
     async def acquire_pot_lock(
         self,
         chat_id: int,
-        timeout: float = 10.0
+        timeout: float = 10.0,
     ) -> AsyncIterator[bool]:
         """Acquire exclusive lock for pot mutations."""
 
         safe_chat = self._safe_int(chat_id)
         lock_key = f"pot:{safe_chat}"
 
-        async with self._acquire_lock(
+        async with self._acquire_tracked_lock(
             lock_key,
             timeout=timeout,
             lock_type="pot",
             level=self.LOCK_LEVELS.get("pot", self._default_lock_level),
             context={"chat_id": safe_chat},
         ) as acquired:
-            if acquired:
-                LOCK_ACQUISITIONS.labels(lock_type="pot", outcome="success").inc()
-                start_time = time.time()
-                try:
-                    yield True
-                finally:
-                    duration = time.time() - start_time
-                    LOCK_HOLD_TIME.labels(lock_type="pot").observe(duration)
-            else:
-                LOCK_ACQUISITIONS.labels(lock_type="pot", outcome="timeout").inc()
-                yield False
+            yield acquired
 
     @asynccontextmanager
     async def acquire_deck_lock(
         self,
         chat_id: int,
-        timeout: float = 10.0
+        timeout: float = 10.0,
     ) -> AsyncIterator[bool]:
         """Acquire exclusive lock for deck operations."""
 
         safe_chat = self._safe_int(chat_id)
         lock_key = f"deck:{safe_chat}"
 
-        async with self._acquire_lock(
+        async with self._acquire_tracked_lock(
             lock_key,
             timeout=timeout,
             lock_type="deck",
             level=self.LOCK_LEVELS.get("deck", self._default_lock_level),
             context={"chat_id": safe_chat},
         ) as acquired:
-            if acquired:
-                LOCK_ACQUISITIONS.labels(lock_type="deck", outcome="success").inc()
-                start_time = time.time()
-                try:
-                    yield True
-                finally:
-                    duration = time.time() - start_time
-                    LOCK_HOLD_TIME.labels(lock_type="deck").observe(duration)
-            else:
-                LOCK_ACQUISITIONS.labels(lock_type="deck", outcome="timeout").inc()
-                yield False
+            yield acquired
 
     @asynccontextmanager
     async def acquire_table_read_lock(
         self,
         chat_id: int,
-        timeout: float = 5.0
+        timeout: float = 5.0,
     ) -> AsyncIterator[bool]:
         """Acquire shared read lock for table state inspection."""
 
         safe_chat = self._safe_int(chat_id)
         lock_key = f"table_read:{safe_chat}"
 
-        async with self._acquire_lock(
+        async with self._acquire_tracked_lock(
             lock_key,
             timeout=timeout,
             lock_type="table_read",
             level=self.LOCK_LEVELS.get("table_read", self._default_lock_level),
             context={"chat_id": safe_chat},
         ) as acquired:
-            if acquired:
-                LOCK_ACQUISITIONS.labels(lock_type="table_read", outcome="success").inc()
-                start_time = time.time()
-                try:
-                    yield True
-                finally:
-                    duration = time.time() - start_time
-                    LOCK_HOLD_TIME.labels(lock_type="table_read").observe(duration)
-            else:
-                LOCK_ACQUISITIONS.labels(lock_type="table_read", outcome="timeout").inc()
-                yield False
+            yield acquired
 
     @asynccontextmanager
     async def _acquire_lock(
