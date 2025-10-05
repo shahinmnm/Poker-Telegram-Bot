@@ -66,28 +66,6 @@ ACTION_DURATION = Histogram(
 
 LOCK_RETRY_TOTAL = Counter(
     "poker_lock_retry_total",
-    "Lock retry attempts",
-    labelnames=["outcome"],
-)
-
-LOCK_QUEUE_DEPTH = Histogram(
-    "poker_lock_queue_depth",
-    "Number of operations waiting for table lock",
-    buckets=[0, 1, 2, 3, 4, 5, 8, 10, 15],
-)
-
-LOCK_WAIT_DURATION = Histogram(
-    "poker_lock_wait_duration_seconds",
-    "Time spent waiting for lock acquisition",
-    buckets=[0.1, 0.5, 1, 2, 5, 10, 15, 20, 25, 30],
-)
-
-# ============================================================================
-# PHASE 2: SMART LOCK RETRY METRICS
-# ============================================================================
-
-LOCK_RETRY_TOTAL = Counter(
-    "poker_lock_retry_total",
     "Total number of lock retry attempts categorized by final outcome",
     labelnames=["outcome"]  # Values: success, abandoned, timeout, max_retries
 )
