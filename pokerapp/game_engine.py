@@ -64,7 +64,6 @@ from pokerapp.utils.cache import AdaptivePlayerReportCache
 from pokerapp.utils.common import normalize_player_ids
 from pokerapp.matchmaking_service import MatchmakingService
 from pokerapp.services.countdown_queue import CountdownMessageQueue
-from pokerapp.services.countdown_worker import CountdownWorker
 from pokerapp.player_manager import PlayerManager
 from pokerapp.stats_reporter import StatsReporter
 from pokerapp.stats import PlayerIdentity
@@ -450,11 +449,6 @@ class GameEngine:
         self._player_factory = player_factory
         self._initialize_stop_translations()
         self._countdown_queue = CountdownMessageQueue(max_size=100)
-        self._countdown_worker = CountdownWorker(
-            queue=self._countdown_queue,
-            safe_ops=self._safe_ops,
-            edit_interval=1.0,
-        )
         self._countdown_contexts: Dict[int, ContextTypes.DEFAULT_TYPE] = {}
 
         locks_config = getattr(self.constants, "locks", None)
@@ -3043,24 +3037,49 @@ class GameEngine:
             )
 
     async def start(self) -> None:
-        """Start background workers managed by the game engine.
+        """Start the game engine and run startup diagnostics.
 
-        This should be called once during application initialization,
-        after the :class:`GameEngine` is constructed.
+        Background countdown workers were removed in Phase 5 and countdowns
+        are now spawned via ad-hoc asyncio tasks during betting rounds.
         """
 
-        await self._countdown_worker.start()
-        self._logger.info("GameEngine background workers started")
+        self._logger.info(
+            "GameEngine initializing",
+            extra={
+                "category": "engine_lifecycle",
+                "event": "startup",
+            },
+        )
+
+        lock_manager = getattr(self, "_lock_manager", None)
+        if lock_manager is not None:
+            try:
+                snapshot = lock_manager.detect_deadlock()
+                self._logger.debug(
+                    "Deadlock detection complete",
+                    extra={"deadlock_snapshot": snapshot},
+                )
+            except Exception as exc:  # pragma: no cover - defensive logging
+                self._logger.warning(f"Deadlock detection failed: {exc}")
+
+        self._logger.info(
+            "GameEngine started",
+            extra={
+                "category": "engine_lifecycle",
+                "event": "startup_complete",
+            },
+        )
 
     async def shutdown(self) -> None:
-        """Stop background workers managed by the game engine.
+        """Record shutdown intent for the game engine."""
 
-        This should be called during application shutdown to ensure
-        graceful cleanup of countdown tasks.
-        """
-
-        await self._countdown_worker.stop()
-        self._logger.info("GameEngine background workers stopped")
+        self._logger.info(
+            "GameEngine shutdown requested",
+            extra={
+                "category": "engine_lifecycle",
+                "event": "shutdown",
+            },
+        )
 
     async def progress_stage(
         self,
