@@ -553,10 +553,11 @@ class LockManager:
             "action_lock_retry_failures": 0,
             "action_lock_retry_timeouts": 0,
         }
-        self.lock_queue_depth = Counter(
-            "poker_lock_queue_depth_total",
-            "Current depth of lock acquisition queues",
+        self.lock_queue_depth = Histogram(
+            "poker_lock_queue_depth",
+            "Distribution of observed lock queue depths",
             ["lock_type"],
+            buckets=[0, 1, 2, 3, 5, 8, 13, 21, 34],
             registry=None,
         )
         self.lock_retry_attempts = Counter(
@@ -656,6 +657,15 @@ class LockManager:
                     if isinstance(value, str) and value:
                         engine_defaults[key] = value
 
+        #
+        # Redis key layout used by the lock manager:
+        #   * action_lock_prefix        -> Prefix for transient action locks (SETNX)
+        #   * engine.table_lock_prefix  -> Prefix for persistent engine/table locks
+        #   * lock_queue_prefix         -> Prefix for the Redis list tracking waiter IDs
+        #
+        # Keeping the structure centralised ensures the Redis footprint is explicitly
+        # documented and easy to override from configuration for multi-tenant
+        # deployments.
         self._redis_keys: Dict[str, Any] = {
             "action_lock_prefix": _resolve_action_lock_prefix(redis_keys_source),
             "engine": engine_defaults,
@@ -4080,7 +4090,13 @@ class LockManager:
         return retry_config
 
     async def get_lock_queue_depth(self, lock_key: str) -> int:
-        """Get current queue depth for a specific lock using Redis."""
+        """Get current queue depth for a specific lock using Redis.
+
+        The queue depth is stored in a Redis list keyed by the configured
+        ``lock_queue_prefix`` (``lock:queue:`` by default) followed by the lock
+        identifier. Each waiter pushes its task ID onto the list so we can
+        sample the current depth and feed the histogram metric.
+        """
 
         redis_client = getattr(self, "_redis_client", None)
         if redis_client is None or not hasattr(redis_client, "llen"):
@@ -4094,7 +4110,7 @@ class LockManager:
             try:
                 self.lock_queue_depth.labels(
                     lock_type=self._extract_lock_type(lock_key)
-                ).inc(depth_value)
+                ).observe(depth_value)
             except Exception:  # pragma: no cover - metrics best effort
                 pass
             return depth_value

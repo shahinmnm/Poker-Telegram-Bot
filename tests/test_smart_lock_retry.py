@@ -46,6 +46,19 @@ class TestSmartLockRetry:
         mock_redis.llen.assert_awaited_once_with(f"{prefix}test_lock")
 
     @pytest.mark.asyncio
+    async def test_queue_depth_handles_redis_failure(self) -> None:
+        mock_redis = AsyncMock()
+        mock_redis.llen.side_effect = ConnectionError("boom")
+
+        lock_manager = _make_lock_manager(mock_redis, "queue-depth-error")
+
+        depth = await lock_manager.get_lock_queue_depth("flaky_lock")
+
+        assert depth == 0
+        prefix = lock_manager._redis_keys["lock_queue_prefix"]
+        mock_redis.llen.assert_awaited_once_with(f"{prefix}flaky_lock")
+
+    @pytest.mark.asyncio
     async def test_smart_retry_with_backoff(self) -> None:
         mock_redis = AsyncMock()
         mock_redis.set.side_effect = [False, False, True]
@@ -203,6 +216,56 @@ class TestSmartLockRetry:
         # Attempt=2 -> exponential (0.1 * 2**1) = 0.2, queue factor = min(3*0.5, 3) = 1.5
         # With jitter=1.0 -> delay = 0.2 * (1 + 1.5) = 0.5
         assert pytest.approx(delay, rel=1e-6) == 0.5
+
+    @pytest.mark.asyncio
+    async def test_queue_cleanup_on_task_cancellation(self) -> None:
+        mock_redis = AsyncMock()
+        mock_redis.set.return_value = False
+
+        lock_manager = _make_lock_manager(mock_redis, "queue-cancel")
+        lock_manager._system_constants = _smart_retry_config({"max_attempts": 5})
+        lock_manager.estimate_wait_time = AsyncMock(return_value=0.0)  # type: ignore[assignment]
+        lock_manager.get_lock_queue_depth = AsyncMock(return_value=1)  # type: ignore[assignment]
+        enqueue_event = asyncio.Event()
+        dequeue_event = asyncio.Event()
+
+        async def _enqueue_side_effect(*_args: object, **_kwargs: object) -> None:
+            enqueue_event.set()
+
+        async def _dequeue_side_effect(*_args: object, **_kwargs: object) -> None:
+            dequeue_event.set()
+
+        lock_manager._enqueue_lock_waiter = AsyncMock(  # type: ignore[assignment]
+            side_effect=_enqueue_side_effect
+        )
+        lock_manager._dequeue_lock_waiter = AsyncMock(  # type: ignore[assignment]
+            side_effect=_dequeue_side_effect
+        )
+        lock_manager._should_retry_based_on_queue = AsyncMock(return_value=True)  # type: ignore[assignment]
+
+        async def wait_for_enqueue() -> None:
+            await asyncio.wait_for(enqueue_event.wait(), timeout=1.0)
+
+        sleep_started = asyncio.Event()
+
+        async def blocking_sleep(_delay: float) -> None:
+            sleep_started.set()
+            await asyncio.get_running_loop().create_future()
+
+        with patch("pokerapp.lock_manager.asyncio.sleep", new=blocking_sleep):
+            task = asyncio.create_task(
+                lock_manager.acquire_with_smart_retry("cancel_lock", 1.0)
+            )
+
+            await wait_for_enqueue()
+
+            await asyncio.wait_for(sleep_started.wait(), timeout=1.0)
+
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+
+        assert dequeue_event.is_set()
 
     @pytest.mark.asyncio
     async def test_should_retry_based_on_queue_threshold(self) -> None:

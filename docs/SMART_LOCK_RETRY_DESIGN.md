@@ -29,6 +29,15 @@ Three Prometheus series provide visibility into contention:
 
 These metrics allow Grafana dashboards and alerting (see PromQL recommendations in the feature brief) to quantify contention hot spots.
 
+## Redis Key Space
+All smart-retry bookkeeping lives under a small, well-defined Redis namespace so that operators can inspect and clean it safely:
+
+- `lock:queue:{lock_key}` – FIFO list recording waiter task IDs for queue depth sampling.
+- `action:lock:{lock_key}` – SETNX entries representing the transient action locks themselves.
+- `table:lock:{chat_id}` – Engine/table level locks managed by the core lock pool.
+
+The prefixes are configurable through `system_constants.redis_keys` and surfaced on the `LockManager._redis_keys` mapping for runtime inspection.
+
 ## Reservation Safety
 The handler stores the reservation start time locally and derives the remaining TTL using the wallet service’s configured reservation lifetime. Before each retry it ensures:
 
