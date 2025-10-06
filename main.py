@@ -11,6 +11,7 @@ from dotenv import load_dotenv
 from pokerapp.bootstrap import build_services
 from pokerapp.config import Config
 from pokerapp.pokerbot import PokerBot
+from pokerapp.metrics_server import start_metrics_server
 
 
 def _startup_log_extra(
@@ -56,6 +57,15 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
     args = parse_args(argv)
     load_dotenv()
     cfg: Config = Config()
+
+    metrics_port = int(os.getenv("POKERBOT_METRICS_PORT", "8000"))
+    if start_metrics_server(metrics_port):
+        print(
+            f"✅ Prometheus metrics available at http://localhost:{metrics_port}/metrics"
+        )
+    else:
+        print(f"⚠️  Failed to start metrics server on port {metrics_port}")
+
     services = build_services(cfg, skip_stats_buffer=args.skip_stats_buffer)
     logger = services.logger.getChild(__name__)
 
