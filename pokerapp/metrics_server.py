@@ -7,26 +7,33 @@ logger = logging.getLogger(__name__)
 _metrics_server_started = False
 
 
-def start_metrics_server(port: int = 8000) -> bool:
+def start_metrics_server(port: int = 8000, host: Optional[str] = None) -> bool:
     """Start Prometheus metrics HTTP server on the given port.
-    
+
     Args:
         port: Port to listen on (default: 8000)
-        
+        host: Host/interface to bind the metrics server to. ``None`` will use the
+            Prometheus client's default of listening on all interfaces.
+
     Returns:
         True if server started successfully, False otherwise
     """
     global _metrics_server_started
-    
+
     if _metrics_server_started:
         logger.warning("Metrics server already started")
         return True
-    
+
     try:
         from prometheus_client import start_http_server
-        start_http_server(port)
+        listen_host = "" if host is None else host
+        start_http_server(port, addr=listen_host)
         _metrics_server_started = True
-        logger.info(f"✅ Prometheus metrics server started on port {port}")
+        bind_label = listen_host or "0.0.0.0"
+        logger.info(
+            "✅ Prometheus metrics server started",
+            extra={"metrics_host": bind_label, "metrics_port": port},
+        )
         return True
     except ImportError:
         logger.warning("prometheus_client not installed, metrics server disabled")

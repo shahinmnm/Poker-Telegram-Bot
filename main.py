@@ -59,9 +59,12 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
     cfg: Config = Config()
 
     metrics_port = int(os.getenv("POKERBOT_METRICS_PORT", "8000"))
-    if start_metrics_server(metrics_port):
+    metrics_host = os.getenv("POKERBOT_METRICS_HOST")
+    if start_metrics_server(metrics_port, host=metrics_host):
+        display_host = metrics_host or "localhost"
         print(
-            f"✅ Prometheus metrics available at http://localhost:{metrics_port}/metrics"
+            "✅ Prometheus metrics available at "
+            f"http://{display_host}:{metrics_port}/metrics"
         )
     else:
         print(f"⚠️  Failed to start metrics server on port {metrics_port}")
