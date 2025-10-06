@@ -1,8 +1,7 @@
 import asyncio
 import logging
 
-from telegram.constants import ParseMode
-from telegram.helpers import MessageLimit
+from telegram.constants import MessageLimit, ParseMode
 
 from pokerapp.telegram_validation import TelegramPayloadValidator
 
