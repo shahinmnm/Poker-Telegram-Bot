@@ -477,102 +477,6 @@ class GameEngine:
                     "Failed to initialize SmartCountdownManager", exc_info=True
                 )
 
-    async def start_waiting_countdown(
-        self,
-        chat_id: int,
-        duration: int,
-        player_count: int = 0,
-        pot_size: int = 0,
-    ) -> bool:
-        """Start countdown in waiting room using SmartCountdownManager."""
-        if self._smart_countdown_manager is None:
-            self._logger.warning(
-                "Cannot start countdown - SmartCountdownManager not initialized",
-                extra={"chat_id": chat_id, "event_type": "countdown_manager_missing"},
-            )
-            return False
-
-        async def on_countdown_complete(completed_chat_id: int) -> None:
-            """Callback when countdown reaches 0 - auto-start game."""
-            try:
-                self._logger.info(
-                    "Countdown complete for chat %s, auto-starting game",
-                    completed_chat_id,
-                    extra={
-                        "chat_id": completed_chat_id,
-                        "event_type": "countdown_complete",
-                    },
-                )
-                await self.start_game(chat_id=completed_chat_id)
-            except Exception:
-                self._logger.exception(
-                    "Failed to auto-start game after countdown",
-                    extra={
-                        "chat_id": completed_chat_id,
-                        "event_type": "auto_start_failed",
-                    },
-                )
-
-        self._logger.info(
-            "Starting countdown for chat %s: %ss, %s players",
-            chat_id,
-            duration,
-            player_count,
-            extra={
-                "chat_id": chat_id,
-                "duration": duration,
-                "player_count": player_count,
-                "event_type": "countdown_start",
-            },
-        )
-
-        return await self._smart_countdown_manager.start_countdown(
-            chat_id=chat_id,
-            duration=duration,
-            player_count=player_count,
-            pot_size=pot_size,
-            on_complete=on_countdown_complete,
-        )
-
-    async def join_game_with_countdown_trigger(
-        self,
-        chat_id: int,
-        current_game,
-        save_success: bool,
-        seated_count: int,
-    ) -> None:
-        """Helper to trigger countdown after successful join."""
-        if not save_success:
-            return
-
-        min_players_for_auto_start = 2
-
-        if (
-            seated_count >= min_players_for_auto_start
-            and current_game.state == GameState.INITIAL
-        ):
-            countdown_duration = 30
-            pot_size = int(getattr(current_game, "pot", 0))
-
-            countdown_started = await self.start_waiting_countdown(
-                chat_id=chat_id,
-                duration=countdown_duration,
-                player_count=seated_count,
-                pot_size=pot_size,
-            )
-
-            if countdown_started:
-                self._logger.info(
-                    "Auto-start countdown triggered for chat %s",
-                    chat_id,
-                    extra={
-                        "chat_id": chat_id,
-                        "player_count": seated_count,
-                        "duration": countdown_duration,
-                        "event_type": "countdown_triggered",
-                    },
-                )
-
         locks_config = getattr(self.constants, "locks", None)
         action_lock_config: Optional[Mapping[str, Any]] = None
         if isinstance(locks_config, Mapping):
@@ -616,6 +520,68 @@ class GameEngine:
             feedback_candidate = action_lock_config.get("feedback_text")
             if isinstance(feedback_candidate, str) and feedback_candidate.strip():
                 self._action_lock_feedback_text = feedback_candidate.strip()
+
+    async def start_waiting_countdown(
+        self,
+        *,
+        chat_id: int,
+        game: Game,
+        duration: int = 30,
+    ) -> None:
+        """Start countdown after players join, with auto-start callback."""
+
+        if self._smart_countdown_manager is None:
+            self._logger.warning(
+                f"SmartCountdownManager not available for chat {chat_id}",
+                extra={
+                    "chat_id": chat_id,
+                    "event_type": "countdown_manager_missing",
+                },
+            )
+            return
+
+        async def on_countdown_complete(completed_chat_id: int) -> None:
+            """Callback when countdown reaches 0."""
+
+            try:
+                self._logger.info(
+                    f"Auto-starting game for chat {completed_chat_id}",
+                    extra={
+                        "chat_id": completed_chat_id,
+                        "event_type": "countdown_auto_start",
+                    },
+                )
+                await self.start_game(chat_id=completed_chat_id)
+            except Exception as exc:  # pragma: no cover - defensive logging
+                self._logger.exception(
+                    f"Failed to auto-start game after countdown: {exc}",
+                    extra={
+                        "chat_id": completed_chat_id,
+                        "event_type": "auto_start_failed",
+                    },
+                )
+
+        player_count = game.seated_count()
+        pot_size = int(getattr(game, "pot", 0))
+
+        self._logger.info(
+            "Starting waiting countdown",
+            extra={
+                "chat_id": chat_id,
+                "duration": duration,
+                "player_count": player_count,
+                "pot_size": pot_size,
+                "event_type": "countdown_start",
+            },
+        )
+
+        await self._smart_countdown_manager.start_countdown(
+            chat_id=chat_id,
+            duration=duration,
+            player_count=player_count,
+            pot_size=pot_size,
+            on_complete=on_countdown_complete,
+        )
 
     async def load_game_state_with_version(
         self, chat_id: int
@@ -886,6 +852,16 @@ class GameEngine:
                     "seat": seat_index,
                 },
             )
+
+            if (
+                current_game.seated_count() >= 2
+                and current_game.state == GameState.INITIAL
+            ):
+                await self.start_waiting_countdown(
+                    chat_id=chat_id,
+                    game=current_game,
+                    duration=30,
+                )
 
             countdown_manager = self._smart_countdown_manager
             if countdown_manager is not None:
