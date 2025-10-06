@@ -8,8 +8,8 @@ from dataclasses import dataclass
 from typing import Callable, Dict, Optional, Set
 
 import redis.asyncio as aioredis
-from sqlalchemy import inspect
-from sqlalchemy.ext.asyncio import create_async_engine
+from sqlalchemy import inspect, text
+from sqlalchemy.ext.asyncio import AsyncConnection, create_async_engine
 
 from pokerapp.config import Config, _SYSTEM_CONSTANTS
 from pokerapp.logging_config import setup_logging
@@ -92,19 +92,78 @@ async def _initialize_statistics_schema(
         echo=echo,
         pool_pre_ping=True,
     )
+
+    async def _has_migrations_applied(conn: AsyncConnection) -> bool:
+        try:
+            result = await conn.execute(
+                text(
+                    """
+                    SELECT EXISTS (
+                        SELECT FROM information_schema.tables
+                        WHERE table_name = 'game_sessions'
+                    )
+                    """
+                )
+            )
+            return bool(result.scalar())
+        except Exception as exc:  # pragma: no cover - defensive logging
+            logger.warning(
+                "Migration presence check failed: %s",  # noqa: G003
+                exc,
+                extra={"event_type": "stats_schema_migration_check_failed"},
+            )
+            return False
+
     try:
         async with engine.begin() as conn:
             def _has_player_stats_table(sync_conn) -> bool:
-                inspector = inspect(sync_conn)
-                return inspector.has_table("player_stats")
+                try:
+                    inspector = inspect(sync_conn)
+                    return inspector.has_table("player_stats")
+                except Exception as exc:  # pragma: no cover - defensive logging
+                    logger.warning(
+                        "Table inspection failed: %s",  # noqa: G003
+                        exc,
+                        extra={"event_type": "stats_schema_check_failed"},
+                    )
+                    return False
 
             has_table = await conn.run_sync(_has_player_stats_table)
-            if not has_table:
-                logger.warning(
-                    "Statistics schema missing; creating tables via ORM metadata",
-                    extra={"event_type": "stats_schema_bootstrap"},
+            has_migrations = await _has_migrations_applied(conn)
+
+            if not has_table and has_migrations:
+                logger.error(
+                    "Migrations detected but player_stats table missing; aborting",
+                    extra={"event_type": "stats_schema_corruption_detected"},
                 )
-            await conn.run_sync(StatisticsBase.metadata.create_all)
+                raise RuntimeError("Statistics schema mismatch detected")
+
+            if has_table:
+                logger.info(
+                    "Statistics schema already exists",
+                    extra={"event_type": "stats_schema_verified"},
+                )
+                return
+
+            logger.warning(
+                "Statistics schema missing; creating tables via ORM metadata",
+                extra={"event_type": "stats_schema_bootstrap_start"},
+            )
+            try:
+                await conn.run_sync(StatisticsBase.metadata.create_all)
+            except Exception as exc:  # pragma: no cover - defensive logging
+                logger.error(
+                    "Failed to create statistics schema: %s",  # noqa: G003
+                    exc,
+                    extra={"event_type": "stats_schema_bootstrap_failed"},
+                    exc_info=True,
+                )
+                raise
+            else:
+                logger.info(
+                    "Statistics schema created successfully",
+                    extra={"event_type": "stats_schema_bootstrap_complete"},
+                )
     finally:
         await engine.dispose()
 
@@ -113,19 +172,34 @@ def _ensure_statistics_schema(
     database_url: str, *, echo: bool, logger: ContextLoggerAdapter
 ) -> None:
     if not database_url:
+        logger.info(
+            "No database URL provided, skipping schema initialization",
+            extra={"event_type": "stats_schema_skipped"},
+        )
         return
 
     async def _runner() -> None:
         await _initialize_statistics_schema(database_url, echo=echo, logger=logger)
 
     try:
-        asyncio.run(_runner())
+        loop = asyncio.get_running_loop()
     except RuntimeError:
-        loop = asyncio.new_event_loop()
         try:
-            loop.run_until_complete(_runner())
-        finally:
-            loop.close()
+            asyncio.run(_runner())
+        except Exception as exc:  # pragma: no cover - defensive logging
+            logger.error(
+                "Schema initialization failed: %s",  # noqa: G003
+                exc,
+                extra={"event_type": "stats_schema_init_failed"},
+                exc_info=True,
+            )
+            raise
+    else:  # pragma: no cover - defensive logging
+        logger.warning(
+            "Schema check called from async context - scheduling background task",
+            extra={"event_type": "schema_sync_from_async_warning"},
+        )
+        loop.create_task(_runner())
 
 
 def build_services(cfg: Config, *, skip_stats_buffer: bool = False) -> ApplicationServices:
