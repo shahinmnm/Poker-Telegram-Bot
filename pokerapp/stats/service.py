@@ -662,6 +662,89 @@ class StatsService(BaseStatsService):
                     if normalized.private_chat_id:
                         stats.last_private_chat_id = normalized.private_chat_id
 
+    def _stats_to_dict(
+        self, stats: PlayerStats, fallback_username: str
+    ) -> Dict[str, Any]:
+        return {
+            "user_id": stats.user_id,
+            "username": stats.username or fallback_username,
+            "display_name": stats.display_name or fallback_username,
+            "total_games": stats.total_games,
+            "total_wins": stats.total_wins,
+            "total_losses": stats.total_losses,
+            "total_play_time": stats.total_play_time,
+            "total_amount_won": stats.total_amount_won,
+            "total_amount_lost": stats.total_amount_lost,
+            "lifetime_profit": stats.lifetime_profit,
+        }
+
+    async def get_or_create_player_stats(
+        self, user_id: int, username: str
+    ) -> Dict[str, Any]:
+        """Fetch player statistics, creating defaults when missing."""
+
+        normalized_id = self._coerce_int(user_id)
+        fallback_username = username or str(normalized_id)
+        minimal_defaults = {
+            "user_id": normalized_id,
+            "username": fallback_username,
+            "display_name": fallback_username,
+            "total_games": 0,
+            "total_wins": 0,
+            "total_losses": 0,
+            "total_play_time": 0,
+            "total_amount_won": 0,
+            "total_amount_lost": 0,
+            "lifetime_profit": 0,
+        }
+
+        if not self._enabled or self._sessionmaker is None:
+            return minimal_defaults
+
+        await self._ensure_schema()
+
+        async with self._sessionmaker() as session:
+            stats = await session.get(PlayerStats, normalized_id)
+            if stats is None:
+                logger.warning(
+                    "Player stats not found for user_id=%s, initializing defaults",
+                    normalized_id,
+                    extra={"user_id": normalized_id},
+                )
+                now = self._utcnow()
+                async with session.begin():
+                    session.add(
+                        PlayerStats(
+                            user_id=normalized_id,
+                            display_name=fallback_username,
+                            username=username or None,
+                            first_seen=now,
+                            last_seen=now,
+                        )
+                    )
+
+                stats = await session.get(PlayerStats, normalized_id)
+                if stats is None:
+                    logger.error(
+                        "Failed to create player stats for user_id=%s",
+                        normalized_id,
+                        extra={"user_id": normalized_id},
+                    )
+                    return minimal_defaults
+
+                logger.info(
+                    "Created default stats for user_id=%s",
+                    normalized_id,
+                    extra={
+                        "category": "player_stats",
+                        "event": "initialization",
+                        "user_id": normalized_id,
+                        "username": username,
+                    },
+                )
+
+            return self._stats_to_dict(stats, fallback_username)
+
     async def start_hand(
         self,
         hand_id: str,
