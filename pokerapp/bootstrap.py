@@ -171,6 +171,7 @@ async def _initialize_statistics_schema(
 def _ensure_statistics_schema(
     database_url: str, *, echo: bool, logger: ContextLoggerAdapter
 ) -> None:
+    """Synchronous wrapper for schema initialization (blocking)."""
     if not database_url:
         logger.info(
             "No database URL provided, skipping schema initialization",
@@ -182,24 +183,15 @@ def _ensure_statistics_schema(
         await _initialize_statistics_schema(database_url, echo=echo, logger=logger)
 
     try:
-        loop = asyncio.get_running_loop()
-    except RuntimeError:
-        try:
-            asyncio.run(_runner())
-        except Exception as exc:  # pragma: no cover - defensive logging
-            logger.error(
-                "Schema initialization failed: %s",  # noqa: G003
-                exc,
-                extra={"event_type": "stats_schema_init_failed"},
-                exc_info=True,
-            )
-            raise
-    else:  # pragma: no cover - defensive logging
-        logger.warning(
-            "Schema check called from async context - scheduling background task",
-            extra={"event_type": "schema_sync_from_async_warning"},
+        asyncio.run(_runner())
+    except Exception as exc:  # pragma: no cover - defensive logging
+        logger.error(
+            "Schema initialization failed: %s",  # noqa: G003
+            exc,
+            extra={"event_type": "stats_schema_init_failed"},
+            exc_info=True,
         )
-        loop.create_task(_runner())
+        raise
 
 
 def build_services(cfg: Config, *, skip_stats_buffer: bool = False) -> ApplicationServices:
