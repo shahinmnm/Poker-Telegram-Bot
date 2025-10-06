@@ -2339,12 +2339,15 @@ class PokerBotModel:
         user = update.effective_user
         chat_id = chat.id
 
-        player_name = (
-            getattr(user, "full_name", None)
-            or getattr(user, "first_name", None)
-            or getattr(user, "username", None)
-            or str(getattr(user, "id", chat_id))
-        )
+        if user is not None:
+            player_name = (
+                user.full_name
+                or user.first_name
+                or user.username
+                or str(user.id)
+            )
+        else:
+            player_name = "Unknown Player"
 
         await self._table_manager.create_game(chat_id)
         game = await self._table_manager.get_game(chat_id)
