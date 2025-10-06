@@ -91,3 +91,28 @@ await game_engine.finalize_game(chat_id=chat_id)
   side effects.
 - Legacy usage will continue to work during the deprecation window but
   logs a warning to simplify auditing.
+
+## Statistics Schema Management
+
+### Strategy Overview
+
+- The ORM models defined in `pokerapp/database_schema.py` are the source
+  of truth for the statistics subsystem schema.
+- New deployments may rely on `Base.metadata.create_all()` to provision
+  the schema automatically during application bootstrap.
+- Existing deployments that previously executed the SQL files under
+  `migrations/` should continue to manage upgrades through those
+  migrations.
+
+### Deployment Guidance
+
+- **Fresh installs** – allow the application to create the schema via
+  the ORM metadata. The raw SQL migrations do not need to be executed.
+- **Upgrades** – run the SQL migration scripts manually before starting
+  the new application version. The bootstrap process will detect the
+  pre-existing tables and skip auto-creation.
+- **Mixed environments** – avoid executing both the SQL migrations and
+  the ORM bootstrap on the same database without coordination. If the
+  migrations created part of the schema but the ORM bootstrap still
+  detects missing tables, treat the situation as a failed deployment and
+  investigate before proceeding.
