@@ -5,6 +5,8 @@ from dataclasses import dataclass, field
 from collections import deque
 from enum import Enum
 
+from telegram.error import TelegramError
+
 
 @dataclass
 class CountdownState:
@@ -156,10 +158,24 @@ class SmartCountdownManager:
 
             return True
 
-        except Exception as e:
+        except TelegramError as e:
             self.logger.error(
-                f"Failed to start countdown for chat {chat_id}: {e}",
-                extra={'event_type': 'countdown_start_failed', 'chat_id': chat_id}
+                f"Telegram API error starting countdown for chat {chat_id}: {e}",
+                extra={
+                    'event_type': 'countdown_start_failed',
+                    'error_type': 'telegram_api',
+                    'chat_id': chat_id
+                }
+            )
+            return False
+        except Exception as e:
+            self.logger.exception(
+                f"Unexpected error starting countdown for chat {chat_id}: {e}",
+                extra={
+                    'event_type': 'countdown_start_failed',
+                    'error_type': 'unexpected',
+                    'chat_id': chat_id
+                }
             )
             return False
 
@@ -209,6 +225,17 @@ class SmartCountdownManager:
         )
 
         self._pending_updates[chat_id].append(new_state)
+
+    async def cancel_countdown(self, chat_id: int) -> None:
+        """Cancel an active countdown for ``chat_id`` if it exists."""
+
+        task = self._active_countdowns.pop(chat_id, None)
+        if task is not None:
+            task.cancel()
+
+        self._countdown_states.pop(chat_id, None)
+        self._pending_updates.pop(chat_id, None)
+        self._countdown_messages.pop(chat_id, None)
 
     async def _run_countdown(
         self,
@@ -277,17 +304,18 @@ class SmartCountdownManager:
 
                     # Get the latest state (coalescing all intermediate updates)
                     latest_state = updates[-1]
-                    skipped = max(len(updates) - 1, 0)
+                    num_updates = len(updates)
                     updates.clear()
 
                     # Send update
                     await self._update_countdown_message(latest_state)
 
                     # Track metrics
-                    if skipped > 0:
-                        self._metrics['api_calls_saved'] += skipped
+                    if num_updates > 1:
+                        saved = num_updates - 1
+                        self._metrics['api_calls_saved'] += saved
                         self.logger.debug(
-                            f"Batched {skipped} updates for chat {chat_id}"
+                            f"Batched {saved} updates for chat {chat_id}"
                         )
 
             except asyncio.CancelledError:
