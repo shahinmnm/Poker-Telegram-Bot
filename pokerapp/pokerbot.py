@@ -133,8 +133,6 @@ class PokerBot:
                 allowed_updates=settings.allowed_updates,
                 drop_pending_updates=settings.drop_pending_updates,
                 max_connections=settings.max_connections,
-                # Enable graceful shutdown by letting PTB install signal handlers.
-                signal_handlers=True,
             )
         except Exception:
             self._logger.exception("Webhook run terminated due to an error.")
