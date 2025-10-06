@@ -702,6 +702,75 @@ class Config:
         else:
             self.RATE_LIMIT_PER_SECOND = parsed_rate_limit_per_second
 
+        pool_min_raw = os.getenv("POKERBOT_DB_POOL_MIN_SIZE")
+        pool_max_raw = os.getenv("POKERBOT_DB_POOL_MAX_SIZE")
+        command_timeout_raw = os.getenv("POKERBOT_DB_COMMAND_TIMEOUT")
+        parsed_pool_min = self._parse_positive_int(
+            pool_min_raw, env_var="POKERBOT_DB_POOL_MIN_SIZE"
+        )
+        parsed_pool_max = self._parse_positive_int(
+            pool_max_raw, env_var="POKERBOT_DB_POOL_MAX_SIZE"
+        )
+        parsed_command_timeout = self._parse_positive_int(
+            command_timeout_raw, env_var="POKERBOT_DB_COMMAND_TIMEOUT"
+        )
+        default_pool_min = 10
+        self.DB_POOL_MIN_SIZE: int = parsed_pool_min or default_pool_min
+        default_pool_max = max(self.DB_POOL_MIN_SIZE, 50)
+        if parsed_pool_max is not None and parsed_pool_max < self.DB_POOL_MIN_SIZE:
+            logger.warning(
+                "POKERBOT_DB_POOL_MAX_SIZE (%s) is lower than the configured minimum (%s); "
+                "clamping to the minimum.",
+                parsed_pool_max,
+                self.DB_POOL_MIN_SIZE,
+            )
+            parsed_pool_max = self.DB_POOL_MIN_SIZE
+        self.DB_POOL_MAX_SIZE: int = parsed_pool_max or default_pool_max
+        self.DB_COMMAND_TIMEOUT: int = parsed_command_timeout or 30
+
+        cache_l1_size_raw = os.getenv("POKERBOT_CACHE_L1_SIZE")
+        cache_l1_ttl_raw = os.getenv("POKERBOT_CACHE_L1_TTL")
+        cache_l2_ttl_raw = os.getenv("POKERBOT_CACHE_L2_TTL")
+        cache_default_ttl_raw = os.getenv("POKERBOT_CACHE_DEFAULT_TTL")
+        cache_l1_enabled_raw = os.getenv("POKERBOT_CACHE_L1_ENABLED")
+        cache_l2_enabled_raw = os.getenv("POKERBOT_CACHE_L2_ENABLED")
+        cache_key_prefix = os.getenv("POKERBOT_CACHE_KEY_PREFIX", "poker:cache:")
+
+        parsed_l1_size = self._parse_positive_int(
+            cache_l1_size_raw, env_var="POKERBOT_CACHE_L1_SIZE"
+        )
+        parsed_l1_ttl = self._parse_positive_int(
+            cache_l1_ttl_raw, env_var="POKERBOT_CACHE_L1_TTL"
+        )
+        parsed_l2_ttl = self._parse_positive_int(
+            cache_l2_ttl_raw, env_var="POKERBOT_CACHE_L2_TTL"
+        )
+        parsed_cache_default_ttl = self._parse_positive_int(
+            cache_default_ttl_raw, env_var="POKERBOT_CACHE_DEFAULT_TTL"
+        )
+
+        self.CACHE_L1_MAX_SIZE: int = parsed_l1_size or 1024
+        self.CACHE_L1_TTL: int = parsed_l1_ttl or 60
+        self.CACHE_L2_TTL: int = parsed_l2_ttl or 300
+        self.CACHE_DEFAULT_TTL: int = parsed_cache_default_ttl or 300
+        self.CACHE_L1_ENABLED: bool = self._parse_bool_env(
+            cache_l1_enabled_raw, default=True
+        )
+        self.CACHE_L2_ENABLED: bool = self._parse_bool_env(
+            cache_l2_enabled_raw, default=True
+        )
+        self.CACHE_KEY_PREFIX: str = cache_key_prefix or "poker:cache:"
+
+        batch_window_raw = os.getenv("POKERBOT_QUERY_BATCH_WINDOW_MS")
+        parsed_batch_window = self._parse_positive_int(
+            batch_window_raw, env_var="POKERBOT_QUERY_BATCH_WINDOW_MS"
+        )
+        self.QUERY_BATCH_WINDOW_MS: int = parsed_batch_window or 50
+
+        self.DATABASE_POOL_DSN: Optional[str] = self._normalise_pool_dsn(
+            self.DATABASE_URL
+        )
+
         telegram_max_retries_raw = os.getenv("POKERBOT_TELEGRAM_MAX_RETRIES")
         parsed_telegram_max_retries = self._parse_positive_int(
             telegram_max_retries_raw,
@@ -903,6 +972,24 @@ class Config:
             return default
 
     @staticmethod
+    def _parse_bool_env(raw_value: Optional[str], *, default: bool) -> bool:
+        if raw_value is None:
+            return default
+        value = raw_value.strip().lower()
+        if not value:
+            return default
+        if value in {"1", "true", "yes", "on"}:
+            return True
+        if value in {"0", "false", "no", "off"}:
+            return False
+        logger.warning(
+            "Invalid boolean value '%s'; using default %s.",
+            raw_value,
+            default,
+        )
+        return default
+
+    @staticmethod
     def _parse_positive_float(
         raw_value: Optional[str], *, env_var: Optional[str]
     ) -> Optional[float]:
@@ -937,3 +1024,14 @@ class Config:
                 )
             return None
         return value
+
+    @staticmethod
+    def _normalise_pool_dsn(database_url: Optional[str]) -> Optional[str]:
+        if not database_url:
+            return None
+        lowered = database_url.lower()
+        if lowered.startswith("postgresql+asyncpg://"):
+            return "postgresql://" + database_url.split("://", 1)[1]
+        if lowered.startswith("postgresql://") or lowered.startswith("postgres://"):
+            return database_url
+        return None

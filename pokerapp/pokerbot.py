@@ -8,10 +8,13 @@ import redis.asyncio as aioredis
 from telegram.error import TelegramError
 from telegram.ext import ApplicationBuilder, ContextTypes, JobQueue
 
+from pokerapp.cache_manager import MultiLayerCache
 from pokerapp.config import Config
+from pokerapp.db_client import OptimizedDatabaseClient
 from pokerapp.pokerbotcontrol import PokerBotCotroller
 from pokerapp.pokerbotmodel import PokerBotModel
 from pokerapp.pokerbotview import PokerBotViewer
+from pokerapp.query_optimizer import QueryBatcher
 from pokerapp.table_manager import TableManager
 from pokerapp.stats import BaseStatsService
 from pokerapp.private_match_service import PrivateMatchService
@@ -61,6 +64,9 @@ class PokerBot:
         table_manager: TableManager,
         stats_service: BaseStatsService,
         redis_ops: RedisSafeOps,
+        cache: Optional[MultiLayerCache] = None,
+        db_client: Optional[OptimizedDatabaseClient] = None,
+        query_batcher: Optional[QueryBatcher] = None,
         player_report_cache: PlayerReportCache,
         adaptive_player_report_cache: AdaptivePlayerReportCache,
         request_metrics: RequestMetrics,
@@ -97,6 +103,9 @@ class PokerBot:
         self._telegram_safeops_factory = telegram_safeops_factory
         self._player_report_cache = player_report_cache
         self._adaptive_player_report_cache = adaptive_player_report_cache
+        self._cache = cache
+        self._db_client = db_client
+        self._query_batcher = query_batcher
         self._build_application()
 
     def run(self) -> None:
@@ -242,6 +251,8 @@ class PokerBot:
             player_report_cache=self._player_report_cache,
             adaptive_player_report_cache=self._adaptive_player_report_cache,
             telegram_safe_ops=telegram_safe_ops,
+            cache=self._cache,
+            query_batcher=self._query_batcher,
         )
         self._register_game_engine()
         self._controller = PokerBotCotroller(self._model, self._application)

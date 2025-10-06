@@ -66,6 +66,7 @@ from pokerapp.utils.cache import AdaptivePlayerReportCache
 from pokerapp.utils.player_report_cache import (
     PlayerReportCache as RedisPlayerReportCache,
 )
+from pokerapp.cache_manager import MultiLayerCache
 from pokerapp.utils.request_metrics import RequestCategory, RequestMetrics
 from pokerapp.utils.redis_safeops import RedisSafeOps
 from pokerapp.lock_manager import LockManager
@@ -77,6 +78,7 @@ from pokerapp.game_engine import GameEngine
 from pokerapp.utils.telegram_safeops import TelegramSafeOps
 from pokerapp.stats_reporter import StatsReporter
 from pokerapp.translations import translate
+from pokerapp.query_optimizer import QueryBatcher
 
 _GAME_CONSTANTS = get_game_constants()
 _GAME_SECTION = _GAME_CONSTANTS.game
@@ -211,6 +213,13 @@ class PokerBotModel:
     def _state_token(self, state: Any) -> str:
         return self._game_engine.state_token(state)
 
+    async def get_player_statistics(
+        self, user_id: UserId, *, include_history: bool = False
+    ) -> Dict[str, Any]:
+        return await self._game_engine.get_player_stats(
+            user_id, include_history=include_history
+        )
+
     def __init__(
         self,
         view: PokerBotViewer,
@@ -225,6 +234,8 @@ class PokerBotModel:
         player_report_cache: Optional[RedisPlayerReportCache] = None,
         adaptive_player_report_cache: Optional[AdaptivePlayerReportCache] = None,
         telegram_safe_ops: Optional[TelegramSafeOps] = None,
+        cache: Optional[MultiLayerCache] = None,
+        query_batcher: Optional[QueryBatcher] = None,
     ):
         self._view: PokerBotViewer = view
         self._bot: Bot = bot
@@ -265,6 +276,8 @@ class PokerBotModel:
             bonus_ttl=_resolve_ttl("PLAYER_REPORT_TTL_BONUS", 60),
             post_hand_ttl=_resolve_ttl("PLAYER_REPORT_TTL_POST_HAND", 45),
         )
+        self._cache = cache
+        self._query_batcher = query_batcher
         cfg_timezone = getattr(cfg, "TIMEZONE_NAME", DEFAULT_TIMEZONE_NAME)
         if not isinstance(cfg_timezone, str) or not cfg_timezone.strip():
             cfg_timezone = DEFAULT_TIMEZONE_NAME
@@ -380,6 +393,8 @@ class PokerBotModel:
             lock_manager=self._lock_manager,
             logger=logger.getChild("game_engine"),
             adaptive_player_report_cache=self._player_report_cache,
+            cache=self._cache,
+            query_batcher=self._query_batcher,
         )
 
         self._log_lock_snapshot(stage="startup", level=logging.INFO)
