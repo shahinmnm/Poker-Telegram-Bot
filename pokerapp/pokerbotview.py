@@ -66,6 +66,7 @@ from pokerapp.utils.debug_trace import trace_telegram_api_call
 from pokerapp.utils.messaging_service import MessagingService
 from pokerapp.utils.message_updates import safe_edit_message
 from pokerapp.utils.request_metrics import RequestCategory, RequestMetrics
+from pokerapp.translations import translate
 
 
 logger = logging.getLogger(__name__)
@@ -4164,6 +4165,25 @@ class PokerBotViewer:
                     "chat_id": self._admin_chat_id,
                 },
             )
+
+    async def send_new_game_created_message(
+        self,
+        chat_id: ChatId,
+        player_name: str,
+    ) -> None:
+        """Send the localized announcement for a freshly created game."""
+
+        sentinel = "__missing_translation_game.newgame_created__"
+        template = translate("game.newgame_created", sentinel)
+        if template == sentinel:
+            raise KeyError("game.newgame_created")
+
+        text = template.format(player_name=player_name)
+        await self.send_message(
+            chat_id,
+            text,
+            request_category=RequestCategory.START_GAME,
+        )
 
     async def send_message_return_id(
         self,

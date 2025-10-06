@@ -2335,11 +2335,37 @@ class PokerBotModel:
     async def create_game(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
     ) -> None:
-        chat_id = update.effective_chat.id
+        chat = update.effective_chat
+        user = update.effective_user
+        chat_id = chat.id
+
+        player_name = (
+            getattr(user, "full_name", None)
+            or getattr(user, "first_name", None)
+            or getattr(user, "username", None)
+            or str(getattr(user, "id", chat_id))
+        )
+
         await self._table_manager.create_game(chat_id)
         game = await self._table_manager.get_game(chat_id)
         await self._send_join_prompt(game, chat_id)
-        await self._view.send_message(chat_id, "بازی جدید ایجاد شد.")
+
+        try:
+            await self._view.send_new_game_created_message(chat_id, player_name)
+        except KeyError as exc:
+            self._logger.error(
+                "Translation key missing for new game announcement",
+                extra={
+                    "category": "translation_error",
+                    "missing_key": str(exc),
+                    "chat_id": chat_id,
+                },
+            )
+            await self._view.send_message(
+                chat_id,
+                f"🎮 Game created by {player_name}\n\nPress 'Join' to play.",
+                request_category=RequestCategory.START_GAME,
+            )
 
     async def add_cards_to_table(
         self,
