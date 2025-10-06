@@ -3297,8 +3297,8 @@ class GameEngine:
                             "error": str(exc),
                             "error_type": type(exc).__name__,
                             "stage": snapshot.stage,
-                    },
-                )
+                        },
+                    )
 
         delete_task_count = len(tasks)
 
