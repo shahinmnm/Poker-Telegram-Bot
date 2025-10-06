@@ -1,5 +1,6 @@
 """Prometheus metrics HTTP server."""
 import logging
+from typing import Optional
 
 logger = logging.getLogger(__name__)
 
@@ -25,7 +26,7 @@ def start_metrics_server(port: int = 8000) -> bool:
         from prometheus_client import start_http_server
         start_http_server(port)
         _metrics_server_started = True
-        logger.info(f"Prometheus metrics server started on port {port}")
+        logger.info(f"✅ Prometheus metrics server started on port {port}")
         return True
     except ImportError:
         logger.warning("prometheus_client not installed, metrics server disabled")
@@ -41,3 +42,4 @@ def start_metrics_server(port: int = 8000) -> bool:
 def is_metrics_server_running() -> bool:
     """Check if metrics server is running."""
     return _metrics_server_started
+
