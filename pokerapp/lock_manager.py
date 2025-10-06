@@ -4952,11 +4952,41 @@ class LockManager:
             metadata["attempts"] = attempt_index
             self._metrics["action_lock_retry_attempts"] += 1
 
-            lock_token = await self.acquire_action_lock(
-                chat_id,
-                user_id,
-                action_data=action_data,
-            )
+            remaining_budget = max(0.0, timeout_budget - (loop.time() - start_time))
+
+            timeout_occurred = False
+            attempt_timeout = min(backoff_delay, remaining_budget)
+            if attempt_timeout <= 0:
+                if remaining_budget > 0:
+                    attempt_timeout = remaining_budget
+                else:
+                    attempt_timeout = backoff_delay
+            attempt_timeout = max(attempt_timeout, 0.1)
+
+            try:
+                lock_token = await asyncio.wait_for(
+                    self.acquire_action_lock(
+                        chat_id,
+                        user_id,
+                        action_data=action_data,
+                    ),
+                    timeout=attempt_timeout,
+                )
+            except asyncio.TimeoutError:
+                lock_token = None
+                timeout_occurred = True
+                last_failure_reason = "timeout"
+                self._logger.debug(
+                    "[ACTION_LOCK] Acquisition timed out after %.2fs",
+                    attempt_timeout,
+                    extra={
+                        "event_type": "action_lock_retry_timeout",
+                        "chat_id": chat_id,
+                        "user_id": user_id,
+                        "timeout": round(attempt_timeout, 3),
+                    },
+                )
+
             if lock_token:
                 elapsed = loop.time() - start_time
                 metadata["wait_time"] = elapsed
@@ -4977,10 +5007,13 @@ class LockManager:
                     )
                 return lock_token, metadata
 
+            if not timeout_occurred:
+                last_failure_reason = "contended"
+
             elapsed = loop.time() - start_time
             remaining_budget = timeout_budget - elapsed
             if remaining_budget <= 0 or attempt_index == attempts_limit:
-                if remaining_budget <= 0:
+                if remaining_budget <= 0 and last_failure_reason != "timeout":
                     last_failure_reason = "timeout"
                 break
 
@@ -5012,7 +5045,7 @@ class LockManager:
             sleep_duration = max(0.0, min(backoff_delay, remaining_budget))
             if sleep_duration > 0:
                 self._logger.debug(
-                    "[ACTION_LOCK] Retry %d in %.2fs (chat=%s user=%s)",
+                    "[ACTION_LOCK] Retry %d after %.2fs wait (chat=%s user=%s)",
                     attempt_index + 1,
                     sleep_duration,
                     chat_id,
@@ -5025,7 +5058,7 @@ class LockManager:
                         "sleep": round(sleep_duration, 3),
                     },
                 )
-                await asyncio.sleep(sleep_duration)
+                await asyncio.sleep(min(sleep_duration, 0.1))
 
             backoff_delay *= multiplier
 
