@@ -8,6 +8,8 @@ from dataclasses import dataclass
 from typing import Callable, Dict, Optional, Set
 
 import redis.asyncio as aioredis
+from sqlalchemy import inspect
+from sqlalchemy.ext.asyncio import create_async_engine
 
 from pokerapp.config import Config, _SYSTEM_CONSTANTS
 from pokerapp.logging_config import setup_logging
@@ -26,6 +28,7 @@ from pokerapp.utils.logging_helpers import ContextLoggerAdapter, enforce_context
 from pokerapp.state_validator import GameStateValidator
 from pokerapp.recovery_service import RecoveryService
 from pokerapp.telegram_retry_manager import TelegramRetryManager
+from pokerapp.database_schema import Base as StatisticsBase
 
 
 @dataclass(frozen=True)
@@ -52,6 +55,11 @@ def _build_stats_service(logger: ContextLoggerAdapter, cfg: Config) -> BaseStats
         return NullStatsService(timezone_name=cfg.TIMEZONE_NAME)
 
     try:
+        _ensure_statistics_schema(
+            cfg.DATABASE_URL,
+            echo=getattr(cfg, "DATABASE_ECHO", False),
+            logger=logger,
+        )
         stats_service = StatsService(
             cfg.DATABASE_URL,
             echo=getattr(cfg, "DATABASE_ECHO", False),
@@ -72,6 +80,52 @@ def _make_service_logger(
     return enforce_context(
         parent_logger.getChild(child_name), {"request_category": category}
     )
+
+
+async def _initialize_statistics_schema(
+    database_url: str, *, echo: bool, logger: ContextLoggerAdapter
+) -> None:
+    """Ensure the statistics schema exists by creating ORM tables if required."""
+
+    engine = create_async_engine(
+        database_url,
+        echo=echo,
+        pool_pre_ping=True,
+    )
+    try:
+        async with engine.begin() as conn:
+            def _has_player_stats_table(sync_conn) -> bool:
+                inspector = inspect(sync_conn)
+                return inspector.has_table("player_stats")
+
+            has_table = await conn.run_sync(_has_player_stats_table)
+            if not has_table:
+                logger.warning(
+                    "Statistics schema missing; creating tables via ORM metadata",
+                    extra={"event_type": "stats_schema_bootstrap"},
+                )
+            await conn.run_sync(StatisticsBase.metadata.create_all)
+    finally:
+        await engine.dispose()
+
+
+def _ensure_statistics_schema(
+    database_url: str, *, echo: bool, logger: ContextLoggerAdapter
+) -> None:
+    if not database_url:
+        return
+
+    async def _runner() -> None:
+        await _initialize_statistics_schema(database_url, echo=echo, logger=logger)
+
+    try:
+        asyncio.run(_runner())
+    except RuntimeError:
+        loop = asyncio.new_event_loop()
+        try:
+            loop.run_until_complete(_runner())
+        finally:
+            loop.close()
 
 
 def build_services(cfg: Config, *, skip_stats_buffer: bool = False) -> ApplicationServices:
