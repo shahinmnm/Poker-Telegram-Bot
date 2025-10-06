@@ -4,36 +4,108 @@ services:
   redis:
     image: "redis:7.0.2"
     restart: always
-    ports:
-      - "127.0.0.1:6379:6379"
     volumes:
       - redis_data:/data
     command: "redis-server --save 60 1 --loglevel warning"
+    networks:
+      - poker_network
+
+  prometheus:
+    image: prom/prometheus:latest
+    restart: always
+    volumes:
+      - ./config/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml
+      - prometheus_data:/prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.retention.time=30d'
+      - '--web.external-url=https://yourdomain.com/prometheus'
+      - '--web.route-prefix=/'
+    networks:
+      - poker_network
+    expose:
+      - "9090"
+
+  grafana:
+    image: grafana/grafana:latest
+    restart: always
+    volumes:
+      - ./config/grafana/dashboards:/etc/grafana/provisioning/dashboards
+      - ./config/grafana/datasources:/etc/grafana/provisioning/datasources
+      - grafana_data:/var/lib/grafana
+    environment:
+      # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+      # CRITICAL: Subdirectory Configuration
+      # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+      - GF_SERVER_ROOT_URL=https://yourdomain.com/grafana
+      - GF_SERVER_SERVE_FROM_SUB_PATH=true
+      - GF_SERVER_DOMAIN=yourdomain.com
+      
+      # Security
+      - GF_SECURITY_ADMIN_USER=admin
+      - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_ADMIN_PASSWORD}
+      - GF_USERS_ALLOW_SIGN_UP=false
+      - GF_SECURITY_COOKIE_SECURE=true
+      - GF_SECURITY_STRICT_TRANSPORT_SECURITY=true
+      
+      # Anonymous access (set to false for production)
+      - GF_AUTH_ANONYMOUS_ENABLED=false
+      
+      # Database (optional - for persistent sessions/dashboards)
+      - GF_DATABASE_TYPE=sqlite3
+      - GF_DATABASE_PATH=/var/lib/grafana/grafana.db
+    networks:
+      - poker_network
+    expose:
+      - "3000"
+    depends_on:
+      - prometheus
+
+  nginx:
+    image: nginx:alpine
+    restart: always
+    ports:
+      - "443:443"
+      - "80:80"
+    volumes:
+      - ./config/nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - /etc/letsencrypt:/etc/letsencrypt:ro
+    networks:
+      - poker_network
+    depends_on:
+      - bot
+      - grafana
 
   bot:
     build: .
     restart: always
-    ports:
-      - "127.0.0.1:3000:3000"
-    # TLS در Nginx خاتمه می‌یابد و درخواست‌ها به 127.0.0.1:3000 هدایت می‌شود،
-    # بنابراین کانتینر فقط روی لوپ‌بک گوش می‌دهد.
     environment:
-      - POKERBOT_TOKEN=$POKERBOT_TOKEN
+      # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+      # PRESERVE YOUR EXISTING WEBHOOK CONFIGURATION
+      # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+      - POKERBOT_TOKEN=${POKERBOT_TOKEN}
       - POKERBOT_REDIS_HOST=redis
-      - POKERBOT_WEBHOOK_LISTEN=$POKERBOT_WEBHOOK_LISTEN
-      - POKERBOT_WEBHOOK_PORT=$POKERBOT_WEBHOOK_PORT
-      - POKERBOT_WEBHOOK_PATH=$POKERBOT_WEBHOOK_PATH
-      - POKERBOT_WEBHOOK_PUBLIC_URL=$POKERBOT_WEBHOOK_PUBLIC_URL
-      - POKERBOT_WEBHOOK_SECRET=$POKERBOT_WEBHOOK_SECRET
-      - POKERBOT_RATE_LIMIT_PER_MINUTE=$POKERBOT_RATE_LIMIT_PER_MINUTE
-      - POKERBOT_DEBUG_TRACE_MESSAGES=1
-      - POKERBOT_DB_POOL_MIN_SIZE=$POKERBOT_DB_POOL_MIN_SIZE
-      - POKERBOT_DB_POOL_MAX_SIZE=$POKERBOT_DB_POOL_MAX_SIZE
-      - POKERBOT_DB_COMMAND_TIMEOUT=$POKERBOT_DB_COMMAND_TIMEOUT
-      - POKERBOT_CACHE_L1_SIZE=$POKERBOT_CACHE_L1_SIZE
-      - POKERBOT_CACHE_L1_TTL=$POKERBOT_CACHE_L1_TTL
-      - POKERBOT_CACHE_L2_TTL=$POKERBOT_CACHE_L2_TTL
-      - POKERBOT_CACHE_DEFAULT_TTL=$POKERBOT_CACHE_DEFAULT_TTL
+      - POKERBOT_WEBHOOK_LISTEN=${POKERBOT_WEBHOOK_LISTEN:-0.0.0.0}
+      - POKERBOT_WEBHOOK_PORT=${POKERBOT_WEBHOOK_PORT:-3000}
+      - POKERBOT_WEBHOOK_PATH=${POKERBOT_WEBHOOK_PATH:-/telegram/webhook-poker2025}
+      - POKERBOT_WEBHOOK_PUBLIC_URL=${POKERBOT_WEBHOOK_PUBLIC_URL}
+      - POKERBOT_WEBHOOK_SECRET=${POKERBOT_WEBHOOK_SECRET}
+      - POKERBOT_RATE_LIMIT_PER_MINUTE=${POKERBOT_RATE_LIMIT_PER_MINUTE:-20}
+      - POKERBOT_DEBUG_TRACE_MESSAGES=${POKERBOT_DEBUG_TRACE_MESSAGES:-1}
+      
+      # Prometheus metrics
+      - PROMETHEUS_MULTIPROC_DIR=/tmp/prometheus
+    networks:
+      - poker_network
+    expose:
+      - "3000"
+      - "8000"  # Metrics port
+
+networks:
+  poker_network:
+    driver: bridge
 
 volumes:
   redis_data:
+  prometheus_data:
+  grafana_data:
