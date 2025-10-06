@@ -62,12 +62,19 @@ services:
     ports:
       - "127.0.0.1:3001:3000"
     environment:
-      - GF_SERVER_ROOT_URL=%(protocol)s://%(domain)s/grafana
+      # ✅ CORRECT: Use proper environment variable syntax
+      - GF_SERVER_ROOT_URL=https://shahin8n.sbs/grafana/
       - GF_SERVER_SERVE_FROM_SUB_PATH=true
-      - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_ADMIN_PASSWORD:-admin}
+      - GF_SERVER_DOMAIN=shahin8n.sbs
+      - GF_SERVER_PROTOCOL=http
+      - GF_SECURITY_ADMIN_USER=admin
+      - GF_SECURITY_ADMIN_PASSWORD=Grafna@_007
+      - GF_USERS_ALLOW_SIGN_UP=false
+      - GF_AUTH_ANONYMOUS_ENABLED=false
+      - GF_LOG_MODE=console
+      - GF_LOG_LEVEL=info
     volumes:
       - grafana_data:/var/lib/grafana
-      - ./config/grafana/grafana.ini:/etc/grafana/grafana.ini:ro
       - ./config/grafana/provisioning:/etc/grafana/provisioning:ro
       - ./config/grafana/dashboards:/etc/grafana/provisioning/dashboards:ro
     depends_on:
