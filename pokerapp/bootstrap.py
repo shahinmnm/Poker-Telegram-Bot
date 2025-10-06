@@ -11,12 +11,15 @@ import redis.asyncio as aioredis
 from sqlalchemy import inspect, text
 from sqlalchemy.ext.asyncio import AsyncConnection, create_async_engine
 
+from pokerapp.cache_manager import CacheConfig, MultiLayerCache
 from pokerapp.config import Config, _SYSTEM_CONSTANTS
+from pokerapp.db_client import CachePolicy, OptimizedDatabaseClient
 from pokerapp.logging_config import setup_logging
 from pokerapp.stats import BaseStatsService, NullStatsService, StatsService
 from pokerapp.stats.buffer import StatsBatchBuffer
 from pokerapp.table_manager import TableManager
 from pokerapp.private_match_service import PrivateMatchService
+from pokerapp.query_optimizer import QueryBatcher
 from pokerapp.translations import init_translations
 from pokerapp.utils.messaging_service import MessagingService
 from pokerapp.utils.redis_safeops import RedisSafeOps
@@ -48,6 +51,9 @@ class ApplicationServices:
     telegram_safeops_factory: Callable[..., TelegramSafeOps]
     retry_manager: TelegramRetryManager
     stats_buffer: Optional[StatsBatchBuffer]
+    cache: MultiLayerCache
+    db_client: Optional[OptimizedDatabaseClient]
+    query_batcher: Optional[QueryBatcher]
 
 
 def _build_stats_service(logger: ContextLoggerAdapter, cfg: Config) -> BaseStatsService:
@@ -209,6 +215,43 @@ def build_services(cfg: Config, *, skip_stats_buffer: bool = False) -> Applicati
         password=cfg.REDIS_PASS or None,
     )
 
+    cache_logger = _make_service_logger(logger, "cache", "cache")
+    cache_config = CacheConfig(
+        l1_ttl_seconds=cfg.CACHE_L1_TTL,
+        l1_max_size=cfg.CACHE_L1_MAX_SIZE,
+        l2_ttl_seconds=cfg.CACHE_L2_TTL,
+        enable_l1=cfg.CACHE_L1_ENABLED,
+        enable_l2=cfg.CACHE_L2_ENABLED,
+        key_prefix=cfg.CACHE_KEY_PREFIX,
+        default_ttl_seconds=cfg.CACHE_DEFAULT_TTL,
+    )
+    cache = MultiLayerCache(kv_async, config=cache_config, logger=cache_logger)
+
+    db_client: Optional[OptimizedDatabaseClient] = None
+    query_batcher: Optional[QueryBatcher] = None
+    if cfg.DATABASE_POOL_DSN:
+        cache_enabled = cfg.CACHE_L1_ENABLED or cfg.CACHE_L2_ENABLED
+        cache_policy = CachePolicy(
+            ttl_seconds=cfg.CACHE_DEFAULT_TTL,
+            category="player_stats",
+            enabled=cache_enabled,
+        )
+        db_logger = _make_service_logger(logger, "db_client", "database")
+        db_client = OptimizedDatabaseClient(
+            cfg.DATABASE_POOL_DSN,
+            min_size=cfg.DB_POOL_MIN_SIZE,
+            max_size=cfg.DB_POOL_MAX_SIZE,
+            cache=cache if cache_enabled else None,
+            cache_policy=cache_policy,
+            logger=db_logger,
+            command_timeout=cfg.DB_COMMAND_TIMEOUT,
+        )
+        query_batcher = QueryBatcher(
+            db_client,
+            batch_window_ms=cfg.QUERY_BATCH_WINDOW_MS,
+            logger=_make_service_logger(logger, "query_batcher", "database"),
+        )
+
     redis_ops = RedisSafeOps(
         kv_async,
         logger=_make_service_logger(logger, "redis_safeops", "redis"),
@@ -342,5 +385,8 @@ def build_services(cfg: Config, *, skip_stats_buffer: bool = False) -> Applicati
         telegram_safeops_factory=telegram_safeops_factory,
         retry_manager=retry_manager,
         stats_buffer=stats_buffer,
+        cache=cache,
+        db_client=db_client,
+        query_batcher=query_batcher,
     )
 

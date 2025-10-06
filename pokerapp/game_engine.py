@@ -76,6 +76,8 @@ from pokerapp.winnerdetermination import (
     WinnerDetermination,
 )
 from pokerapp.translations import translate
+from pokerapp.cache_manager import MultiLayerCache
+from pokerapp.query_optimizer import QueryBatcher
 
 
 def clear_all_message_ids(game: Game) -> None:
@@ -412,6 +414,8 @@ class GameEngine:
         adaptive_player_report_cache: Optional[AdaptivePlayerReportCache] = None,
         player_factory: Optional[Callable[[int, str], Player]] = None,
         redis_client: Optional[RedisClient] = None,
+        cache: Optional[MultiLayerCache] = None,
+        query_batcher: Optional[QueryBatcher] = None,
     ) -> None:
         self._table_manager = table_manager
         self._view = view
@@ -439,6 +443,8 @@ class GameEngine:
             self._stage_lock_timeout, self.BETTING_ROUND_TIMEOUT_SECONDS
         )
         self._redis_client = redis_client
+        self._cache = cache
+        self._query_batcher = query_batcher
         self._game_state_ttl_ms = 15 * 60 * 1000  # 15 minutes of inactivity tolerance
 
         self._max_players = _positive_int(
@@ -2596,6 +2602,116 @@ class GameEngine:
             player_ids, event_type, chat_id=normalized_chat
         )
 
+    def _player_stats_cache_key(
+        self, user_id: int, *, include_history: bool = False
+    ) -> str:
+        suffix = ":history" if include_history else ""
+        return f"player:{user_id}:stats{suffix}"
+
+    async def _legacy_player_stats(
+        self, user_id: int, *, include_history: bool = False
+    ) -> Dict[str, Any]:
+        stats_service = getattr(self._stats_reporter, "_stats", None)
+        if stats_service is None or not hasattr(stats_service, "build_player_report"):
+            return {}
+        try:
+            report = await stats_service.build_player_report(user_id)
+        except Exception:
+            if self._logger:
+                self._logger.debug(
+                    "player_stats_legacy_failed",
+                    extra={"user_id": user_id},
+                    exc_info=True,
+                )
+            return {}
+        if report is None:
+            return {}
+        payload: Dict[str, Any] = {"user_id": user_id}
+        stats_obj = getattr(report, "stats", None)
+        if stats_obj is not None:
+            payload["stats"] = {
+                "games_played": getattr(stats_obj, "games_played", None),
+                "games_won": getattr(stats_obj, "games_won", None),
+                "total_profit": getattr(stats_obj, "total_profit", None),
+                "win_streak": getattr(stats_obj, "win_streak", None),
+                "last_game_at": getattr(stats_obj, "last_game_at", None),
+                "last_bonus_at": getattr(stats_obj, "last_bonus_at", None),
+            }
+        if include_history:
+            history_entries: List[Dict[str, Any]] = []
+            for entry in getattr(report, "recent_games", [])[:10]:
+                history_entries.append(
+                    {
+                        "hand_id": getattr(entry, "hand_id", None),
+                        "net_profit": getattr(entry, "net_profit", None),
+                        "finished_at": (
+                            getattr(entry, "finished_at", None).isoformat()
+                            if getattr(entry, "finished_at", None)
+                            else None
+                        ),
+                    }
+                )
+            if history_entries:
+                payload["history"] = history_entries
+        return payload
+
+    async def get_player_stats(
+        self, user_id: int, *, include_history: bool = False
+    ) -> Dict[str, Any]:
+        normalized_id = self._safe_int(user_id)
+        if normalized_id <= 0:
+            return {}
+        cache = self._cache
+        batcher = self._query_batcher
+        if cache is not None and batcher is not None:
+            cache_key = self._player_stats_cache_key(
+                normalized_id, include_history=include_history
+            )
+
+            async def _compute() -> Dict[str, Any]:
+                data = await batcher.get_player_data(
+                    normalized_id,
+                    include_stats=True,
+                    include_wallet=True,
+                    include_history=include_history,
+                )
+                return data or {}
+
+            ttl = getattr(cache.config, "default_ttl_seconds", None)
+            cached = await cache.get_or_compute(
+                cache_key,
+                _compute,
+                category="player_stats",
+                ttl=ttl,
+            )
+            return cached or {}
+        return await self._legacy_player_stats(
+            normalized_id, include_history=include_history
+        )
+
+    async def _invalidate_player_cache(self, user_id: int) -> None:
+        cache = self._cache
+        if cache is None:
+            return
+        patterns = [
+            ("player_stats", f"player:{user_id}:stats*"),
+            ("wallet", f"wallet:{user_id}:*"),
+        ]
+        for category, pattern in patterns:
+            try:
+                await cache.invalidate(pattern, category=category)
+            except Exception:
+                if self._logger:
+                    self._logger.debug(
+                        "cache_invalidation_failed",
+                        extra={
+                            "user_id": user_id,
+                            "category": category,
+                            "pattern": pattern,
+                        },
+                        exc_info=True,
+                    )
+
     async def start_game(
         self, context: ContextTypes.DEFAULT_TYPE, game: Game, chat_id: ChatId
     ) -> None:
@@ -4166,6 +4282,7 @@ class GameEngine:
             amount = payouts.get(player_id, 0)
             if amount > 0:
                 await player.wallet.inc(amount)
+                await self._invalidate_player_cache(player_id)
 
     async def _reset_core_game_state(
         self,
@@ -4915,6 +5032,9 @@ class GameEngine:
         for player in player_list:
             if player.wallet:
                 await player.wallet.cancel(original_game_id)
+                await self._invalidate_player_cache(
+                    self._safe_int(getattr(player, "user_id", 0))
+                )
 
         self._invalidate_adaptive_report_cache(
             player_list,

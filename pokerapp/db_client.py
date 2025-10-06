@@ -35,6 +35,7 @@ class OptimizedDatabaseClient:
         cache: Optional[MultiLayerCache] = None,
         cache_policy: Optional[CachePolicy] = None,
         logger: Optional[Any] = None,
+        command_timeout: int = 30,
     ) -> None:
         self._dsn = dsn
         self._min_size = min_size
@@ -44,6 +45,7 @@ class OptimizedDatabaseClient:
         self._cache_policy = cache_policy or CachePolicy()
         self._logger = logger
         self._lock = asyncio.Lock()
+        self._command_timeout = command_timeout
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -66,7 +68,7 @@ class OptimizedDatabaseClient:
                     dsn=self._dsn,
                     min_size=self._min_size,
                     max_size=self._max_size,
-                    command_timeout=30,
+                    command_timeout=self._command_timeout,
                 )
 
     async def close(self) -> None:
