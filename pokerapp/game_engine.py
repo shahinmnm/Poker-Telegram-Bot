@@ -64,6 +64,7 @@ from pokerapp.utils.cache import AdaptivePlayerReportCache
 from pokerapp.utils.common import normalize_player_ids
 from pokerapp.matchmaking_service import MatchmakingService
 from pokerapp.services.countdown_queue import CountdownMessageQueue
+from pokerapp.countdown_manager import SmartCountdownManager
 from pokerapp.player_manager import PlayerManager
 from pokerapp.stats_reporter import StatsReporter
 from pokerapp.stats import PlayerIdentity
@@ -450,6 +451,21 @@ class GameEngine:
         self._initialize_stop_translations()
         self._countdown_queue = CountdownMessageQueue(max_size=100)
         self._countdown_contexts: Dict[int, ContextTypes.DEFAULT_TYPE] = {}
+        self._smart_countdown_manager: Optional[SmartCountdownManager] = None
+
+        bot_instance = getattr(view, "_bot", None)
+        if bot_instance is not None:
+            countdown_logger = logger.getChild("countdown") if logger else None
+            try:
+                self._smart_countdown_manager = SmartCountdownManager(
+                    bot=bot_instance,
+                    redis_client=redis_client,
+                    logger=countdown_logger or logger,
+                )
+            except Exception:
+                self._logger.warning(
+                    "Failed to initialize SmartCountdownManager", exc_info=True
+                )
 
         locks_config = getattr(self.constants, "locks", None)
         action_lock_config: Optional[Mapping[str, Any]] = None
@@ -764,6 +780,21 @@ class GameEngine:
                     "seat": seat_index,
                 },
             )
+
+            countdown_manager = self._smart_countdown_manager
+            if countdown_manager is not None:
+                try:
+                    await countdown_manager.on_player_joined(chat_id, user_id)
+                except Exception:
+                    self._logger.debug(
+                        "Countdown join hook failed",
+                        extra={
+                            "event_type": "countdown_join_hook_failed",
+                            "chat_id": chat_id,
+                            "user_id": user_id,
+                        },
+                        exc_info=True,
+                    )
             return True
 
         lock_manager = self._lock_manager
@@ -1861,6 +1892,25 @@ class GameEngine:
             if not save_success:
                 return None
 
+            countdown_manager = self._smart_countdown_manager
+            if countdown_manager is not None and total_commit > 0:
+                try:
+                    await countdown_manager.on_pot_changed(
+                        chat_id,
+                        int(getattr(current_game, "pot", 0)),
+                    )
+                except Exception:
+                    self._logger.debug(
+                        "Countdown pot hook failed",
+                        extra={
+                            "event_type": "countdown_pot_hook_failed",
+                            "chat_id": chat_id,
+                            "user_id": user_id,
+                            "amount": total_commit,
+                        },
+                        exc_info=True,
+                    )
+
             return True
 
         lock_manager = self._lock_manager
@@ -2925,6 +2975,26 @@ class GameEngine:
             },
         )
 
+        countdown_manager = self._smart_countdown_manager
+        if countdown_manager is not None:
+            try:
+                await countdown_manager.start_countdown(
+                    chat_id=chat_id,
+                    duration=duration_seconds,
+                    player_count=game.seated_count(),
+                    pot_size=int(getattr(game, "pot", 0)),
+                )
+            except Exception:
+                self._logger.debug(
+                    "Failed to start smart countdown",
+                    extra={
+                        "event_type": "countdown_start_failed",  # reuse tag for visibility
+                        "chat_id": self._safe_int(chat_id),
+                        "duration": duration_seconds,
+                    },
+                    exc_info=True,
+                )
+
     async def _handle_countdown_completion(self, chat_id: int) -> None:
         """Called when pre-start countdown finishes."""
 
@@ -3011,6 +3081,20 @@ class GameEngine:
         self._countdown_contexts.pop(chat_id, None)
         cancelled = await self._countdown_queue.cancel_countdown_for_chat(chat_id)
 
+        countdown_manager = self._smart_countdown_manager
+        if countdown_manager is not None:
+            try:
+                await countdown_manager.cancel_countdown(chat_id)
+            except Exception:
+                self._logger.debug(
+                    "Countdown cancel hook failed",
+                    extra={
+                        "event_type": "countdown_cancel_hook_failed",
+                        "chat_id": self._safe_int(chat_id),
+                    },
+                    exc_info=True,
+                )
+
         try:
             game = await self._table_manager.get_game(chat_id)
         except Exception:
@@ -3043,6 +3127,12 @@ class GameEngine:
         are now spawned via ad-hoc asyncio tasks during betting rounds.
         """
 
+        if self._smart_countdown_manager is not None:
+            try:
+                await self._smart_countdown_manager.start()
+            except Exception:
+                self._logger.exception("Failed to start SmartCountdownManager")
+
         self._logger.info(
             "GameEngine initializing",
             extra={
@@ -3072,6 +3162,12 @@ class GameEngine:
 
     async def shutdown(self) -> None:
         """Record shutdown intent for the game engine."""
+
+        if self._smart_countdown_manager is not None:
+            try:
+                await self._smart_countdown_manager.stop()
+            except Exception:
+                self._logger.exception("Failed to stop SmartCountdownManager")
 
         self._logger.info(
             "GameEngine shutdown requested",
