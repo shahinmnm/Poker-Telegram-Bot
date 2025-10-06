@@ -1,5 +1,6 @@
 import asyncio
 import time
+import logging
 from typing import Dict, Optional, Callable
 from dataclasses import dataclass, field
 from collections import deque
@@ -59,7 +60,7 @@ class SmartCountdownManager:
     ):
         self.bot = bot
         self.redis = redis_client
-        self.logger = logger
+        self.logger = logger or logging.getLogger(__name__)
         self.batching_mode = batching_mode
 
         # State management
@@ -243,32 +244,70 @@ class SmartCountdownManager:
         duration: int,
         on_complete: Optional[Callable]
     ):
-        """Main countdown loop - only updates at milestones"""
+        """
+        Main countdown loop - uses monotonic clock to prevent jumps.
+
+        Phase 2 Fix: Monotonic time prevents seconds from jumping back/forward
+        when system clock changes or tasks resume from await.
+        """
         try:
-            for remaining in range(duration, -1, -1):
-                await asyncio.sleep(1)
+            end_time = time.monotonic() + duration
+            last_remaining = duration
 
-                # Update state
-                current_state = self._countdown_states[chat_id]
-                new_state = CountdownState(
-                    chat_id=current_state.chat_id,
-                    remaining_seconds=remaining,
-                    total_seconds=current_state.total_seconds,
-                    player_count=current_state.player_count,
-                    pot_size=current_state.pot_size
-                )
+            while True:
+                remaining = max(0, int(end_time - time.monotonic()))
 
-                # Queue update if at milestone
-                if current_state.should_update(new_state):
-                    self._pending_updates[chat_id].append(new_state)
-                else:
-                    self._metrics['updates_skipped'] += 1
+                if remaining != last_remaining:
+                    current_state = self._countdown_states.get(chat_id)
+                    if current_state is None:
+                        break
 
-                self._countdown_states[chat_id] = new_state
+                    new_state = CountdownState(
+                        chat_id=current_state.chat_id,
+                        remaining_seconds=remaining,
+                        total_seconds=current_state.total_seconds,
+                        player_count=current_state.player_count,
+                        pot_size=current_state.pot_size,
+                    )
 
-            # Countdown complete
+                    pending_updates = self._pending_updates.setdefault(chat_id, deque())
+
+                    if current_state.should_update(new_state):
+                        pending_updates.append(new_state)
+                        self.logger.debug(
+                            "Countdown update queued for chat %s: %ss",
+                            chat_id,
+                            remaining,
+                            extra={
+                                "chat_id": chat_id,
+                                "remaining": remaining,
+                                "event_type": "countdown_update_queued",
+                            },
+                        )
+                    else:
+                        self._metrics['updates_skipped'] += 1
+
+                    self._countdown_states[chat_id] = new_state
+                    last_remaining = remaining
+
+                if remaining <= 0:
+                    break
+
+                await asyncio.sleep(0.1)
+
             if on_complete:
-                await on_complete(chat_id)
+                try:
+                    await on_complete(chat_id)
+                except Exception as exc:
+                    self.logger.error(
+                        "Error in countdown completion callback: %s",
+                        exc,
+                        extra={
+                            "chat_id": chat_id,
+                            "event_type": "countdown_callback_error",
+                        },
+                        exc_info=True,
+                    )
 
             self.logger.info(
                 f"Countdown completed for chat {chat_id}",
