@@ -18,8 +18,8 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import urlparse
 from urllib.request import Request, urlopen
 
-from telegram.constants import ParseMode
-from telegram.helpers import MessageLimit, escape, escape_markdown
+from telegram.constants import MessageLimit, ParseMode
+from telegram.helpers import escape, escape_markdown
 
 
 logger = logging.getLogger(__name__)
