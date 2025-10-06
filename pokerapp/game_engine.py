@@ -468,9 +468,109 @@ class GameEngine:
                     redis_client=redis_client,
                     logger=countdown_logger or logger,
                 )
+                # CRITICAL FIX: Start the batch worker
+                if self._smart_countdown_manager is not None:
+                    asyncio.create_task(self._smart_countdown_manager.start())
+                    self._logger.info("SmartCountdownManager initialized and started")
             except Exception:
                 self._logger.warning(
                     "Failed to initialize SmartCountdownManager", exc_info=True
+                )
+
+    async def start_waiting_countdown(
+        self,
+        chat_id: int,
+        duration: int,
+        player_count: int = 0,
+        pot_size: int = 0,
+    ) -> bool:
+        """Start countdown in waiting room using SmartCountdownManager."""
+        if self._smart_countdown_manager is None:
+            self._logger.warning(
+                "Cannot start countdown - SmartCountdownManager not initialized",
+                extra={"chat_id": chat_id, "event_type": "countdown_manager_missing"},
+            )
+            return False
+
+        async def on_countdown_complete(completed_chat_id: int) -> None:
+            """Callback when countdown reaches 0 - auto-start game."""
+            try:
+                self._logger.info(
+                    "Countdown complete for chat %s, auto-starting game",
+                    completed_chat_id,
+                    extra={
+                        "chat_id": completed_chat_id,
+                        "event_type": "countdown_complete",
+                    },
+                )
+                await self.start_game(chat_id=completed_chat_id)
+            except Exception:
+                self._logger.exception(
+                    "Failed to auto-start game after countdown",
+                    extra={
+                        "chat_id": completed_chat_id,
+                        "event_type": "auto_start_failed",
+                    },
+                )
+
+        self._logger.info(
+            "Starting countdown for chat %s: %ss, %s players",
+            chat_id,
+            duration,
+            player_count,
+            extra={
+                "chat_id": chat_id,
+                "duration": duration,
+                "player_count": player_count,
+                "event_type": "countdown_start",
+            },
+        )
+
+        return await self._smart_countdown_manager.start_countdown(
+            chat_id=chat_id,
+            duration=duration,
+            player_count=player_count,
+            pot_size=pot_size,
+            on_complete=on_countdown_complete,
+        )
+
+    async def join_game_with_countdown_trigger(
+        self,
+        chat_id: int,
+        current_game,
+        save_success: bool,
+        seated_count: int,
+    ) -> None:
+        """Helper to trigger countdown after successful join."""
+        if not save_success:
+            return
+
+        min_players_for_auto_start = 2
+
+        if (
+            seated_count >= min_players_for_auto_start
+            and current_game.state == GameState.INITIAL
+        ):
+            countdown_duration = 30
+            pot_size = int(getattr(current_game, "pot", 0))
+
+            countdown_started = await self.start_waiting_countdown(
+                chat_id=chat_id,
+                duration=countdown_duration,
+                player_count=seated_count,
+                pot_size=pot_size,
+            )
+
+            if countdown_started:
+                self._logger.info(
+                    "Auto-start countdown triggered for chat %s",
+                    chat_id,
+                    extra={
+                        "chat_id": chat_id,
+                        "player_count": seated_count,
+                        "duration": countdown_duration,
+                        "event_type": "countdown_triggered",
+                    },
                 )
 
         locks_config = getattr(self.constants, "locks", None)
