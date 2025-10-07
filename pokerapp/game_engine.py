@@ -536,22 +536,11 @@ class GameEngine:
 
     async def start_waiting_countdown(
         self,
-        *,
         chat_id: int,
-        game: Game,
-        duration: int = 30,
+        duration: int,
+        message_id: Optional[int] = None,
     ) -> None:
-        """Start countdown after players join, with auto-start callback."""
-
-        if self._smart_countdown_manager is None:
-            self._logger.warning(
-                f"SmartCountdownManager not available for chat {chat_id}",
-                extra={
-                    "chat_id": chat_id,
-                    "event_type": "countdown_manager_missing",
-                },
-            )
-            return
+        """Route countdown creation through :class:`SmartCountdownManager`."""
 
         try:
             await self._ensure_smart_countdown_manager_started()
@@ -567,6 +556,38 @@ class GameEngine:
                 exc_info=True,
             )
             return
+
+        countdown_manager = self._smart_countdown_manager
+        if countdown_manager is None:
+            self._logger.warning(
+                f"SmartCountdownManager not available for chat {chat_id}",
+                extra={
+                    "chat_id": chat_id,
+                    "event_type": "countdown_manager_missing",
+                },
+            )
+            return
+
+        game: Optional[Game]
+        try:
+            game = await self._table_manager.get_game(chat_id)
+        except Exception:
+            self._logger.exception(
+                "Failed to load game while starting waiting countdown",
+                extra={
+                    "chat_id": chat_id,
+                    "event_type": "countdown_game_load_failed",
+                },
+            )
+            return
+
+        player_count = game.seated_count() if game is not None else 0
+        pot_size = int(getattr(game, "pot", 0)) if game is not None else 0
+        anchor_message_id = (
+            message_id
+            if message_id is not None
+            else getattr(game, "ready_message_main_id", None)
+        )
 
         async def on_countdown_complete(completed_chat_id: int) -> None:
             """Callback when countdown reaches 0."""
@@ -589,9 +610,6 @@ class GameEngine:
                     },
                 )
 
-        player_count = game.seated_count()
-        pot_size = int(getattr(game, "pot", 0))
-
         self._logger.info(
             "Starting waiting countdown",
             extra={
@@ -603,13 +621,30 @@ class GameEngine:
             },
         )
 
-        await self._smart_countdown_manager.start_countdown(
+        await countdown_manager.start_countdown(
             chat_id=chat_id,
             duration=duration,
             player_count=player_count,
             pot_size=pot_size,
             on_complete=on_countdown_complete,
+            message_id=anchor_message_id,
         )
+
+    async def cancel_waiting_countdown(self, chat_id: int) -> None:
+        """Cancel the waiting countdown using :class:`SmartCountdownManager`."""
+
+        countdown_manager = self._smart_countdown_manager
+        if countdown_manager is None:
+            self._logger.debug(
+                "Ignoring countdown cancel; SmartCountdownManager unavailable",
+                extra={
+                    "chat_id": chat_id,
+                    "event_type": "countdown_manager_missing",
+                },
+            )
+            return
+
+        await countdown_manager.cancel_countdown(chat_id)
 
     async def _ensure_smart_countdown_manager_started(self) -> None:
         """Ensure the SmartCountdownManager background task is running."""
@@ -915,8 +950,8 @@ class GameEngine:
             ):
                 await self.start_waiting_countdown(
                     chat_id=chat_id,
-                    game=current_game,
                     duration=30,
+                    message_id=getattr(current_game, "ready_message_main_id", None),
                 )
 
             countdown_manager = self._smart_countdown_manager
@@ -3231,6 +3266,7 @@ class GameEngine:
                     duration=duration_seconds,
                     player_count=game.seated_count(),
                     pot_size=int(getattr(game, "pot", 0)),
+                    message_id=message_id,
                 )
             except Exception:
                 self._logger.debug(

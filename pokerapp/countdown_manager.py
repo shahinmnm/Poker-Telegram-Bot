@@ -149,7 +149,8 @@ class SmartCountdownManager:
         duration: int = 30,
         player_count: int = 0,
         pot_size: int = 0,
-        on_complete: Optional[Callable] = None
+        on_complete: Optional[Callable] = None,
+        message_id: Optional[int] = None,
     ) -> bool:
         """
         Start a smart countdown for a poker game
@@ -160,6 +161,7 @@ class SmartCountdownManager:
             player_count: Initial number of players
             pot_size: Current pot size
             on_complete: Callback when countdown reaches 0
+            message_id: Optional existing message to reuse for updates
 
         Returns:
             True if countdown started successfully
@@ -183,10 +185,16 @@ class SmartCountdownManager:
         self._countdown_states[chat_id] = initial_state
         self._pending_updates[chat_id] = deque()
 
-        # Send initial countdown message
+        # Send or update the initial countdown message
         try:
-            message = await self._send_countdown_message(initial_state)
-            self._countdown_messages[chat_id] = message.message_id
+            anchor_message_id: Optional[int] = message_id
+            if anchor_message_id is None:
+                message = await self._send_countdown_message(initial_state)
+                anchor_message_id = message.message_id
+                self._countdown_messages[chat_id] = anchor_message_id
+            else:
+                self._countdown_messages[chat_id] = anchor_message_id
+                await self._update_countdown_message(initial_state)
 
             # Start countdown task
             countdown_task = asyncio.create_task(
