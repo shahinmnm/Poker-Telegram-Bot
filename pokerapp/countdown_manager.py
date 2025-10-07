@@ -9,10 +9,13 @@ from contextlib import suppress
 
 from telegram.error import TelegramError
 
+from pokerapp.pokerbotmodel import PERSIAN_DIGIT_MAP
+
 
 @dataclass
 class CountdownState:
     """Immutable snapshot of countdown state"""
+
     chat_id: int
     remaining_seconds: int
     total_seconds: int
@@ -20,15 +23,17 @@ class CountdownState:
     pot_size: int
     timestamp: float = field(default_factory=time.time)
 
-    def should_update(self, other: 'CountdownState') -> bool:
+    _MILESTONE_SECONDS = frozenset({30, 25, 20, 15, 10, 5, 3, 1, 0})
+
+    def should_update(self, other: "CountdownState") -> bool:
         """Determines if state change warrants a message update"""
+
         # Update on player count change
         if self.player_count != other.player_count:
             return True
 
         # Update only at milestones
-        milestones = {30, 25, 20, 15, 10, 5, 3, 1, 0}
-        if other.remaining_seconds in milestones:
+        if other.remaining_seconds in self._MILESTONE_SECONDS:
             return True
 
         return False
@@ -475,12 +480,11 @@ class SmartCountdownManager:
 
         percentage = int(progress * 100)
 
-        # Persian number conversion
-        persian_digits = str.maketrans('0123456789', '۰۱۲۳۴۵۶۷۸۹')
-        remaining_fa = str(state.remaining_seconds).translate(persian_digits)
-        players_fa = str(state.player_count).translate(persian_digits)
-        pot_fa = str(state.pot_size).translate(persian_digits)
-        pct_fa = str(percentage).translate(persian_digits)
+        # Persian number conversion using the shared translation map
+        remaining_fa = str(state.remaining_seconds).translate(PERSIAN_DIGIT_MAP)
+        players_fa = str(state.player_count).translate(PERSIAN_DIGIT_MAP)
+        pot_fa = str(state.pot_size).translate(PERSIAN_DIGIT_MAP)
+        pct_fa = str(percentage).translate(PERSIAN_DIGIT_MAP)
 
         return f"""
 🎮 <b>بازی در حال شروع...</b>
