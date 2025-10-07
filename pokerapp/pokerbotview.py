@@ -836,33 +836,13 @@ class PokerBotViewer:
         payload_fn: Callable[[int], Tuple[str, Optional[InlineKeyboardMarkup | ReplyKeyboardMarkup]]],
         on_complete: Optional[Callable[[], Awaitable[None]]] = None,
     ) -> None:
-        """Send a single countdown update while deferring to SmartCountdownManager."""
+        """DEPRECATED: Countdown now handled by SmartCountdownManager."""
 
-        # DEPRECATED: Use SmartCountdownManager instead
-        normalized_chat = self._safe_int(chat_id)
-        seconds_left = max(0, int(seconds))
-        try:
-            text, reply_markup = payload_fn(seconds_left)
-        except Exception:
-            logger.exception("[Countdown] Legacy payload_fn failed")
-            return
-
-        update_kwargs = {
-            "chat_id": normalized_chat,
-            "message_id": anchor_message_id,
-            "text": text,
-            "reply_markup": reply_markup,
-            "request_category": RequestCategory.ANCHOR,
-        }
-
-        schedule = getattr(self, "schedule_message_update", None)
-        try:
-            if callable(schedule):
-                await schedule(**update_kwargs)
-            else:
-                await self._update_message(**update_kwargs)
-        except Exception:
-            logger.exception("[Countdown] Failed to send legacy countdown update")
+        logger.warning(
+            "Deprecated countdown method called",
+            extra={"method": "start_prestart_countdown"},
+        )
+        return None
 
     def _payload_hash(
         self,
