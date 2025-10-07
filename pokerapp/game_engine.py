@@ -22,6 +22,7 @@ import warnings
 from collections import defaultdict
 from dataclasses import dataclass
 from contextlib import asynccontextmanager, suppress
+from pathlib import Path
 from typing import (
     Any,
     AsyncIterator,
@@ -537,6 +538,8 @@ class GameEngine:
         chat_id: int,
         duration: int,
         message_id: Optional[int] = None,
+        *,
+        trigger: str = "unknown",
     ) -> None:
         """Route countdown creation through :class:`SmartCountdownManager`."""
 
@@ -608,6 +611,16 @@ class GameEngine:
                     },
                 )
 
+        callsite = "unknown"
+        frame = inspect.currentframe()
+        if frame is not None:
+            caller = frame.f_back
+            if caller is not None:
+                code = caller.f_code
+                callsite = f"{Path(code.co_filename).name}:{caller.f_lineno}"
+            del caller
+        del frame
+
         self._logger.info(
             "Starting waiting countdown",
             extra={
@@ -616,6 +629,8 @@ class GameEngine:
                 "player_count": player_count,
                 "pot_size": pot_size,
                 "event_type": "countdown_start",
+                "trigger": trigger,
+                "callsite": callsite,
             },
         )
 
@@ -950,6 +965,7 @@ class GameEngine:
                     chat_id=chat_id,
                     duration=30,
                     message_id=getattr(current_game, "ready_message_main_id", None),
+                    trigger="player_join",
                 )
 
             countdown_manager = self._smart_countdown_manager
