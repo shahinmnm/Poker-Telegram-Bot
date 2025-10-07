@@ -532,7 +532,7 @@ class GameEngine:
                     self._valid_player_actions = normalized
             feedback_candidate = action_lock_config.get("feedback_text")
             if isinstance(feedback_candidate, str) and feedback_candidate.strip():
-                self._action_lock_feedback_text = feedback_candidate.strip()
+                    self._action_lock_feedback_text = feedback_candidate.strip()
 
     async def start_waiting_countdown(
         self,
@@ -550,6 +550,21 @@ class GameEngine:
                     "chat_id": chat_id,
                     "event_type": "countdown_manager_missing",
                 },
+            )
+            return
+
+        try:
+            await self._ensure_smart_countdown_manager_started()
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            self._logger.warning(
+                "Unable to start waiting countdown; countdown manager unavailable",
+                extra={
+                    "chat_id": chat_id,
+                    "event_type": "countdown_manager_start_failed",
+                },
+                exc_info=True,
             )
             return
 
@@ -595,6 +610,34 @@ class GameEngine:
             pot_size=pot_size,
             on_complete=on_countdown_complete,
         )
+
+    async def _ensure_smart_countdown_manager_started(self) -> None:
+        """Ensure the SmartCountdownManager background task is running."""
+
+        countdown_manager = self._smart_countdown_manager
+        if countdown_manager is None:
+            return
+
+        startup_task = self._smart_countdown_start_task
+        if startup_task is not None:
+            try:
+                await startup_task
+            except asyncio.CancelledError:
+                self._smart_countdown_start_task = None
+                raise
+            except Exception:
+                self._smart_countdown_start_task = None
+                self._logger.exception("SmartCountdownManager startup failed")
+                raise
+            else:
+                self._smart_countdown_start_task = None
+                return
+
+        try:
+            await countdown_manager.start()
+        except Exception:
+            self._logger.exception("Failed to start SmartCountdownManager")
+            raise
 
     async def load_game_state_with_version(
         self, chat_id: int
@@ -3333,17 +3376,15 @@ class GameEngine:
         """
 
         if self._smart_countdown_manager is not None:
-            startup_task = self._smart_countdown_start_task
             try:
-                if startup_task is not None:
-                    await startup_task
-                else:
-                    await self._smart_countdown_manager.start()
+                await self._ensure_smart_countdown_manager_started()
+            except asyncio.CancelledError:
+                raise
             except Exception:
-                self._logger.exception("Failed to start SmartCountdownManager")
-            finally:
-                if startup_task is not None:
-                    self._smart_countdown_start_task = None
+                self._logger.warning(
+                    "SmartCountdownManager startup failed during engine start",
+                    exc_info=True,
+                )
 
         self._logger.info(
             "GameEngine initializing",
@@ -3381,7 +3422,7 @@ class GameEngine:
                 startup_task.cancel()
                 with suppress(asyncio.CancelledError):
                     await startup_task
-                self._smart_countdown_start_task = None
+            self._smart_countdown_start_task = None
 
             try:
                 await self._smart_countdown_manager.stop()
