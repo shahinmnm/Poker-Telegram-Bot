@@ -37,6 +37,7 @@ import datetime
 import hashlib
 import inspect
 import logging
+import warnings
 import json
 import threading
 import time
@@ -841,6 +842,12 @@ class PokerBotViewer:
         logger.warning(
             "Deprecated countdown method called",
             extra={"method": "start_prestart_countdown"},
+        )
+        warnings.warn(
+            "PokerBotViewer.start_prestart_countdown is deprecated. "
+            "SmartCountdownManager now owns countdown rendering.",
+            DeprecationWarning,
+            stacklevel=2,
         )
         return None
 

@@ -470,8 +470,9 @@ class SmartCountdownManager:
         # ASCII progress bar
         ascii_filled = '█' * (filled * 2)
         ascii_pulse = '▓' if state.remaining_seconds <= 10 else ''
-        ascii_empty = '░' * ((empty * 2) - len(ascii_pulse))
-        ascii_bar = ascii_filled + ascii_pulse + ascii_empty
+        ascii_bar = (
+            ('█' * (filled * 2)) + ascii_pulse + ('░' * max((empty * 2) - len(ascii_pulse), 0))
+        )
 
         percentage = int(progress * 100)
 
