@@ -154,7 +154,7 @@ class RedisSafeOps:
 
         if not self._loop_validated:
             try:
-                await self._redis.ping()
+                await asyncio.wait_for(self._redis.ping(), timeout=2.0)
             except Exception as exc:
                 self._logger.error(
                     "Redis connection validation failed",

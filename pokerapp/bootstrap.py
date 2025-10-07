@@ -275,6 +275,15 @@ def build_services(cfg: Config, *, skip_stats_buffer: bool = False) -> Applicati
             recovery_logger.exception("Failed to close recovery Redis client")
 
     kv_async = _create_redis_client(redis_client_kwargs)
+    logger.info(
+        "Redis client initialized with lazy connection",
+        extra={
+            "event_type": "redis_client_created",
+            "host": cfg.REDIS_HOST,
+            "port": cfg.REDIS_PORT,
+            "health_check_interval": 30,
+        },
+    )
 
     cache_logger = _make_service_logger(logger, "cache", "cache")
     cache_config = CacheConfig(
