@@ -638,19 +638,19 @@ class GameEngine:
                     return
 
                 self._logger.info(
-                    "Countdown update returned False, starting new countdown",
+                    "Countdown update returned False, restarting",
                     extra={
-                        "event_type": "countdown_update_failed_restart",
+                        "event_type": "countdown_update_false_restart",
                         "chat_id": chat_id,
                         "trigger": trigger,
                     },
                 )
             except Exception:
                 self._logger.warning(
-                    "Failed to update countdown display",
+                    "Countdown update raised exception, restarting",
                     extra={
                         "chat_id": chat_id,
-                        "event_type": "countdown_update_failed",
+                        "event_type": "countdown_update_exception_restart",
                         "trigger": trigger,
                     },
                     exc_info=True,
