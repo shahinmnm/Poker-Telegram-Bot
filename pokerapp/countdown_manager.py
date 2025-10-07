@@ -248,24 +248,20 @@ class SmartCountdownManager:
         try:
             start_time = time.monotonic()
             end_time = start_time + duration
-            last_reported_second = duration
-            if duration <= 0:
-                last_reported_second += 1
+            last_reported_second: Optional[int] = None
+            countdown_completed = False
 
             while True:
                 current_time = time.monotonic()
-                elapsed = current_time - start_time
-                remaining = int(duration - elapsed)
-
-                if current_time >= end_time or remaining < 0:
-                    remaining = 0
+                remaining_float = end_time - current_time
+                remaining = max(0, int(remaining_float))
 
                 if remaining != last_reported_second:
                     last_reported_second = remaining
 
                     current_state = self._countdown_states.get(chat_id)
                     if current_state is None:
-                        self.logger.debug(
+                        self.logger.warning(
                             "Countdown state disappeared mid-loop; cancelling",
                             extra={
                                 'event_type': 'countdown_state_missing',
@@ -283,18 +279,24 @@ class SmartCountdownManager:
                     )
 
                     if current_state.should_update(new_state):
-                        self._pending_updates[chat_id].append(new_state)
+                        pending_updates = self._pending_updates.get(chat_id)
+                        if pending_updates is not None:
+                            pending_updates.append(new_state)
                     else:
                         self._metrics['updates_skipped'] += 1
 
                     self._countdown_states[chat_id] = new_state
 
-                    if remaining <= 0:
+                    if remaining == 0:
+                        countdown_completed = True
                         break
+
+                if remaining == 0:
+                    break
 
                 await asyncio.sleep(0.1)
 
-            if on_complete:
+            if countdown_completed and on_complete:
                 await on_complete(chat_id)
 
             self.logger.info(

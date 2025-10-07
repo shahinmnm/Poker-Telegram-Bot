@@ -21,7 +21,7 @@ import logging
 import warnings
 from collections import defaultdict
 from dataclasses import dataclass
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 from typing import (
     Any,
     AsyncIterator,
@@ -458,6 +458,7 @@ class GameEngine:
         self._countdown_queue = CountdownMessageQueue(max_size=100)
         self._countdown_contexts: Dict[int, ContextTypes.DEFAULT_TYPE] = {}
         self._smart_countdown_manager: Optional[SmartCountdownManager] = None
+        self._smart_countdown_start_task: Optional[asyncio.Task[None]] = None
 
         bot_instance = getattr(view, "_bot", None)
         if bot_instance is not None:
@@ -468,6 +469,21 @@ class GameEngine:
                     redis_client=redis_client,
                     logger=countdown_logger or logger,
                 )
+                try:
+                    loop = asyncio.get_running_loop()
+                except RuntimeError:
+                    loop = None
+
+                if loop is not None:
+                    self._smart_countdown_start_task = loop.create_task(
+                        self._smart_countdown_manager.start()
+                    )
+                    self._logger.info("SmartCountdownManager startup scheduled")
+                else:
+                    self._logger.debug(
+                        "Async loop unavailable; SmartCountdownManager will start later",
+                        extra={"event_type": "countdown_start_deferred"},
+                    )
                 self._logger.info("SmartCountdownManager initialized")
             except Exception:
                 self._logger.warning(
@@ -3317,10 +3333,17 @@ class GameEngine:
         """
 
         if self._smart_countdown_manager is not None:
+            startup_task = self._smart_countdown_start_task
             try:
-                await self._smart_countdown_manager.start()
+                if startup_task is not None:
+                    await startup_task
+                else:
+                    await self._smart_countdown_manager.start()
             except Exception:
                 self._logger.exception("Failed to start SmartCountdownManager")
+            finally:
+                if startup_task is not None:
+                    self._smart_countdown_start_task = None
 
         self._logger.info(
             "GameEngine initializing",
@@ -3353,6 +3376,13 @@ class GameEngine:
         """Record shutdown intent for the game engine."""
 
         if self._smart_countdown_manager is not None:
+            startup_task = self._smart_countdown_start_task
+            if startup_task is not None and not startup_task.done():
+                startup_task.cancel()
+                with suppress(asyncio.CancelledError):
+                    await startup_task
+                self._smart_countdown_start_task = None
+
             try:
                 await self._smart_countdown_manager.stop()
             except Exception:
