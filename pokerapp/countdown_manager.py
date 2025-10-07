@@ -2,11 +2,19 @@ import asyncio
 import time
 import logging
 import traceback
-from typing import Dict, Optional, Callable
+from pathlib import Path
+from typing import Dict, Optional, Callable, Any
 from dataclasses import dataclass, field
 from collections import deque
 from enum import Enum
 from contextlib import suppress
+
+import yaml
+
+try:
+    from pokerapp import bootstrap
+except ImportError:  # pragma: no cover - optional dependency for tests
+    bootstrap = None  # type: ignore[assignment]
 
 from telegram.error import TelegramError
 
@@ -80,6 +88,7 @@ class SmartCountdownManager:
 
         # Metadata for diagnostics
         self._countdown_metadata: Dict[int, str] = {}
+        self._countdown_timer_info: Dict[int, Dict[str, float]] = {}
 
         # Performance metrics
         self._metrics = {
@@ -92,6 +101,158 @@ class SmartCountdownManager:
 
         # Batching worker
         self._batch_worker_task: Optional[asyncio.Task] = None
+
+        # Hybrid countdown configuration
+        self.config: Dict[str, Any] = {}
+        self.milestones = []
+        self.duration: Optional[int] = None
+        self.state_messages: Dict[str, str] = {}
+        self.progress_bars: Dict[int, str] = {}
+        self._traffic_light_thresholds: Dict[str, int] = {}
+        self._default_progress_bar = "⬜⬜⬜⬜⬜"
+        self._hybrid_enabled = False
+
+        self._initialize_hybrid_config()
+
+    def _initialize_hybrid_config(self) -> None:
+        """Load hybrid countdown configuration from YAML if available."""
+
+        config_data: Dict[str, Any] = {}
+
+        if bootstrap is not None and hasattr(bootstrap, "load_yaml_config"):
+            try:
+                config_data = bootstrap.load_yaml_config("config/game_constants.yaml") or {}
+            except Exception as exc:  # pragma: no cover - defensive logging
+                self.logger.debug(
+                    "Failed to load hybrid config via bootstrap: %s",
+                    exc,
+                    extra={"event_type": "countdown_hybrid_config_load_failed_bootstrap"},
+                )
+
+        if not config_data:
+            config_path = Path("config/game_constants.yaml")
+            if config_path.exists():
+                try:
+                    with config_path.open("r", encoding="utf-8") as handle:
+                        loaded = yaml.safe_load(handle) or {}
+                        if isinstance(loaded, dict):
+                            config_data = loaded
+                except Exception as exc:  # pragma: no cover - defensive logging
+                    self.logger.debug(
+                        "Failed to load hybrid config from file: %s",
+                        exc,
+                        extra={"event_type": "countdown_hybrid_config_load_failed_file"},
+                    )
+
+        self.config = config_data
+
+        game_config = config_data.get("game", {}) if isinstance(config_data, dict) else {}
+        hybrid_config = (
+            game_config.get("hybrid_countdown", {}) if isinstance(game_config, dict) else {}
+        )
+
+        raw_milestones = hybrid_config.get("milestones")
+        if isinstance(raw_milestones, (list, tuple)):
+            normalized = {
+                int(value)
+                for value in raw_milestones
+                if isinstance(value, (int, float)) and int(value) >= 0
+            }
+            self.milestones = sorted(normalized, reverse=True)
+        else:
+            self.milestones = []
+
+        duration_seconds = hybrid_config.get("duration_seconds")
+        if isinstance(duration_seconds, (int, float)):
+            self.duration = int(duration_seconds)
+
+        thresholds = hybrid_config.get("traffic_light_thresholds", {})
+        if isinstance(thresholds, dict):
+            self._traffic_light_thresholds = {
+                key: int(value)
+                for key, value in thresholds.items()
+                if isinstance(value, (int, float))
+            }
+
+        ui_config = config_data.get("ui", {}) if isinstance(config_data, dict) else {}
+        state_messages = ui_config.get("countdown_states", {})
+        if isinstance(state_messages, dict):
+            self.state_messages = {
+                str(key): str(value)
+                for key, value in state_messages.items()
+                if isinstance(value, str)
+            }
+
+        progress_bars = ui_config.get("progress_bars", {})
+        if isinstance(progress_bars, dict):
+            normalized_bars: Dict[int, str] = {}
+            for key, value in progress_bars.items():
+                if not isinstance(value, str):
+                    continue
+                try:
+                    normalized_key = int(key)
+                except (TypeError, ValueError):
+                    continue
+                normalized_bars[normalized_key] = value
+            self.progress_bars = normalized_bars
+
+        self._hybrid_enabled = bool(self.milestones and self.duration is not None)
+
+    def _compute_remaining_seconds(self, chat_id: int, fallback: int) -> int:
+        """Compute remaining seconds using monotonic clock metadata."""
+
+        timer_info = self._countdown_timer_info.get(chat_id)
+        if not timer_info:
+            return fallback
+
+        start_time = timer_info.get("start_time")
+        duration = timer_info.get("duration")
+        if start_time is None or duration is None:
+            return fallback
+
+        end_time = start_time + duration
+        remaining_float = end_time - time.monotonic()
+        return max(0, int(remaining_float))
+
+    def _merge_pending_state(self, chat_id: int, base_state: CountdownState) -> CountdownState:
+        """Merge pending player/pot updates into the provided base state."""
+
+        pending_updates = self._pending_updates.get(chat_id)
+        if not pending_updates:
+            return base_state
+
+        latest_state = pending_updates[-1]
+        num_updates = len(pending_updates)
+        pending_updates.clear()
+
+        if num_updates > 1:
+            self._metrics['api_calls_saved'] += num_updates - 1
+
+        merged_state = CountdownState(
+            chat_id=base_state.chat_id,
+            remaining_seconds=base_state.remaining_seconds,
+            total_seconds=base_state.total_seconds,
+            player_count=latest_state.player_count,
+            pot_size=latest_state.pot_size,
+        )
+
+        return merged_state
+
+    def _get_traffic_light_state(self, remaining_seconds: int, player_count: int) -> str:
+        """Determine countdown state based on time and players."""
+
+        thresholds = self._traffic_light_thresholds
+        ready_threshold = thresholds.get('ready') if thresholds else None
+        starting_threshold = thresholds.get('starting') if thresholds else None
+
+        if ready_threshold is None or starting_threshold is None:
+            return 'starting' if remaining_seconds <= 0 else 'ready'
+
+        if player_count < ready_threshold:
+            return 'waiting'
+        if remaining_seconds > starting_threshold:
+            return 'ready'
+        return 'starting'
 
     async def start(self):
         """Initialize the countdown manager"""
@@ -284,9 +445,12 @@ class SmartCountdownManager:
 
         # Update state
         current_state = self._countdown_states[chat_id]
+        remaining_seconds = self._compute_remaining_seconds(
+            chat_id, current_state.remaining_seconds
+        )
         new_state = CountdownState(
             chat_id=current_state.chat_id,
-            remaining_seconds=current_state.remaining_seconds,
+            remaining_seconds=remaining_seconds,
             total_seconds=current_state.total_seconds,
             player_count=current_state.player_count + 1,
             pot_size=current_state.pot_size
@@ -294,6 +458,7 @@ class SmartCountdownManager:
 
         # Queue update (will be debounced)
         self._pending_updates[chat_id].append(new_state)
+        self._countdown_states[chat_id] = new_state
         self._metrics['players_joined_during_countdown'] += 1
 
         self.logger.debug(
@@ -311,15 +476,19 @@ class SmartCountdownManager:
             return
 
         current_state = self._countdown_states[chat_id]
+        remaining_seconds = self._compute_remaining_seconds(
+            chat_id, current_state.remaining_seconds
+        )
         new_state = CountdownState(
             chat_id=current_state.chat_id,
-            remaining_seconds=current_state.remaining_seconds,
+            remaining_seconds=remaining_seconds,
             total_seconds=current_state.total_seconds,
             player_count=current_state.player_count,
             pot_size=new_pot
         )
 
         self._pending_updates[chat_id].append(new_state)
+        self._countdown_states[chat_id] = new_state
 
     async def cancel_countdown(self, chat_id: int) -> None:
         """Cancel an active countdown for ``chat_id`` if it exists."""
@@ -355,6 +524,7 @@ class SmartCountdownManager:
         self._countdown_states.pop(chat_id, None)
         self._pending_updates.pop(chat_id, None)
         self._countdown_messages.pop(chat_id, None)
+        self._countdown_timer_info.pop(chat_id, None)
 
     def is_countdown_active(self, chat_id: int) -> bool:
         """Return ``True`` when an unfinished countdown task exists for ``chat_id``."""
@@ -479,9 +649,12 @@ class SmartCountdownManager:
         on_complete: Optional[Callable],
         countdown_id: Optional[str] = None,
     ):
-        """Main countdown loop using monotonic clock to prevent second jumps"""
+        """Main countdown loop delegating to milestone or legacy strategy."""
+
         tick_count = 0
+        countdown_completed = False
         current_task = asyncio.current_task()
+
         self.logger.info(
             "Countdown loop started",
             extra={
@@ -493,77 +666,27 @@ class SmartCountdownManager:
         )
 
         try:
-            start_time = time.monotonic()
-            end_time = start_time + duration
-            last_reported_second: Optional[int] = None
-            countdown_completed = False
-
-            while True:
-                current_time = time.monotonic()
-                remaining_float = end_time - current_time
-                remaining = max(0, int(remaining_float))
-
-                if remaining != last_reported_second:
-                    last_reported_second = remaining
-                    tick_count += 1
-
-                    current_state = self._countdown_states.get(chat_id)
-                    if current_state is None:
-                        self.logger.warning(
-                            "Countdown state disappeared mid-loop; cancelling",
-                            extra={
-                                'event_type': 'countdown_state_missing',
-                                'chat_id': chat_id,
-                                'countdown_id': countdown_id,
-                            },
-                        )
-                        self._metrics['state_missing_events'] += 1
-                        break
-
-                    new_state = CountdownState(
-                        chat_id=current_state.chat_id,
-                        remaining_seconds=remaining,
-                        total_seconds=current_state.total_seconds,
-                        player_count=current_state.player_count,
-                        pot_size=current_state.pot_size
-                    )
-
-                    if current_state.should_update(new_state):
-                        pending_updates = self._pending_updates.get(chat_id)
-                        if pending_updates is not None:
-                            pending_updates.append(new_state)
-                    else:
-                        self._metrics['updates_skipped'] += 1
-
-                    self._countdown_states[chat_id] = new_state
-
-                    self.logger.debug(
-                        "Countdown tick",
-                        extra={
-                            'event_type': 'countdown_tick',
-                            'chat_id': chat_id,
-                            'countdown_id': countdown_id,
-                            'tick_number': tick_count,
-                            'remaining': remaining,
-                        }
-                    )
-
-                    if remaining == 0:
-                        countdown_completed = True
-                        break
-
-                if remaining == 0:
-                    break
-
-                await asyncio.sleep(1.0)
+            if self._hybrid_enabled and self.milestones:
+                tick_count, countdown_completed = await self._run_countdown_milestones(
+                    chat_id=chat_id,
+                    duration=duration,
+                    countdown_id=countdown_id,
+                )
+            else:
+                tick_count, countdown_completed = await self._run_countdown_legacy(
+                    chat_id=chat_id,
+                    duration=duration,
+                    countdown_id=countdown_id,
+                )
 
             if countdown_completed and on_complete:
                 await on_complete(chat_id)
 
-            self.logger.info(
-                f"Countdown completed for chat {chat_id}",
-                extra={'event_type': 'countdown_completed', 'chat_id': chat_id}
-            )
+            if countdown_completed:
+                self.logger.info(
+                    f"Countdown completed for chat {chat_id}",
+                    extra={'event_type': 'countdown_completed', 'chat_id': chat_id}
+                )
 
         except asyncio.CancelledError:
             self.logger.info(
@@ -584,6 +707,7 @@ class SmartCountdownManager:
             self._countdown_states.pop(chat_id, None)
             self._pending_updates.pop(chat_id, None)
             self._countdown_messages.pop(chat_id, None)
+            self._countdown_timer_info.pop(chat_id, None)
             self.logger.info(
                 "Countdown loop ended",
                 extra={
@@ -593,6 +717,163 @@ class SmartCountdownManager:
                     'tick_count': tick_count,
                 }
             )
+
+    async def _run_countdown_legacy(
+        self,
+        chat_id: int,
+        duration: int,
+        countdown_id: Optional[str] = None,
+    ) -> tuple[int, bool]:
+        """Run legacy 1Hz countdown loop as a compatibility fallback."""
+
+        tick_count = 0
+        countdown_completed = False
+
+        start_time = time.monotonic()
+        self._countdown_timer_info[chat_id] = {
+            "start_time": start_time,
+            "duration": duration,
+        }
+
+        end_time = start_time + duration
+        last_reported_second: Optional[int] = None
+
+        while True:
+            current_time = time.monotonic()
+            remaining_float = end_time - current_time
+            remaining = max(0, int(remaining_float))
+
+            if remaining != last_reported_second:
+                last_reported_second = remaining
+                tick_count += 1
+
+                current_state = self._countdown_states.get(chat_id)
+                if current_state is None:
+                    self.logger.warning(
+                        "Countdown state disappeared mid-loop; cancelling",
+                        extra={
+                            'event_type': 'countdown_state_missing',
+                            'chat_id': chat_id,
+                            'countdown_id': countdown_id,
+                        },
+                    )
+                    self._metrics['state_missing_events'] += 1
+                    break
+
+                new_state = CountdownState(
+                    chat_id=current_state.chat_id,
+                    remaining_seconds=remaining,
+                    total_seconds=current_state.total_seconds,
+                    player_count=current_state.player_count,
+                    pot_size=current_state.pot_size
+                )
+
+                if current_state.should_update(new_state):
+                    pending_updates = self._pending_updates.get(chat_id)
+                    if pending_updates is not None:
+                        pending_updates.append(new_state)
+                else:
+                    self._metrics['updates_skipped'] += 1
+
+                self._countdown_states[chat_id] = new_state
+
+                self.logger.debug(
+                    "Countdown tick",
+                    extra={
+                        'event_type': 'countdown_tick',
+                        'chat_id': chat_id,
+                        'countdown_id': countdown_id,
+                        'tick_number': tick_count,
+                        'remaining': remaining,
+                    }
+                )
+
+                if remaining == 0:
+                    countdown_completed = True
+                    break
+
+            if remaining == 0:
+                break
+
+            await asyncio.sleep(1.0)
+
+        return tick_count, countdown_completed
+
+    async def _run_countdown_milestones(
+        self,
+        chat_id: int,
+        duration: int,
+        countdown_id: Optional[str] = None,
+    ) -> tuple[int, bool]:
+        """Run milestone-driven countdown loop."""
+
+        tick_count = 0
+        countdown_completed = False
+
+        start_time = time.monotonic()
+        self._countdown_timer_info[chat_id] = {
+            "start_time": start_time,
+            "duration": duration,
+        }
+
+        available_milestones = {
+            value for value in self.milestones if value <= duration and value >= 0
+        }
+        available_milestones.update({duration, 0})
+        milestone_schedule = sorted(available_milestones, reverse=True)
+
+        for index, milestone in enumerate(milestone_schedule):
+            tick_count += 1
+
+            current_state = self._countdown_states.get(chat_id)
+            if current_state is None:
+                self.logger.warning(
+                    "Countdown state disappeared mid-milestone; cancelling",
+                    extra={
+                        'event_type': 'countdown_state_missing',
+                        'chat_id': chat_id,
+                        'countdown_id': countdown_id,
+                    },
+                )
+                self._metrics['state_missing_events'] += 1
+                break
+
+            base_state = CountdownState(
+                chat_id=current_state.chat_id,
+                remaining_seconds=milestone,
+                total_seconds=current_state.total_seconds,
+                player_count=current_state.player_count,
+                pot_size=current_state.pot_size,
+            )
+
+            merged_state = self._merge_pending_state(chat_id, base_state)
+            self._countdown_states[chat_id] = merged_state
+
+            await self._update_countdown_message(merged_state)
+
+            self.logger.debug(
+                "Countdown milestone reached",
+                extra={
+                    'event_type': 'countdown_milestone',
+                    'chat_id': chat_id,
+                    'countdown_id': countdown_id,
+                    'milestone': milestone,
+                    'tick_number': tick_count,
+                },
+            )
+
+            if milestone == 0:
+                countdown_completed = True
+                break
+
+            if index + 1 < len(milestone_schedule):
+                next_milestone = milestone_schedule[index + 1]
+                target_time = start_time + (duration - next_milestone)
+                sleep_for = max(0.0, target_time - time.monotonic())
+                if sleep_for > 0:
+                    await asyncio.sleep(sleep_for)
+
+        return tick_count, countdown_completed
 
     async def _batch_worker(self):
         """
@@ -616,6 +897,7 @@ class SmartCountdownManager:
 
                     # Send update
                     await self._update_countdown_message(latest_state)
+                    self._countdown_states[chat_id] = latest_state
 
                     # Track metrics
                     if num_updates > 1:
@@ -671,10 +953,45 @@ class SmartCountdownManager:
             )
 
     def _format_countdown_text(self, state: CountdownState) -> str:
-        """
-        Generate the visual countdown message
-        Using PERSIAN THEMED design (most eye-catching)
-        """
+        """Format countdown text depending on hybrid configuration."""
+
+        if self._hybrid_enabled and self.state_messages:
+            return self._format_hybrid_countdown_text(state)
+        return self._format_legacy_countdown_text(state)
+
+    def _format_hybrid_countdown_text(self, state: CountdownState) -> str:
+        """Render countdown text using hybrid milestone configuration."""
+
+        remaining = max(0, int(state.remaining_seconds))
+        player_count = max(0, int(state.player_count))
+
+        state_key = self._get_traffic_light_state(remaining, player_count)
+        state_message = self.state_messages.get(state_key)
+        if state_message is None:
+            state_message = self.state_messages.get('ready', '⏳ شمارش معکوس...')
+
+        progress_bar = self.progress_bars.get(remaining)
+        if progress_bar is None:
+            progress_bar = self._default_progress_bar
+
+        remaining_fa = to_persian_digits(remaining)
+        players_fa = to_persian_digits(player_count)
+        pot_fa = to_persian_digits(state.pot_size)
+
+        lines = [
+            state_message,
+            "",
+            f"{progress_bar} {remaining_fa} ثانیه مانده",
+            "",
+            f"👥 بازیکنان: <b>{players_fa}</b> نفر",
+            f"💰 پات: <b>{pot_fa}</b> سکه",
+        ]
+
+        return "\n".join(lines).strip()
+
+    def _format_legacy_countdown_text(self, state: CountdownState) -> str:
+        """Fallback formatting used when hybrid config is unavailable."""
+
         total_seconds = max(state.total_seconds, 1)
         remaining_seconds = max(0, min(state.remaining_seconds, total_seconds))
         progress_ratio = remaining_seconds / total_seconds if total_seconds else 0
@@ -694,7 +1011,6 @@ class SmartCountdownManager:
         percentage = max(0, min(100, int(progress_ratio * 100)))
         bar = ('█' * filled_blocks) + ('░' * empty_blocks)
 
-        # Persian number conversion using the shared translation map
         remaining_fa = to_persian_digits(remaining_seconds)
         players_fa = to_persian_digits(state.player_count)
         pot_fa = to_persian_digits(state.pot_size)
