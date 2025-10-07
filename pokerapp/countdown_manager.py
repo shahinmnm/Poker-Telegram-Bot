@@ -106,10 +106,12 @@ class SmartCountdownManager:
         self.config: Dict[str, Any] = {}
         self.milestones = []
         self.duration: Optional[int] = None
+        self._default_duration: int = 30
         self.state_messages: Dict[str, str] = {}
         self.progress_bars: Dict[int, str] = {}
         self._traffic_light_thresholds: Dict[str, int] = {}
-        self._default_progress_bar = "⬜⬜⬜⬜⬜"
+        self._progress_bar_width: int = 20
+        self._default_progress_bar = "░" * self._progress_bar_width
         self._hybrid_enabled = False
 
         self._initialize_hybrid_config()
@@ -151,6 +153,25 @@ class SmartCountdownManager:
             game_config.get("hybrid_countdown", {}) if isinstance(game_config, dict) else {}
         )
 
+        countdown_config = {}
+        if isinstance(config_data, dict):
+            countdown_config = config_data.get("countdown", {}) or {}
+
+        if isinstance(countdown_config, dict):
+            duration_override = countdown_config.get("duration")
+            if isinstance(duration_override, (int, float)):
+                self._default_duration = int(duration_override)
+
+            countdown_milestones = countdown_config.get("milestones")
+            if isinstance(countdown_milestones, (list, tuple)):
+                normalized = {
+                    int(value)
+                    for value in countdown_milestones
+                    if isinstance(value, (int, float)) and int(value) >= 0
+                }
+                if normalized:
+                    self.milestones = sorted(normalized, reverse=True)
+
         raw_milestones = hybrid_config.get("milestones")
         if isinstance(raw_milestones, (list, tuple)):
             normalized = {
@@ -158,13 +179,15 @@ class SmartCountdownManager:
                 for value in raw_milestones
                 if isinstance(value, (int, float)) and int(value) >= 0
             }
-            self.milestones = sorted(normalized, reverse=True)
+            if normalized:
+                self.milestones = sorted(normalized, reverse=True)
         else:
             self.milestones = []
 
         duration_seconds = hybrid_config.get("duration_seconds")
         if isinstance(duration_seconds, (int, float)):
             self.duration = int(duration_seconds)
+            self._default_duration = self.duration
 
         thresholds = hybrid_config.get("traffic_light_thresholds", {})
         if isinstance(thresholds, dict):
@@ -183,6 +206,11 @@ class SmartCountdownManager:
                 if isinstance(value, str)
             }
 
+        progress_bar_width = ui_config.get("progress_bar_width")
+        if isinstance(progress_bar_width, (int, float)) and progress_bar_width > 0:
+            self._progress_bar_width = int(progress_bar_width)
+            self._default_progress_bar = "░" * self._progress_bar_width
+
         progress_bars = ui_config.get("progress_bars", {})
         if isinstance(progress_bars, dict):
             normalized_bars: Dict[int, str] = {}
@@ -196,7 +224,11 @@ class SmartCountdownManager:
                 normalized_bars[normalized_key] = value
             self.progress_bars = normalized_bars
 
-        self._hybrid_enabled = bool(self.milestones and self.duration is not None)
+        effective_duration = self.duration
+        if effective_duration is None:
+            effective_duration = self._default_duration
+
+        self._hybrid_enabled = bool(self.milestones and effective_duration)
 
     def _compute_remaining_seconds(self, chat_id: int, fallback: int) -> int:
         """Compute remaining seconds using monotonic clock metadata."""
@@ -228,9 +260,13 @@ class SmartCountdownManager:
         if num_updates > 1:
             self._metrics['api_calls_saved'] += num_updates - 1
 
+        remaining_seconds = self._compute_remaining_seconds(
+            chat_id, base_state.remaining_seconds
+        )
+
         merged_state = CountdownState(
             chat_id=base_state.chat_id,
-            remaining_seconds=base_state.remaining_seconds,
+            remaining_seconds=remaining_seconds,
             total_seconds=base_state.total_seconds,
             player_count=latest_state.player_count,
             pot_size=latest_state.pot_size,
@@ -316,7 +352,7 @@ class SmartCountdownManager:
     async def start_countdown(
         self,
         chat_id: int,
-        duration: int = 30,
+        duration: Optional[int] = None,
         player_count: int = 0,
         pot_size: int = 0,
         on_complete: Optional[Callable] = None,
@@ -336,6 +372,9 @@ class SmartCountdownManager:
         Returns:
             True if countdown started successfully
         """
+        if duration is None:
+            duration = max(1, int(self._default_duration))
+
         existing_task = self._active_countdowns.get(chat_id)
         if existing_task is not None and not existing_task.done():
             self.logger.warning(
@@ -607,7 +646,9 @@ class SmartCountdownManager:
 
         updated_state = CountdownState(
             chat_id=current_state.chat_id,
-            remaining_seconds=current_state.remaining_seconds,
+            remaining_seconds=self._compute_remaining_seconds(
+                chat_id, current_state.remaining_seconds
+            ),
             total_seconds=current_state.total_seconds,
             player_count=(
                 current_state.player_count if player_count is None else player_count
@@ -838,9 +879,13 @@ class SmartCountdownManager:
                 self._metrics['state_missing_events'] += 1
                 break
 
+            base_remaining = self._compute_remaining_seconds(
+                chat_id, milestone
+            )
+
             base_state = CountdownState(
                 chat_id=current_state.chat_id,
-                remaining_seconds=milestone,
+                remaining_seconds=base_remaining,
                 total_seconds=current_state.total_seconds,
                 player_count=current_state.player_count,
                 pot_size=current_state.pot_size,
@@ -895,6 +940,17 @@ class SmartCountdownManager:
                     num_updates = len(updates)
                     updates.clear()
 
+                    refreshed_remaining = self._compute_remaining_seconds(
+                        chat_id, latest_state.remaining_seconds
+                    )
+                    latest_state = CountdownState(
+                        chat_id=latest_state.chat_id,
+                        remaining_seconds=refreshed_remaining,
+                        total_seconds=latest_state.total_seconds,
+                        player_count=latest_state.player_count,
+                        pot_size=latest_state.pot_size,
+                    )
+
                     # Send update
                     await self._update_countdown_message(latest_state)
                     self._countdown_states[chat_id] = latest_state
@@ -937,20 +993,41 @@ class SmartCountdownManager:
         text = self._format_countdown_text(state)
         message_id = self._countdown_messages[state.chat_id]
 
-        try:
-            await self.bot.edit_message_text(
-                chat_id=state.chat_id,
-                message_id=message_id,
-                text=text,
-                parse_mode='HTML'
-            )
-            self._metrics['updates_sent'] += 1
+        max_attempts = 3
+        delay = 0.5
 
-        except Exception as e:
-            self.logger.warning(
-                f"Failed to update countdown message: {e}",
-                extra={'chat_id': state.chat_id}
-            )
+        for attempt in range(1, max_attempts + 1):
+            try:
+                await self.bot.edit_message_text(
+                    chat_id=state.chat_id,
+                    message_id=message_id,
+                    text=text,
+                    parse_mode='HTML'
+                )
+                self._metrics['updates_sent'] += 1
+                return
+            except TelegramError as exc:
+                if attempt == max_attempts:
+                    self.logger.warning(
+                        "Failed to update countdown message after retries", 
+                        extra={
+                            'chat_id': state.chat_id,
+                            'error': str(exc),
+                            'attempts': attempt,
+                            'event_type': 'countdown_update_failed',
+                        }
+                    )
+                    break
+
+                jitter = 0.05 * attempt
+                await asyncio.sleep(delay + jitter)
+                delay *= 2
+            except Exception as exc:  # pragma: no cover - defensive logging
+                self.logger.warning(
+                    f"Failed to update countdown message: {exc}",
+                    extra={'chat_id': state.chat_id, 'event_type': 'countdown_update_failed_unexpected'}
+                )
+                break
 
     def _format_countdown_text(self, state: CountdownState) -> str:
         """Format countdown text depending on hybrid configuration."""
@@ -966,17 +1043,25 @@ class SmartCountdownManager:
         player_count = max(0, int(state.player_count))
 
         state_key = self._get_traffic_light_state(remaining, player_count)
-        state_message = self.state_messages.get(state_key)
-        if state_message is None:
-            state_message = self.state_messages.get('ready', '⏳ شمارش معکوس...')
-
-        progress_bar = self.progress_bars.get(remaining)
-        if progress_bar is None:
-            progress_bar = self._default_progress_bar
+        state_message_template = self.state_messages.get(state_key)
+        if state_message_template is None:
+            state_message_template = self.state_messages.get('ready', '⏳ شمارش معکوس...')
 
         remaining_fa = to_persian_digits(remaining)
         players_fa = to_persian_digits(player_count)
         pot_fa = to_persian_digits(state.pot_size)
+
+        try:
+            state_message = state_message_template.format(seconds=remaining_fa)
+        except (KeyError, IndexError, ValueError):
+            state_message = state_message_template
+
+        progress_bar = self.progress_bars.get(remaining)
+        if progress_bar is None:
+            progress_bar = self._render_progress_bar(
+                remaining_seconds=remaining,
+                total_seconds=max(state.total_seconds, 1),
+            )
 
         lines = [
             state_message,
@@ -994,10 +1079,7 @@ class SmartCountdownManager:
 
         total_seconds = max(state.total_seconds, 1)
         remaining_seconds = max(0, min(state.remaining_seconds, total_seconds))
-        progress_ratio = remaining_seconds / total_seconds if total_seconds else 0
-
-        filled_blocks = max(0, min(20, int(progress_ratio * 20)))
-        empty_blocks = 20 - filled_blocks
+        progress_bar = self._render_progress_bar(remaining_seconds, total_seconds)
 
         if remaining_seconds == 0:
             urgency_msg = '<b>🎮 بازی شروع شد!</b>'
@@ -1008,8 +1090,8 @@ class SmartCountdownManager:
         else:
             urgency_msg = '⚡ برای پیوستن /join را بزنید!'
 
+        progress_ratio = remaining_seconds / total_seconds if total_seconds else 0
         percentage = max(0, min(100, int(progress_ratio * 100)))
-        bar = ('█' * filled_blocks) + ('░' * empty_blocks)
 
         remaining_fa = to_persian_digits(remaining_seconds)
         players_fa = to_persian_digits(state.player_count)
@@ -1021,13 +1103,26 @@ class SmartCountdownManager:
 
 ⏰ زمان باقی‌مانده: <b>{remaining_fa}</b> ثانیه
 
-{bar} {pct_fa}٪
+{progress_bar} {pct_fa}٪
 
 👥 بازیکنان: <b>{players_fa}</b> نفر
 💰 پات: <b>{pot_fa}</b> سکه
 
 {urgency_msg}
         """.strip()
+
+    def _render_progress_bar(self, remaining_seconds: int, total_seconds: int) -> str:
+        """Render a unicode progress bar using filled and empty blocks."""
+
+        total_seconds = max(total_seconds, 1)
+        normalized_remaining = max(0, min(remaining_seconds, total_seconds))
+
+        filled_ratio = normalized_remaining / total_seconds if total_seconds else 0
+        filled_blocks = int(round(filled_ratio * self._progress_bar_width))
+        filled_blocks = max(0, min(self._progress_bar_width, filled_blocks))
+        empty_blocks = self._progress_bar_width - filled_blocks
+
+        return ("█" * filled_blocks) + ("░" * empty_blocks)
 
     def get_metrics(self) -> dict:
         """Get performance metrics"""
