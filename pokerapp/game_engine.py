@@ -536,12 +536,10 @@ class GameEngine:
     async def start_waiting_countdown(
         self,
         chat_id: int,
-        duration: int,
-        message_id: Optional[int] = None,
         *,
         trigger: str = "unknown",
     ) -> None:
-        """Start a waiting countdown, or update display if one is already active."""
+        """Start the hybrid waiting countdown managed by :class:`SmartCountdownManager`."""
 
         try:
             await self._ensure_smart_countdown_manager_started()
@@ -565,7 +563,6 @@ class GameEngine:
                 "Cannot start waiting countdown; SmartCountdownManager unavailable",
                 extra={
                     "chat_id": self._safe_int(chat_id),
-                    "duration": duration,
                     "event_type": "countdown_manager_missing",
                     "trigger": trigger,
                 },
@@ -612,11 +609,7 @@ class GameEngine:
             return
 
         pot_size = int(getattr(game, "pot", 0))
-        anchor_message_id = (
-            message_id
-            if message_id is not None
-            else getattr(game, "ready_message_main_id", None)
-        )
+        anchor_message_id = getattr(game, "ready_message_main_id", None)
 
         if countdown_manager.is_countdown_active(chat_id):
             try:
@@ -680,9 +673,9 @@ class GameEngine:
         del frame
 
         try:
-            await countdown_manager.start_countdown(
+            success = await countdown_manager.start_countdown(
                 chat_id=chat_id,
-                duration=duration,
+                duration=None,
                 player_count=player_count,
                 pot_size=pot_size,
                 on_complete=on_countdown_complete,
@@ -694,11 +687,22 @@ class GameEngine:
                 extra={
                     "event_type": "countdown_start_failed",
                     "chat_id": chat_id,
-                    "duration": duration,
                     "trigger": trigger,
                     "callsite": callsite,
                 },
                 exc_info=True,
+            )
+            return
+
+        if not success:
+            self._logger.warning(
+                "Countdown manager rejected start request",
+                extra={
+                    "event_type": "countdown_start_rejected",
+                    "chat_id": chat_id,
+                    "trigger": trigger,
+                    "callsite": callsite,
+                },
             )
             return
 
@@ -707,7 +711,6 @@ class GameEngine:
             extra={
                 "event_type": "countdown_started",
                 "chat_id": chat_id,
-                "duration": duration,
                 "player_count": player_count,
                 "pot_size": pot_size,
                 "trigger": trigger,
@@ -1035,8 +1038,6 @@ class GameEngine:
             ):
                 await self.start_waiting_countdown(
                     chat_id=chat_id,
-                    duration=30,
-                    message_id=getattr(current_game, "ready_message_main_id", None),
                     trigger="player_join",
                 )
 
