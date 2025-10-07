@@ -45,6 +45,8 @@ class RedisSafeOps:
         self._backoff_factor = backoff_factor
         self._timeout_seconds = timeout_seconds
         self._metrics_recorder = metrics_recorder
+        self._bound_loop: Optional[asyncio.AbstractEventLoop] = None
+        self._loop_validated = False
 
         # Ensure logs follow the JSON structure even when a custom logger is
         # provided without handlers.  If the application already configured
@@ -74,11 +76,14 @@ class RedisSafeOps:
 
         while attempt <= self._max_retries:
             try:
+                await self._ensure_connection()
                 coroutine: Awaitable[Any] = getattr(self._redis, method)(*args, **kwargs)
                 result = await asyncio.wait_for(coroutine, timeout=self._timeout_seconds)
                 self._record_metrics(method, time.monotonic() - start_time, "success")
                 return result
-            except (ConnectionError, TimeoutError, asyncio.TimeoutError) as exc:
+            except (ConnectionError, TimeoutError, asyncio.TimeoutError, RuntimeError) as exc:
+                if isinstance(exc, RuntimeError) and not self._is_event_loop_error(exc):
+                    raise
                 last_exception = exc
                 attempt += 1
                 payload = {
@@ -91,6 +96,7 @@ class RedisSafeOps:
                 if log_extra:
                     payload.update(log_extra)
                 self._logger.warning("Redis connection issue", extra=payload)
+                self._loop_validated = False
                 if attempt > self._max_retries:
                     break
                 await asyncio.sleep(delay)
@@ -126,6 +132,47 @@ class RedisSafeOps:
         # retries exhausted without assigning ``last_exception``).  Raise a
         # TimeoutError to signal the failure explicitly.
         raise TimeoutError("Redis operation timed out without explicit error")
+
+    async def _ensure_connection(self) -> None:
+        """Validate the Redis client is bound to the active event loop."""
+
+        try:
+            current_loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+
+        if self._bound_loop is None:
+            self._bound_loop = current_loop
+        elif self._bound_loop is not current_loop:
+            self._logger.warning(
+                "Redis connection loop mismatch detected; resetting connection pool",
+                extra={"error_type": "EventLoopMismatch"},
+            )
+            await self._redis.close(close_connection_pool=True)
+            self._bound_loop = current_loop
+            self._loop_validated = False
+
+        if not self._loop_validated:
+            try:
+                await self._redis.ping()
+            except Exception as exc:
+                self._logger.error(
+                    "Redis connection validation failed",
+                    extra={
+                        "error_type": exc.__class__.__name__,
+                        "error": str(exc),
+                    },
+                )
+                raise
+            else:
+                self._loop_validated = True
+
+    @staticmethod
+    def _is_event_loop_error(exc: RuntimeError) -> bool:
+        message = str(exc).lower()
+        return "event loop" in message and (
+            "closed" in message or "attached to a different" in message
+        )
 
     async def safe_get(
         self, key: str, *, log_extra: Optional[Dict[str, Any]] = None
