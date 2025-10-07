@@ -541,7 +541,7 @@ class GameEngine:
         *,
         trigger: str = "unknown",
     ) -> None:
-        """Route countdown creation through :class:`SmartCountdownManager`."""
+        """Start a waiting countdown, or update display if one is already active."""
 
         try:
             await self._ensure_smart_countdown_manager_started()
@@ -553,6 +553,7 @@ class GameEngine:
                 extra={
                     "chat_id": chat_id,
                     "event_type": "countdown_manager_start_failed",
+                    "trigger": trigger,
                 },
                 exc_info=True,
             )
@@ -560,11 +561,13 @@ class GameEngine:
 
         countdown_manager = self._smart_countdown_manager
         if countdown_manager is None:
-            self._logger.warning(
-                f"SmartCountdownManager not available for chat {chat_id}",
+            self._logger.debug(
+                "Cannot start waiting countdown; SmartCountdownManager unavailable",
                 extra={
-                    "chat_id": chat_id,
+                    "chat_id": self._safe_int(chat_id),
+                    "duration": duration,
                     "event_type": "countdown_manager_missing",
+                    "trigger": trigger,
                 },
             )
             return
@@ -573,41 +576,98 @@ class GameEngine:
         try:
             game = await self._table_manager.get_game(chat_id)
         except Exception:
-            self._logger.exception(
-                "Failed to load game while starting waiting countdown",
+            self._logger.warning(
+                "Failed to load game for countdown",
                 extra={
                     "chat_id": chat_id,
                     "event_type": "countdown_game_load_failed",
+                    "trigger": trigger,
+                },
+                exc_info=True,
+            )
+            return
+
+        if game is None:
+            self._logger.debug(
+                "No game found for countdown",
+                extra={
+                    "chat_id": chat_id,
+                    "event_type": "countdown_no_game",
+                    "trigger": trigger,
                 },
             )
             return
 
-        player_count = game.seated_count() if game is not None else 0
-        pot_size = int(getattr(game, "pot", 0)) if game is not None else 0
+        player_count = game.seated_count()
+        if player_count < 2:
+            self._logger.debug(
+                "Insufficient players for countdown",
+                extra={
+                    "chat_id": chat_id,
+                    "event_type": "countdown_insufficient_players",
+                    "player_count": player_count,
+                    "trigger": trigger,
+                },
+            )
+            return
+
+        pot_size = int(getattr(game, "pot", 0))
         anchor_message_id = (
             message_id
             if message_id is not None
             else getattr(game, "ready_message_main_id", None)
         )
 
-        async def on_countdown_complete(completed_chat_id: int) -> None:
-            """Callback when countdown reaches 0."""
-
+        if countdown_manager.is_countdown_active(chat_id):
             try:
-                self._logger.info(
-                    f"Auto-starting game for chat {completed_chat_id}",
+                updated = await countdown_manager.update_countdown_display(
+                    chat_id=chat_id,
+                    player_count=player_count,
+                    pot_size=pot_size,
+                )
+            except Exception:
+                self._logger.warning(
+                    "Failed to update countdown display",
                     extra={
-                        "chat_id": completed_chat_id,
-                        "event_type": "countdown_auto_start",
+                        "chat_id": chat_id,
+                        "event_type": "countdown_update_failed",
+                        "trigger": trigger,
+                    },
+                    exc_info=True,
+                )
+            else:
+                if updated:
+                    self._logger.info(
+                        "Updated existing countdown display",
+                        extra={
+                            "event_type": "countdown_display_updated",
+                            "chat_id": chat_id,
+                            "player_count": player_count,
+                            "pot_size": pot_size,
+                            "trigger": trigger,
+                        },
+                    )
+                    return
+
+                self._logger.info(
+                    "Countdown update returned False, starting new countdown",
+                    extra={
+                        "event_type": "countdown_update_failed_restart",
+                        "chat_id": chat_id,
+                        "trigger": trigger,
                     },
                 )
-                await self.start_game(chat_id=completed_chat_id)
-            except Exception as exc:  # pragma: no cover - defensive logging
+
+        async def on_countdown_complete(completed_chat_id: int) -> None:
+            """Callback when countdown reaches zero."""
+            try:
+                await self._handle_countdown_completion(completed_chat_id)
+            except Exception:
                 self._logger.exception(
-                    f"Failed to auto-start game after countdown: {exc}",
+                    "Error in countdown completion handler",
                     extra={
-                        "chat_id": completed_chat_id,
-                        "event_type": "auto_start_failed",
+                        "chat_id": self._safe_int(completed_chat_id),
+                        "event_type": "countdown_completion_error",
                     },
                 )
 
@@ -621,26 +681,40 @@ class GameEngine:
             del caller
         del frame
 
+        try:
+            await countdown_manager.start_countdown(
+                chat_id=chat_id,
+                duration=duration,
+                player_count=player_count,
+                pot_size=pot_size,
+                on_complete=on_countdown_complete,
+                message_id=anchor_message_id,
+            )
+        except Exception:
+            self._logger.warning(
+                "Failed to start countdown",
+                extra={
+                    "event_type": "countdown_start_failed",
+                    "chat_id": chat_id,
+                    "duration": duration,
+                    "trigger": trigger,
+                    "callsite": callsite,
+                },
+                exc_info=True,
+            )
+            return
+
         self._logger.info(
-            "Starting waiting countdown",
+            "Started new waiting countdown",
             extra={
+                "event_type": "countdown_started",
                 "chat_id": chat_id,
                 "duration": duration,
                 "player_count": player_count,
                 "pot_size": pot_size,
-                "event_type": "countdown_start",
                 "trigger": trigger,
                 "callsite": callsite,
             },
-        )
-
-        await countdown_manager.start_countdown(
-            chat_id=chat_id,
-            duration=duration,
-            player_count=player_count,
-            pot_size=pot_size,
-            on_complete=on_countdown_complete,
-            message_id=anchor_message_id,
         )
 
     async def cancel_waiting_countdown(self, chat_id: int) -> None:
