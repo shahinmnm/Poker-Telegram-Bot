@@ -641,6 +641,9 @@ class SmartCountdownManager:
             parse_mode='HTML'
         )
 
+        # Cache anchor message id for future updates
+        self._countdown_messages[state.chat_id] = message.message_id
+
         self._metrics['updates_sent'] += 1
         return message
 
