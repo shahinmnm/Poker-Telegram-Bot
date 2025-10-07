@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from dataclasses import dataclass
-from typing import Callable, Dict, Optional, Set
+from typing import Any, Callable, Dict, Optional, Set
 
 import redis.asyncio as aioredis
 from sqlalchemy import inspect, text
@@ -17,9 +17,9 @@ from pokerapp.db_client import CachePolicy, OptimizedDatabaseClient
 from pokerapp.logging_config import setup_logging
 from pokerapp.stats import BaseStatsService, NullStatsService, StatsService
 from pokerapp.stats.buffer import StatsBatchBuffer
-from pokerapp.table_manager import TableManager
 from pokerapp.private_match_service import PrivateMatchService
 from pokerapp.query_optimizer import QueryBatcher
+from pokerapp.table_manager import TableManager
 from pokerapp.translations import init_translations
 from pokerapp.utils.messaging_service import MessagingService
 from pokerapp.utils.redis_safeops import RedisSafeOps
@@ -32,6 +32,31 @@ from pokerapp.state_validator import GameStateValidator
 from pokerapp.recovery_service import RecoveryService
 from pokerapp.telegram_retry_manager import TelegramRetryManager
 from pokerapp.database_schema import Base as StatisticsBase
+
+
+def _build_redis_client_kwargs(cfg: Config) -> Dict[str, Any]:
+    """Return connection settings for the Redis client."""
+
+    return {
+        "host": cfg.REDIS_HOST,
+        "port": cfg.REDIS_PORT,
+        "db": cfg.REDIS_DB,
+        "password": cfg.REDIS_PASS or None,
+        "auto_close_connection_pool": False,
+        "socket_connect_timeout": 5,
+        "socket_timeout": 5,
+        "retry_on_timeout": True,
+        "health_check_interval": 30,
+    }
+
+
+def _create_redis_client(client_kwargs: Dict[str, Any]) -> aioredis.Redis:
+    """Create a Redis client ensuring connections are established lazily."""
+
+    kwargs_copy = dict(client_kwargs)
+    redis_client = aioredis.Redis(**kwargs_copy)
+    setattr(redis_client, "_client_init_kwargs", kwargs_copy)
+    return redis_client
 
 
 @dataclass(frozen=True)
@@ -208,12 +233,48 @@ def build_services(cfg: Config, *, skip_stats_buffer: bool = False) -> Applicati
 
     init_translations("config/data/translations.json")
 
-    kv_async = aioredis.Redis(
-        host=cfg.REDIS_HOST,
-        port=cfg.REDIS_PORT,
-        db=cfg.REDIS_DB,
-        password=cfg.REDIS_PASS or None,
+    redis_client_kwargs = _build_redis_client_kwargs(cfg)
+
+    state_validator = GameStateValidator()
+
+    recovery_logger = _make_service_logger(logger, "recovery", "recovery")
+    recovery_redis = _create_redis_client(redis_client_kwargs)
+    recovery_ops = RedisSafeOps(
+        recovery_redis,
+        logger=_make_service_logger(logger, "redis_safeops_recovery", "redis"),
     )
+    recovery_table_manager = TableManager(
+        recovery_redis,
+        redis_ops=recovery_ops,
+        wallet_redis_ops=recovery_ops,
+        state_validator=state_validator,
+    )
+    recovery_service = RecoveryService(
+        redis=recovery_redis,
+        table_manager=recovery_table_manager,
+        logger=recovery_logger,
+    )
+    try:
+        asyncio.run(recovery_service.run_startup_recovery())
+    except RuntimeError:
+        recovery_logger.warning(
+            "Skipping startup recovery; event loop already running",
+            extra={"event_type": "startup_recovery_skipped"},
+        )
+    except Exception:
+        recovery_logger.exception("Startup recovery failed")
+    finally:
+        try:
+            asyncio.run(recovery_redis.close(close_connection_pool=True))
+        except RuntimeError:
+            recovery_logger.warning(
+                "Skipping recovery Redis close; event loop already running",
+                extra={"event_type": "recovery_redis_close_skipped"},
+            )
+        except Exception:
+            recovery_logger.exception("Failed to close recovery Redis client")
+
+    kv_async = _create_redis_client(redis_client_kwargs)
 
     cache_logger = _make_service_logger(logger, "cache", "cache")
     cache_config = CacheConfig(
@@ -257,7 +318,6 @@ def build_services(cfg: Config, *, skip_stats_buffer: bool = False) -> Applicati
         logger=_make_service_logger(logger, "redis_safeops", "redis"),
     )
 
-    state_validator = GameStateValidator()
     table_manager = TableManager(
         kv_async,
         redis_ops=redis_ops,
@@ -271,22 +331,6 @@ def build_services(cfg: Config, *, skip_stats_buffer: bool = False) -> Applicati
         max_delay=cfg.TELEGRAM_RETRY_MAX_DELAY,
         logger=logger,
     )
-
-    recovery_logger = _make_service_logger(logger, "recovery", "recovery")
-    recovery_service = RecoveryService(
-        redis=kv_async,
-        table_manager=table_manager,
-        logger=recovery_logger,
-    )
-    try:
-        asyncio.run(recovery_service.run_startup_recovery())
-    except RuntimeError:
-        recovery_logger.warning(
-            "Skipping startup recovery; event loop already running",
-            extra={"event_type": "startup_recovery_skipped"},
-        )
-    except Exception:
-        recovery_logger.exception("Startup recovery failed")
 
     stats_logger = _make_service_logger(logger, "stats", "stats")
     stats_service = _build_stats_service(stats_logger, cfg)
