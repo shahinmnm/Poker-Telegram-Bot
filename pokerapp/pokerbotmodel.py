@@ -1053,33 +1053,24 @@ class PokerBotModel:
             resolved_total = max(resolved_total, 1)
             seconds_remaining = min(seconds_remaining, resolved_total)
             progress_ratio = seconds_remaining / resolved_total
-            segments = 15
-            filled = min(segments, max(0, int(progress_ratio * segments)))
-            empty = segments - filled
+            progress_ratio = max(0.0, min(1.0, progress_ratio))
+            filled_blocks = max(0, min(20, int(progress_ratio * 20)))
+            empty_blocks = 20 - filled_blocks
             if seconds_remaining == 0:
-                emoji = "🚀"
                 urgency_line = "🚀 *بازی شروع شد!*"
             elif seconds_remaining <= 3:
-                emoji = "🔥"
                 urgency_line = "🔥 *آخرین فرصت!*"
             elif seconds_remaining <= 10:
-                emoji = "🟨"
                 urgency_line = "⚡ عجله کنید!"
             else:
-                emoji = "🟩"
                 urgency_line = "⚡ برای پیوستن /join را بزنید!"
-            bar_emojis = (emoji * filled) + ("⬜" * empty)
-            ascii_filled = "█" * (filled * 2)
-            ascii_pulse = "▓" if 0 < seconds_remaining <= 10 else ""
-            ascii_empty = "░" * max(0, (empty * 2) - len(ascii_pulse))
-            ascii_bar = ascii_filled + ascii_pulse + ascii_empty
-            percentage = int(progress_ratio * 100)
+            bar = ("█" * filled_blocks) + ("░" * empty_blocks)
+            percentage = max(0, min(100, int(progress_ratio * 100)))
             remaining_fa = to_persian_digits(seconds_remaining)
             pct_fa = to_persian_digits(percentage)
             lines.append("🎯 *شمارش معکوس شروع بازی*")
             lines.append("")
-            lines.append(bar_emojis)
-            lines.append(f"`{ascii_bar}` {pct_fa}٪")
+            lines.append(f"{bar} {pct_fa}٪")
             lines.append("")
             lines.append(f"⏰ زمان باقی‌مانده: *{remaining_fa}* ثانیه")
             lines.append(urgency_line)
