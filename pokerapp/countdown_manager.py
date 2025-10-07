@@ -157,10 +157,14 @@ class SmartCountdownManager:
         if isinstance(config_data, dict):
             countdown_config = config_data.get("countdown", {}) or {}
 
+        configured_duration: Optional[int] = None
+
         if isinstance(countdown_config, dict):
             duration_override = countdown_config.get("duration")
             if isinstance(duration_override, (int, float)):
-                self._default_duration = int(duration_override)
+                parsed = int(duration_override)
+                if parsed > 0:
+                    configured_duration = parsed
 
             countdown_milestones = countdown_config.get("milestones")
             if isinstance(countdown_milestones, (list, tuple)):
@@ -184,10 +188,21 @@ class SmartCountdownManager:
         else:
             self.milestones = []
 
+        hybrid_duration: Optional[int] = None
         duration_seconds = hybrid_config.get("duration_seconds")
         if isinstance(duration_seconds, (int, float)):
-            self.duration = int(duration_seconds)
-            self._default_duration = self.duration
+            parsed = int(duration_seconds)
+            if parsed > 0:
+                hybrid_duration = parsed
+
+        if configured_duration is None:
+            configured_duration = hybrid_duration
+
+        if configured_duration is None:
+            configured_duration = self._default_duration
+
+        self._default_duration = max(1, int(configured_duration))
+        self.duration = self._default_duration
 
         thresholds = hybrid_config.get("traffic_light_thresholds", {})
         if isinstance(thresholds, dict):
