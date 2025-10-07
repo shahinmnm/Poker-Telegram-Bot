@@ -620,23 +620,11 @@ class GameEngine:
 
         if countdown_manager.is_countdown_active(chat_id):
             try:
-                updated = await countdown_manager.update_countdown_display(
+                if await countdown_manager.update_countdown_display(
                     chat_id=chat_id,
                     player_count=player_count,
                     pot_size=pot_size,
-                )
-            except Exception:
-                self._logger.warning(
-                    "Failed to update countdown display",
-                    extra={
-                        "chat_id": chat_id,
-                        "event_type": "countdown_update_failed",
-                        "trigger": trigger,
-                    },
-                    exc_info=True,
-                )
-            else:
-                if updated:
+                ):
                     self._logger.info(
                         "Updated existing countdown display",
                         extra={
@@ -656,6 +644,16 @@ class GameEngine:
                         "chat_id": chat_id,
                         "trigger": trigger,
                     },
+                )
+            except Exception:
+                self._logger.warning(
+                    "Failed to update countdown display",
+                    extra={
+                        "chat_id": chat_id,
+                        "event_type": "countdown_update_failed",
+                        "trigger": trigger,
+                    },
+                    exc_info=True,
                 )
 
         async def on_countdown_complete(completed_chat_id: int) -> None:
