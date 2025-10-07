@@ -247,7 +247,7 @@ class SmartCountdownManager:
         """Main countdown loop using monotonic clock to prevent second jumps"""
         try:
             start_time = time.monotonic()
-            end_time = time.monotonic() + duration
+            end_time = start_time + duration
             last_reported_second = duration
             if duration <= 0:
                 last_reported_second += 1
@@ -263,7 +263,16 @@ class SmartCountdownManager:
                 if remaining != last_reported_second:
                     last_reported_second = remaining
 
-                    current_state = self._countdown_states[chat_id]
+                    current_state = self._countdown_states.get(chat_id)
+                    if current_state is None:
+                        self.logger.debug(
+                            "Countdown state disappeared mid-loop; cancelling",
+                            extra={
+                                'event_type': 'countdown_state_missing',
+                                'chat_id': chat_id,
+                            },
+                        )
+                        break
 
                     new_state = CountdownState(
                         chat_id=current_state.chat_id,
