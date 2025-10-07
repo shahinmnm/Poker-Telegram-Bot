@@ -406,6 +406,72 @@ class SmartCountdownManager:
 
         return True
 
+    async def update_countdown_display(
+        self,
+        chat_id: int,
+        player_count: Optional[int] = None,
+        pot_size: Optional[int] = None,
+    ) -> bool:
+        """Update countdown message with new player/pot info without restarting timer."""
+
+        if not self.is_countdown_active(chat_id):
+            self.logger.warning(
+                "Cannot update countdown display; no active countdown",
+                extra={
+                    'event_type': 'countdown_update_no_active',
+                    'chat_id': chat_id,
+                },
+            )
+            return False
+
+        current_state = self._countdown_states.get(chat_id)
+        if current_state is None:
+            self.logger.warning(
+                "Cannot update countdown display; state missing",
+                extra={
+                    'event_type': 'countdown_update_state_missing',
+                    'chat_id': chat_id,
+                },
+            )
+            return False
+
+        updated_state = CountdownState(
+            chat_id=current_state.chat_id,
+            remaining_seconds=current_state.remaining_seconds,
+            total_seconds=current_state.total_seconds,
+            player_count=(
+                current_state.player_count if player_count is None else player_count
+            ),
+            pot_size=current_state.pot_size if pot_size is None else pot_size,
+        )
+
+        self._countdown_states[chat_id] = updated_state
+
+        try:
+            await self._update_countdown_message(updated_state)
+        except Exception as exc:  # pragma: no cover - defensive logging
+            self.logger.error(
+                "Failed to update countdown message",
+                extra={
+                    'event_type': 'countdown_message_update_failed',
+                    'chat_id': chat_id,
+                    'error': str(exc),
+                },
+            )
+
+        self.logger.info(
+            "Countdown display updated",
+            extra={
+                'event_type': 'countdown_display_updated',
+                'chat_id': chat_id,
+                'new_player_count': updated_state.player_count,
+                'new_pot_size': updated_state.pot_size,
+                'remaining_seconds': updated_state.remaining_seconds,
+            },
+        )
+
+        return True
+
     async def _run_countdown(
         self,
         chat_id: int,
