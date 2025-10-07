@@ -244,46 +244,44 @@ class SmartCountdownManager:
         duration: int,
         on_complete: Optional[Callable]
     ):
-        """Main countdown loop using monotonic time"""
+        """Main countdown loop using monotonic clock to prevent second jumps"""
         try:
             start_time = time.monotonic()
-            end_time = start_time + duration
-            last_update_time = start_time
+            end_time = time.monotonic() + duration
+            last_reported_second = duration
+            if duration <= 0:
+                last_reported_second += 1
 
             while True:
                 current_time = time.monotonic()
                 elapsed = current_time - start_time
-                remaining = max(0, int(duration - elapsed))
+                remaining = int(duration - elapsed)
 
-                if current_time >= end_time:
+                if current_time >= end_time or remaining < 0:
                     remaining = 0
 
-                current_state = self._countdown_states.get(chat_id)
-                if current_state is None:
-                    break
+                if remaining != last_reported_second:
+                    last_reported_second = remaining
 
-                new_state = CountdownState(
-                    chat_id=current_state.chat_id,
-                    remaining_seconds=remaining,
-                    total_seconds=current_state.total_seconds,
-                    player_count=current_state.player_count,
-                    pot_size=current_state.pot_size
-                )
+                    current_state = self._countdown_states[chat_id]
 
-                if current_state.should_update(new_state):
-                    self._pending_updates[chat_id].append(new_state)
-                    last_update_time = current_time
-                    self.logger.debug(
-                        f"Queued countdown update for chat {chat_id}: {remaining}s",
-                        extra={'event_type': 'countdown_update_queued'}
+                    new_state = CountdownState(
+                        chat_id=current_state.chat_id,
+                        remaining_seconds=remaining,
+                        total_seconds=current_state.total_seconds,
+                        player_count=current_state.player_count,
+                        pot_size=current_state.pot_size
                     )
-                else:
-                    self._metrics['updates_skipped'] += 1
 
-                self._countdown_states[chat_id] = new_state
+                    if current_state.should_update(new_state):
+                        self._pending_updates[chat_id].append(new_state)
+                    else:
+                        self._metrics['updates_skipped'] += 1
 
-                if remaining == 0:
-                    break
+                    self._countdown_states[chat_id] = new_state
+
+                    if remaining <= 0:
+                        break
 
                 await asyncio.sleep(0.1)
 
