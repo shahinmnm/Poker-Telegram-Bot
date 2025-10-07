@@ -1,6 +1,7 @@
 import asyncio
 import time
 import logging
+import traceback
 from typing import Dict, Optional, Callable
 from dataclasses import dataclass, field
 from collections import deque
@@ -176,13 +177,14 @@ class SmartCountdownManager:
         """
         existing_task = self._active_countdowns.get(chat_id)
         if existing_task is not None and not existing_task.done():
-            self.logger.debug(
+            self.logger.warning(
                 "Duplicate countdown spawn detected; cancelling existing task",
                 extra={
                     'event_type': 'countdown_duplicate_spawn',
                     'chat_id': chat_id,
                     'existing_task_id': id(existing_task),
                     'existing_countdown_id': self._countdown_metadata.get(chat_id),
+                    'call_stack': ''.join(traceback.format_stack()),
                 }
             )
 
@@ -536,7 +538,7 @@ class SmartCountdownManager:
                     self._countdown_states[chat_id] = new_state
 
                     self.logger.debug(
-                        "countdown_tick",
+                        "Countdown tick",
                         extra={
                             'event_type': 'countdown_tick',
                             'chat_id': chat_id,
