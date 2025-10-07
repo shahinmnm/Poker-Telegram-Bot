@@ -80,6 +80,8 @@ from pokerapp.stats_reporter import StatsReporter
 from pokerapp.translations import translate
 from pokerapp.query_optimizer import QueryBatcher
 
+PERSIAN_DIGIT_MAP = str.maketrans("0123456789", "۰۱۲۳۴۵۶۷۸۹")
+
 _GAME_CONSTANTS = get_game_constants()
 _GAME_SECTION = _GAME_CONSTANTS.game
 _UI_SECTION = _GAME_CONSTANTS.ui
@@ -1040,21 +1042,55 @@ class PokerBotModel:
         elif countdown <= 0:
             lines.append("🚀 بازی در حال شروع است...")
         else:
-            lines.append(f"⏳ بازی در {countdown} ثانیه شروع می‌شود.")
+            seconds_remaining = max(0, int(countdown))
             anchor = anchor_time or now_utc()
             if anchor.tzinfo is None or anchor.tzinfo.utcoffset(anchor) is None:
                 anchor = anchor.replace(tzinfo=datetime.timezone.utc)
-            seconds_total = (
+            resolved_total = (
                 int(total_seconds)
                 if isinstance(total_seconds, (int, float)) and total_seconds > 0
-                else max(int(countdown), 0)
+                else max(seconds_remaining, 1)
             )
-            target_time = anchor + datetime.timedelta(seconds=seconds_total)
-            localized = format_local(
-                target_time, self._timezone_name, fmt="%H:%M:%S"
-            )
-            lines.append(f"🕒 زمان تقریبی شروع: {localized}")
-            lines.append("🚀 برای شروع سریع‌تر بازی /start را بزنید یا صبر کنید.")
+            resolved_total = max(resolved_total, 1)
+            seconds_remaining = min(seconds_remaining, resolved_total)
+            progress_ratio = seconds_remaining / resolved_total
+            segments = 15
+            filled = min(segments, max(0, int(progress_ratio * segments)))
+            empty = segments - filled
+            if seconds_remaining == 0:
+                emoji = "🚀"
+                urgency_line = "🚀 *بازی شروع شد!*"
+            elif seconds_remaining <= 3:
+                emoji = "🔥"
+                urgency_line = "🔥 *آخرین فرصت!*"
+            elif seconds_remaining <= 10:
+                emoji = "🟨"
+                urgency_line = "⚡ عجله کنید!"
+            else:
+                emoji = "🟩"
+                urgency_line = "⚡ برای پیوستن /join را بزنید!"
+            bar_emojis = (emoji * filled) + ("⬜" * empty)
+            ascii_filled = "█" * (filled * 2)
+            ascii_pulse = "▓" if 0 < seconds_remaining <= 10 else ""
+            ascii_empty = "░" * max(0, (empty * 2) - len(ascii_pulse))
+            ascii_bar = ascii_filled + ascii_pulse + ascii_empty
+            percentage = int(progress_ratio * 100)
+            remaining_fa = str(seconds_remaining).translate(PERSIAN_DIGIT_MAP)
+            pct_fa = str(percentage).translate(PERSIAN_DIGIT_MAP)
+            lines.append("🎯 *شمارش معکوس شروع بازی*")
+            lines.append("")
+            lines.append(bar_emojis)
+            lines.append(f"`{ascii_bar}` {pct_fa}٪")
+            lines.append("")
+            lines.append(f"⏰ زمان باقی‌مانده: *{remaining_fa}* ثانیه")
+            lines.append(urgency_line)
+            if seconds_remaining > 0:
+                target_time = anchor + datetime.timedelta(seconds=resolved_total)
+                localized = format_local(
+                    target_time, self._timezone_name, fmt="%H:%M:%S"
+                )
+                lines.append(f"🕒 زمان تقریبی شروع: {localized}")
+                lines.append("🚀 برای شروع سریع‌تر بازی /start را بزنید یا صبر کنید.")
 
         text = "\n".join(lines)
 

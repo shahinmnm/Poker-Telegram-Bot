@@ -38,7 +38,6 @@ import hashlib
 import inspect
 import logging
 import json
-import math
 import threading
 import time
 from cachetools import FIFOCache, LRUCache
@@ -754,11 +753,7 @@ class PokerBotViewer:
             maxsize=4096
         )
         self._stage_payload_hash_lock = asyncio.Lock()
-        self._prestart_countdown_tasks: Dict[Tuple[int, str], asyncio.Task[None]] = {}
-        self._prestart_countdown_lock = asyncio.Lock()
-        self._countdown_lock = asyncio.Lock()
-        self._countdown_state: Dict[Tuple[int, str], Dict[str, Any]] = {}
-        self._last_edit_time: Dict[Tuple[int, str], float] = {}
+        # DEPRECATED: Use SmartCountdownManager instead of legacy countdown tracking.
         self._countdown_transition_pending: Set[int] = set()
         self._countdown_transition_lock = threading.Lock()
         self._pending_updates: Dict[
@@ -784,52 +779,19 @@ class PokerBotViewer:
     async def _cancel_prestart_countdown(
         self, chat_id: ChatId, game_id: Optional[int | str] = None
     ) -> None:
-        """Cancel and cleanup a running countdown while respecting the lock order.
+        """Cancel a legacy countdown if one was previously scheduled."""
 
-        The countdown state is guarded by ``_countdown_lock`` while the task registry
-        uses ``_prestart_countdown_lock``.  To avoid deadlocks with
-        ``start_prestart_countdown`` (which first grabs ``_prestart_countdown_lock``
-        before entering ``_countdown_lock``) we acquire the locks in the same order
-        here.  This ensures both helpers observe a consistent lock hierarchy even
-        when they race to replace or cancel the same countdown task.
-        """
+        # DEPRECATED: Use SmartCountdownManager instead
         normalized_chat = self._safe_int(chat_id)
         normalized_game = str(game_id) if game_id is not None else "0"
-        key = (normalized_chat, normalized_game)
-        task: Optional[asyncio.Task[None]]
-        async with self._prestart_countdown_lock:
-            async with self._countdown_lock:
-                task = self._prestart_countdown_tasks.pop(key, None)
-                if task is None:
-                    return
-
-                task.cancel()
-                logger.info(
-                    "[Countdown] Cancelled prestart countdown for chat %s game %s",
-                    normalized_chat,
-                    normalized_game,
-                )
-
-                self._countdown_state.pop(key, None)
-                self._last_edit_time.pop(key, None)
-
-        self._mark_countdown_transition_pending(normalized_chat)
-        try:
-            # ``wait_for`` prevents hanging when the task ignores cancellation; 2
-            # seconds is long enough for the task to finish its current iteration
-            # (which may include a rate-limited Telegram edit) yet short enough to
-            # release the caller and avoid head-of-line blocking the event loop.
-            await asyncio.wait_for(task, timeout=2.0)
-        except asyncio.CancelledError:
-            pass
-        except asyncio.TimeoutError:
-            logger.warning(
-                "[Countdown] Task cancellation timeout for chat %s game %s",
-                normalized_chat,
-                normalized_game,
-            )
-        finally:
-            self._clear_countdown_transition_pending(chat_id)
+        logger.debug(
+            "[Countdown] Legacy cancel request ignored",
+            extra={
+                "chat_id": normalized_chat,
+                "game_id": normalized_game,
+            },
+        )
+        self._clear_countdown_transition_pending(chat_id)
 
     def _mark_countdown_transition_pending(self, normalized_chat: int) -> None:
         if normalized_chat == 0:
@@ -851,199 +813,19 @@ class PokerBotViewer:
             return normalized_chat in self._countdown_transition_pending
 
     async def _is_countdown_active(self, chat_id: ChatId) -> bool:
-        """Return True when a prestart countdown task exists for the chat."""
+        """Return ``False`` because legacy countdown tasks are disabled."""
 
-        normalized_chat = self._safe_int(chat_id)
-        if normalized_chat == 0:
-            return False
-
-        async with self._prestart_countdown_lock:
-            for (chat_key, _), task in self._prestart_countdown_tasks.items():
-                if chat_key != normalized_chat:
-                    continue
-                if task is None:
-                    continue
-                if not task.done():
-                    return True
-
+        # DEPRECATED: Use SmartCountdownManager instead
         return False
 
     @staticmethod
     def _describe_countdown_guard_source(
         *, task_active: bool, transition_pending: bool
     ) -> str:
-        sources: List[str] = []
-        if task_active:
-            sources.append("task")
-        if transition_pending:
-            sources.append("transition")
-        return ",".join(sources) if sources else "none"
+        """Describe the guard source for legacy countdowns (always ``"none"``)."""
 
-    def _create_countdown_task(
-        self,
-        normalized_chat: int,
-        normalized_game: str,
-        anchor_message_id: Optional[int],
-        end_time: float,
-        payload_fn: Callable[[int], Tuple[str, Optional[InlineKeyboardMarkup | ReplyKeyboardMarkup]]],
-        on_complete: Optional[Callable[[], Awaitable[None]]],
-        task_started_mono: float,
-    ) -> asyncio.Task[None]:
-        """
-        Return an asyncio.Task that runs a per-second countdown until end_time.
-
-        payload_fn(seconds_left:int) -> (text:str, reply_markup|None)
-
-        The task uses schedule_message_update if available, otherwise falls back to _update_message.
-        It cleans up self._prestart_countdown_tasks entry when finished or cancelled.
-        """
-
-        async def _run() -> None:
-            current_message_id = anchor_message_id
-            completed = False
-            try:
-                loop = asyncio.get_event_loop()
-                key = (normalized_chat, normalized_game)
-                last_monotonic = task_started_mono
-                while True:
-                    # ``loop.time`` returns a monotonic clock that is immune to
-                    # system wall-clock adjustments.  Using it here keeps the
-                    # countdown stable even if the host clock jumps backwards or
-                    # forwards while we are running.
-                    now = loop.time()
-                    seconds_left = max(0, int(round(end_time - now)))
-                    async with self._countdown_lock:
-                        state = self._countdown_state.get(key)
-                        if state is None:
-                            logger.debug(
-                                "[Countdown] State missing for chat %s game %s; stopping",
-                                normalized_chat,
-                                normalized_game,
-                            )
-                            break
-                        started_mono = state.get("task_started_mono")
-                        if isinstance(started_mono, (int, float)) and not math.isclose(
-                            started_mono,
-                            task_started_mono,
-                            rel_tol=0.0,
-                            abs_tol=1e-6,
-                        ):
-                            logger.debug(
-                                "[Countdown] Detected newer task for chat %s game %s; stopping",
-                                normalized_chat,
-                                normalized_game,
-                            )
-                            break
-                    try:
-                        text, reply_markup = payload_fn(seconds_left)
-                    except Exception:
-                        logger.exception("[Countdown] payload_fn failed")
-                        text, reply_markup = "", None
-                    try:
-                        schedule = getattr(self, "schedule_message_update", None)
-                        if callable(schedule):
-                            result = await schedule(
-                                chat_id=normalized_chat,
-                                message_id=current_message_id,
-                                text=text,
-                                reply_markup=reply_markup,
-                                request_category=RequestCategory.ANCHOR,
-                            )
-                        else:
-                            result = await self._update_message(
-                                chat_id=normalized_chat,
-                                message_id=current_message_id,
-                                text=text,
-                                reply_markup=reply_markup,
-                                request_category=RequestCategory.ANCHOR,
-                            )
-                    except asyncio.CancelledError:
-                        raise
-                    except Exception:
-                        logger.exception("[Countdown] failed to send countdown tick")
-                    else:
-                        if isinstance(result, int):
-                            current_message_id = result
-                        elif hasattr(result, "message_id"):
-                            maybe_id = getattr(result, "message_id", None)
-                            if isinstance(maybe_id, int):
-                                current_message_id = maybe_id
-                        elif result is not None:
-                            try:
-                                current_message_id = int(result)
-                            except (TypeError, ValueError):
-                                pass
-                    monotonic_after_update = time.monotonic()
-                    elapsed = monotonic_after_update - last_monotonic
-                    if elapsed < 0 or elapsed > 5:
-                        logger.warning(
-                            "[Countdown] Time anomaly detected: elapsed=%.2fs",
-                            elapsed,
-                            extra={
-                                "chat_id": normalized_chat,
-                                "game_id": normalized_game,
-                                "anchor": current_message_id,
-                            },
-                        )
-                        elapsed = 1.0
-                    async with self._countdown_lock:
-                        state = self._countdown_state.get(key)
-                        if state is not None:
-                            state["last_update_mono"] = monotonic_after_update
-                            state["seconds_left"] = seconds_left
-                    self._last_edit_time[key] = loop.time()
-                    last_monotonic = monotonic_after_update
-                    if seconds_left <= 0:
-                        completed = True
-                        break
-                    sleep_duration = max(0.0, 1.0 - min(max(elapsed, 0.0), 1.0))
-                    if sleep_duration:
-                        await asyncio.sleep(sleep_duration)
-            except asyncio.CancelledError:
-                logger.debug(
-                    "[Countdown] Task cancelled for chat %s game %s",
-                    normalized_chat,
-                    normalized_game,
-                )
-                raise
-            finally:
-                mark_transition_pending = False
-                async with self._prestart_countdown_lock:
-                    async with self._countdown_lock:
-                        existing = self._prestart_countdown_tasks.get(
-                            (normalized_chat, normalized_game)
-                        )
-                        if existing is asyncio.current_task():
-                            self._prestart_countdown_tasks.pop(
-                                (normalized_chat, normalized_game), None
-                            )
-                            self._countdown_state.pop(
-                                (normalized_chat, normalized_game), None
-                            )
-                            self._last_edit_time.pop(
-                                (normalized_chat, normalized_game), None
-                            )
-                            mark_transition_pending = True
-                if mark_transition_pending:
-                    self._mark_countdown_transition_pending(normalized_chat)
-                logger.info(
-                    "[Countdown] Prestart countdown finished for chat %s game %s",
-                    normalized_chat,
-                    normalized_game,
-                )
-                if completed and on_complete is not None:
-                    try:
-                        await on_complete()
-                    except Exception:
-                        logger.exception(
-                            "[Countdown] Countdown completion handler failed",
-                            extra={
-                                "chat_id": normalized_chat,
-                                "game_id": normalized_game,
-                            },
-                        )
-
-        return asyncio.create_task(_run())
+        # DEPRECATED: Use SmartCountdownManager instead
+        return "none"
 
     async def start_prestart_countdown(
         self,
@@ -1054,47 +836,33 @@ class PokerBotViewer:
         payload_fn: Callable[[int], Tuple[str, Optional[InlineKeyboardMarkup | ReplyKeyboardMarkup]]],
         on_complete: Optional[Callable[[], Awaitable[None]]] = None,
     ) -> None:
-        """
-        Start or replace a per-chat prestart countdown.
+        """Send a single countdown update while deferring to SmartCountdownManager."""
 
-        payload_fn(seconds_left:int) -> (text, reply_markup)
-        """
-
+        # DEPRECATED: Use SmartCountdownManager instead
         normalized_chat = self._safe_int(chat_id)
-        normalized_game = str(game_id)
-        end_time = asyncio.get_event_loop().time() + max(0, int(seconds))
-        async with self._prestart_countdown_lock:
-            async with self._countdown_lock:
-                key = (normalized_chat, normalized_game)
-                old = self._prestart_countdown_tasks.get(key)
-                if old is not None:
-                    old.cancel()
-                task_started_mono = time.monotonic()
-                task = self._create_countdown_task(
-                    normalized_chat,
-                    normalized_game,
-                    anchor_message_id,
-                    end_time,
-                    payload_fn,
-                    on_complete,
-                    task_started_mono,
-                )
-                self._prestart_countdown_tasks[key] = task
-                self._countdown_state[key] = {
-                    "end_time": end_time,
-                    "seconds": max(0, int(seconds)),
-                    "anchor_message_id": anchor_message_id,
-                    "task_started_mono": task_started_mono,
-                    "last_update_mono": task_started_mono,
-                }
-                self._last_edit_time[key] = asyncio.get_event_loop().time()
-        logger.info(
-            "[Countdown] Started prestart countdown for chat %s game %s seconds=%s anchor=%s",
-            normalized_chat,
-            normalized_game,
-            seconds,
-            anchor_message_id,
-        )
+        seconds_left = max(0, int(seconds))
+        try:
+            text, reply_markup = payload_fn(seconds_left)
+        except Exception:
+            logger.exception("[Countdown] Legacy payload_fn failed")
+            return
+
+        update_kwargs = {
+            "chat_id": normalized_chat,
+            "message_id": anchor_message_id,
+            "text": text,
+            "reply_markup": reply_markup,
+            "request_category": RequestCategory.ANCHOR,
+        }
+
+        schedule = getattr(self, "schedule_message_update", None)
+        try:
+            if callable(schedule):
+                await schedule(**update_kwargs)
+            else:
+                await self._update_message(**update_kwargs)
+        except Exception:
+            logger.exception("[Countdown] Failed to send legacy countdown update")
 
     def _payload_hash(
         self,

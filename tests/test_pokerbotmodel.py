@@ -711,9 +711,9 @@ async def test_auto_start_tick_starts_prestart_countdown_and_updates_state():
     assert countdown_call.kwargs["seconds"] == 5
     payload_fn = countdown_call.kwargs["payload_fn"]
     initial_text = game.ready_message_main_text
-    assert "5 ثانیه" in initial_text
+    assert "⏰ زمان باقی‌مانده: *۵* ثانیه" in initial_text
     preview_text, _ = payload_fn(3)
-    assert "3 ثانیه" in preview_text
+    assert "⏰ زمان باقی‌مانده: *۳* ثانیه" in preview_text
     state = context.chat_data[KEY_START_COUNTDOWN_CONTEXT][(chat_id, str(game.id))]
     assert state["seconds"] == 4
     assert state["active"] is True

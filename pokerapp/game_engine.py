@@ -63,7 +63,6 @@ from pokerapp.utils.telegram_safeops import TelegramSafeOps
 from pokerapp.utils.cache import AdaptivePlayerReportCache
 from pokerapp.utils.common import normalize_player_ids
 from pokerapp.matchmaking_service import MatchmakingService
-from pokerapp.services.countdown_queue import CountdownMessageQueue
 from pokerapp.countdown_manager import SmartCountdownManager
 from pokerapp.player_manager import PlayerManager
 from pokerapp.stats_reporter import StatsReporter
@@ -455,7 +454,6 @@ class GameEngine:
         )
         self._player_factory = player_factory
         self._initialize_stop_translations()
-        self._countdown_queue = CountdownMessageQueue(max_size=100)
         self._countdown_contexts: Dict[int, ContextTypes.DEFAULT_TYPE] = {}
         self._smart_countdown_manager: Optional[SmartCountdownManager] = None
         self._smart_countdown_start_task: Optional[asyncio.Task[None]] = None
@@ -3195,9 +3193,19 @@ class GameEngine:
         *,
         context: Optional[ContextTypes.DEFAULT_TYPE] = None,
     ) -> None:
-        """Start or restart the pre-game countdown using the queue system."""
+        """Start or restart the pre-game countdown using SmartCountdownManager."""
 
-        await self._countdown_queue.cancel_countdown_for_chat(chat_id)
+        countdown_manager = self._smart_countdown_manager
+        if countdown_manager is None:
+            self._logger.debug(
+                "Cannot start prestart countdown; SmartCountdownManager unavailable",
+                extra={
+                    "chat_id": self._safe_int(chat_id),
+                    "duration": duration_seconds,
+                    "event_type": "countdown_manager_missing",
+                },
+            )
+            return
 
         if context is not None:
             self._countdown_contexts[chat_id] = context
@@ -3218,66 +3226,45 @@ class GameEngine:
             )
             return
 
-        def format_countdown(remaining: float) -> str:
-            seconds = max(0, int(remaining))
-            if seconds == 0:
-                return "🎮 Game starting now!"
-            return f"⏳ Game starts in {seconds} second{'s' if seconds != 1 else ''}..."
-
-        async def on_countdown_complete() -> None:
+        async def on_countdown_complete(completed_chat_id: int) -> None:
             try:
-                await self._handle_countdown_completion(chat_id)
+                await self._handle_countdown_completion(completed_chat_id)
             except Exception:
                 self._logger.exception(
                     "Error in countdown completion handler",
-                    extra={"chat_id": self._safe_int(chat_id)},
+                    extra={"chat_id": self._safe_int(completed_chat_id)},
                 )
 
         try:
-            await self._countdown_queue.enqueue(
+            await countdown_manager.start_countdown(
                 chat_id=chat_id,
-                message_id=message_id,
-                text="⏳ Starting...",
-                duration_seconds=float(duration_seconds),
-                formatter=format_countdown,
+                duration=duration_seconds,
+                player_count=game.seated_count(),
+                pot_size=int(getattr(game, "pot", 0)),
                 on_complete=on_countdown_complete,
+                message_id=message_id,
             )
-        except asyncio.QueueFull:
-            self._logger.error(
-                "Countdown queue is full",
-                extra={"chat_id": self._safe_int(chat_id)},
+        except Exception:
+            self._logger.debug(
+                "Failed to start smart countdown",
+                extra={
+                    "event_type": "countdown_start_failed",
+                    "chat_id": self._safe_int(chat_id),
+                    "duration": duration_seconds,
+                },
+                exc_info=True,
             )
             return
 
         self._logger.info(
-            "Prestart countdown enqueued",
+            "Prestart countdown started",
             extra={
                 "chat_id": self._safe_int(chat_id),
                 "message_id": message_id,
                 "duration": duration_seconds,
+                "event_type": "countdown_start",
             },
         )
-
-        countdown_manager = self._smart_countdown_manager
-        if countdown_manager is not None:
-            try:
-                await countdown_manager.start_countdown(
-                    chat_id=chat_id,
-                    duration=duration_seconds,
-                    player_count=game.seated_count(),
-                    pot_size=int(getattr(game, "pot", 0)),
-                    message_id=message_id,
-                )
-            except Exception:
-                self._logger.debug(
-                    "Failed to start smart countdown",
-                    extra={
-                        "event_type": "countdown_start_failed",  # reuse tag for visibility
-                        "chat_id": self._safe_int(chat_id),
-                        "duration": duration_seconds,
-                    },
-                    exc_info=True,
-                )
 
     async def _handle_countdown_completion(self, chat_id: int) -> None:
         """Called when pre-start countdown finishes."""
@@ -3363,45 +3350,27 @@ class GameEngine:
         """Cancel any active countdown for this chat."""
 
         self._countdown_contexts.pop(chat_id, None)
-        cancelled = await self._countdown_queue.cancel_countdown_for_chat(chat_id)
-
         countdown_manager = self._smart_countdown_manager
-        if countdown_manager is not None:
-            try:
-                await countdown_manager.cancel_countdown(chat_id)
-            except Exception:
-                self._logger.debug(
-                    "Countdown cancel hook failed",
-                    extra={
-                        "event_type": "countdown_cancel_hook_failed",
-                        "chat_id": self._safe_int(chat_id),
-                    },
-                    exc_info=True,
-                )
-
-        try:
-            game = await self._table_manager.get_game(chat_id)
-        except Exception:
-            game = None
-
-        message_id = getattr(game, "ready_message_main_id", None) if game else None
-        if message_id is not None:
-            self._countdown_queue.cancel_countdown(chat_id, message_id)
+        if countdown_manager is None:
             self._logger.debug(
-                "Cancelled prestart countdown",
+                "Skipping prestart countdown cancel; SmartCountdownManager unavailable",
                 extra={
                     "chat_id": self._safe_int(chat_id),
-                    "message_id": message_id,
-                    "cancelled_entries": cancelled,
+                    "event_type": "countdown_manager_missing",
                 },
             )
-        elif cancelled:
+            return
+
+        try:
+            await countdown_manager.cancel_countdown(chat_id)
+        except Exception:
             self._logger.debug(
-                "Cancelled prestart countdown entries without anchor",
+                "Countdown cancel hook failed",
                 extra={
+                    "event_type": "countdown_cancel_hook_failed",
                     "chat_id": self._safe_int(chat_id),
-                    "cancelled_entries": cancelled,
                 },
+                exc_info=True,
             )
 
     async def start(self) -> None:
