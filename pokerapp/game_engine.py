@@ -468,10 +468,7 @@ class GameEngine:
                     redis_client=redis_client,
                     logger=countdown_logger or logger,
                 )
-                # CRITICAL FIX: Start the batch worker
-                if self._smart_countdown_manager is not None:
-                    asyncio.create_task(self._smart_countdown_manager.start())
-                    self._logger.info("SmartCountdownManager initialized and started")
+                self._logger.info("SmartCountdownManager initialized")
             except Exception:
                 self._logger.warning(
                     "Failed to initialize SmartCountdownManager", exc_info=True
