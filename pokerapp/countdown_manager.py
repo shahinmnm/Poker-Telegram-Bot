@@ -675,39 +675,27 @@ class SmartCountdownManager:
         Generate the visual countdown message
         Using PERSIAN THEMED design (most eye-catching)
         """
-        # Progress calculation
-        progress = state.remaining_seconds / state.total_seconds
-        filled = int(progress * 15)
-        empty = 15 - filled
+        total_seconds = max(state.total_seconds, 1)
+        remaining_seconds = max(0, min(state.remaining_seconds, total_seconds))
+        progress_ratio = remaining_seconds / total_seconds if total_seconds else 0
 
-        # Dynamic emoji based on urgency
-        if state.remaining_seconds == 0:
-            emoji = '🚀'
+        filled_blocks = max(0, min(20, int(progress_ratio * 20)))
+        empty_blocks = 20 - filled_blocks
+
+        if remaining_seconds == 0:
             urgency_msg = '<b>🎮 بازی شروع شد!</b>'
-        elif state.remaining_seconds <= 3:
-            emoji = '🔥'
+        elif remaining_seconds <= 3:
             urgency_msg = '<b>🔥 آخرین فرصت!</b>'
-        elif state.remaining_seconds <= 10:
-            emoji = '🟨'
+        elif remaining_seconds <= 10:
             urgency_msg = '⚡ عجله کنید!'
         else:
-            emoji = '🟩'
             urgency_msg = '⚡ برای پیوستن /join را بزنید!'
 
-        # Build progress bar
-        bar_emojis = (emoji * filled) + ('⬜' * empty)
-
-        # ASCII progress bar
-        ascii_filled = '█' * (filled * 2)
-        ascii_pulse = '▓' if state.remaining_seconds <= 10 else ''
-        ascii_bar = (
-            ('█' * (filled * 2)) + ascii_pulse + ('░' * max((empty * 2) - len(ascii_pulse), 0))
-        )
-
-        percentage = int(progress * 100)
+        percentage = max(0, min(100, int(progress_ratio * 100)))
+        bar = ('█' * filled_blocks) + ('░' * empty_blocks)
 
         # Persian number conversion using the shared translation map
-        remaining_fa = to_persian_digits(state.remaining_seconds)
+        remaining_fa = to_persian_digits(remaining_seconds)
         players_fa = to_persian_digits(state.player_count)
         pot_fa = to_persian_digits(state.pot_size)
         pct_fa = to_persian_digits(percentage)
@@ -717,8 +705,7 @@ class SmartCountdownManager:
 
 ⏰ زمان باقی‌مانده: <b>{remaining_fa}</b> ثانیه
 
-{bar_emojis}
-<code>{ascii_bar}</code> {pct_fa}٪
+{bar} {pct_fa}٪
 
 👥 بازیکنان: <b>{players_fa}</b> نفر
 💰 پات: <b>{pot_fa}</b> سکه
