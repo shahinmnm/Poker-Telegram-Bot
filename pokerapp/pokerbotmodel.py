@@ -79,8 +79,7 @@ from pokerapp.utils.telegram_safeops import TelegramSafeOps
 from pokerapp.stats_reporter import StatsReporter
 from pokerapp.translations import translate
 from pokerapp.query_optimizer import QueryBatcher
-
-PERSIAN_DIGIT_MAP = str.maketrans("0123456789", "۰۱۲۳۴۵۶۷۸۹")
+from pokerapp.utils.locale_utils import PERSIAN_DIGIT_MAP, to_persian_digits
 
 _GAME_CONSTANTS = get_game_constants()
 _GAME_SECTION = _GAME_CONSTANTS.game
@@ -1075,8 +1074,8 @@ class PokerBotModel:
             ascii_empty = "░" * max(0, (empty * 2) - len(ascii_pulse))
             ascii_bar = ascii_filled + ascii_pulse + ascii_empty
             percentage = int(progress_ratio * 100)
-            remaining_fa = str(seconds_remaining).translate(PERSIAN_DIGIT_MAP)
-            pct_fa = str(percentage).translate(PERSIAN_DIGIT_MAP)
+            remaining_fa = to_persian_digits(seconds_remaining)
+            pct_fa = to_persian_digits(percentage)
             lines.append("🎯 *شمارش معکوس شروع بازی*")
             lines.append("")
             lines.append(bar_emojis)

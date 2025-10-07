@@ -9,7 +9,7 @@ from contextlib import suppress
 
 from telegram.error import TelegramError
 
-from pokerapp.pokerbotmodel import PERSIAN_DIGIT_MAP
+from pokerapp.utils.locale_utils import to_persian_digits
 
 
 @dataclass
@@ -482,10 +482,10 @@ class SmartCountdownManager:
         percentage = int(progress * 100)
 
         # Persian number conversion using the shared translation map
-        remaining_fa = str(state.remaining_seconds).translate(PERSIAN_DIGIT_MAP)
-        players_fa = str(state.player_count).translate(PERSIAN_DIGIT_MAP)
-        pot_fa = str(state.pot_size).translate(PERSIAN_DIGIT_MAP)
-        pct_fa = str(percentage).translate(PERSIAN_DIGIT_MAP)
+        remaining_fa = to_persian_digits(state.remaining_seconds)
+        players_fa = to_persian_digits(state.player_count)
+        pot_fa = to_persian_digits(state.pot_size)
+        pct_fa = to_persian_digits(percentage)
 
         return f"""
 🎮 <b>بازی در حال شروع...</b>
