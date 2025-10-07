@@ -5,6 +5,7 @@ from typing import Dict, Optional, Callable
 from dataclasses import dataclass, field
 from collections import deque
 from enum import Enum
+from contextlib import suppress
 
 from telegram.error import TelegramError
 
@@ -76,7 +77,8 @@ class SmartCountdownManager:
             'updates_sent': 0,
             'updates_skipped': 0,
             'players_joined_during_countdown': 0,
-            'api_calls_saved': 0
+            'api_calls_saved': 0,
+            'state_missing_events': 0,
         }
 
         # Batching worker
@@ -84,6 +86,31 @@ class SmartCountdownManager:
 
     async def start(self):
         """Initialize the countdown manager"""
+        existing_task = self._batch_worker_task
+        if existing_task is not None:
+            if not existing_task.done():
+                self.logger.debug(
+                    "SmartCountdownManager.start called while already running",
+                    extra={'event_type': 'countdown_batch_worker_running'},
+                )
+                return
+
+            if existing_task.cancelled():
+                self.logger.debug(
+                    "Previous batch worker was cancelled before restart",
+                    extra={'event_type': 'countdown_batch_worker_cancelled'},
+                )
+            else:
+                exception = existing_task.exception()
+                if exception is not None:
+                    self.logger.warning(
+                        "Previous batch worker exited with exception: %s",
+                        exception,
+                        extra={'event_type': 'countdown_batch_worker_failed'},
+                    )
+
+            self._batch_worker_task = None
+
         self._batch_worker_task = asyncio.create_task(self._batch_worker())
         self.logger.info("SmartCountdownManager started")
 
@@ -91,11 +118,26 @@ class SmartCountdownManager:
         """Cleanup all active countdowns"""
         # Cancel all active countdowns
         for task in self._active_countdowns.values():
-            task.cancel()
+            if not task.done():
+                task.cancel()
+
+        for task in list(self._active_countdowns.values()):
+            if task.done():
+                continue
+            with suppress(asyncio.CancelledError):
+                await task
 
         # Cancel batch worker
         if self._batch_worker_task:
             self._batch_worker_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await self._batch_worker_task
+            self._batch_worker_task = None
+
+        self._active_countdowns.clear()
+        self._countdown_states.clear()
+        self._pending_updates.clear()
+        self._countdown_messages.clear()
 
         self.logger.info(
             f"SmartCountdownManager stopped. Metrics: {self._metrics}"
@@ -268,6 +310,7 @@ class SmartCountdownManager:
                                 'chat_id': chat_id,
                             },
                         )
+                        self._metrics['state_missing_events'] += 1
                         break
 
                     new_state = CountdownState(
