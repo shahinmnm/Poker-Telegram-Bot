@@ -7,6 +7,13 @@ game:
   small_blind: 5
   default_money: 1000
   max_time_for_turn_seconds: 120
+  hybrid_countdown:
+    duration_seconds: 30
+    milestones: [30, 15, 5, 0]
+    traffic_light_thresholds:
+      waiting: 0
+      ready: 2
+      starting: 15
   auto_start:
     max_updates_per_minute: 20
     min_update_interval_seconds: 3
@@ -14,6 +21,16 @@ game:
 ui:
   description_file: "assets/description_bot.md"
   stages_persian: ["پری فلاپ", "فلاپ", "ترن", "ریور"]
+  countdown_states:
+    waiting: "🔴 منتظر بازیکنان"
+    ready: "🟡 آماده شروع!"
+    starting: "🟢 در حال شروع..."
+    started: "🎉 بازی شروع شد!"
+  progress_bars:
+    30: "🟩🟩🟩🟩🟩"
+    15: "🟩🟩🟩⬜⬜"
+    5: "🟩⬜⬜⬜⬜"
+    0: "⬜⬜⬜⬜⬜"
   stage_map:
     ROUND_PRE_FLOP: "پری فلاپ"
     PRE_FLOP: "پری فلاپ"
