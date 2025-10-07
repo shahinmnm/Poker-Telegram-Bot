@@ -22,7 +22,6 @@ import warnings
 from collections import defaultdict
 from dataclasses import dataclass
 from contextlib import asynccontextmanager, suppress
-from pathlib import Path
 from typing import (
     Any,
     AsyncIterator,
@@ -669,16 +668,6 @@ class GameEngine:
                     },
                 )
 
-        callsite = "unknown"
-        frame = inspect.currentframe()
-        if frame is not None:
-            caller = frame.f_back
-            if caller is not None:
-                code = caller.f_code
-                callsite = f"{Path(code.co_filename).name}:{caller.f_lineno}"
-            del caller
-        del frame
-
         try:
             await countdown_manager.start_countdown(
                 chat_id=chat_id,
@@ -696,7 +685,6 @@ class GameEngine:
                     "chat_id": chat_id,
                     "duration": duration,
                     "trigger": trigger,
-                    "callsite": callsite,
                 },
                 exc_info=True,
             )
@@ -711,7 +699,6 @@ class GameEngine:
                 "player_count": player_count,
                 "pot_size": pot_size,
                 "trigger": trigger,
-                "callsite": callsite,
             },
         )
 
