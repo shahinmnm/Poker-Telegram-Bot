@@ -356,6 +356,56 @@ class SmartCountdownManager:
         self._pending_updates.pop(chat_id, None)
         self._countdown_messages.pop(chat_id, None)
 
+    def is_countdown_active(self, chat_id: int) -> bool:
+        """Return ``True`` when an unfinished countdown task exists for ``chat_id``."""
+
+        task = self._active_countdowns.get(chat_id)
+        if task is None:
+            if chat_id in self._countdown_states:
+                self.logger.debug(
+                    "Countdown state exists without active task",
+                    extra={
+                        'event_type': 'countdown_state_without_task',
+                        'chat_id': chat_id,
+                    }
+                )
+            return False
+
+        if task.cancelled():
+            self.logger.debug(
+                "Countdown task found but already cancelled",
+                extra={
+                    'event_type': 'countdown_task_cancelled',
+                    'chat_id': chat_id,
+                    'task_id': id(task),
+                }
+            )
+            return False
+
+        if task.done():
+            self.logger.debug(
+                "Countdown task found but already completed",
+                extra={
+                    'event_type': 'countdown_task_done',
+                    'chat_id': chat_id,
+                    'task_id': id(task),
+                }
+            )
+            return False
+
+        # Optional state consistency check
+        if chat_id not in self._countdown_states:
+            self.logger.debug(
+                "Active countdown task missing state",
+                extra={
+                    'event_type': 'countdown_task_without_state',
+                    'chat_id': chat_id,
+                    'task_id': id(task),
+                }
+            )
+
+        return True
+
     async def _run_countdown(
         self,
         chat_id: int,
