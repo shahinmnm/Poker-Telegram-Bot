@@ -1,6 +1,7 @@
 import asyncio
 import time
 import logging
+import traceback
 from typing import Dict, Optional, Callable
 from dataclasses import dataclass, field
 from collections import deque
@@ -76,6 +77,9 @@ class SmartCountdownManager:
 
         # Message tracking
         self._countdown_messages: Dict[int, int] = {}  # chat_id → message_id
+
+        # Metadata for diagnostics
+        self._countdown_metadata: Dict[int, str] = {}
 
         # Performance metrics
         self._metrics = {
@@ -171,12 +175,20 @@ class SmartCountdownManager:
         Returns:
             True if countdown started successfully
         """
-        # Cancel existing countdown for this chat
-        if chat_id in self._active_countdowns:
+        existing_task = self._active_countdowns.get(chat_id)
+        if existing_task is not None and not existing_task.done():
             self.logger.warning(
-                f"Canceling existing countdown for chat {chat_id}"
+                "Duplicate countdown spawn detected; cancelling existing task",
+                extra={
+                    'event_type': 'countdown_duplicate_spawn',
+                    'chat_id': chat_id,
+                    'existing_task_id': id(existing_task),
+                    'existing_countdown_id': self._countdown_metadata.get(chat_id),
+                    'call_stack': ''.join(traceback.format_stack()),
+                }
             )
-            self._active_countdowns[chat_id].cancel()
+
+        await self.cancel_countdown(chat_id)
 
         # Initialize state
         initial_state = CountdownState(
@@ -201,15 +213,42 @@ class SmartCountdownManager:
                 self._countdown_messages[chat_id] = anchor_message_id
                 await self._update_countdown_message(initial_state)
 
+            countdown_id = f"{chat_id}_{int(time.time() * 1000)}"
+            self._countdown_metadata[chat_id] = countdown_id
+
+            self.logger.info(
+                "Starting new countdown",
+                extra={
+                    'event_type': 'countdown_spawn',
+                    'chat_id': chat_id,
+                    'countdown_id': countdown_id,
+                    'duration': duration,
+                    'player_count': player_count,
+                    'pot_size': pot_size,
+                    'message_id': anchor_message_id,
+                }
+            )
+
             # Start countdown task
             countdown_task = asyncio.create_task(
-                self._run_countdown(chat_id, duration, on_complete)
+                self._run_countdown(
+                    chat_id=chat_id,
+                    duration=duration,
+                    on_complete=on_complete,
+                    countdown_id=countdown_id,
+                )
             )
             self._active_countdowns[chat_id] = countdown_task
 
             self.logger.info(
-                f"Started countdown for chat {chat_id}: {duration}s",
-                extra={'event_type': 'countdown_started', 'chat_id': chat_id}
+                "Countdown task spawned",
+                extra={
+                    'event_type': 'countdown_task_spawned',
+                    'chat_id': chat_id,
+                    'countdown_id': countdown_id,
+                    'task_id': id(countdown_task),
+                    'active_countdown_count': len(self._active_countdowns),
+                }
             )
 
             return True
@@ -286,8 +325,32 @@ class SmartCountdownManager:
         """Cancel an active countdown for ``chat_id`` if it exists."""
 
         task = self._active_countdowns.pop(chat_id, None)
+        countdown_id = self._countdown_metadata.pop(chat_id, None)
+
         if task is not None:
-            task.cancel()
+            if not task.done():
+                task.cancel()
+                with suppress(asyncio.CancelledError):
+                    await task
+                self.logger.info(
+                    "Countdown cancelled",
+                    extra={
+                        'event_type': 'countdown_cancelled',
+                        'chat_id': chat_id,
+                        'countdown_id': countdown_id,
+                        'task_id': id(task),
+                    }
+                )
+            else:
+                self.logger.debug(
+                    "Countdown task already finished before cancellation",
+                    extra={
+                        'event_type': 'countdown_cancelled_already_done',
+                        'chat_id': chat_id,
+                        'countdown_id': countdown_id,
+                        'task_id': id(task),
+                    }
+                )
 
         self._countdown_states.pop(chat_id, None)
         self._pending_updates.pop(chat_id, None)
@@ -297,9 +360,22 @@ class SmartCountdownManager:
         self,
         chat_id: int,
         duration: int,
-        on_complete: Optional[Callable]
+        on_complete: Optional[Callable],
+        countdown_id: Optional[str] = None,
     ):
         """Main countdown loop using monotonic clock to prevent second jumps"""
+        tick_count = 0
+        current_task = asyncio.current_task()
+        self.logger.info(
+            "Countdown loop started",
+            extra={
+                'event_type': 'countdown_loop_start',
+                'chat_id': chat_id,
+                'countdown_id': countdown_id,
+                'task_id': id(current_task) if current_task else None,
+            }
+        )
+
         try:
             start_time = time.monotonic()
             end_time = start_time + duration
@@ -313,6 +389,7 @@ class SmartCountdownManager:
 
                 if remaining != last_reported_second:
                     last_reported_second = remaining
+                    tick_count += 1
 
                     current_state = self._countdown_states.get(chat_id)
                     if current_state is None:
@@ -321,6 +398,7 @@ class SmartCountdownManager:
                             extra={
                                 'event_type': 'countdown_state_missing',
                                 'chat_id': chat_id,
+                                'countdown_id': countdown_id,
                             },
                         )
                         self._metrics['state_missing_events'] += 1
@@ -343,6 +421,17 @@ class SmartCountdownManager:
 
                     self._countdown_states[chat_id] = new_state
 
+                    self.logger.debug(
+                        "Countdown tick",
+                        extra={
+                            'event_type': 'countdown_tick',
+                            'chat_id': chat_id,
+                            'countdown_id': countdown_id,
+                            'tick_number': tick_count,
+                            'remaining': remaining,
+                        }
+                    )
+
                     if remaining == 0:
                         countdown_completed = True
                         break
@@ -350,7 +439,7 @@ class SmartCountdownManager:
                 if remaining == 0:
                     break
 
-                await asyncio.sleep(0.1)
+                await asyncio.sleep(1.0)
 
             if countdown_completed and on_complete:
                 await on_complete(chat_id)
@@ -362,15 +451,32 @@ class SmartCountdownManager:
 
         except asyncio.CancelledError:
             self.logger.info(
-                f"Countdown cancelled for chat {chat_id}",
-                extra={'event_type': 'countdown_cancelled', 'chat_id': chat_id}
+                "Countdown loop cancelled",
+                extra={
+                    'event_type': 'countdown_loop_cancelled',
+                    'chat_id': chat_id,
+                    'countdown_id': countdown_id,
+                    'tick_count': tick_count,
+                }
             )
+            raise
+
         finally:
-            # Cleanup
-            self._active_countdowns.pop(chat_id, None)
+            if self._active_countdowns.get(chat_id) is current_task:
+                self._active_countdowns.pop(chat_id, None)
+            self._countdown_metadata.pop(chat_id, None)
             self._countdown_states.pop(chat_id, None)
             self._pending_updates.pop(chat_id, None)
             self._countdown_messages.pop(chat_id, None)
+            self.logger.info(
+                "Countdown loop ended",
+                extra={
+                    'event_type': 'countdown_loop_end',
+                    'chat_id': chat_id,
+                    'countdown_id': countdown_id,
+                    'tick_count': tick_count,
+                }
+            )
 
     async def _batch_worker(self):
         """
