@@ -87,6 +87,25 @@ def _prepare_view_mock(view: MagicMock) -> MagicMock:
     return view
 
 
+def _make_model_and_game() -> Tuple[PokerBotModel, Game]:
+    cfg = MagicMock(DEBUG=False)
+    cfg.constants = get_game_constants()
+    kv = fakeredis.aioredis.FakeRedis()
+    view = _prepare_view_mock(MagicMock())
+    bot = MagicMock()
+    table_manager = MagicMock()
+    private_match_service = _make_private_match_service(kv, table_manager)
+    model = PokerBotModel(
+        view=view,
+        bot=bot,
+        cfg=cfg,
+        kv=kv,
+        table_manager=table_manager,
+        private_match_service=private_match_service,
+    )
+    return model, Game()
+
+
 class TestRoundRateModel(unittest.IsolatedAsyncioTestCase):
     def __init__(self, *args, **kwargs):
         super(TestRoundRateModel, self).__init__(*args, **kwargs)
@@ -262,6 +281,98 @@ def _build_model_with_game():
     game.add_player(player, seat_index=0)
     player.cards = [Card("A♠"), Card("K♦")]
     return model, game, player, view
+
+
+@pytest.mark.asyncio
+async def test_prune_ready_seats_removes_unseated_players():
+    model, game = _make_model_and_game()
+    chat_id = -123
+
+    wallet_one = make_wallet_mock()
+    wallet_two = make_wallet_mock()
+    wallet_three = make_wallet_mock()
+
+    player1 = Player(
+        user_id=1,
+        mention_markdown="Player1",
+        wallet=wallet_one,
+        ready_message_id="",
+    )
+    player2 = Player(
+        user_id=2,
+        mention_markdown="Player2",
+        wallet=wallet_two,
+        ready_message_id="",
+    )
+    player3 = Player(
+        user_id=3,
+        mention_markdown="Player3",
+        wallet=wallet_three,
+        ready_message_id="",
+    )
+
+    game.add_player(player1, seat_index=0)
+    game.add_player(player2, seat_index=1)
+    game.ready_users = {player1.user_id, player2.user_id, player3.user_id}
+
+    ready_players = await model._prune_ready_seats(game, chat_id)
+
+    assert {player.user_id for player in ready_players} == {1, 2}
+    assert game.ready_users == {1, 2}
+    assert player3.user_id not in game.ready_users
+
+
+@pytest.mark.asyncio
+async def test_prune_ready_seats_handles_empty_ready_users():
+    model, game = _make_model_and_game()
+    chat_id = -456
+
+    wallet_one = make_wallet_mock()
+    player1 = Player(
+        user_id=1,
+        mention_markdown="Player1",
+        wallet=wallet_one,
+        ready_message_id="",
+    )
+
+    game.add_player(player1, seat_index=0)
+    game.ready_users = set()
+
+    ready_players = await model._prune_ready_seats(game, chat_id)
+
+    assert ready_players == []
+    assert game.ready_users == set()
+
+
+@pytest.mark.asyncio
+async def test_prune_ready_seats_preserves_valid_ready_players():
+    model, game = _make_model_and_game()
+    chat_id = -789
+
+    wallet_one = make_wallet_mock()
+    wallet_two = make_wallet_mock()
+
+    player1 = Player(
+        user_id=1,
+        mention_markdown="Player1",
+        wallet=wallet_one,
+        ready_message_id="",
+    )
+    player2 = Player(
+        user_id=2,
+        mention_markdown="Player2",
+        wallet=wallet_two,
+        ready_message_id="",
+    )
+
+    game.add_player(player1, seat_index=0)
+    game.add_player(player2, seat_index=1)
+    game.ready_users = {1, 2}
+
+    ready_players = await model._prune_ready_seats(game, chat_id)
+
+    assert {player.user_id for player in ready_players} == {1, 2}
+    assert game.ready_users == {1, 2}
 
 
 @pytest.mark.asyncio

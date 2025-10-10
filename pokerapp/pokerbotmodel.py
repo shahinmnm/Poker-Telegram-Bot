@@ -1135,7 +1135,7 @@ class PokerBotModel:
 
         await self._register_player_identity(user)
 
-        ready_players = self._prune_ready_seats(game)
+        ready_players = await self._prune_ready_seats(game, chat_id)
 
         if game.state != GameState.INITIAL:
             await self._view.send_message(chat_id, "⚠️ بازی قبلاً شروع شده است، لطفاً صبر کنید!")
@@ -1175,7 +1175,7 @@ class PokerBotModel:
                 await self._view.send_message(chat_id, "🚪 اتاق پر است!")
                 return
 
-        ready_players = self._prune_ready_seats(game)
+        ready_players = await self._prune_ready_seats(game, chat_id)
 
         if len(ready_players) >= self._min_players:
             await self._schedule_auto_start(context, game, chat_id)
@@ -1248,6 +1248,46 @@ class PokerBotModel:
                 game.ready_message_stage = game.state
 
         await self._table_manager.save_game(chat_id, game)
+
+    async def _prune_ready_seats(
+        self, game: Game, chat_id: ChatId
+    ) -> List[Player]:
+        """
+        Remove ready flags from users who are no longer seated and return active ready players.
+
+        This ensures that ``game.ready_users`` only contains valid seated players,
+        preventing stale ready states after seat changes or player departures.
+
+        Args:
+            game: The current game instance.
+            chat_id: The chat identifier for logging context.
+
+        Returns:
+            A list of players who remain marked as ready and are currently seated.
+        """
+
+        if not getattr(game, "ready_users", None):
+            return []
+
+        seated_players = list(game.seated_players())
+        seated_user_ids = {player.user_id for player in seated_players}
+        stale_ready_users = [
+            user_id for user_id in game.ready_users if user_id not in seated_user_ids
+        ]
+
+        if stale_ready_users:
+            for user_id in stale_ready_users:
+                game.ready_users.discard(user_id)
+
+            self._logger.debug(
+                "Pruned %s stale ready flags from chat %s",
+                len(stale_ready_users),
+                chat_id,
+            )
+
+        return [
+            player for player in seated_players if player.user_id in game.ready_users
+        ]
 
     async def ready(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         game, chat_id = await self._get_game(update, context)
@@ -1326,7 +1366,7 @@ class PokerBotModel:
             # Re-add players logic would go here if needed.
             # For now, just resetting allows new players to join.
 
-        ready_players = self._prune_ready_seats(game)
+        ready_players = await self._prune_ready_seats(game, chat_id)
 
         if len(ready_players) >= self._min_players:
             await self._start_game(context, game, chat_id)
