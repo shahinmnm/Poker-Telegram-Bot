@@ -1352,11 +1352,12 @@ class PokerBotModel:
     async def _prune_ready_seats(
         self, game: Game, chat_id: ChatId
     ) -> List[Player]:
-        """
-        Remove ready flags from users who are no longer seated and return active ready players.
+        """Remove stale ready flags and return the currently seated ready players.
 
-        This ensures that ``game.ready_users`` only contains valid seated players,
-        preventing stale ready states after seat changes or player departures.
+        The calling sites (``join_game``, ``ready`` and ``start``) still invoke this
+        coroutine synchronously.  That behaviour will be addressed in a later
+        change, but the pruning logic itself must remain safe when called from
+        synchronous code paths.
 
         Args:
             game: The current game instance.
@@ -1386,25 +1387,32 @@ class PokerBotModel:
 
         seated_players = list(game.seated_players())
         seated_user_ids = {player.user_id for player in seated_players}
+
+        # Create a snapshot of the ready set so that discards below do not mutate
+        # the collection while it is being iterated.
+        ready_users_snapshot = list(ready_users)
         stale_ready_users = [
-            user_id for user_id in game.ready_users if user_id not in seated_user_ids
+            user_id for user_id in ready_users_snapshot if user_id not in seated_user_ids
         ]
 
         if stale_ready_users:
             for user_id in stale_ready_users:
-                game.ready_users.discard(user_id)
+                ready_users.discard(user_id)
 
             self._logger.info(
-                "Pruned stale ready flags",
+                "Pruned %d stale ready flags: %s",
+                len(stale_ready_users),
+                stale_ready_users,
                 extra={
                     "chat_id": chat_id,
                     "pruned_count": len(stale_ready_users),
                     "pruned_user_ids": stale_ready_users,
+                    "event_type": "ready_flags_pruned",
                 },
             )
 
         ready_players = [
-            player for player in seated_players if player.user_id in game.ready_users
+            player for player in seated_players if player.user_id in ready_users
         ]
 
         self._logger.info(
