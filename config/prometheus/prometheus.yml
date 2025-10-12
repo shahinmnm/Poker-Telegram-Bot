@@ -1,0 +1,19 @@
+# File: config/prometheus/prometheus.yml
+# Purpose: Base Prometheus configuration for the Poker Telegram Bot stack
+
+global:
+  scrape_interval: 15s
+  evaluation_interval: 30s
+
+rule_files:
+  - poker_security_alerts.yml
+
+scrape_configs:
+  - job_name: 'poker-bot'
+    metrics_path: /metrics
+    static_configs:
+      - targets: ['bot:8000']
+
+  - job_name: 'prometheus'
+    static_configs:
+      - targets: ['localhost:9090']
