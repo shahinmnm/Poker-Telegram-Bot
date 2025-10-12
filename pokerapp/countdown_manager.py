@@ -1057,13 +1057,26 @@ class SmartCountdownManager:
                 self._metrics['updates_sent'] += 1
                 return
             except BadRequest as exc:
+                error_text = str(exc)
+                if "message is not modified" in error_text.lower():
+                    timer_info["last_edit"] = time.monotonic()
+                    self.logger.debug(
+                        "Skipping countdown update because message content did not change",
+                        extra={
+                            'chat_id': state.chat_id,
+                            'message_id': message_id,
+                            'event_type': 'countdown_update_not_modified',
+                        }
+                    )
+                    return
+
                 last_error = exc
                 self.logger.warning(
                     "BadRequest while updating countdown message",
                     extra={
                         'chat_id': state.chat_id,
                         'message_id': message_id,
-                        'error': str(exc),
+                        'error': error_text,
                         'attempt': attempt,
                         'event_type': 'countdown_update_bad_request',
                     }
