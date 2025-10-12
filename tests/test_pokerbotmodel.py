@@ -31,6 +31,7 @@ from pokerapp.private_match_service import PrivateMatchService
 from pokerapp.utils.request_metrics import RequestMetrics
 from telegram.error import BadRequest
 from telegram import InlineKeyboardMarkup
+from telegram.ext import CallbackContext
 import logging
 
 
@@ -711,6 +712,172 @@ async def test_cancel_auto_start_delegates_to_smart_countdown():
 
 
 
+
+
+
+
+class TestAutoStartCancellation:
+    """Test suite for auto-start cancellation logic."""
+
+    @pytest.fixture
+    def mock_context(self) -> MagicMock:
+        context = MagicMock(spec=CallbackContext)
+        context.chat_data = {}
+        return context
+
+    @pytest.fixture
+    def mock_game(self) -> MagicMock:
+        game = MagicMock()
+        game.id = "test_game_123"
+        game.ready_users = {1001, 1002}
+        game.state = "INITIAL"
+        return game
+
+    @pytest.fixture
+    def poker_model(self) -> PokerBotModel:
+        model, _game, _player, _view = _build_model_with_game()
+        engine = MagicMock()
+        engine.cancel_waiting_countdown = AsyncMock()
+        engine.start_waiting_countdown = AsyncMock()
+        model._game_engine = engine
+        model._view._cancel_prestart_countdown = AsyncMock()
+        return model
+
+    @pytest.mark.asyncio
+    async def test_cancel_auto_start_with_legacy_job(
+        self,
+        poker_model: PokerBotModel,
+        mock_context: MagicMock,
+        mock_game: MagicMock,
+    ) -> None:
+        job = MagicMock()
+        job.chat_id = -4824666797
+        job.id = "legacy_job_123"
+        job.schedule_removal = MagicMock()
+        mock_context.chat_data["start_countdown_job"] = job
+
+        await poker_model._cancel_auto_start(
+            context=mock_context,
+            chat_id=-4824666797,
+            game=mock_game,
+        )
+
+        assert "start_countdown_job" not in mock_context.chat_data
+        job.schedule_removal.assert_called_once()
+        poker_model._game_engine.cancel_waiting_countdown.assert_awaited_once_with(
+            -4824666797
+        )
+        poker_model._view._cancel_prestart_countdown.assert_awaited_once_with(
+            -4824666797,
+            "test_game_123",
+        )
+
+    @pytest.mark.asyncio
+    async def test_cancel_auto_start_without_legacy_job(
+        self,
+        poker_model: PokerBotModel,
+        mock_context: MagicMock,
+        mock_game: MagicMock,
+    ) -> None:
+        assert "start_countdown_job" not in mock_context.chat_data
+
+        await poker_model._cancel_auto_start(
+            context=mock_context,
+            chat_id=-4824666797,
+            game=mock_game,
+        )
+
+        poker_model._game_engine.cancel_waiting_countdown.assert_awaited_once_with(
+            -4824666797
+        )
+        poker_model._view._cancel_prestart_countdown.assert_awaited_once_with(
+            -4824666797,
+            "test_game_123",
+        )
+
+    @pytest.mark.asyncio
+    async def test_cancel_auto_start_extracts_chat_id_from_job(
+        self,
+        poker_model: PokerBotModel,
+        mock_context: MagicMock,
+        mock_game: MagicMock,
+    ) -> None:
+        job = MagicMock()
+        job.chat_id = -1234567890
+        job.schedule_removal = MagicMock()
+        mock_context.chat_data["start_countdown_job"] = job
+
+        await poker_model._cancel_auto_start(
+            context=mock_context,
+            chat_id=None,
+            game=mock_game,
+        )
+
+        poker_model._game_engine.cancel_waiting_countdown.assert_awaited_once_with(
+            -1234567890
+        )
+        poker_model._view._cancel_prestart_countdown.assert_awaited_once_with(
+            -1234567890,
+            "test_game_123",
+        )
+
+    @pytest.mark.asyncio
+    async def test_cancel_auto_start_handles_missing_chat_id_gracefully(
+        self,
+        poker_model: PokerBotModel,
+        mock_context: MagicMock,
+    ) -> None:
+        await poker_model._cancel_auto_start(
+            context=mock_context,
+            chat_id=None,
+            game=None,
+        )
+
+        poker_model._game_engine.cancel_waiting_countdown.assert_not_awaited()
+        poker_model._view._cancel_prestart_countdown.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_legacy_auto_start_tick_neutered(
+        self,
+        poker_model: PokerBotModel,
+        mock_context: MagicMock,
+    ) -> None:
+        job = MagicMock()
+        job.chat_id = -4824666797
+        job.id = "legacy_tick_job"
+        job.schedule_removal = MagicMock()
+        mock_context.job = job
+        mock_context.chat_data["start_countdown_job"] = "some_data"
+
+        await poker_model._auto_start_tick(mock_context)
+
+        job.schedule_removal.assert_called_once()
+        assert "start_countdown_job" not in mock_context.chat_data
+        poker_model._game_engine.start_waiting_countdown.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_schedule_auto_start_cleans_legacy_job(
+        self,
+        poker_model: PokerBotModel,
+        mock_context: MagicMock,
+        mock_game: MagicMock,
+    ) -> None:
+        legacy_job = MagicMock()
+        legacy_job.schedule_removal = MagicMock()
+        mock_context.chat_data["start_countdown_job"] = legacy_job
+
+        await poker_model._schedule_auto_start(
+            context=mock_context,
+            game=mock_game,
+            chat_id=-4824666797,
+        )
+
+        assert "start_countdown_job" not in mock_context.chat_data
+        legacy_job.schedule_removal.assert_called_once()
+        poker_model._game_engine.start_waiting_countdown.assert_awaited_once_with(
+            chat_id=-4824666797,
+            trigger="model_auto_start",
+        )
 
 def test_send_turn_message_updates_turn_message_only():
     model, game, player, view = _build_model_with_game()
