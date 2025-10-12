@@ -1,0 +1,67 @@
+# File: config/alertmanager/poker_routes.yml
+# Purpose: Route security alerts to appropriate channels
+
+route:
+  group_by: ['alertname', 'severity']
+  group_wait: 10s
+  group_interval: 5m
+  repeat_interval: 4h
+  receiver: 'poker-team-default'
+  routes:
+    # Critical security alerts → PagerDuty + Slack
+    - match:
+        severity: critical
+        component: security
+      receiver: 'poker-security-oncall'
+      continue: true
+
+    # High-severity operational → Slack only
+    - match:
+        severity: high
+      receiver: 'poker-ops-slack'
+
+    # Warnings and info → Email digest
+    - match_re:
+        severity: 'warning|info'
+      receiver: 'poker-team-email'
+      group_interval: 1h
+
+receivers:
+  - name: 'poker-security-oncall'
+    pagerduty_configs:
+      - service_key: '<PAGERDUTY_SERVICE_KEY>'
+        description: '{{ range .Alerts }}{{ .Annotations.summary }}{{ end }}'
+    slack_configs:
+      - api_url: '<SLACK_WEBHOOK_URL>'
+        channel: '#poker-security-alerts'
+        title: '🚨 SECURITY INCIDENT: {{ .GroupLabels.alertname }}'
+        text: |
+          {{ range .Alerts }}
+          *Alert:* {{ .Labels.alertname }}
+          *Severity:* {{ .Labels.severity }}
+          *Description:* {{ .Annotations.description }}
+          *Dashboard:* {{ .Annotations.dashboard_url }}
+          {{ end }}
+        send_resolved: true
+
+  - name: 'poker-ops-slack'
+    slack_configs:
+      - api_url: '<SLACK_WEBHOOK_URL>'
+        channel: '#poker-operations'
+        title: '⚠️ {{ .GroupLabels.alertname }}'
+        text: '{{ range .Alerts }}{{ .Annotations.summary }}{{ end }}'
+
+  - name: 'poker-team-email'
+    email_configs:
+      - to: 'poker-team@yourcompany.com'
+        from: 'alertmanager@yourcompany.com'
+        smarthost: 'smtp.yourcompany.com:587'
+        auth_username: 'alertmanager'
+        auth_password: '<SMTP_PASSWORD>'
+        headers:
+          Subject: '[Poker Bot] {{ .GroupLabels.alertname }} ({{ .GroupLabels.severity }})'
+
+  - name: 'poker-team-default'
+    slack_configs:
+      - api_url: '<SLACK_WEBHOOK_URL>'
+        channel: '#poker-general'

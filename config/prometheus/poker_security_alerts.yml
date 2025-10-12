@@ -1,0 +1,267 @@
+# File: config/prometheus/poker_security_alerts.yml
+# Purpose: Security and operational alerting for the Poker Telegram Bot
+# Integration: Load into Prometheus via alerting_rules configuration
+
+groups:
+  - name: poker_security_critical
+    interval: 30s
+    rules:
+      # ========================================================================
+      # ALERT 1: Token Forgery Attack Detected
+      # ========================================================================
+      - alert: PokerTokenForgeryAttack
+        expr: |
+          rate(poker_token_validation_total{result="failure", reason="forgery"}[5m]) > 0.1
+        for: 2m
+        labels:
+          severity: critical
+          component: security
+          attack_type: token_forgery
+        annotations:
+          summary: "Token forgery attempts detected ({{ $value | humanize }} attempts/sec)"
+          description: |
+            Multiple invalid token signatures detected in the last 5 minutes.
+
+            Current Rate: {{ $value | humanize }} attempts/second
+            Threshold: 0.1 attempts/second
+
+            This indicates:
+            - Possible man-in-the-middle attack
+            - Callback data tampering
+            - Malicious client attempting to bypass security
+
+            Immediate Actions:
+            1. Check Grafana dashboard for source chat_ids
+            2. Review recent game sessions for suspicious activity
+            3. Consider temporarily disabling affected game rooms
+            4. Inspect Redis logs for token generation anomalies
+          runbook_url: "https://docs.yourcompany.com/runbooks/token-forgery-response"
+
+      # ========================================================================
+      # ALERT 2: Replay Attack Pattern
+      # ========================================================================
+      - alert: PokerReplayAttackPattern
+        expr: |
+          rate(poker_token_validation_total{result="failure", reason="replay"}[5m]) > 0.5
+        for: 3m
+        labels:
+          severity: critical
+          component: security
+          attack_type: replay_attack
+        annotations:
+          summary: "Replay attack detected ({{ $value | humanize }} attempts/sec)"
+          description: |
+            High rate of duplicate token usage detected.
+
+            Current Rate: {{ $value | humanize }} attempts/second
+            Threshold: 0.5 attempts/second
+            Duration: 3+ minutes
+
+            Potential Causes:
+            - Attacker intercepting and replaying callback tokens
+            - User attempting to double-click betting buttons
+            - Race condition in frontend UI
+
+            Investigation Steps:
+            1. Query Redis: GET token:usage:* to identify replayed tokens
+            2. Check if attacks target specific users or are distributed
+            3. Review Telegram bot logs for callback_query timing patterns
+            4. Verify Redis TTL is correctly set to 300 seconds
+          dashboard_url: "https://grafana.yourcompany.com/d/security/poker-security-dashboard"
+
+      # ========================================================================
+      # ALERT 3: Incomplete Payload Tampering
+      # ========================================================================
+      - alert: PokerIncompletePayloadTampering
+        expr: |
+          rate(poker_security_event_total{event_type="incomplete_payload"}[10m]) > 0.05
+        for: 5m
+        labels:
+          severity: high
+          component: security
+          attack_type: payload_tampering
+        annotations:
+          summary: "Malformed callback payloads detected ({{ $value | humanize }}/sec)"
+          description: |
+            Users are sending callback data that matches the secure format
+            (action:NAME:TOKEN:NONCE:TS) but is missing required components.
+
+            Current Rate: {{ $value | humanize }} events/second
+            Threshold: 0.05 events/second
+
+            Root Causes:
+            - Intentional payload manipulation
+            - Frontend bug generating incomplete tokens
+            - Network corruption (unlikely due to HTTPS)
+
+            Response:
+            1. Enable debug logging for aiogram_flow._handle_action_callback
+            2. Capture raw callback_query.data samples
+            3. Check if issue affects specific Telegram client versions
+            4. Review CallbackTokenManager.generate_token() for edge cases
+
+  - name: poker_security_operational
+    interval: 1m
+    rules:
+      # ========================================================================
+      # ALERT 4: Token Validation Latency Spike
+      # ========================================================================
+      - alert: PokerTokenValidationSlowdown
+        expr: |
+          histogram_quantile(0.95,
+            rate(poker_token_validation_duration_seconds_bucket[5m])
+          ) > 0.5
+        for: 5m
+        labels:
+          severity: warning
+          component: performance
+        annotations:
+          summary: "Token validation P95 latency {{ $value | humanize }}s (threshold: 0.5s)"
+          description: |
+            95th percentile validation time exceeded 0.5 seconds.
+
+            Current P95: {{ $value | humanize }} seconds
+            Expected: < 0.1 seconds
+
+            Impact:
+            - Delayed player actions (fold, call, raise)
+            - Poor user experience during high-load games
+            - Potential timeout errors in aiogram handlers
+
+            Troubleshooting:
+            1. Check Redis latency: redis-cli --latency
+            2. Review CPU usage on Redis host
+            3. Inspect CallbackTokenManager for blocking operations
+            4. Check if Redis is evicting keys prematurely (memory pressure)
+            5. Verify network latency between bot and Redis
+
+      # ========================================================================
+      # ALERT 5: High Token Generation Rate (Capacity Planning)
+      # ========================================================================
+      - alert: PokerTokenGenerationSurge
+        expr: |
+          rate(poker_token_generation_total[5m]) > 50
+        for: 10m
+        labels:
+          severity: info
+          component: capacity
+        annotations:
+          summary: "Token generation rate {{ $value | humanize }}/sec (threshold: 50/sec)"
+          description: |
+            Unusually high token generation indicates:
+            - Viral growth in concurrent games
+            - Potential DDoS via /newgame spam
+            - Load testing in progress
+
+            Capacity Checks:
+            1. Monitor Redis memory usage (MEMORY STATS)
+            2. Check active game count via poker_active_games_total
+            3. Review Telegram API rate limits (not yet hit if this fires)
+            4. Consider horizontal scaling if sustained
+
+      # ========================================================================
+      # ALERT 6: Token Expiry Rate Anomaly
+      # ========================================================================
+      - alert: PokerTokenExpiryRateHigh
+        expr: |
+          rate(poker_token_validation_total{result="failure", reason="expired"}[5m]) > 2.0
+        for: 5m
+        labels:
+          severity: warning
+          component: user_experience
+        annotations:
+          summary: "High token expiry rate ({{ $value | humanize }}/sec)"
+          description: |
+            Many tokens are expiring before players can use them.
+
+            Current Rate: {{ $value | humanize }} expired tokens/second
+            Token TTL: 300 seconds (5 minutes)
+
+            Possible Causes:
+            - Players abandoning games (AFK epidemic)
+            - Network delays causing message delivery lag
+            - Frontend not refreshing buttons after stage changes
+            - TTL misconfigured (check system_constants.json)
+
+            User Impact: Players see "Your action expired" errors
+
+            Mitigation:
+            1. Review poker_stage_duration_seconds for stage timing
+            2. Check if issue correlates with specific game stages
+            3. Consider increasing TTL to 600s if network lag is proven
+            4. Add frontend auto-refresh logic for stale buttons
+
+  - name: poker_security_composite
+    interval: 2m
+    rules:
+      # ========================================================================
+      # ALERT 7: Coordinated Security Incident
+      # ========================================================================
+      - alert: PokerCoordinatedSecurityIncident
+        expr: |
+          (
+            rate(poker_token_validation_total{result="failure", reason="forgery"}[5m]) > 0.05
+          ) and (
+            rate(poker_token_validation_total{result="failure", reason="replay"}[5m]) > 0.2
+          )
+        for: 5m
+        labels:
+          severity: critical
+          component: security
+          attack_type: coordinated_attack
+        annotations:
+          summary: "Multi-vector security attack in progress"
+          description: |
+            CRITICAL: Both token forgery AND replay attacks detected simultaneously.
+
+            This pattern indicates:
+            - Sophisticated attacker with intercepted callback data
+            - Compromised Telegram client or proxy
+            - Possible breach of Redis keyspace
+
+            IMMEDIATE RESPONSE REQUIRED:
+            1. Enable emergency rate limiting in nginx/Telegram webhook
+            2. Rotate Redis password if accessible externally
+            3. Audit docker-compose.yml for exposed Redis ports
+            4. Check for unauthorized access to bot token in .env
+            5. Consider temporary shutdown until breach is contained
+
+            ESCALATION: Page on-call engineer immediately
+
+      # ========================================================================
+      # ALERT 8: Token System Degradation
+      # ========================================================================
+      - alert: PokerTokenSystemDegraded
+        expr: |
+          (
+            rate(poker_token_validation_total{result="failure"}[5m]) /
+            rate(poker_token_validation_total[5m])
+          ) > 0.3
+        for: 10m
+        labels:
+          severity: high
+          component: reliability
+        annotations:
+          summary: "Token validation failure rate {{ $value | humanizePercentage }}"
+          description: |
+            More than 30% of token validations are failing.
+
+            Current Failure Rate: {{ $value | humanizePercentage }}
+            Expected: < 5%
+
+            System Impact:
+            - Most player actions are being rejected
+            - Game flow is severely disrupted
+            - User experience is degraded to pre-security state
+
+            Diagnosis:
+            1. Check if Redis is down (connection refused errors)
+            2. Verify system clock synchronization (NTP drift)
+            3. Review recent deployments for token format changes
+            4. Check if TTL was accidentally reduced
+            5. Inspect CallbackTokenManager initialization logs
+
+            Rollback Plan:
+            - If failure rate > 50%, consider disabling token validation
+            - Fallback to legacy action:fold format temporarily
+            - Deploy hotfix via docker-compose restart
