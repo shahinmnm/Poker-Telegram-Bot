@@ -89,28 +89,37 @@ class CallbackTokenManager:
     TTL: 300 seconds (5 minutes)
     """
 
-    def __init__(self, redis_client, token_ttl: int = 300):
-        """Store the Redis client and TTL configuration."""
+    def __init__(
+        self,
+        *,
+        redis_client,
+        token_ttl: int = 300,
+        request_metrics: Optional[RequestMetrics] = None,
+    ) -> None:
+        """Store the Redis client, TTL configuration, and metrics hook."""
 
         self.redis = redis_client
         self.token_ttl = token_ttl
+        self.request_metrics = request_metrics
 
-    def generate_token(self, game_id: int, user_id: int) -> Dict[str, Any]:
+    def generate_token(self, game_id: int, user_id: int, *, action: str) -> Tuple[str, str, int]:
         """Generate a unique secure token for a player's action.
 
         Args:
             game_id: Telegram ``chat_id`` of the game.
             user_id: Telegram ``user_id`` of the player.
+            action: Name of the action this token authorises.
 
         Returns:
-            Dictionary containing the token, nonce, and timestamp.
+            Tuple of ``(token, nonce, timestamp)`` values.
         """
 
         nonce = str(uuid.uuid4())
         timestamp = int(time.time())
 
-        raw_data = f"{user_id}:{game_id}:{nonce}:{timestamp}"
-        token = hashlib.sha256(raw_data.encode()).hexdigest()[:16]
+        payload = f"{game_id}:{user_id}:{action}:{nonce}:{timestamp}"
+        token_hash = hashlib.sha256(payload.encode()).hexdigest()
+        token = token_hash[:16]
 
         redis_key = f"action_token:{game_id}:{user_id}:{nonce}"
         token_data = {
@@ -119,15 +128,16 @@ class CallbackTokenManager:
             "used": False,
             "user_id": user_id,
             "game_id": game_id,
+            "nonce": nonce,
+            "action": action,
         }
 
         self.redis.setex(redis_key, self.token_ttl, json.dumps(token_data))
 
-        return {
-            "token": token,
-            "nonce": nonce,
-            "timestamp": timestamp,
-        }
+        if self.request_metrics is not None:
+            self.request_metrics.record_token_generation(action=action)
+
+        return token, nonce, timestamp
 
     def validate_token(
         self,
@@ -147,36 +157,89 @@ class CallbackTokenManager:
         5. Mark token as used.
         """
 
+        start_time = time.time()
+
         current_time = int(time.time())
         age_seconds = current_time - timestamp
 
         if age_seconds > self.token_ttl:
+            duration = time.time() - start_time
+            if self.request_metrics is not None:
+                self.request_metrics.record_token_validation(
+                    success=False,
+                    reason="expired",
+                    duration=duration,
+                )
             return False, f"Token expired ({age_seconds}s old, max {self.token_ttl}s)"
 
         if age_seconds < 0:
+            duration = time.time() - start_time
+            if self.request_metrics is not None:
+                self.request_metrics.record_token_validation(
+                    success=False,
+                    reason="invalid",
+                    duration=duration,
+                )
             return False, "Token timestamp is in the future (clock skew?)"
 
         redis_key = f"action_token:{game_id}:{user_id}:{nonce}"
         stored_data_bytes = self.redis.get(redis_key)
 
         if not stored_data_bytes:
+            duration = time.time() - start_time
+            if self.request_metrics is not None:
+                self.request_metrics.record_token_validation(
+                    success=False,
+                    reason="not_found",
+                    duration=duration,
+                )
             return False, "Token not found in store (expired or never created)"
 
         try:
             stored_data = json.loads(stored_data_bytes.decode("utf-8"))
         except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+            duration = time.time() - start_time
+            if self.request_metrics is not None:
+                self.request_metrics.record_token_validation(
+                    success=False,
+                    reason="invalid",
+                    duration=duration,
+                )
             return False, f"Token data corrupted: {exc}"
 
         if stored_data.get("token") != token:
+            duration = time.time() - start_time
+            if self.request_metrics is not None:
+                self.request_metrics.record_token_validation(
+                    success=False,
+                    reason="forgery",
+                    duration=duration,
+                )
+                self.request_metrics.record_security_event(event_type="token_forgery")
             return False, "Token mismatch (possible forgery attempt)"
 
         if stored_data.get("used", False):
+            duration = time.time() - start_time
+            if self.request_metrics is not None:
+                self.request_metrics.record_token_validation(
+                    success=False,
+                    reason="replay",
+                    duration=duration,
+                )
+                self.request_metrics.record_security_event(event_type="replay_attack")
             return False, "Token already used (replay attack prevented)"
 
         stored_data["used"] = True
         stored_data["used_at"] = current_time
 
         self.redis.setex(redis_key, self.token_ttl, json.dumps(stored_data))
+        duration = time.time() - start_time
+        if self.request_metrics is not None:
+            self.request_metrics.record_token_validation(
+                success=True,
+                reason="valid",
+                duration=duration,
+            )
 
         return True, ""
 
@@ -1000,6 +1063,7 @@ class PokerBotViewer:
                 CallbackTokenManager(
                     redis_client=redis_client,
                     token_ttl=300,  # 5 minutes
+                    request_metrics=request_metrics,
                 )
             )
         else:
@@ -5021,15 +5085,14 @@ class PokerBotViewer:
 
         def make_callback(action_name: str, legacy_value: str) -> str:
             if self.token_manager is None:
-                return legacy_value
+                return f"action:{legacy_value}"
 
-            token_data = self.token_manager.generate_token(
+            token, nonce, timestamp = self.token_manager.generate_token(
                 game_id=getattr(game, "chat_id", 0),
                 user_id=getattr(player, "user_id", 0),
+                action=action_name,
             )
-            token = token_data.get("token", "")
-            nonce = (token_data.get("nonce", "") or "")[:8]
-            timestamp = token_data.get("timestamp", 0)
+            nonce = (nonce or "")[:8]
             return f"action:{action_name}:{token}:{nonce}:{timestamp}"
 
         inline_keyboard = [

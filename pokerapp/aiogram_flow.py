@@ -1581,6 +1581,7 @@ async def _handle_action_callback(
         amount = _parse_raise_amount(parsed_action)
 
     token_manager = _resolve_token_manager(game_engine)
+    request_metrics = getattr(game_engine, "request_metrics", None)
     if token_manager and token and nonce and timestamp is not None:
         is_valid, error_message = token_manager.validate_token(
             game_id=chat_id,
@@ -1617,6 +1618,8 @@ async def _handle_action_callback(
             "Incomplete secure callback payload",
             extra={"data": data, "chat_id": chat_id, "user_id": user_id},
         )
+        if request_metrics is not None:
+            request_metrics.record_security_event(event_type="incomplete_payload")
         await callback.answer("⚠️ Invalid action format", show_alert=True)
         return
 
