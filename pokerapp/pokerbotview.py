@@ -7,6 +7,8 @@ sequence flows that place this module alongside ``PokerBot`` and ``GameEngine``
 are available in ``docs/game_flow.md``.
 """
 
+import functools
+
 from telegram import (
     Message,
     InlineKeyboardButton,
@@ -15,9 +17,11 @@ from telegram import (
     ReplyKeyboardRemove,
     Bot,
     InputMediaPhoto,
+    Update,
 )
 from telegram.constants import ParseMode
 from telegram.error import BadRequest, Forbidden, RetryAfter, TelegramError
+from telegram.ext import ContextTypes
 from io import BytesIO
 from typing import (
     Optional,
@@ -187,6 +191,132 @@ class CallbackTokenManager:
 
         deleted = self.redis.delete(*keys)
         return int(deleted or 0)
+
+
+class TokenValidationError(Exception):
+    """Raised when secure callback token validation fails."""
+
+    def __init__(self, message: str, user_facing_message: str) -> None:
+        super().__init__(message)
+        self.user_facing_message = user_facing_message
+
+
+def validate_action_token(
+    handler: Callable[["Update", ContextTypes.DEFAULT_TYPE], Awaitable[None]]
+) -> Callable[["Update", ContextTypes.DEFAULT_TYPE], Awaitable[None]]:
+    """Validate secure callback tokens before executing an action handler."""
+
+    @functools.wraps(handler)
+    async def wrapper(
+        update: "Update", context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        query = getattr(update, "callback_query", None)
+        if query is None or not getattr(query, "data", None):
+            logger.warning("No callback query data in update")
+            return
+
+        callback_data = query.data
+        user_id = getattr(getattr(query, "from_user", None), "id", None)
+        chat_id = getattr(getattr(query, "message", None), "chat_id", None)
+
+        parts = callback_data.split(":")
+        if len(parts) == 2:
+            logger.info(
+                "Legacy callback detected, skipping token validation",
+                extra={
+                    "callback_data": callback_data,
+                    "user_id": user_id,
+                    "chat_id": chat_id,
+                },
+            )
+            await handler(update, context)
+            return
+
+        if len(parts) != 5:
+            logger.warning(
+                "Invalid callback data format",
+                extra={
+                    "callback_data": callback_data,
+                    "parts_count": len(parts),
+                    "user_id": user_id,
+                },
+            )
+            await query.answer(
+                "❌ فرمت نامعتبر. لطفا دوباره تلاش کنید.",
+                show_alert=True,
+            )
+            return
+
+        prefix, action_name, token, nonce, timestamp_str = parts
+        if prefix != "action":
+            logger.warning("Invalid callback prefix: %s", prefix)
+            await query.answer("❌ خطای داخلی.", show_alert=True)
+            return
+
+        try:
+            timestamp = int(timestamp_str)
+        except ValueError:
+            logger.warning("Invalid timestamp format: %s", timestamp_str)
+            await query.answer("❌ زمان نامعتبر.", show_alert=True)
+            return
+
+        bot_data = getattr(context, "bot_data", {})
+        token_manager = bot_data.get("token_manager")
+        if token_manager is None:
+            logger.warning("Token manager not found in bot_data; skipping validation")
+            await handler(update, context)
+            return
+
+        if chat_id is None or user_id is None:
+            logger.warning("Missing identifiers for token validation")
+            await query.answer("❌ خطا در شناسایی کاربر.", show_alert=True)
+            return
+
+        is_valid, error_message = token_manager.validate_token(
+            game_id=chat_id,
+            user_id=user_id,
+            token=token,
+            nonce=nonce,
+            timestamp=timestamp,
+        )
+
+        if not is_valid:
+            logger.warning(
+                "Token validation failed",
+                extra={
+                    "user_id": user_id,
+                    "chat_id": chat_id,
+                    "action": action_name,
+                    "error": error_message,
+                    "token": f"{token[:8]}...",
+                },
+            )
+
+            lowered = (error_message or "").lower()
+            if "expired" in lowered:
+                user_message = "⏰ این دکمه منقضی شده است. لطفا منتظر نوبت جدید باشید."
+            elif "already used" in lowered:
+                user_message = "🔄 این دکمه قبلا استفاده شده است."
+            elif "not found" in lowered:
+                user_message = "🔍 دکمه نامعتبر است. لطفا دوباره تلاش کنید."
+            else:
+                user_message = "❌ دکمه نامعتبر است."
+
+            await query.answer(user_message, show_alert=True)
+            return
+
+        logger.info(
+            "Token validated successfully",
+            extra={
+                "user_id": user_id,
+                "chat_id": chat_id,
+                "action": action_name,
+            },
+        )
+
+        await handler(update, context)
+
+    return wrapper
 
 
 logger = logging.getLogger(__name__)

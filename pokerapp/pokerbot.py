@@ -238,6 +238,8 @@ class PokerBot:
             request_metrics=self._request_metrics,
             messaging_service_factory=self._messaging_service_factory,
         )
+        if getattr(self._view, "token_manager", None) is not None:
+            self._application.bot_data["token_manager"] = self._view.token_manager
         telegram_safe_ops = self._telegram_safeops_factory(view=self._view)
         self._model = PokerBotModel(
             view=self._view,
@@ -270,6 +272,7 @@ class PokerBot:
 
         try:
             self._application.bot_data.pop("game_engine", None)
+            self._application.bot_data.pop("token_manager", None)
         except Exception:
             self._logger.debug("Failed to clear game engine reference from bot_data.", exc_info=True)
 
@@ -305,6 +308,8 @@ class PokerBot:
             )
         else:
             application.bot_data["game_engine"] = game_engine
+            if getattr(self._view, "token_manager", None) is not None:
+                application.bot_data["token_manager"] = self._view.token_manager
             try:
                 await game_engine.start()
             except Exception:
