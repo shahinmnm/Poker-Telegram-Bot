@@ -3,7 +3,7 @@ import time
 import logging
 import traceback
 from pathlib import Path
-from typing import Dict, Optional, Callable, Any
+from typing import Dict, Iterable, Optional, Callable, Any, Sequence
 from dataclasses import dataclass, field
 from collections import deque
 from enum import Enum
@@ -18,9 +18,18 @@ except ImportError:  # pragma: no cover - optional dependency for tests
 
 from telegram.constants import ParseMode
 from telegram.error import BadRequest, TelegramError
-from telegram.helpers import escape_markdown
 
+from pokerapp.entities import MAX_PLAYERS
 from pokerapp.utils.locale_utils import to_persian_digits
+
+
+@dataclass(frozen=True)
+class PlayerRosterEntry:
+    """Immutable snapshot of a player's lobby representation."""
+
+    user_id: int
+    seat_index: Optional[int]
+    display_name: str
 
 
 @dataclass
@@ -32,6 +41,7 @@ class CountdownState:
     total_seconds: int
     player_count: int
     pot_size: int
+    player_roster: tuple[PlayerRosterEntry, ...] = field(default_factory=tuple)
     timestamp: float = field(default_factory=time.time)
 
     _MILESTONE_SECONDS = frozenset({30, 25, 20, 15, 10, 5, 3, 1, 0})
@@ -41,6 +51,9 @@ class CountdownState:
 
         # Update on player count change
         if self.player_count != other.player_count:
+            return True
+
+        if self.player_roster != other.player_roster:
             return True
 
         # Update only at milestones
@@ -117,6 +130,139 @@ class SmartCountdownManager:
         self._hybrid_enabled = False
 
         self._initialize_hybrid_config()
+
+    @staticmethod
+    def _to_persian_digits(value: int) -> str:
+        """Convert ``value`` to a Persian digit string."""
+
+        try:
+            return to_persian_digits(int(value))
+        except Exception:
+            return to_persian_digits(0)
+
+    @staticmethod
+    def _escape_markdown_v2(text: str) -> str:
+        """Escape special MarkdownV2 characters in ``text``."""
+
+        special_chars = "_*[]()~`>#+-=|{}.!"
+        return "".join(f"\\{char}" if char in special_chars else char for char in text)
+
+    def _normalize_player_roster(
+        self, roster: Optional[Sequence[Any]]
+    ) -> tuple[PlayerRosterEntry, ...]:
+        """Normalize various player structures into :class:`PlayerRosterEntry`."""
+
+        if not roster:
+            return ()
+
+        normalized: list[PlayerRosterEntry] = []
+        seen: set[int] = set()
+
+        for item in roster:
+            if item is None:
+                continue
+
+            if isinstance(item, PlayerRosterEntry):
+                user_id = int(item.user_id)
+                if user_id in seen:
+                    continue
+                seen.add(user_id)
+                normalized.append(item)
+                continue
+
+            user_id = getattr(item, "user_id", None)
+            if user_id is None:
+                continue
+
+            try:
+                user_id_int = int(user_id)
+            except (TypeError, ValueError):
+                continue
+
+            if user_id_int in seen:
+                continue
+
+            seat_index = getattr(item, "seat_index", None)
+            if seat_index is not None:
+                try:
+                    seat_index = int(seat_index)
+                except (TypeError, ValueError):
+                    seat_index = None
+
+            display_name = (
+                getattr(item, "display_name", None)
+                or getattr(item, "full_name", None)
+                or getattr(item, "username", None)
+                or getattr(item, "mention", None)
+                or getattr(item, "mention_markdown", None)
+                or str(user_id_int)
+            )
+
+            entry = PlayerRosterEntry(
+                user_id=user_id_int,
+                seat_index=seat_index,
+                display_name=str(display_name),
+            )
+            normalized.append(entry)
+            seen.add(user_id_int)
+
+        normalized.sort(key=lambda entry: (entry.seat_index is None, entry.seat_index))
+        return tuple(normalized)
+
+    def _build_player_list_section(self, state: CountdownState) -> list[str]:
+        """Render the player roster portion of the countdown message."""
+
+        roster = state.player_roster
+        lines = ["👥 *لیست بازیکنان آماده*"]
+
+        if not roster:
+            lines.append("هیچ بازیکنی آماده نیست")
+            return lines
+
+        for index, entry in enumerate(roster, start=1):
+            index_fa = self._to_persian_digits(index)
+            if entry.seat_index is None:
+                seat_label = "صندلی نامشخص"
+            else:
+                seat_label = f"صندلی {self._to_persian_digits(entry.seat_index + 1)}"
+            seat_label = self._escape_markdown_v2(seat_label)
+            safe_name = self._escape_markdown_v2(entry.display_name)
+            player_link = f"[{safe_name}](tg://user?id={entry.user_id})"
+
+            lines.append(
+                f"{index_fa}\\. \\({seat_label}\\) {player_link} 🟢"
+            )
+
+        return lines
+
+    def _format_unified_message(
+        self,
+        state: CountdownState,
+        countdown_lines: Iterable[str],
+    ) -> str:
+        """Combine countdown details with the player roster into one message."""
+
+        lines = list(countdown_lines)
+        if lines and lines[-1] != "":
+            lines.append("")
+
+        lines.extend(self._build_player_list_section(state))
+
+        ready_fa = self._to_persian_digits(state.player_count)
+        max_players_fa = self._to_persian_digits(MAX_PLAYERS)
+        pot_fa = self._to_persian_digits(state.pot_size)
+
+        lines.extend(
+            [
+                "",
+                f"📊 {ready_fa}/{max_players_fa} بازیکن آماده",
+                f"💰 پات: {pot_fa} سکه",
+                "",
+                "⚡ برای پیوستن /join را بزنید\\!",
+            ]
+        )
+
+        return "\n".join(lines).strip()
 
     def _initialize_hybrid_config(self) -> None:
         """Load hybrid countdown configuration from YAML if available."""
@@ -287,6 +433,7 @@ class SmartCountdownManager:
             total_seconds=base_state.total_seconds,
             player_count=latest_state.player_count,
             pot_size=latest_state.pot_size,
+            player_roster=latest_state.player_roster,
         )
 
         return merged_state
@@ -374,6 +521,7 @@ class SmartCountdownManager:
         pot_size: int = 0,
         on_complete: Optional[Callable] = None,
         message_id: Optional[int] = None,
+        player_roster: Optional[Sequence[Any]] = None,
     ) -> bool:
         """
         Start a smart countdown for a poker game
@@ -407,13 +555,16 @@ class SmartCountdownManager:
 
         await self.cancel_countdown(chat_id)
 
+        normalized_roster = self._normalize_player_roster(player_roster)
+
         # Initialize state
         initial_state = CountdownState(
             chat_id=chat_id,
             remaining_seconds=duration,
             total_seconds=duration,
             player_count=player_count,
-            pot_size=pot_size
+            pot_size=pot_size,
+            player_roster=normalized_roster,
         )
 
         self._countdown_states[chat_id] = initial_state
@@ -509,7 +660,8 @@ class SmartCountdownManager:
             remaining_seconds=remaining_seconds,
             total_seconds=current_state.total_seconds,
             player_count=current_state.player_count + 1,
-            pot_size=current_state.pot_size
+            pot_size=current_state.pot_size,
+            player_roster=current_state.player_roster,
         )
 
         # Queue update (will be debounced)
@@ -540,7 +692,8 @@ class SmartCountdownManager:
             remaining_seconds=remaining_seconds,
             total_seconds=current_state.total_seconds,
             player_count=current_state.player_count,
-            pot_size=new_pot
+            pot_size=new_pot,
+            player_roster=current_state.player_roster,
         )
 
         self._pending_updates[chat_id].append(new_state)
@@ -637,6 +790,7 @@ class SmartCountdownManager:
         chat_id: int,
         player_count: Optional[int] = None,
         pot_size: Optional[int] = None,
+        player_roster: Optional[Sequence[Any]] = None,
     ) -> bool:
         """Update countdown message with new player/pot info without restarting timer."""
 
@@ -661,6 +815,12 @@ class SmartCountdownManager:
             )
             return False
 
+        normalized_roster = (
+            current_state.player_roster
+            if player_roster is None
+            else self._normalize_player_roster(player_roster)
+        )
+
         updated_state = CountdownState(
             chat_id=current_state.chat_id,
             remaining_seconds=self._compute_remaining_seconds(
@@ -671,6 +831,7 @@ class SmartCountdownManager:
                 current_state.player_count if player_count is None else player_count
             ),
             pot_size=current_state.pot_size if pot_size is None else pot_size,
+            player_roster=normalized_roster,
         )
 
         self._countdown_states[chat_id] = updated_state
@@ -832,7 +993,8 @@ class SmartCountdownManager:
                     remaining_seconds=remaining,
                     total_seconds=current_state.total_seconds,
                     player_count=current_state.player_count,
-                    pot_size=current_state.pot_size
+                    pot_size=current_state.pot_size,
+                    player_roster=current_state.player_roster,
                 )
 
                 if current_state.should_update(new_state):
@@ -915,6 +1077,7 @@ class SmartCountdownManager:
                 total_seconds=current_state.total_seconds,
                 player_count=current_state.player_count,
                 pot_size=current_state.pot_size,
+                player_roster=current_state.player_roster,
             )
 
             merged_state = self._merge_pending_state(chat_id, base_state)
@@ -975,6 +1138,7 @@ class SmartCountdownManager:
                         total_seconds=latest_state.total_seconds,
                         player_count=latest_state.player_count,
                         pot_size=latest_state.pot_size,
+                        player_roster=latest_state.player_roster,
                     )
 
                     # Send update
@@ -997,12 +1161,9 @@ class SmartCountdownManager:
 
     async def _send_countdown_message(self, state: CountdownState):
         """Send initial countdown message"""
-        raw_text = self._format_countdown_text(state)
-        text = escape_markdown(raw_text, version=2)
-
         message = await self.bot.send_message(
             chat_id=state.chat_id,
-            text=text,
+            text=self._format_countdown_text(state),
             parse_mode=ParseMode.MARKDOWN_V2
         )
 
@@ -1031,9 +1192,6 @@ class SmartCountdownManager:
             )
             return
 
-        raw_text = self._format_countdown_text(state)
-        text = escape_markdown(raw_text, version=2)
-
         timer_info = self._countdown_timer_info.setdefault(state.chat_id, {})
         min_interval = 1.0
         last_edit = timer_info.get("last_edit")
@@ -1050,7 +1208,7 @@ class SmartCountdownManager:
                 await self.bot.edit_message_text(
                     chat_id=state.chat_id,
                     message_id=message_id,
-                    text=text,
+                    text=self._format_countdown_text(state),
                     parse_mode=ParseMode.MARKDOWN_V2
                 )
                 timer_info["last_edit"] = time.monotonic()
@@ -1181,13 +1339,13 @@ class SmartCountdownManager:
             state_message_template = self.state_messages.get('ready', '⏳ شمارش معکوس...')
 
         remaining_fa = to_persian_digits(remaining)
-        players_fa = to_persian_digits(player_count)
-        pot_fa = to_persian_digits(state.pot_size)
 
         try:
             state_message = state_message_template.format(seconds=remaining_fa)
         except (KeyError, IndexError, ValueError):
             state_message = state_message_template
+
+        state_message = self._escape_markdown_v2(str(state_message))
 
         progress_bar = self.progress_bars.get(remaining)
         if progress_bar is None:
@@ -1196,16 +1354,13 @@ class SmartCountdownManager:
                 total_seconds=max(state.total_seconds, 1),
             )
 
-        lines = [
+        countdown_lines = [
             state_message,
             "",
             f"{progress_bar} {remaining_fa} ثانیه مانده",
-            "",
-            f"👥 بازیکنان: {players_fa} نفر",
-            f"💰 پات: {pot_fa} سکه",
         ]
 
-        return "\n".join(lines).strip()
+        return self._format_unified_message(state, countdown_lines)
 
     def _format_legacy_countdown_text(self, state: CountdownState) -> str:
         """Fallback formatting used when hybrid config is unavailable."""
@@ -1227,22 +1382,19 @@ class SmartCountdownManager:
         percentage = max(0, min(100, int(progress_ratio * 100)))
 
         remaining_fa = to_persian_digits(remaining_seconds)
-        players_fa = to_persian_digits(state.player_count)
-        pot_fa = to_persian_digits(state.pot_size)
         pct_fa = to_persian_digits(percentage)
 
-        return f"""
-🎮 بازی در حال شروع...
+        countdown_lines = [
+            "🎮 بازی در حال شروع...",
+            "",
+            f"⏰ زمان باقی‌مانده: {remaining_fa} ثانیه",
+            "",
+            f"{progress_bar} {pct_fa}٪",
+            "",
+            self._escape_markdown_v2(urgency_msg),
+        ]
 
-⏰ زمان باقی‌مانده: {remaining_fa} ثانیه
-
-{progress_bar} {pct_fa}٪
-
-👥 بازیکنان: {players_fa} نفر
-💰 پات: {pot_fa} سکه
-
-{urgency_msg}
-        """.strip()
+        return self._format_unified_message(state, countdown_lines)
 
     def _render_progress_bar(self, remaining_seconds: int, total_seconds: int) -> str:
         """Render a unicode progress bar using filled and empty blocks."""
