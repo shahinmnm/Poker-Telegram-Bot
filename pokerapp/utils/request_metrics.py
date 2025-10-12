@@ -21,8 +21,35 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Deque, DefaultDict, Dict, Iterable, Optional
 
+from prometheus_client import Counter, Histogram
+
 
 logger = logging.getLogger(__name__)
+
+
+_TOKEN_VALIDATION_TOTAL = Counter(
+    "poker_token_validation_total",
+    "Total token validation attempts",
+    ["result", "reason"],
+)
+
+_TOKEN_GENERATION_TOTAL = Counter(
+    "poker_token_generation_total",
+    "Total secure tokens generated",
+    ["action"],
+)
+
+_TOKEN_VALIDATION_DURATION = Histogram(
+    "poker_token_validation_duration_seconds",
+    "Time spent validating tokens",
+    buckets=[0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0],
+)
+
+_SECURITY_EVENT_TOTAL = Counter(
+    "poker_security_event_total",
+    "Security events detected",
+    ["event_type"],
+)
 
 
 class RequestCategory(str, Enum):
@@ -66,6 +93,12 @@ class RequestMetrics:
         self._logger = logger_ or logger.getChild("metrics")
         self._lock = asyncio.Lock()
         self._cycles: Dict[int, _CycleSnapshot] = {}
+
+        # Prometheus metrics for security observability.
+        self.token_validation_total = _TOKEN_VALIDATION_TOTAL
+        self.token_generation_total = _TOKEN_GENERATION_TOTAL
+        self.token_validation_duration = _TOKEN_VALIDATION_DURATION
+        self.security_event_total = _SECURITY_EVENT_TOTAL
 
     async def start_cycle(self, chat_id: int, cycle_token: str) -> None:
         """Begin counting a new game cycle for ``chat_id``."""
@@ -192,6 +225,34 @@ class RequestMetrics:
             if snapshot is None:
                 return []
             return list(snapshot.recent_calls)
+
+    def record_token_validation(
+        self,
+        *,
+        success: bool,
+        reason: str = "",
+        duration: float = 0.0,
+    ) -> None:
+        """Record the outcome of a secure token validation."""
+
+        result = "success" if success else "failure"
+        self.token_validation_total.labels(
+            result=result,
+            reason=reason or "valid",
+        ).inc()
+
+        if duration > 0:
+            self.token_validation_duration.observe(duration)
+
+    def record_token_generation(self, *, action: str) -> None:
+        """Record that a secure action token was generated."""
+
+        self.token_generation_total.labels(action=action).inc()
+
+    def record_security_event(self, *, event_type: str) -> None:
+        """Record a security-related event for observability."""
+
+        self.security_event_total.labels(event_type=event_type).inc()
 
     def record_fine_grained_lock(
         self,

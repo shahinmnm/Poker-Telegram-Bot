@@ -383,7 +383,12 @@ class PokerBotCotroller:
 
         # ۲. اجرای اکشن بازیکن
         try:
-            query_data = update.callback_query.data # <--- دریافت دیتا از کوئری
+            query_data_raw = update.callback_query.data  # <--- دریافت دیتا از کوئری
+            parts = query_data_raw.split(":") if query_data_raw else []
+            if parts and parts[0] == "action" and len(parts) >= 2:
+                query_data = parts[1]
+            else:
+                query_data = query_data_raw
 
             # --- شروع بلوک اصلاح شده ---
             if query_data == PlayerAction.CHECK.value or query_data == PlayerAction.CALL.value:
