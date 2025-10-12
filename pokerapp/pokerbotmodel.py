@@ -1382,6 +1382,9 @@ class PokerBotModel:
             )
             await self._cancel_auto_start(context, chat_id, game)
 
+        # Countdown message now renders the up-to-date ready roster; avoid
+        # separate player list messages to prevent race conditions.
+
         text, keyboard = self._build_ready_message(
             game,
             countdown=None,

@@ -533,6 +533,58 @@ class GameEngine:
             if isinstance(feedback_candidate, str) and feedback_candidate.strip():
                     self._action_lock_feedback_text = feedback_candidate.strip()
 
+    def _build_ready_player_roster(self, game: Game) -> List[Dict[str, str]]:
+        """Construct a roster of ready players for countdown displays."""
+
+        ready_users = set(getattr(game, "ready_users", set()) or [])
+        seats = getattr(game, "seats", [])
+        roster: List[Dict[str, str]] = []
+
+        if not ready_users and isinstance(seats, list):
+            # Fallback: include all seated players when ready tracking is unavailable
+            for seat_index, player in enumerate(seats):
+                if not player:
+                    continue
+                user_id = getattr(player, "user_id", None)
+                if user_id is None:
+                    continue
+                display_name = (
+                    getattr(player, "display_name", None)
+                    or getattr(player, "full_name", None)
+                    or getattr(player, "username", None)
+                    or str(user_id)
+                )
+                roster.append(
+                    {
+                        "user_id": user_id,
+                        "seat_index": seat_index,
+                        "display_name": str(display_name),
+                    }
+                )
+            return roster
+
+        for seat_index, player in enumerate(seats):
+            if not player:
+                continue
+            user_id = getattr(player, "user_id", None)
+            if user_id is None or user_id not in ready_users:
+                continue
+            display_name = (
+                getattr(player, "display_name", None)
+                or getattr(player, "full_name", None)
+                or getattr(player, "username", None)
+                or str(user_id)
+            )
+            roster.append(
+                {
+                    "user_id": user_id,
+                    "seat_index": seat_index,
+                    "display_name": str(display_name),
+                }
+            )
+
+        return roster
+
     async def start_waiting_countdown(
         self,
         chat_id: int,
@@ -595,14 +647,15 @@ class GameEngine:
             )
             return
 
-        player_count = game.seated_count()
-        if player_count < 2:
+        ready_roster = self._build_ready_player_roster(game)
+        ready_count = len(ready_roster)
+        if ready_count < 2 and not countdown_manager.is_countdown_active(chat_id):
             self._logger.debug(
-                "Insufficient players for countdown",
+                "Insufficient ready players for countdown",
                 extra={
                     "chat_id": chat_id,
                     "event_type": "countdown_insufficient_players",
-                    "player_count": player_count,
+                    "player_count": ready_count,
                     "trigger": trigger,
                 },
             )
@@ -615,15 +668,16 @@ class GameEngine:
             try:
                 if await countdown_manager.update_countdown_display(
                     chat_id=chat_id,
-                    player_count=player_count,
+                    player_count=ready_count,
                     pot_size=pot_size,
+                    player_roster=ready_roster,
                 ):
                     self._logger.info(
                         "Updated existing countdown display",
                         extra={
                             "event_type": "countdown_display_updated",
                             "chat_id": chat_id,
-                            "player_count": player_count,
+                            "player_count": ready_count,
                             "pot_size": pot_size,
                             "trigger": trigger,
                         },
@@ -676,10 +730,11 @@ class GameEngine:
             success = await countdown_manager.start_countdown(
                 chat_id=chat_id,
                 duration=None,
-                player_count=player_count,
+                player_count=ready_count,
                 pot_size=pot_size,
                 on_complete=on_countdown_complete,
                 message_id=anchor_message_id,
+                player_roster=ready_roster,
             )
         except Exception:
             self._logger.warning(
@@ -707,16 +762,16 @@ class GameEngine:
             return
 
         self._logger.info(
-            "Started new waiting countdown",
-            extra={
-                "event_type": "countdown_started",
-                "chat_id": chat_id,
-                "player_count": player_count,
-                "pot_size": pot_size,
-                "trigger": trigger,
-                "callsite": callsite,
-            },
-        )
+                "Started new waiting countdown",
+                extra={
+                    "event_type": "countdown_started",
+                    "chat_id": chat_id,
+                    "player_count": ready_count,
+                    "pot_size": pot_size,
+                    "trigger": trigger,
+                    "callsite": callsite,
+                },
+            )
 
     async def cancel_waiting_countdown(self, chat_id: int) -> None:
         """Cancel the waiting countdown using :class:`SmartCountdownManager`."""
@@ -1139,6 +1194,27 @@ class GameEngine:
 
             if not success:
                 return None
+
+            countdown_manager = self._smart_countdown_manager
+            if countdown_manager is not None and countdown_manager.is_countdown_active(chat_id):
+                try:
+                    ready_roster = self._build_ready_player_roster(game)
+                    await countdown_manager.update_countdown_display(
+                        chat_id=chat_id,
+                        player_count=len(ready_roster),
+                        pot_size=int(getattr(game, "pot", 0)),
+                        player_roster=ready_roster,
+                    )
+                except Exception:
+                    logger.debug(
+                        "Failed to refresh countdown after player left",
+                        extra={
+                            "event_type": "countdown_update_after_leave_failed",
+                            "chat_id": chat_id,
+                            "user_id": user_id,
+                        },
+                        exc_info=True,
+                    )
 
             await self._view.send_message(
                 chat_id,
@@ -3315,6 +3391,9 @@ class GameEngine:
             )
             return
 
+        ready_roster = self._build_ready_player_roster(game)
+        ready_count = len(ready_roster)
+
         async def on_countdown_complete(completed_chat_id: int) -> None:
             try:
                 await self._handle_countdown_completion(completed_chat_id)
@@ -3328,10 +3407,11 @@ class GameEngine:
             await countdown_manager.start_countdown(
                 chat_id=chat_id,
                 duration=duration_seconds,
-                player_count=game.seated_count(),
+                player_count=ready_count,
                 pot_size=int(getattr(game, "pot", 0)),
                 on_complete=on_countdown_complete,
                 message_id=message_id,
+                player_roster=ready_roster,
             )
         except Exception:
             self._logger.debug(
