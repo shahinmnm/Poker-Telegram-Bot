@@ -1094,6 +1094,19 @@ class SmartCountdownManager:
             if attempt < len(delays):
                 await asyncio.sleep(backoff)
 
+        if isinstance(last_error, BadRequest):
+            error_text = str(last_error).lower()
+            if "message is not modified" in error_text:
+                self.logger.debug(
+                    "Skipping countdown resend after no-op edit",
+                    extra={
+                        'chat_id': state.chat_id,
+                        'message_id': message_id,
+                        'event_type': 'countdown_update_noop',
+                    },
+                )
+                return
+
         await self._handle_countdown_edit_failure(
             state,
             message_id=message_id,
