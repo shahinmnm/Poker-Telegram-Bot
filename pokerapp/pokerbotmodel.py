@@ -1009,9 +1009,24 @@ class PokerBotModel:
         if chat_id is None:
             return
 
+        job_id = getattr(job, "id", None)
+        self._logger.debug(
+            "Auto-start tick executing",
+            extra={
+                "chat_id": chat_id,
+                "job_id": job_id,
+                "active_countdowns": len(getattr(self, "_active_countdowns", {})),
+            },
+        )
+
         await self._game_engine.start_waiting_countdown(
             chat_id=chat_id,
             trigger="legacy_auto_start_tick",
+        )
+
+        self._logger.debug(
+            "Auto-start tick completed",
+            extra={"chat_id": chat_id, "job_id": job_id},
         )
 
         job.schedule_removal()
@@ -1128,6 +1143,11 @@ class PokerBotModel:
         """بازیکن با دکمهٔ نشستن سر میز به بازی افزوده می‌شود."""
         game, chat_id = await self._get_game(update, context)
         user = update.effective_user
+
+        self._logger.info(
+            "Join game request received",
+            extra={"chat_id": chat_id, "user_id": getattr(user, "id", None)},
+        )
         if update.callback_query:
             await update.callback_query.answer()
 
@@ -1135,7 +1155,20 @@ class PokerBotModel:
 
         await self._register_player_identity(user)
 
+        self._logger.debug(
+            "Pruning ready seats before join handling",
+            extra={"chat_id": chat_id},
+        )
         ready_players = await self._prune_ready_seats(game, chat_id)
+
+        self._logger.debug(
+            "Ready players after initial pruning",
+            extra={
+                "chat_id": chat_id,
+                "ready_count": len(ready_players),
+                "min_players": self._min_players,
+            },
+        )
 
         if game.state != GameState.INITIAL:
             await self._view.send_message(chat_id, "⚠️ بازی قبلاً شروع شده است، لطفاً صبر کنید!")
@@ -1174,12 +1207,42 @@ class PokerBotModel:
             if seat_assigned == -1:
                 await self._view.send_message(chat_id, "🚪 اتاق پر است!")
                 return
+            self._logger.info(
+                "Player seated and marked ready",
+                extra={
+                    "chat_id": chat_id,
+                    "user_id": user.id,
+                    "seat_index": seat_assigned,
+                    "total_ready": len(game.ready_users),
+                },
+            )
+        else:
+            self._logger.debug(
+                "Player already marked ready",
+                extra={"chat_id": chat_id, "user_id": user.id},
+            )
 
         ready_players = await self._prune_ready_seats(game, chat_id)
 
         if len(ready_players) >= self._min_players:
+            self._logger.info(
+                "Scheduling auto-start after join",
+                extra={
+                    "chat_id": chat_id,
+                    "ready_count": len(ready_players),
+                    "min_players": self._min_players,
+                },
+            )
             await self._schedule_auto_start(context, game, chat_id)
         else:
+            self._logger.debug(
+                "Auto-start not scheduled after join",
+                extra={
+                    "chat_id": chat_id,
+                    "ready_count": len(ready_players),
+                    "min_players": self._min_players,
+                },
+            )
             await self._cancel_auto_start(context, chat_id, game)
 
         text, keyboard = self._build_ready_message(
@@ -1266,7 +1329,22 @@ class PokerBotModel:
             A list of players who remain marked as ready and are currently seated.
         """
 
-        if not getattr(game, "ready_users", None):
+        ready_users: Set[int] = getattr(game, "ready_users", set())
+
+        self._logger.debug(
+            "Pruning ready seats",
+            extra={
+                "chat_id": chat_id,
+                "ready_users_before": len(ready_users),
+                "seated_players": len(list(game.seated_players())),
+            },
+        )
+
+        if not ready_users:
+            self._logger.debug(
+                "No ready users to prune",
+                extra={"chat_id": chat_id},
+            )
             return []
 
         seated_players = list(game.seated_players())
@@ -1279,17 +1357,39 @@ class PokerBotModel:
             for user_id in stale_ready_users:
                 game.ready_users.discard(user_id)
 
-            self._logger.debug(
-                "Pruned %s stale ready flags from chat %s",
-                len(stale_ready_users),
-                chat_id,
+            self._logger.info(
+                "Pruned stale ready flags",
+                extra={
+                    "chat_id": chat_id,
+                    "pruned_count": len(stale_ready_users),
+                    "pruned_user_ids": stale_ready_users,
+                },
             )
 
-        return [
+        ready_players = [
             player for player in seated_players if player.user_id in game.ready_users
         ]
 
+        self._logger.info(
+            "Ready seats pruned",
+            extra={
+                "chat_id": chat_id,
+                "ready_players_count": len(ready_players),
+                "ready_user_ids": [player.user_id for player in ready_players],
+            },
+        )
+
+        return ready_players
+
     async def ready(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        self._logger.info(
+            "Ready button pressed",
+            extra={
+                "chat_id": update.effective_chat.id,
+                "user_id": update.effective_user.id,
+            },
+        )
+
         game, chat_id = await self._get_game(update, context)
 
         current_game_id = getattr(game, "id", None)
@@ -1325,6 +1425,11 @@ class PokerBotModel:
             return
 
         await self.join_game(update, context)
+
+        self._logger.debug(
+            "Ready handler delegated to join_game",
+            extra={"chat_id": chat_id, "user_id": update.effective_user.id},
+        )
 
     async def start(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """بازی را به صورت دستی شروع می‌کند."""
@@ -1368,9 +1473,35 @@ class PokerBotModel:
 
         ready_players = await self._prune_ready_seats(game, chat_id)
 
-        if len(ready_players) >= self._min_players:
+        can_start = len(ready_players) >= self._min_players
+        self._logger.info(
+            "Manual start validation",
+            extra={
+                "chat_id": chat_id,
+                "ready_players_count": len(ready_players),
+                "min_required": self._min_players,
+                "can_start": can_start,
+            },
+        )
+
+        if can_start:
+            self._logger.info(
+                "Starting game manually",
+                extra={
+                    "chat_id": chat_id,
+                    "ready_user_ids": [player.user_id for player in ready_players],
+                },
+            )
             await self._start_game(context, game, chat_id)
         else:
+            self._logger.warning(
+                "Manual start rejected due to insufficient ready players",
+                extra={
+                    "chat_id": chat_id,
+                    "ready_players_count": len(ready_players),
+                    "min_required": self._min_players,
+                },
+            )
             await self._view.send_message(
                 chat_id,
                 f"👤 تعداد بازیکنان برای شروع کافی نیست (حداقل {self._min_players} نفر).",
