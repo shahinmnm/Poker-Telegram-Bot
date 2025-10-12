@@ -4834,7 +4834,12 @@ class PokerBotViewer:
 
             text = "\n".join(info_lines)
 
-            reply_markup = await self._build_turn_keyboard(call_text, call_action)
+            reply_markup = await self._build_turn_keyboard(
+                game,
+                player,
+                call_text,
+                call_action,
+            )
 
             turn_anchor = self._anchor_registry.get_turn_anchor(chat_id)
             anchor_message_id = message_id or turn_anchor.message_id
@@ -4874,10 +4879,86 @@ class PokerBotViewer:
                 board_line=board_line,
             )
 
-    async def _build_turn_keyboard(
-        self, call_text: str, call_action: PlayerAction
+    def _create_action_buttons(
+        self,
+        game: Game,
+        player: Player,
+        *,
+        call_text: str,
+        call_action: PlayerAction,
     ) -> InlineKeyboardMarkup:
-        """Return a cached inline keyboard for the active player's actions."""
+        """Create inline action buttons, embedding secure tokens when available."""
+
+        def make_callback(action_name: str, legacy_value: str) -> str:
+            if self.token_manager is None:
+                return legacy_value
+
+            token_data = self.token_manager.generate_token(
+                game_id=getattr(game, "chat_id", 0),
+                user_id=getattr(player, "user_id", 0),
+            )
+            token = token_data.get("token", "")
+            nonce = (token_data.get("nonce", "") or "")[:8]
+            timestamp = token_data.get("timestamp", 0)
+            return f"action:{action_name}:{token}:{nonce}:{timestamp}"
+
+        inline_keyboard = [
+            [
+                InlineKeyboardButton(
+                    text=PlayerAction.FOLD.value,
+                    callback_data=make_callback("fold", PlayerAction.FOLD.value),
+                ),
+                InlineKeyboardButton(
+                    text=PlayerAction.ALL_IN.value,
+                    callback_data=make_callback("allin", PlayerAction.ALL_IN.value),
+                ),
+                InlineKeyboardButton(
+                    text=call_text,
+                    callback_data=make_callback(
+                        "call" if call_action == PlayerAction.CALL else "check",
+                        call_action.value,
+                    ),
+                ),
+            ],
+            [
+                InlineKeyboardButton(
+                    text=str(PlayerAction.SMALL.value),
+                    callback_data=make_callback(
+                        "raise-10", str(PlayerAction.SMALL.value)
+                    ),
+                ),
+                InlineKeyboardButton(
+                    text=str(PlayerAction.NORMAL.value),
+                    callback_data=make_callback(
+                        "raise-25", str(PlayerAction.NORMAL.value)
+                    ),
+                ),
+                InlineKeyboardButton(
+                    text=str(PlayerAction.BIG.value),
+                    callback_data=make_callback(
+                        "raise-50", str(PlayerAction.BIG.value)
+                    ),
+                ),
+            ],
+        ]
+        return InlineKeyboardMarkup(inline_keyboard=inline_keyboard)
+
+    async def _build_turn_keyboard(
+        self,
+        game: Game,
+        player: Player,
+        call_text: str,
+        call_action: PlayerAction,
+    ) -> InlineKeyboardMarkup:
+        """Return an inline keyboard for the active player's actions."""
+
+        if self.token_manager is not None:
+            return self._create_action_buttons(
+                game,
+                player,
+                call_text=call_text,
+                call_action=call_action,
+            )
 
         cache_key = f"{call_action.value}|{call_text}"
         async with self._inline_keyboard_cache_lock:
@@ -4891,37 +4972,12 @@ class PokerBotViewer:
                 )
                 return cached
 
-            keyboard = [
-                [
-                    InlineKeyboardButton(
-                        text=PlayerAction.FOLD.value,
-                        callback_data=PlayerAction.FOLD.value,
-                    ),
-                    InlineKeyboardButton(
-                        text=PlayerAction.ALL_IN.value,
-                        callback_data=PlayerAction.ALL_IN.value,
-                    ),
-                    InlineKeyboardButton(
-                        text=call_text,
-                        callback_data=call_action.value,
-                    ),
-                ],
-                [
-                    InlineKeyboardButton(
-                        text=str(PlayerAction.SMALL.value),
-                        callback_data=str(PlayerAction.SMALL.value),
-                    ),
-                    InlineKeyboardButton(
-                        text=str(PlayerAction.NORMAL.value),
-                        callback_data=str(PlayerAction.NORMAL.value),
-                    ),
-                    InlineKeyboardButton(
-                        text=str(PlayerAction.BIG.value),
-                        callback_data=str(PlayerAction.BIG.value),
-                    ),
-                ],
-            ]
-            markup = InlineKeyboardMarkup(inline_keyboard=keyboard)
+            markup = self._create_action_buttons(
+                game,
+                player,
+                call_text=call_text,
+                call_action=call_action,
+            )
             self._inline_keyboard_cache[cache_key] = markup
             logger.debug(
                 "Turn keyboard cache size %s/%s",
