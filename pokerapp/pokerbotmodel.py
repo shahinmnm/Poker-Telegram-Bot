@@ -1521,13 +1521,14 @@ class PokerBotModel:
             # For now, just resetting allows new players to join.
 
         ready_players = await self._prune_ready_seats(game, chat_id)
+        ready_players_count = len(ready_players)
 
-        can_start = len(ready_players) >= self._min_players
+        can_start = ready_players_count >= self._min_players
         self._logger.info(
             "Manual start validation",
             extra={
                 "chat_id": chat_id,
-                "ready_players_count": len(ready_players),
+                "ready_players_count": ready_players_count,
                 "min_required": self._min_players,
                 "can_start": can_start,
             },
@@ -1547,7 +1548,7 @@ class PokerBotModel:
                 "Manual start rejected due to insufficient ready players",
                 extra={
                     "chat_id": chat_id,
-                    "ready_players_count": len(ready_players),
+                    "ready_players_count": ready_players_count,
                     "min_required": self._min_players,
                 },
             )
