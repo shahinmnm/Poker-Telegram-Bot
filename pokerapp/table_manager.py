@@ -3,7 +3,7 @@ import logging
 import pickle
 import time
 from datetime import datetime
-from typing import Dict, Optional, Tuple, Union, TYPE_CHECKING
+from typing import Dict, List, Optional, Tuple, Union, TYPE_CHECKING
 
 import redis.asyncio as aioredis
 from redis import exceptions as redis_exceptions
@@ -142,6 +142,43 @@ class TableManager:
             time.time() - section_start,
         )
         return final_game
+
+    async def get_active_game_ids(self) -> List[ChatId]:
+        """Return a list of chat IDs that have persisted games."""
+
+        active_ids: set[ChatId] = set(self._tables.keys())
+        pattern = self._game_key("*")
+
+        try:
+            redis_keys = await self._redis_ops.call(
+                "keys", pattern, log_extra={"pattern": pattern}
+            )
+        except Exception as exc:  # pragma: no cover - defensive logging
+            self._logger.warning(
+                "Failed to enumerate active game keys",
+                extra={"pattern": pattern, "error": str(exc)},
+            )
+            redis_keys = []
+
+        for raw_key in redis_keys or []:
+            decoded = raw_key.decode() if isinstance(raw_key, bytes) else str(raw_key)
+            prefix = "chat:"
+            suffix = ":game"
+            if not decoded.startswith(prefix) or not decoded.endswith(suffix):
+                continue
+
+            chat_id_value = decoded[len(prefix) : -len(suffix)]
+            if not chat_id_value:
+                continue
+
+            try:
+                normalized: ChatId = int(chat_id_value)  # type: ignore[assignment]
+            except ValueError:
+                normalized = chat_id_value  # type: ignore[assignment]
+
+            active_ids.add(normalized)
+
+        return list(active_ids)
 
     async def load_game(
         self, chat_id: ChatId, *, validate: bool = True

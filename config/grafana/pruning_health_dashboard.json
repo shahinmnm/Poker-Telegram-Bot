@@ -1,0 +1,85 @@
+{
+  "dashboard": {
+    "title": "Poker Bot - Pruning Subsystem Health",
+    "tags": ["poker", "pruning", "v81"],
+    "timezone": "browser",
+    "panels": [
+      {
+        "title": "Pruning Operations Rate",
+        "targets": [
+          {
+            "expr": "rate(poker_prune_executions_total[5m])",
+            "legendFormat": "Prunes/sec"
+          }
+        ],
+        "type": "graph"
+      },
+      {
+        "title": "Stale User Count Distribution",
+        "targets": [
+          {
+            "expr": "histogram_quantile(0.95, poker_prune_stale_count_bucket)",
+            "legendFormat": "p95 stale users"
+          },
+          {
+            "expr": "histogram_quantile(0.50, poker_prune_stale_count_bucket)",
+            "legendFormat": "p50 stale users"
+          }
+        ],
+        "type": "graph"
+      },
+      {
+        "title": "Pruning Duration (ms)",
+        "targets": [
+          {
+            "expr": "histogram_quantile(0.99, poker_prune_duration_ms_bucket)",
+            "legendFormat": "p99 latency"
+          }
+        ],
+        "type": "graph"
+      },
+      {
+        "title": "High Stale Rate Alerts",
+        "targets": [
+          {
+            "expr": "increase(poker_prune_high_stale_rate_total[1h])",
+            "legendFormat": "Games with >50% stale users"
+          }
+        ],
+        "type": "graph",
+        "alert": {
+          "name": "High Stale User Rate",
+          "conditions": [
+            {
+              "evaluator": {
+                "type": "gt",
+                "params": [10]
+              },
+              "query": {
+                "params": ["A", "5m", "now"]
+              }
+            }
+          ],
+          "frequency": "1m",
+          "handler": 1,
+          "message": "Multiple games have >50% stale ready users. Investigate user retention issues."
+        }
+      },
+      {
+        "title": "Pruning Health Status",
+        "targets": [
+          {
+            "expr": "poker_pruning_health_status",
+            "legendFormat": "{{status}}"
+          }
+        ],
+        "type": "singlestat",
+        "valueMaps": [
+          {"value": "0", "text": "Unhealthy"},
+          {"value": "1", "text": "Degraded"},
+          {"value": "2", "text": "Healthy"}
+        ]
+      }
+    ]
+  }
+}

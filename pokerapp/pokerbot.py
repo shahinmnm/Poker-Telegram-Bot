@@ -303,16 +303,21 @@ class PokerBot:
             self._logger.warning(
                 "Cannot start game engine workers: engine reference missing during post_init.",
             )
-            return
+        else:
+            application.bot_data["game_engine"] = game_engine
+            try:
+                await game_engine.start()
+            except Exception:
+                self._logger.exception("Failed to start GameEngine background workers")
+                raise
 
-        application.bot_data["game_engine"] = game_engine
-        try:
-            await game_engine.start()
-        except Exception:
-            self._logger.exception("Failed to start GameEngine background workers")
-            raise
+        if self._model is not None:
+            await self._model.start_stale_user_cleanup()
 
     async def _on_application_post_shutdown(self, application: "Application") -> None:
+        if self._model is not None:
+            await self._model.stop_stale_user_cleanup()
+
         game_engine = application.bot_data.get("game_engine") or self._resolve_game_engine()
         if game_engine is None:
             return

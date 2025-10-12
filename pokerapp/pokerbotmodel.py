@@ -6,6 +6,7 @@ import inspect
 import json
 import math
 import random
+import time
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from typing import Any, Awaitable, Callable, Dict, Iterable, List, Optional, Set, Tuple
@@ -67,6 +68,7 @@ from pokerapp.utils.player_report_cache import (
     PlayerReportCache as RedisPlayerReportCache,
 )
 from pokerapp.cache_manager import MultiLayerCache
+from pokerapp.health_checks import PruningHealthCheck
 from pokerapp.utils.request_metrics import RequestCategory, RequestMetrics
 from pokerapp.utils.redis_safeops import RedisSafeOps
 from pokerapp.lock_manager import LockManager
@@ -80,6 +82,7 @@ from pokerapp.stats_reporter import StatsReporter
 from pokerapp.translations import translate
 from pokerapp.query_optimizer import QueryBatcher
 from pokerapp.utils.locale_utils import PERSIAN_DIGIT_MAP, to_persian_digits
+from pokerapp.background_jobs import StaleUserCleanupJob
 
 _GAME_CONSTANTS = get_game_constants()
 _GAME_SECTION = _GAME_CONSTANTS.game
@@ -348,6 +351,8 @@ class PokerBotModel:
             logger=logger.getChild("matchmaking"),
             config=cfg,
         )
+        self._pruning_health = PruningHealthCheck(self)
+        self._stale_cleanup_job = StaleUserCleanupJob(self)
         self._telegram_ops = telegram_safe_ops or TelegramSafeOps(
             self._view,
             logger=logger.getChild("telegram_safeops"),
@@ -1356,79 +1361,139 @@ class PokerBotModel:
     async def _prune_ready_seats(
         self, game: Game, chat_id: ChatId
     ) -> List[Player]:
-        """Remove stale ready flags and return the currently seated ready players.
+        """
+        Remove ready markers for players who have left the game.
 
-        The calling sites (``join_game``, ``ready`` and ``start``) still invoke this
-        coroutine synchronously.  That behaviour will be addressed in a later
-        change, but the pruning logic itself must remain safe when called from
-        synchronous code paths.
-
-        Args:
-            game: The current game instance.
-            chat_id: The chat identifier for logging context.
-
-        Returns:
-            A list of players who remain marked as ready and are currently seated.
+        Returns the list of currently ready players still in the game.
+        Emits metrics for monitoring stale user patterns.
         """
 
-        ready_users: Set[int] = getattr(game, "ready_users", set())
+        start_time = time.perf_counter()
+        duration_ms = 0.0
+        success = False
+        health = getattr(self, "_pruning_health", None)
 
-        self._logger.debug(
-            "Pruning ready seats",
-            extra={
-                "chat_id": chat_id,
-                "ready_users_before": len(ready_users),
-                "seated_players": len(list(game.seated_players())),
-            },
-        )
+        try:
+            ready_users: Optional[Set[int]] = getattr(game, "ready_users", None)
+            if ready_users is None:
+                ready_users = set()
+                setattr(game, "ready_users", ready_users)
 
-        if not ready_users:
-            self._logger.debug(
-                "No ready users to prune",
-                extra={"chat_id": chat_id},
-            )
-            return []
+            ready_users_snapshot = list(ready_users)
+            current_player_ids = {
+                player.user_id
+                for player in game.players
+                if getattr(player, "user_id", None) is not None
+            }
 
-        seated_players = list(game.seated_players())
-        seated_user_ids = {player.user_id for player in seated_players}
+            stale_ready = [
+                user_id for user_id in ready_users_snapshot if user_id not in current_player_ids
+            ]
 
-        # Create a snapshot of the ready set so that discards below do not mutate
-        # the collection while it is being iterated.
-        ready_users_snapshot = list(ready_users)
-        stale_ready_users = [
-            user_id for user_id in ready_users_snapshot if user_id not in seated_user_ids
-        ]
-
-        if stale_ready_users:
-            for user_id in stale_ready_users:
+            for user_id in stale_ready:
                 ready_users.discard(user_id)
 
+            ready_players = [
+                player for player in game.players if player.user_id in ready_users
+            ]
+
+            duration_ms = (time.perf_counter() - start_time) * 1000
+            remaining_ready = len(ready_players)
+            total_players = len(game.players)
+
+            prune_ratio = 0.0
+            denominator = max(len(ready_users) or 1, 1)
+            if denominator:
+                prune_ratio = len(stale_ready) / denominator
+
             self._logger.info(
-                "Pruned %d stale ready flags: %s",
-                len(stale_ready_users),
-                stale_ready_users,
+                "Pruned stale ready seats",
                 extra={
                     "chat_id": chat_id,
-                    "pruned_count": len(stale_ready_users),
-                    "pruned_user_ids": stale_ready_users,
-                    "event_type": "ready_flags_pruned",
+                    "stale_count": len(stale_ready),
+                    "stale_user_ids": stale_ready,
+                    "remaining_ready": remaining_ready,
+                    "total_players": total_players,
+                    "duration_ms": round(duration_ms, 2),
+                    "prune_ratio": round(prune_ratio, 2),
                 },
             )
 
-        ready_players = [
-            player for player in seated_players if player.user_id in ready_users
-        ]
+            metrics = getattr(self, "_metrics", None)
+            if metrics is not None:
+                try:
+                    metrics.increment(
+                        "poker.prune.executions",
+                        tags={"chat_id": chat_id, "had_stale": len(stale_ready) > 0},
+                    )
+                    metrics.histogram("poker.prune.stale_count", len(stale_ready))
+                    metrics.histogram("poker.prune.duration_ms", duration_ms)
 
-        self._logger.info(
-            "Ready seats pruned",
-            extra={
-                "chat_id": chat_id,
-                "ready_players_count": len(ready_players),
-                "ready_user_ids": [player.user_id for player in ready_players],
-            },
-        )
+                    if len(stale_ready) > total_players * 0.5:
+                        metrics.increment(
+                            "poker.prune.high_stale_rate",
+                            tags={"chat_id": chat_id},
+                        )
+                except Exception:
+                    self._logger.debug(
+                        "Failed to record pruning metrics", exc_info=True
+                    )
 
-        return ready_players
+            success = True
+            return ready_players
+        finally:
+            if health is not None:
+                try:
+                    effective_duration = (
+                        duration_ms if duration_ms else (time.perf_counter() - start_time) * 1000
+                    )
+                    health.record_prune(chat_id, success, effective_duration)
+                except Exception:
+                    self._logger.debug(
+                        "Failed to record pruning health metrics", exc_info=True
+                    )
+
+    async def start_stale_user_cleanup(self) -> None:
+        """Start the background job that prunes stale ready users across games."""
+
+        job = getattr(self, "_stale_cleanup_job", None)
+        if job is None:
+            return
+
+        try:
+            await job.start()
+        except Exception:
+            self._logger.exception("Failed to start stale user cleanup job")
+
+    async def stop_stale_user_cleanup(self) -> None:
+        """Stop the background job that prunes stale ready users."""
+
+        job = getattr(self, "_stale_cleanup_job", None)
+        if job is None:
+            return
+
+        try:
+            await job.stop()
+        except Exception:
+            self._logger.exception("Failed to stop stale user cleanup job")
+
+    def get_pruning_health_status(self) -> Dict[str, Any]:
+        """Return the latest health snapshot for pruning operations."""
+
+        health = getattr(self, "_pruning_health", None)
+        if health is None:
+            return {
+                "status": "unknown",
+                "total_operations": 0,
+                "success_count": 0,
+                "error_count": 0,
+                "error_rate": 0.0,
+                "active_games": 0,
+                "stale_games": 0,
+                "last_check": datetime.datetime.utcnow().isoformat(),
+            }
+
+        return health.get_health_status()
 
     async def ready(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         self._logger.info(
