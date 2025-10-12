@@ -162,6 +162,7 @@ class SmartCountdownManager:
             if item is None:
                 continue
 
+            item_dict = item if isinstance(item, dict) else None
             if isinstance(item, PlayerRosterEntry):
                 user_id = int(item.user_id)
                 if user_id in seen:
@@ -171,6 +172,8 @@ class SmartCountdownManager:
                 continue
 
             user_id = getattr(item, "user_id", None)
+            if user_id is None and item_dict is not None:
+                user_id = item_dict.get("user_id")
             if user_id is None:
                 continue
 
@@ -183,6 +186,8 @@ class SmartCountdownManager:
                 continue
 
             seat_index = getattr(item, "seat_index", None)
+            if seat_index is None and item_dict is not None:
+                seat_index = item_dict.get("seat_index")
             if seat_index is not None:
                 try:
                     seat_index = int(seat_index)
@@ -190,11 +195,16 @@ class SmartCountdownManager:
                     seat_index = None
 
             display_name = (
-                getattr(item, "display_name", None)
+                (item_dict.get("display_name") if item_dict is not None else None)
+                or getattr(item, "display_name", None)
                 or getattr(item, "full_name", None)
                 or getattr(item, "username", None)
                 or getattr(item, "mention", None)
                 or getattr(item, "mention_markdown", None)
+                or (item_dict.get("full_name") if item_dict is not None else None)
+                or (item_dict.get("username") if item_dict is not None else None)
+                or (item_dict.get("mention") if item_dict is not None else None)
+                or (item_dict.get("mention_markdown") if item_dict is not None else None)
                 or str(user_id_int)
             )
 
@@ -642,7 +652,13 @@ class SmartCountdownManager:
             )
             return False
 
-    async def on_player_joined(self, chat_id: int, player_id: int):
+    async def on_player_joined(
+        self,
+        chat_id: int,
+        player_id: int,
+        *,
+        player_roster: Optional[Sequence[Any]] = None,
+    ):
         """
         Event handler for player join during countdown
         Triggers a debounced update
@@ -655,13 +671,30 @@ class SmartCountdownManager:
         remaining_seconds = self._compute_remaining_seconds(
             chat_id, current_state.remaining_seconds
         )
+        if player_roster is not None:
+            normalized_roster = self._normalize_player_roster(player_roster)
+        else:
+            current_roster = list(current_state.player_roster)
+            if all(entry.user_id != player_id for entry in current_roster):
+                current_roster.append(
+                    PlayerRosterEntry(
+                        user_id=int(player_id),
+                        seat_index=None,
+                        display_name=str(player_id),
+                    )
+                )
+                current_roster.sort(
+                    key=lambda entry: (entry.seat_index is None, entry.seat_index)
+                )
+            normalized_roster = tuple(current_roster)
+
         new_state = CountdownState(
             chat_id=current_state.chat_id,
             remaining_seconds=remaining_seconds,
             total_seconds=current_state.total_seconds,
             player_count=current_state.player_count + 1,
             pot_size=current_state.pot_size,
-            player_roster=current_state.player_roster,
+            player_roster=normalized_roster,
         )
 
         # Queue update (will be debounced)
