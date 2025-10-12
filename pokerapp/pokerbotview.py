@@ -41,6 +41,7 @@ import warnings
 import json
 import threading
 import time
+import uuid
 from cachetools import FIFOCache, LRUCache
 from pokerapp.config import (
     DEFAULT_RATE_LIMIT_PER_MINUTE,
@@ -67,6 +68,125 @@ from pokerapp.utils.messaging_service import MessagingService
 from pokerapp.utils.message_updates import safe_edit_message
 from pokerapp.utils.request_metrics import RequestCategory, RequestMetrics
 from pokerapp.translations import translate
+
+
+class CallbackTokenManager:
+    """Manages secure callback tokens with Redis storage.
+
+    Security Features:
+    - Unique token per player action
+    - 5-minute expiry (configurable)
+    - One-time use (replay prevention)
+    - Nonce-based collision avoidance
+
+    Redis Schema:
+    Key: "action_token:{game_id}:{user_id}:{nonce}"
+    Value: JSON string with token data
+    TTL: 300 seconds (5 minutes)
+    """
+
+    def __init__(self, redis_client, token_ttl: int = 300):
+        """Store the Redis client and TTL configuration."""
+
+        self.redis = redis_client
+        self.token_ttl = token_ttl
+
+    def generate_token(self, game_id: int, user_id: int) -> Dict[str, Any]:
+        """Generate a unique secure token for a player's action.
+
+        Args:
+            game_id: Telegram ``chat_id`` of the game.
+            user_id: Telegram ``user_id`` of the player.
+
+        Returns:
+            Dictionary containing the token, nonce, and timestamp.
+        """
+
+        nonce = str(uuid.uuid4())
+        timestamp = int(time.time())
+
+        raw_data = f"{user_id}:{game_id}:{nonce}:{timestamp}"
+        token = hashlib.sha256(raw_data.encode()).hexdigest()[:16]
+
+        redis_key = f"action_token:{game_id}:{user_id}:{nonce}"
+        token_data = {
+            "token": token,
+            "created_at": timestamp,
+            "used": False,
+            "user_id": user_id,
+            "game_id": game_id,
+        }
+
+        self.redis.setex(redis_key, self.token_ttl, json.dumps(token_data))
+
+        return {
+            "token": token,
+            "nonce": nonce,
+            "timestamp": timestamp,
+        }
+
+    def validate_token(
+        self,
+        game_id: int,
+        user_id: int,
+        token: str,
+        nonce: str,
+        timestamp: int,
+    ) -> Tuple[bool, str]:
+        """Validate a token and mark it as used if valid.
+
+        Validation steps:
+        1. Check timestamp is within the TTL window.
+        2. Check token exists in Redis.
+        3. Verify token string matches.
+        4. Check token has not been used already.
+        5. Mark token as used.
+        """
+
+        current_time = int(time.time())
+        age_seconds = current_time - timestamp
+
+        if age_seconds > self.token_ttl:
+            return False, f"Token expired ({age_seconds}s old, max {self.token_ttl}s)"
+
+        if age_seconds < 0:
+            return False, "Token timestamp is in the future (clock skew?)"
+
+        redis_key = f"action_token:{game_id}:{user_id}:{nonce}"
+        stored_data_bytes = self.redis.get(redis_key)
+
+        if not stored_data_bytes:
+            return False, "Token not found in store (expired or never created)"
+
+        try:
+            stored_data = json.loads(stored_data_bytes.decode("utf-8"))
+        except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+            return False, f"Token data corrupted: {exc}"
+
+        if stored_data.get("token") != token:
+            return False, "Token mismatch (possible forgery attempt)"
+
+        if stored_data.get("used", False):
+            return False, "Token already used (replay attack prevented)"
+
+        stored_data["used"] = True
+        stored_data["used_at"] = current_time
+
+        self.redis.setex(redis_key, self.token_ttl, json.dumps(stored_data))
+
+        return True, ""
+
+    def invalidate_all_tokens(self, game_id: int) -> int:
+        """Invalidate all tokens for a specific game."""
+
+        pattern = f"action_token:{game_id}:*"
+        keys = list(self.redis.keys(pattern) or [])
+
+        if not keys:
+            return 0
+
+        deleted = self.redis.delete(*keys)
+        return int(deleted or 0)
 
 
 logger = logging.getLogger(__name__)
@@ -718,6 +838,7 @@ class PokerBotViewer:
         update_debounce: float = 0.25,
         request_metrics: RequestMetrics,
         messaging_service_factory: Callable[..., MessagingService],
+        redis_ops: Optional[Any] = None,
     ):
         # ``update_debounce`` historically controlled how quickly message edits
         # were flushed to Telegram.  The messaging rewrite in mid-2023 stopped
@@ -735,6 +856,24 @@ class PokerBotViewer:
             raise ValueError("request_metrics dependency must be provided")
         if messaging_service_factory is None:
             raise ValueError("messaging_service_factory dependency must be provided")
+
+        self.redis_ops = redis_ops
+        redis_client = None
+        if redis_ops is not None:
+            redis_client = getattr(redis_ops, "redis_client", None)
+            if redis_client is None:
+                redis_client = getattr(redis_ops, "_redis", None)
+
+        if redis_client is not None:
+            # Initialize token manager for secure callbacks
+            self.token_manager: Optional[CallbackTokenManager] = (
+                CallbackTokenManager(
+                    redis_client=redis_client,
+                    token_ttl=300,  # 5 minutes
+                )
+            )
+        else:
+            self.token_manager = None
 
         self._request_metrics = request_metrics
         # Legacy rate-limit attributes are retained for backwards compatibility
