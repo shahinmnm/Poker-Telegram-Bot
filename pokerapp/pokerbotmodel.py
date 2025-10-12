@@ -1253,13 +1253,17 @@ class PokerBotModel:
                     "total_ready": len(game.ready_users),
                 },
             )
+
+            # Prune stale ready markers before checking game start
+            ready_players = await self._prune_ready_seats(game, chat_id)
         else:
             self._logger.debug(
                 "Player already marked ready",
                 extra={"chat_id": chat_id, "user_id": user.id},
             )
 
-        ready_players = await self._prune_ready_seats(game, chat_id)
+            # Prune stale ready markers
+            ready_players = await self._prune_ready_seats(game, chat_id)
 
         if len(ready_players) >= self._min_players:
             self._logger.info(
