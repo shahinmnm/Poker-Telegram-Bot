@@ -5,6 +5,8 @@ import sys
 from pathlib import Path
 from typing import Awaitable, Callable, Optional, Tuple
 
+from types import SimpleNamespace
+
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
@@ -20,6 +22,7 @@ from pokerapp.lock_manager import LockManager
 from pokerapp.pokerbotview import PokerBotViewer
 from pokerapp.utils.messaging_service import MessagingService
 from pokerapp.utils.request_metrics import RequestMetrics
+from pokerapp.config import get_game_constants
 
 
 class DummyTableManager:
@@ -119,6 +122,32 @@ def game_engine_factory(redis_pool):
         return _build_engine_for_game(
             game=game, redis_pool=redis_pool, logger_name=logger_name
         )
+
+    return _factory
+
+
+@pytest.fixture
+def config_factory():
+    """Factory fixture for lightweight configuration objects used in tests."""
+
+    constants = get_game_constants()
+
+    def _factory(**overrides):
+        cfg = SimpleNamespace(
+            DEBUG=overrides.pop("DEBUG", False),
+            constants=constants,
+            system_constants=overrides.pop("system_constants", {}),
+        )
+
+        # Provide a no-op reload hook expected by FeatureFlagManager.
+        setattr(cfg, "reload_system_constants", overrides.pop(
+            "reload_system_constants", lambda: None
+        ))
+
+        for key, value in overrides.items():
+            setattr(cfg, key, value)
+
+        return cfg
 
     return _factory
 
