@@ -1024,7 +1024,7 @@ class SmartCountdownManager:
             except TelegramError as exc:
                 if attempt == max_attempts:
                     self.logger.warning(
-                        "Failed to update countdown message after retries", 
+                        "Failed to update countdown message after retries",
                         extra={
                             'chat_id': state.chat_id,
                             'error': str(exc),
