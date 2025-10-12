@@ -1010,31 +1010,68 @@ class PokerBotModel:
             return
 
         job_id = getattr(job, "id", None)
-        self._logger.debug(
-            "Auto-start tick executing",
+        self._logger.info(
+            "Legacy auto-start tick invoked but disabled",
             extra={
                 "chat_id": chat_id,
                 "job_id": job_id,
-                "active_countdowns": len(getattr(self, "_active_countdowns", {})),
+                "event_type": "legacy_auto_start_disabled",
             },
         )
 
-        await self._game_engine.start_waiting_countdown(
-            chat_id=chat_id,
-            trigger="legacy_auto_start_tick",
-        )
+        schedule_removal = getattr(job, "schedule_removal", None)
+        if callable(schedule_removal):
+            try:
+                schedule_removal()
+            except Exception:
+                self._logger.debug(
+                    "Failed to schedule removal for disabled legacy auto-start job",
+                    extra={
+                        "chat_id": chat_id,
+                        "job_id": job_id,
+                        "event_type": "legacy_auto_start_cleanup_failure",
+                    },
+                    exc_info=True,
+                )
 
-        self._logger.debug(
-            "Auto-start tick completed",
-            extra={"chat_id": chat_id, "job_id": job_id},
-        )
-
-        job.schedule_removal()
         context.chat_data.pop("start_countdown_job", None)
 
     async def _schedule_auto_start(
         self, context: CallbackContext, game: Game, chat_id: ChatId
     ) -> None:
+        legacy_job = context.chat_data.pop("start_countdown_job", None)
+        if legacy_job is not None:
+            self._logger.warning(
+                "Removing legacy auto-start countdown job before scheduling smart countdown",
+                extra={
+                    "chat_id": chat_id,
+                    "event_type": "legacy_auto_start_cleanup",
+                },
+            )
+            schedule_removal = getattr(legacy_job, "schedule_removal", None)
+            if callable(schedule_removal):
+                try:
+                    schedule_removal()
+                except Exception:
+                    self._logger.debug(
+                        "Failed to schedule removal for legacy auto-start job",
+                        extra={
+                            "chat_id": chat_id,
+                            "event_type": "legacy_auto_start_cleanup_failure",
+                        },
+                        exc_info=True,
+                    )
+
+        self._logger.info(
+            "Scheduling SmartCountdownManager auto-start",
+            extra={
+                "chat_id": chat_id,
+                "event_type": "smart_auto_start_schedule",
+                "ready_count": len(getattr(game, "ready_users", set())),
+                "min_players": self._min_players,
+            },
+        )
+
         await self._game_engine.start_waiting_countdown(
             chat_id=chat_id,
             trigger="model_auto_start",
