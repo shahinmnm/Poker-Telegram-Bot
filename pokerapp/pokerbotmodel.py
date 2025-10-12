@@ -2,6 +2,7 @@
 
 import asyncio
 import datetime
+import functools
 import inspect
 import json
 import math
@@ -195,6 +196,42 @@ class _ActionProcessingResult:
     error_message: Optional[str] = None
 
 
+class _RedisAsyncAdapter:
+    """Adapter that exposes async wrappers around synchronous Redis methods."""
+
+    def __init__(self, client: aioredis.Redis):
+        self._client = client
+
+    def __getattr__(self, item: str) -> Any:
+        return getattr(self._client, item)
+
+    async def _call_async(self, method_name: str, *args: Any, **kwargs: Any) -> Any:
+        method = getattr(self._client, method_name)
+        type_method = getattr(type(self._client), method_name, None)
+        if inspect.iscoroutinefunction(method) or inspect.iscoroutinefunction(type_method):
+            return await method(*args, **kwargs)
+        bound = functools.partial(method, *args, **kwargs)
+        result = await asyncio.to_thread(bound)
+        if inspect.isawaitable(result):
+            return await result
+        return result
+
+    async def get_async(self, *args: Any, **kwargs: Any) -> Any:
+        return await self._call_async("get", *args, **kwargs)
+
+    async def set_async(self, *args: Any, **kwargs: Any) -> Any:
+        return await self._call_async("set", *args, **kwargs)
+
+    async def delete_async(self, *args: Any, **kwargs: Any) -> Any:
+        return await self._call_async("delete", *args, **kwargs)
+
+    async def setex_async(self, *args: Any, **kwargs: Any) -> Any:
+        return await self._call_async("setex", *args, **kwargs)
+
+    async def exists_async(self, *args: Any, **kwargs: Any) -> Any:
+        return await self._call_async("exists", *args, **kwargs)
+
+
 class PokerBotModel:
     ACTIVE_GAME_STATES = GameEngine.ACTIVE_GAME_STATES
 
@@ -237,7 +274,7 @@ class PokerBotModel:
         self._cfg: Config = cfg
         self._logger = logger.getChild("model")
         self._constants = cfg.constants
-        self._kv = kv
+        self._kv = _RedisAsyncAdapter(kv)
         self._redis_ops = redis_ops or RedisSafeOps(
             kv, logger=logger.getChild("redis_safeops")
         )
@@ -877,6 +914,32 @@ class PokerBotModel:
 
         await self._player_manager.send_join_prompt(game, chat_id)
 
+    async def _send_message_batch(
+        self,
+        *factories: Callable[[], Awaitable[Any]],
+        log_context: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        """Send multiple messages concurrently and log individual failures."""
+
+        if not factories:
+            return
+
+        tasks = [factory() for factory in factories]
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        context = log_context or {}
+        for index, result in enumerate(results):
+            if isinstance(result, Exception):
+                payload = {
+                    **context,
+                    "batch_index": index,
+                    "error_type": type(result).__name__,
+                    "error": str(result),
+                }
+                self._logger.warning(
+                    "Message send failed in batch",
+                    extra={**payload, "event_type": "message_batch_failure"},
+                )
+
     async def _countdown_cache_should_skip(
         self,
         chat_id: ChatId,
@@ -1219,18 +1282,33 @@ class PokerBotModel:
         )
 
         if game.state != GameState.INITIAL:
-            await self._view.send_message(chat_id, "⚠️ بازی قبلاً شروع شده است، لطفاً صبر کنید!")
+            await self._send_message_batch(
+                lambda: self._view.send_message(
+                    chat_id, "⚠️ بازی قبلاً شروع شده است، لطفاً صبر کنید!"
+                ),
+                log_context={"chat_id": chat_id, "scenario": "game_already_started"},
+            )
             return
 
         if len(ready_players) >= MAX_PLAYERS:
-            await self._view.send_message(chat_id, "🚪 اتاق پر است!")
+            await self._send_message_batch(
+                lambda: self._view.send_message(chat_id, "🚪 اتاق پر است!"),
+                log_context={"chat_id": chat_id, "scenario": "table_full_initial"},
+            )
             return
 
         wallet = WalletManagerModel(user.id, self._kv)
         if await wallet.value() < SMALL_BLIND * 2:
-            await self._view.send_message(
-                chat_id,
-                f"💸 موجودی شما برای ورود به بازی کافی نیست (حداقل {SMALL_BLIND * 2}$ نیاز است).",
+            await self._send_message_batch(
+                lambda: self._view.send_message(
+                    chat_id,
+                    f"💸 موجودی شما برای ورود به بازی کافی نیست (حداقل {SMALL_BLIND * 2}$ نیاز است).",
+                ),
+                log_context={
+                    "chat_id": chat_id,
+                    "scenario": "insufficient_funds",
+                    "user_id": getattr(user, "id", None),
+                },
             )
             return
 
@@ -1253,7 +1331,14 @@ class PokerBotModel:
             game.ready_users.add(user.id)
             seat_assigned = game.add_player(player)
             if seat_assigned == -1:
-                await self._view.send_message(chat_id, "🚪 اتاق پر است!")
+                await self._send_message_batch(
+                    lambda: self._view.send_message(chat_id, "🚪 اتاق پر است!"),
+                    log_context={
+                        "chat_id": chat_id,
+                        "scenario": "table_full_assignment",
+                        "user_id": getattr(user, "id", None),
+                    },
+                )
                 return
             self._logger.info(
                 "Player seated and marked ready",
@@ -2548,7 +2633,7 @@ class RoundRateModel:
     def __init__(
         self,
         view: PokerBotViewer = None,
-        kv: aioredis.Redis = None,
+        kv: Any = None,
         model: "PokerBotModel" = None,
     ):
         self._view = view
@@ -2696,9 +2781,11 @@ class WalletManagerModel(Wallet):
     این کلاس به صورت اتمی (atomic) کار می‌کند تا از مشکلات همزمانی (race condition) جلوگیری کند.
     """
 
-    def __init__(self, user_id: UserId, kv: aioredis.Redis):
+    def __init__(self, user_id: UserId, kv: Any):
         self._user_id = user_id
-        self._kv: aioredis.Redis = kv
+        if not hasattr(kv, "get_async"):
+            kv = _RedisAsyncAdapter(kv)
+        self._kv = kv
         self._val_key = f"u_m:{user_id}"
         self._daily_bonus_key = f"u_db:{user_id}"
         self._authorized_money_key = f"u_am:{user_id}"  # برای پول رزرو شده در بازی
@@ -2724,9 +2811,9 @@ class WalletManagerModel(Wallet):
 
     async def value(self) -> Money:
         """موجودی فعلی بازیکن را برمی‌گرداند. اگر بازیکن وجود نداشته باشد، با مقدار پیش‌فرض ایجاد می‌شود."""
-        val = await self._kv.get(self._val_key)
+        val = await self._kv.get_async(self._val_key)
         if val is None:
-            await self._kv.set(self._val_key, DEFAULT_MONEY)
+            await self._kv.set_async(self._val_key, DEFAULT_MONEY)
             return DEFAULT_MONEY
         return int(val)
 
@@ -2750,9 +2837,9 @@ class WalletManagerModel(Wallet):
                 keys=[self._val_key], args=[amount, DEFAULT_MONEY]
             )
         except (NoScriptError, ModuleNotFoundError):
-            current_raw = await self._kv.get(self._val_key)
+            current_raw = await self._kv.get_async(self._val_key)
             if current_raw is None:
-                await self._kv.set(self._val_key, DEFAULT_MONEY)
+                await self._kv.set_async(self._val_key, DEFAULT_MONEY)
                 current = DEFAULT_MONEY
             else:
                 current = int(current_raw)
@@ -2767,7 +2854,7 @@ class WalletManagerModel(Wallet):
 
     async def has_daily_bonus(self) -> bool:
         """چک می‌کند آیا بازیکن پاداش روزانه خود را دریافت کرده است یا خیر."""
-        result = await self._kv.exists(self._daily_bonus_key)
+        result = await self._kv.exists_async(self._daily_bonus_key)
         return bool(result)
 
     async def add_daily(self, amount: Money) -> Money:
@@ -2781,7 +2868,7 @@ class WalletManagerModel(Wallet):
         ) + datetime.timedelta(days=1)
         ttl = int((tomorrow - now).total_seconds())
 
-        await self._kv.setex(self._daily_bonus_key, ttl, "1")
+        await self._kv.setex_async(self._daily_bonus_key, ttl, "1")
         return await self.inc(amount)
 
     # --- متدهای مربوط به تراکنش‌های بازی (برای تطابق با Wallet ABC) ---
