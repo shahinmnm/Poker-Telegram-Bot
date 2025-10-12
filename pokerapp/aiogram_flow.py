@@ -48,6 +48,7 @@ from aiogram.types import (
 from cachetools import LRUCache, TTLCache
 
 from pokerapp.config import get_game_constants
+from pokerapp.pokerbotview import CallbackTokenManager
 from pokerapp.player_manager import PlayerManager
 from pokerapp.translations import translate
 from pokerapp.utils.messaging_service import MessagingService
@@ -1501,36 +1502,123 @@ class PokerMessagingOrchestrator:
         )
 
 
+def _resolve_token_manager(game_engine: "GameEngine") -> Optional[CallbackTokenManager]:
+    token_manager = getattr(game_engine, "token_manager", None)
+    if token_manager is not None:
+        return token_manager
+    view = getattr(game_engine, "_view", None)
+    return getattr(view, "token_manager", None)
+
+
+def _parse_raise_amount(action_name: Optional[str]) -> int:
+    if not action_name:
+        return 0
+    if action_name.startswith("raise-"):
+        try:
+            return int(action_name.split("-", maxsplit=1)[1])
+        except (IndexError, ValueError):
+            return 0
+    return 0
+
+
 async def _handle_action_callback(
     callback: CallbackQuery,
     game_engine: "GameEngine",
     action: str,
 ) -> None:
     data = getattr(callback, "data", "") or ""
-    parts = data.split("_")
-
-    if len(parts) < 2:
-        await callback.answer("⚠️ Invalid action format", show_alert=True)
-        return
-
-    try:
-        chat_id = int(parts[1])
-    except (TypeError, ValueError):
-        await callback.answer("⚠️ Invalid action format", show_alert=True)
-        return
-
+    message = getattr(callback, "message", None)
+    chat = getattr(message, "chat", None)
+    chat_id = getattr(chat, "id", None)
     user = getattr(callback, "from_user", None)
     user_id = getattr(user, "id", None)
+
     if user_id is None:
         await callback.answer("⚠️ Action failed", show_alert=True)
         return
 
+    token = None
+    nonce = None
+    timestamp: Optional[int] = None
+    parsed_action = action
     amount = 0
-    if action == "raise" and len(parts) > 2:
-        try:
-            amount = int(parts[2])
-        except (TypeError, ValueError):
-            amount = 0
+    if data.startswith("action:"):
+        colon_parts = data.split(":")
+        if len(colon_parts) == 2:
+            _, parsed_action = colon_parts
+        elif len(colon_parts) == 5:
+            _, parsed_action, token, nonce, timestamp_str = colon_parts
+            try:
+                timestamp = int(timestamp_str)
+            except ValueError:
+                await callback.answer("⚠️ Invalid action format", show_alert=True)
+                return
+        else:
+            await callback.answer("⚠️ Invalid action format", show_alert=True)
+            return
+    else:
+        legacy_parts = data.split("_")
+        if len(legacy_parts) < 2:
+            await callback.answer("⚠️ Invalid action format", show_alert=True)
+            return
+        if chat_id is None:
+            try:
+                chat_id = int(legacy_parts[1])
+            except (TypeError, ValueError):
+                await callback.answer("⚠️ Invalid action format", show_alert=True)
+                return
+        if action == "raise" and len(legacy_parts) > 2:
+            try:
+                amount = int(legacy_parts[2])
+            except (TypeError, ValueError):
+                amount = 0
+
+    if chat_id is None:
+        await callback.answer("⚠️ Invalid action format", show_alert=True)
+        return
+
+    if action == "raise" and not amount:
+        amount = _parse_raise_amount(parsed_action)
+
+    token_manager = _resolve_token_manager(game_engine)
+    if token_manager and token and nonce and timestamp is not None:
+        is_valid, error_message = token_manager.validate_token(
+            game_id=chat_id,
+            user_id=user_id,
+            token=token,
+            nonce=nonce,
+            timestamp=timestamp,
+        )
+        if not is_valid:
+            logger.warning(
+                "Token validation failed",
+                extra={
+                    "user_id": user_id,
+                    "chat_id": chat_id,
+                    "action": parsed_action,
+                    "error": error_message,
+                },
+            )
+            lowered = (error_message or "").lower()
+            if "expired" in lowered:
+                user_message = (
+                    "⏰ این دکمه منقضی شده است. لطفا منتظر نوبت جدید باشید."
+                )
+            elif "already used" in lowered:
+                user_message = "🔄 این دکمه قبلا استفاده شده است."
+            elif "not found" in lowered:
+                user_message = "🔍 دکمه نامعتبر است. لطفا دوباره تلاش کنید."
+            else:
+                user_message = "❌ دکمه نامعتبر است."
+            await callback.answer(user_message, show_alert=True)
+            return
+    elif token_manager and (token or nonce or timestamp is not None):
+        logger.warning(
+            "Incomplete secure callback payload",
+            extra={"data": data, "chat_id": chat_id, "user_id": user_id},
+        )
+        await callback.answer("⚠️ Invalid action format", show_alert=True)
+        return
 
     success = await game_engine.process_action(
         chat_id=chat_id,
@@ -1551,7 +1639,9 @@ async def _handle_action_callback(
         await callback.answer("⚠️ Action failed", show_alert=True)
 
 
-@router.callback_query(F.data.startswith("fold_"))
+@router.callback_query(
+    F.data.startswith("fold_") | F.data.startswith("action:fold")
+)
 async def handle_fold_callback(
     callback: CallbackQuery,
     game_engine: "GameEngine",
@@ -1561,7 +1651,9 @@ async def handle_fold_callback(
     await _handle_action_callback(callback, game_engine, "fold")
 
 
-@router.callback_query(F.data.startswith("check_"))
+@router.callback_query(
+    F.data.startswith("check_") | F.data.startswith("action:check")
+)
 async def handle_check_callback(
     callback: CallbackQuery,
     game_engine: "GameEngine",
@@ -1571,7 +1663,9 @@ async def handle_check_callback(
     await _handle_action_callback(callback, game_engine, "check")
 
 
-@router.callback_query(F.data.startswith("call_"))
+@router.callback_query(
+    F.data.startswith("call_") | F.data.startswith("action:call")
+)
 async def handle_call_callback(
     callback: CallbackQuery,
     game_engine: "GameEngine",
@@ -1581,7 +1675,9 @@ async def handle_call_callback(
     await _handle_action_callback(callback, game_engine, "call")
 
 
-@router.callback_query(F.data.startswith("raise_"))
+@router.callback_query(
+    F.data.startswith("raise_") | F.data.startswith("action:raise")
+)
 async def handle_raise_callback(
     callback: CallbackQuery,
     game_engine: "GameEngine",
