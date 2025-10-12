@@ -1,11 +1,11 @@
-"""
-Health check endpoints for monitoring subsystem status.
-"""
+"""Health check endpoints for monitoring subsystem status."""
 from __future__ import annotations
 
 import time
 from datetime import datetime
 from typing import Any, Dict, Optional, TYPE_CHECKING
+
+from cachetools import TTLCache
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from pokerapp.entities import Game
@@ -17,8 +17,10 @@ class PruningHealthCheck:
 
     def __init__(self, model: "PokerBotModel"):
         self._model = model
-        self._last_prune_times: Dict[int, float] = {}
-        self._last_prune_durations: Dict[int, float] = {}
+        self._last_prune_times: TTLCache[int, float] = TTLCache(maxsize=1000, ttl=3600)
+        self._last_prune_durations: TTLCache[int, float] = TTLCache(
+            maxsize=1000, ttl=3600
+        )
         self._prune_error_count = 0
         self._prune_success_count = 0
 

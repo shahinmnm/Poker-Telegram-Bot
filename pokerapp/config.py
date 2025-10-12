@@ -767,6 +767,11 @@ class Config:
         )
         self.QUERY_BATCH_WINDOW_MS: int = parsed_batch_window or 50
 
+        enable_cleanup_raw = os.getenv("POKERBOT_ENABLE_STALE_CLEANUP_JOB")
+        self.ENABLE_STALE_CLEANUP_JOB: bool = self._parse_bool_env(
+            enable_cleanup_raw, default=True
+        )
+
         self.DATABASE_POOL_DSN: Optional[str] = self._normalise_pool_dsn(
             self.DATABASE_URL
         )
