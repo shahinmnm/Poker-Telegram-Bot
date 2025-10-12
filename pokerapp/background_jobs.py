@@ -10,7 +10,6 @@ from typing import Optional, TYPE_CHECKING
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from pokerapp.pokerbotmodel import PokerBotModel
 
-
 class StaleUserCleanupJob:
     """Periodic cleanup of stale ready markers across all games."""
 
@@ -19,6 +18,9 @@ class StaleUserCleanupJob:
         self._interval = interval_seconds
         self._running = False
         self._task: Optional[asyncio.Task] = None
+        self._consecutive_failures = 0
+        self._max_failures = 5
+        self._circuit_open = False
 
     async def start(self) -> None:
         """Start the cleanup job."""
@@ -26,6 +28,13 @@ class StaleUserCleanupJob:
         if self._running:
             return
 
+        if self._circuit_open:
+            self._model._logger.warning(
+                "Cleanup job circuit breaker is open; refusing to start"
+            )
+            return
+
+        self._consecutive_failures = 0
         self._running = True
         self._task = asyncio.create_task(self._cleanup_loop())
         self._model._logger.info(
@@ -61,9 +70,24 @@ class StaleUserCleanupJob:
             except asyncio.CancelledError:
                 break
             except Exception as exc:
+                self._consecutive_failures += 1
+                if self._consecutive_failures >= self._max_failures:
+                    self._circuit_open = True
+                    self._running = False
+                    self._model._logger.critical(
+                        "Cleanup job exceeded maximum consecutive failures; circuit opened",
+                        extra={"error": str(exc), "failures": self._consecutive_failures},
+                        exc_info=True,
+                    )
+                    break
+
                 self._model._logger.error(
                     "Cleanup cycle failed",
-                    extra={"error": str(exc)},
+                    extra={
+                        "error": str(exc),
+                        "failures": self._consecutive_failures,
+                        "max_failures": self._max_failures,
+                    },
                     exc_info=True,
                 )
 
@@ -122,3 +146,12 @@ class StaleUserCleanupJob:
                 ),
             },
         )
+        self._consecutive_failures = 0
+
+    def reset_circuit_breaker(self) -> None:
+        """Allow manual reset of the circuit breaker for the cleanup job."""
+
+        self._consecutive_failures = 0
+        self._circuit_open = False
+        self._model._logger.info("Reset cleanup job circuit breaker")
+

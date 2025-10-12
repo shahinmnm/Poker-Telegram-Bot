@@ -352,7 +352,13 @@ class PokerBotModel:
             config=cfg,
         )
         self._pruning_health = PruningHealthCheck(self)
-        self._stale_cleanup_job = StaleUserCleanupJob(self)
+        if getattr(cfg, "ENABLE_STALE_CLEANUP_JOB", True):
+            self._stale_cleanup_job = StaleUserCleanupJob(self)
+        else:
+            self._stale_cleanup_job = None
+            logger.getChild("background_jobs").info(
+                "Stale user cleanup job disabled via configuration"
+            )
         self._telegram_ops = telegram_safe_ops or TelegramSafeOps(
             self._view,
             logger=logger.getChild("telegram_safeops"),
@@ -1458,6 +1464,9 @@ class PokerBotModel:
 
         job = getattr(self, "_stale_cleanup_job", None)
         if job is None:
+            self._logger.debug(
+                "Stale user cleanup job not configured; skipping start request"
+            )
             return
 
         try:
@@ -1470,6 +1479,9 @@ class PokerBotModel:
 
         job = getattr(self, "_stale_cleanup_job", None)
         if job is None:
+            self._logger.debug(
+                "Stale user cleanup job not configured; skipping stop request"
+            )
             return
 
         try:
