@@ -1,3 +1,4 @@
+import asyncio
 import json
 import logging
 import pickle
@@ -116,14 +117,13 @@ class TableManager:
 
         async with lock_manager.table_read_lock(lock_chat_id):
             cached = self._tables.get(chat_id)
-
-        if cached is not None:
-            logger.debug(
-                "[LOCK_SECTION_END] chat_id=%s action=get_game elapsed=%.3fs",
-                chat_id,
-                time.time() - section_start,
-            )
-            return cached
+            if cached is not None:
+                logger.debug(
+                    "[LOCK_SECTION_END] chat_id=%s action=get_game elapsed=%.3fs",
+                    chat_id,
+                    time.time() - section_start,
+                )
+                return cached
 
         async with lock_manager.table_write_lock(lock_chat_id):
             cached = self._tables.get(chat_id)
@@ -186,14 +186,14 @@ class TableManager:
         """Load a game snapshot from Redis without caching it."""
 
         extra = {"chat_id": chat_id}
-        data = await self._redis_ops.safe_get(
+        data = await self._redis_ops.get_async(
             self._game_key(chat_id), log_extra=extra
         )
         if not data:
             return None, None
 
         try:
-            game = pickle.loads(data)
+            game = await asyncio.to_thread(pickle.loads, data)
         except (
             pickle.UnpicklingError,
             AttributeError,
@@ -416,7 +416,7 @@ class TableManager:
             if any(p.user_id == user_id for p in game.players):
                 return game, chat_id
 
-        chat_id_data = await self._redis_ops.safe_get(
+        chat_id_data = await self._redis_ops.get_async(
             self._player_chat_key(str(user_id)),
             log_extra={"user_id": user_id},
         )

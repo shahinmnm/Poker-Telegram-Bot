@@ -196,6 +196,26 @@ class RedisSafeOps:
         result = await self.call("delete", *keys, log_extra=log_extra)
         return int(result or 0)
 
+    async def get_async(
+        self, key: str, *, log_extra: Optional[Dict[str, Any]] = None
+    ) -> Optional[Union[bytes, str]]:
+        return await self.safe_get(key, log_extra=log_extra)
+
+    async def set_async(
+        self,
+        key: str,
+        value: Any,
+        expire: Optional[int] = None,
+        *,
+        log_extra: Optional[Dict[str, Any]] = None,
+    ) -> bool:
+        return await self.safe_set(key, value, expire=expire, log_extra=log_extra)
+
+    async def delete_async(
+        self, *keys: str, log_extra: Optional[Dict[str, Any]] = None
+    ) -> int:
+        return await self.safe_delete(*keys, log_extra=log_extra)
+
     async def safe_lpush(
         self, key: str, *values: Any, log_extra: Optional[Dict[str, Any]] = None
     ) -> int:
