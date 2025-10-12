@@ -5,7 +5,11 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from pokerapp.countdown_manager import CountdownState, SmartCountdownManager
+from pokerapp.countdown_manager import (
+    CountdownState,
+    PlayerRosterEntry,
+    SmartCountdownManager,
+)
 
 
 class DummyBot(SimpleNamespace):
@@ -56,12 +60,19 @@ async def test_player_join_merges_state(monkeypatch: pytest.MonkeyPatch):
     manager = _make_manager(monkeypatch)
 
     chat_id = 101
+    existing_entry = PlayerRosterEntry(
+        user_id=303,
+        seat_index=0,
+        display_name="Existing Player",
+    )
+
     initial_state = CountdownState(
         chat_id=chat_id,
         remaining_seconds=30,
         total_seconds=30,
         player_count=2,
         pot_size=100,
+        player_roster=(existing_entry,),
     )
 
     manager._countdown_states[chat_id] = initial_state
@@ -79,16 +90,70 @@ async def test_player_join_merges_state(monkeypatch: pytest.MonkeyPatch):
     fake_clock = FakeMonotonic(10.0)
     monkeypatch.setattr("pokerapp.countdown_manager.time.monotonic", fake_clock)
 
-    await manager.on_player_joined(chat_id=chat_id, player_id=404)
+    await manager.on_player_joined(
+        chat_id=chat_id,
+        player_id=404,
+        player_roster=[
+            {
+                "user_id": existing_entry.user_id,
+                "seat_index": existing_entry.seat_index,
+                "display_name": existing_entry.display_name,
+            },
+            {
+                "user_id": 404,
+                "seat_index": 1,
+                "display_name": "New Player",
+            },
+        ],
+    )
 
     pending_state = manager._pending_updates[chat_id][-1]
     assert pending_state.remaining_seconds == 20
     assert pending_state.player_count == 3
+    assert [entry.user_id for entry in pending_state.player_roster] == [303, 404]
 
     updated_state = manager._countdown_states[chat_id]
     assert updated_state.remaining_seconds == 20
     assert updated_state.player_count == 3
+    assert [entry.user_id for entry in updated_state.player_roster] == [303, 404]
     assert manager._metrics["players_joined_during_countdown"] == 1
+
+
+@pytest.mark.asyncio
+async def test_player_join_without_roster_adds_placeholder(monkeypatch: pytest.MonkeyPatch):
+    manager = _make_manager(monkeypatch)
+
+    chat_id = 102
+    initial_state = CountdownState(
+        chat_id=chat_id,
+        remaining_seconds=25,
+        total_seconds=30,
+        player_count=1,
+        pot_size=200,
+    )
+
+    manager._countdown_states[chat_id] = initial_state
+    manager._pending_updates[chat_id] = deque()
+    manager._countdown_messages[chat_id] = 1111
+    manager._countdown_timer_info[chat_id] = {"start_time": 0.0, "duration": 30}
+
+    class FakeMonotonic:
+        def __init__(self, value: float) -> None:
+            self.value = value
+
+        def __call__(self) -> float:
+            return self.value
+
+    fake_clock = FakeMonotonic(5.0)
+    monkeypatch.setattr("pokerapp.countdown_manager.time.monotonic", fake_clock)
+
+    await manager.on_player_joined(chat_id=chat_id, player_id=505)
+
+    pending_state = manager._pending_updates[chat_id][-1]
+    assert pending_state.player_count == 2
+    assert pending_state.player_roster[0].user_id == 505
+    assert pending_state.player_roster[0].display_name == "505"
+
 
 
 @pytest.mark.asyncio

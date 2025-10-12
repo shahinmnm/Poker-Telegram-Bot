@@ -1099,7 +1099,12 @@ class GameEngine:
             countdown_manager = self._smart_countdown_manager
             if countdown_manager is not None:
                 try:
-                    await countdown_manager.on_player_joined(chat_id, user_id)
+                    ready_roster = self._build_ready_player_roster(current_game)
+                    await countdown_manager.on_player_joined(
+                        chat_id,
+                        user_id,
+                        player_roster=ready_roster,
+                    )
                 except Exception:
                     self._logger.debug(
                         "Countdown join hook failed",
