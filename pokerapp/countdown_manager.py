@@ -16,7 +16,9 @@ try:
 except ImportError:  # pragma: no cover - optional dependency for tests
     bootstrap = None  # type: ignore[assignment]
 
-from telegram.error import TelegramError
+from telegram.constants import ParseMode
+from telegram.error import BadRequest, TelegramError
+from telegram.helpers import escape_markdown
 
 from pokerapp.utils.locale_utils import to_persian_digits
 
@@ -675,6 +677,15 @@ class SmartCountdownManager:
 
         try:
             await self._update_countdown_message(updated_state)
+        except BadRequest as exc:
+            self.logger.warning(
+                "Countdown message update triggered BadRequest",
+                extra={
+                    'event_type': 'countdown_message_update_bad_request',
+                    'chat_id': chat_id,
+                    'error': str(exc),
+                },
+            )
         except Exception as exc:  # pragma: no cover - defensive logging
             self.logger.error(
                 "Failed to update countdown message",
@@ -986,16 +997,20 @@ class SmartCountdownManager:
 
     async def _send_countdown_message(self, state: CountdownState):
         """Send initial countdown message"""
-        text = self._format_countdown_text(state)
+        raw_text = self._format_countdown_text(state)
+        text = escape_markdown(raw_text, version=2)
 
         message = await self.bot.send_message(
             chat_id=state.chat_id,
             text=text,
-            parse_mode='HTML'
+            parse_mode=ParseMode.MARKDOWN_V2
         )
 
         # Cache anchor message id for future updates
         self._countdown_messages[state.chat_id] = message.message_id
+
+        timer_info = self._countdown_timer_info.setdefault(state.chat_id, {})
+        timer_info["last_edit"] = time.monotonic()
 
         self._metrics['updates_sent'] += 1
         return message
@@ -1005,44 +1020,147 @@ class SmartCountdownManager:
         if state.chat_id not in self._countdown_messages:
             return
 
-        text = self._format_countdown_text(state)
         message_id = self._countdown_messages[state.chat_id]
+        if message_id is None:
+            self.logger.debug(
+                "Countdown message ID missing; skipping update",
+                extra={
+                    'chat_id': state.chat_id,
+                    'event_type': 'countdown_update_missing_message_id',
+                }
+            )
+            return
 
-        max_attempts = 3
-        delay = 0.5
+        raw_text = self._format_countdown_text(state)
+        text = escape_markdown(raw_text, version=2)
 
-        for attempt in range(1, max_attempts + 1):
+        timer_info = self._countdown_timer_info.setdefault(state.chat_id, {})
+        min_interval = 1.0
+        last_edit = timer_info.get("last_edit")
+        if isinstance(last_edit, (int, float)):
+            elapsed = time.monotonic() - last_edit
+            if elapsed < min_interval:
+                await asyncio.sleep(min_interval - elapsed)
+
+        delays = (1.0, 2.0, 4.0)
+        last_error: Optional[Exception] = None
+
+        for attempt, backoff in enumerate(delays, start=1):
             try:
                 await self.bot.edit_message_text(
                     chat_id=state.chat_id,
                     message_id=message_id,
                     text=text,
-                    parse_mode='HTML'
+                    parse_mode=ParseMode.MARKDOWN_V2
                 )
+                timer_info["last_edit"] = time.monotonic()
                 self._metrics['updates_sent'] += 1
                 return
+            except BadRequest as exc:
+                last_error = exc
+                self.logger.warning(
+                    "BadRequest while updating countdown message",
+                    extra={
+                        'chat_id': state.chat_id,
+                        'message_id': message_id,
+                        'error': str(exc),
+                        'attempt': attempt,
+                        'event_type': 'countdown_update_bad_request',
+                    }
+                )
             except TelegramError as exc:
-                if attempt == max_attempts:
-                    self.logger.warning(
-                        "Failed to update countdown message after retries",
-                        extra={
-                            'chat_id': state.chat_id,
-                            'error': str(exc),
-                            'attempts': attempt,
-                            'event_type': 'countdown_update_failed',
-                        }
-                    )
-                    break
-
-                jitter = 0.05 * attempt
-                await asyncio.sleep(delay + jitter)
-                delay *= 2
+                last_error = exc
+                self.logger.warning(
+                    "TelegramError while updating countdown message",
+                    extra={
+                        'chat_id': state.chat_id,
+                        'message_id': message_id,
+                        'error': str(exc),
+                        'attempt': attempt,
+                        'event_type': 'countdown_update_retry',
+                    }
+                )
             except Exception as exc:  # pragma: no cover - defensive logging
+                last_error = exc
                 self.logger.warning(
                     f"Failed to update countdown message: {exc}",
-                    extra={'chat_id': state.chat_id, 'event_type': 'countdown_update_failed_unexpected'}
+                    extra={
+                        'chat_id': state.chat_id,
+                        'event_type': 'countdown_update_failed_unexpected',
+                    }
                 )
                 break
+
+            if attempt < len(delays):
+                await asyncio.sleep(backoff)
+
+        await self._handle_countdown_edit_failure(
+            state,
+            message_id=message_id,
+            error=last_error,
+        )
+
+    async def _handle_countdown_edit_failure(
+        self,
+        state: CountdownState,
+        *,
+        message_id: int,
+        error: Optional[Exception],
+    ) -> None:
+        """Recover from repeated edit failures by resending the countdown message."""
+
+        self.logger.warning(
+            "Resending countdown message after repeated edit failures",
+            extra={
+                'chat_id': state.chat_id,
+                'previous_message_id': message_id,
+                'error': str(error) if error else None,
+                'event_type': 'countdown_resend_after_edit_failure',
+            },
+        )
+
+        try:
+            message = await self._send_countdown_message(state)
+        except BadRequest as exc:
+            self.logger.error(
+                "Failed to resend countdown message due to BadRequest",
+                extra={
+                    'chat_id': state.chat_id,
+                    'previous_message_id': message_id,
+                    'error': str(exc),
+                    'event_type': 'countdown_resend_bad_request',
+                },
+            )
+        except TelegramError as exc:
+            self.logger.error(
+                "Failed to resend countdown message",
+                extra={
+                    'chat_id': state.chat_id,
+                    'previous_message_id': message_id,
+                    'error': str(exc),
+                    'event_type': 'countdown_resend_failed',
+                },
+            )
+        except Exception as exc:  # pragma: no cover - defensive logging
+            self.logger.error(
+                "Unexpected error while resending countdown message",
+                extra={
+                    'chat_id': state.chat_id,
+                    'previous_message_id': message_id,
+                    'error': str(exc),
+                    'event_type': 'countdown_resend_failed_unexpected',
+                },
+            )
+        else:
+            self.logger.info(
+                "Countdown message resent successfully",
+                extra={
+                    'chat_id': state.chat_id,
+                    'previous_message_id': message_id,
+                    'new_message_id': message.message_id,
+                    'event_type': 'countdown_resend_success',
+                },
+            )
 
     def _format_countdown_text(self, state: CountdownState) -> str:
         """Format countdown text depending on hybrid configuration."""
@@ -1083,8 +1201,8 @@ class SmartCountdownManager:
             "",
             f"{progress_bar} {remaining_fa} ثانیه مانده",
             "",
-            f"👥 بازیکنان: <b>{players_fa}</b> نفر",
-            f"💰 پات: <b>{pot_fa}</b> سکه",
+            f"👥 بازیکنان: {players_fa} نفر",
+            f"💰 پات: {pot_fa} سکه",
         ]
 
         return "\n".join(lines).strip()
@@ -1097,9 +1215,9 @@ class SmartCountdownManager:
         progress_bar = self._render_progress_bar(remaining_seconds, total_seconds)
 
         if remaining_seconds == 0:
-            urgency_msg = '<b>🎮 بازی شروع شد!</b>'
+            urgency_msg = '🎮 بازی شروع شد!'
         elif remaining_seconds <= 3:
-            urgency_msg = '<b>🔥 آخرین فرصت!</b>'
+            urgency_msg = '🔥 آخرین فرصت!'
         elif remaining_seconds <= 10:
             urgency_msg = '⚡ عجله کنید!'
         else:
@@ -1114,14 +1232,14 @@ class SmartCountdownManager:
         pct_fa = to_persian_digits(percentage)
 
         return f"""
-🎮 <b>بازی در حال شروع...</b>
+🎮 بازی در حال شروع...
 
-⏰ زمان باقی‌مانده: <b>{remaining_fa}</b> ثانیه
+⏰ زمان باقی‌مانده: {remaining_fa} ثانیه
 
 {progress_bar} {pct_fa}٪
 
-👥 بازیکنان: <b>{players_fa}</b> نفر
-💰 پات: <b>{pot_fa}</b> سکه
+👥 بازیکنان: {players_fa} نفر
+💰 پات: {pot_fa} سکه
 
 {urgency_msg}
         """.strip()
