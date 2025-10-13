@@ -122,3 +122,55 @@ async def test_milestone_updates_only(monkeypatch: pytest.MonkeyPatch):
 
     assert manager.bot.edit_message_text.await_count == 4
 
+
+@pytest.mark.asyncio
+async def test_final_update_skips_throttle(monkeypatch: pytest.MonkeyPatch):
+    manager = _make_manager(monkeypatch)
+
+    class FakeClock:
+        def __init__(self, start: float) -> None:
+            self.value = start
+
+        def monotonic(self) -> float:
+            return self.value
+
+        def advance(self, seconds: float) -> None:
+            self.value += seconds
+
+    fake_clock = FakeClock(start=50.0)
+
+    chat_id = 303
+    manager._countdown_messages[chat_id] = 5150
+    timer_info = manager._countdown_timer_info.setdefault(chat_id, {})
+    timer_info["last_edit"] = fake_clock.monotonic()
+
+    # Advance the clock by less than the one-second throttle window so the
+    # previous implementation would have slept before editing the message.
+    fake_clock.advance(0.2)
+
+    sleep_calls: list[float] = []
+
+    async def tracking_sleep(delay: float, *_args, **_kwargs) -> None:
+        sleep_calls.append(delay)
+        fake_clock.advance(delay)
+
+    monkeypatch.setattr(
+        "pokerapp.countdown_manager.time.monotonic", fake_clock.monotonic
+    )
+    monkeypatch.setattr("pokerapp.countdown_manager.asyncio.sleep", tracking_sleep)
+
+    state = CountdownState(
+        chat_id=chat_id,
+        remaining_seconds=0,
+        total_seconds=30,
+        player_count=2,
+        pot_size=100,
+    )
+
+    manager.bot.edit_message_text.reset_mock()
+
+    await manager._update_countdown_message(state)
+
+    assert sleep_calls == []
+    manager.bot.edit_message_text.assert_awaited_once()
+
