@@ -1,0 +1,80 @@
+groups:
+  - name: poker-security
+    interval: 15s
+    rules:
+      - alert: PokerTokenForgeryAttack
+        expr: rate(poker_security_event_total{event_type="token_forgery"}[1m]) > 0.1
+        for: 1m
+        labels:
+          severity: critical
+          component: security
+        annotations:
+          summary: "Token forgery attempts detected"
+          description: "The validation pipeline is rejecting tokens due to suspected forgery at a sustained rate."
+          runbook: "https://runbooks.pokerbot.internal/security/token-forgery"
+
+      - alert: PokerReplayAttackPattern
+        expr: rate(poker_security_event_total{event_type="replay_attack"}[2m]) > 0.05
+        for: 2m
+        labels:
+          severity: critical
+          component: security
+        annotations:
+          summary: "Replay attack behaviour observed"
+          description: "Replay attack patterns are being recorded and require immediate investigation."
+          runbook: "https://runbooks.pokerbot.internal/security/replay-attack"
+
+      - alert: PokerCoordinatedSecurityIncident
+        expr: sum(rate(poker_security_event_total[5m])) > 0.2
+        for: 1m
+        labels:
+          severity: critical
+          component: security
+        annotations:
+          summary: "Multiple concurrent security events"
+          description: "Aggregate security event rate suggests a coordinated incident across the platform."
+          runbook: "https://runbooks.pokerbot.internal/security/coordinated-incident"
+
+      - alert: PokerTokenValidationSlow
+        expr: histogram_quantile(0.95, sum(rate(poker_token_validation_duration_seconds_bucket[5m])) by (le)) > 0.1
+        for: 5m
+        labels:
+          severity: high
+          component: token_validation
+        annotations:
+          summary: "Token validation latency is elevated"
+          description: "95th percentile of token validation latency has exceeded 100ms for 5 minutes."
+          runbook: "https://runbooks.pokerbot.internal/operations/token-validation-latency"
+
+      - alert: PokerTokenExpiryRateHigh
+        expr: rate(poker_token_validation_total{reason="expired"}[10m]) > 0.5
+        for: 10m
+        labels:
+          severity: high
+          component: token_validation
+        annotations:
+          summary: "High rate of expired tokens"
+          description: "Clients are presenting expired tokens at a rate that may indicate clock drift or distribution issues."
+          runbook: "https://runbooks.pokerbot.internal/operations/token-expiry"
+
+      - alert: PokerTokenGenerationSurge
+        expr: rate(poker_token_generation_total[10m]) > 10
+        for: 10m
+        labels:
+          severity: warning
+          component: token_generation
+        annotations:
+          summary: "Token generation volume is elevated"
+          description: "Token creation requests have spiked beyond normal traffic patterns."
+          runbook: "https://runbooks.pokerbot.internal/operations/token-generation-surge"
+
+      - alert: PokerSecurityDigestActivity
+        expr: sum(rate(poker_security_event_total[30m])) >= 0
+        for: 30m
+        labels:
+          severity: info
+          component: security_digest
+        annotations:
+          summary: "Security activity digest"
+          description: "Periodic digest of recent security telemetry for situational awareness."
+          runbook: "https://runbooks.pokerbot.internal/security/digest-overview"
