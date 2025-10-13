@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Discover Telegram chat identifiers for the alerting groups."""
+"""Discover Telegram chat identifiers for admin alert delivery."""
 
 from __future__ import annotations
 
@@ -40,7 +40,7 @@ def _iter_updates(result: Dict[str, object]) -> Iterable[Dict[str, object]]:
         yield update
 
 
-def _extract_chat(update: Dict[str, object]) -> Optional[Tuple[int, str]]:
+def _extract_chat(update: Dict[str, object]) -> Optional[Tuple[int, str, str]]:
     if "message" in update and update["message"] and "chat" in update["message"]:
         chat = update["message"]["chat"]
     elif "my_chat_member" in update and update["my_chat_member"]:
@@ -52,27 +52,37 @@ def _extract_chat(update: Dict[str, object]) -> Optional[Tuple[int, str]]:
         return None
 
     chat_id = chat.get("id")
-    title = chat.get("title") or chat.get("username") or "(unknown title)"
+    chat_type = chat.get("type")
+    if chat_type not in ["private", "group", "supergroup"]:
+        return None
+
+    if chat_type == "private":
+        title = chat.get("username") or chat.get("first_name") or "(unknown title)"
+    else:
+        title = chat.get("title") or "(unknown title)"
     if chat_id is None:
         return None
-    return int(chat_id), str(title)
+    return int(chat_id), str(title), str(chat_type)
 
 
-def _print_summary(chats: Dict[int, str]) -> None:
+def _print_summary(chats: Dict[int, Tuple[str, str]]) -> None:
     if not chats:
-        print("No group chats detected. Ensure the bot is added, privacy mode is disabled, and /start was sent.")
+        print("No chats detected. Send /start to the bot from your personal account.")
         return
 
     print("Discovered chat identifiers:\n")
-    for chat_id, title in sorted(chats.items()):
-        print(f"  • {title}: {chat_id}")
+    for chat_id, (title, chat_type) in sorted(chats.items()):
+        human_type = "Private" if chat_type == "private" else "Group"
+        print(f"  • [{human_type}] {title}: {chat_id}")
 
-    print(
-        "\nUpdate your .env file with:\n"
-        "  CRITICAL_CHAT_ID=<critical chat id>\n"
-        "  OPERATIONAL_CHAT_ID=<operational chat id>\n"
-        "  DIGEST_CHAT_ID=<digest chat id>\n"
-    )
+    private_chats = [cid for cid, (_, ctype) in chats.items() if ctype == "private"]
+    if private_chats:
+        suggested_admin = private_chats[0]
+        print(f"\n✅ Suggested admin chat ID: {suggested_admin}")
+        print("\nUpdate your .env file with:")
+        print(f"  ADMIN_CHAT_ID={suggested_admin}")
+    else:
+        print("\n⚠️ No private chats found. Send /start to the bot from your personal account.")
 
 
 def main() -> None:
@@ -95,13 +105,13 @@ def main() -> None:
         print(f"Failed to reach Telegram API: {exc}", file=sys.stderr)
         raise SystemExit(1)
 
-    chats: Dict[int, str] = {}
+    chats: Dict[int, Tuple[str, str]] = {}
     max_update_id: Optional[int] = None
     for update in _iter_updates(raw_updates):
         chat_info = _extract_chat(update)
         if chat_info:
-            chat_id, title = chat_info
-            chats.setdefault(chat_id, title)
+            chat_id, title, chat_type = chat_info
+            chats.setdefault(chat_id, (title, chat_type))
         update_id = update.get("update_id")
         if isinstance(update_id, int):
             if max_update_id is None or update_id > max_update_id:

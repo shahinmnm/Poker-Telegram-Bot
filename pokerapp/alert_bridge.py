@@ -10,7 +10,7 @@ import time
 from collections import defaultdict
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Any, Dict, Iterable, List, Optional, Sequence
+from typing import Any, Dict, List, Optional, Sequence
 
 from aiohttp import ClientSession, ClientTimeout, web
 
@@ -85,11 +85,9 @@ class AlertBridge:
         if not self._bot_token:
             raise RuntimeError("POKERBOT_TOKEN environment variable must be set for alert bridge")
 
-        self._chat_ids = {
-            "critical": os.environ.get("CRITICAL_CHAT_ID"),
-            "operational": os.environ.get("OPERATIONAL_CHAT_ID"),
-            "digest": os.environ.get("DIGEST_CHAT_ID"),
-        }
+        self._admin_chat_id = os.environ.get("ADMIN_CHAT_ID")
+        if not self._admin_chat_id:
+            raise RuntimeError("ADMIN_CHAT_ID environment variable must be set for alert bridge")
         self._api_base = os.environ.get("TELEGRAM_API_BASE", "https://api.telegram.org").rstrip("/")
         self._session: Optional[ClientSession] = None
         self._alerts_processed = 0
@@ -103,9 +101,8 @@ class AlertBridge:
             "Alert bridge initialised",
             extra={
                 "telegram_api_base": self._api_base,
-                "has_critical_chat": bool(self._chat_ids.get("critical")),
-                "has_operational_chat": bool(self._chat_ids.get("operational")),
-                "has_digest_chat": bool(self._chat_ids.get("digest")),
+                "admin_chat_id": self._admin_chat_id,
+                "mode": "single_admin",
             },
         )
 
@@ -131,7 +128,6 @@ class AlertBridge:
         return web.Response(text=body + "\n", content_type="text/plain; version=0.0.4; charset=utf-8")
 
     async def handle_alertmanager(self, request: web.Request) -> web.Response:
-        channel_hint = request.rel_url.query.get("channel")
         payload = await request.json()
         alerts = payload.get("alerts", [])
         LOGGER.info(
@@ -139,20 +135,16 @@ class AlertBridge:
             extra={
                 "alerts_count": len(alerts),
                 "status": payload.get("status"),
-                "channel_hint": channel_hint,
             },
         )
 
-        formatted_alerts = self._format_alerts(alerts, channel_hint)
+        formatted_alerts = self._format_alerts(alerts)
         if formatted_alerts:
             await self._dispatch(formatted_alerts)
-        else:
-            LOGGER.info("No alerts to dispatch after formatting", extra={"alerts_count": len(alerts)})
         return web.json_response({"status": "ok"})
 
-    def _format_alerts(self, alerts: Sequence[Dict[str, Any]], channel_hint: Optional[str]) -> List[FormattedAlert]:
+    def _format_alerts(self, alerts: Sequence[Dict[str, Any]]) -> List[FormattedAlert]:
         formatted: List[FormattedAlert] = []
-        digest_alerts: List[Dict[str, Any]] = []
         for alert in alerts:
             labels = {k: str(v) for k, v in alert.get("labels", {}).items()}
             severity = labels.get("severity", "info").lower()
@@ -165,22 +157,6 @@ class AlertBridge:
             runbook = annotations.get("runbook")
             timestamp = _parse_timestamp(alert.get("startsAt") if status != "resolved" else alert.get("endsAt"))
 
-            target_channel = self._resolve_channel(severity, labels, channel_hint)
-            if target_channel == "digest":
-                digest_alerts.append(
-                    {
-                        "alert_name": alert_name,
-                        "severity": severity,
-                        "status": status,
-                        "component": component,
-                        "summary": summary,
-                        "description": description,
-                        "runbook": runbook,
-                        "timestamp": timestamp,
-                    }
-                )
-                continue
-
             body = self._build_message(
                 severity=severity,
                 status=status,
@@ -191,40 +167,17 @@ class AlertBridge:
                 runbook=runbook,
                 timestamp=timestamp,
             )
-            chat_id = self._chat_ids.get(target_channel)
-            if not chat_id:
-                LOGGER.warning(
-                    "Skipping alert delivery because chat id is not configured",
-                    extra={"target_channel": target_channel, "alert_name": alert_name},
-                )
-                continue
-            formatted.append(FormattedAlert(chat_id=str(chat_id), body=body, severity=severity, alert_name=alert_name))
 
-        if digest_alerts:
-            chat_id = self._chat_ids.get("digest")
-            if not chat_id:
-                LOGGER.warning(
-                    "Digest alerts dropped because DIGEST_CHAT_ID is missing",
-                    extra={"alert_count": len(digest_alerts)},
+            formatted.append(
+                FormattedAlert(
+                    chat_id=str(self._admin_chat_id),
+                    body=body,
+                    severity=severity,
+                    alert_name=alert_name,
                 )
-            else:
-                for chunk in _chunk_alerts(digest_alerts, size=20):
-                    body = self._build_digest(chunk)
-                    formatted.append(FormattedAlert(chat_id=str(chat_id), body=body, severity="info", alert_name="digest"))
+            )
 
         return formatted
-
-    def _resolve_channel(
-        self, severity: str, labels: Dict[str, str], channel_hint: Optional[str]
-    ) -> str:
-        explicit = labels.get("notification_channel") or channel_hint
-        if explicit in {"critical", "operational", "digest"}:
-            return explicit
-        if severity == "critical":
-            return "critical"
-        if severity in {"high", "warning"}:
-            return "operational"
-        return "digest"
 
     def _build_message(
         self,
@@ -258,26 +211,6 @@ class AlertBridge:
         lines.append(f"*Timestamp:* `{_escape_markdown(timestamp)}`")
         return "\n".join(lines)
 
-    def _build_digest(self, alerts: Sequence[Dict[str, str]]) -> str:
-        header = "🔵 *Security Digest*"
-        lines = [header]
-        for idx, alert in enumerate(alerts, start=1):
-            lines.append(f"*{idx}. {_escape_markdown(alert['alert_name'])}*")
-            severity_icon = _SEVERITY_EMOJI.get(alert["severity"], "🔵")
-            status_icon = _RESOLVED_EMOJI if alert["status"] == "resolved" else severity_icon
-            lines.append(f"  • Severity: `{_escape_markdown(alert['severity'].upper())}`")
-            lines.append(f"  • Status: {status_icon} `{_escape_markdown(alert['status'].upper())}`")
-            lines.append(f"  • Component: `{_escape_markdown(alert['component'])}`")
-            if alert.get("summary"):
-                lines.append(f"  • Summary: {_escape_markdown(alert['summary'])}")
-            if alert.get("description"):
-                lines.append(f"  • Description: {_escape_markdown(alert['description'])}")
-            if alert.get("runbook"):
-                lines.append(
-                    f"  • Runbook: [{_escape_markdown('View runbook')}]({_escape_link_target(alert['runbook'])})"
-                )
-            lines.append(f"  • Timestamp: `{_escape_markdown(alert['timestamp'])}`")
-        return "\n".join(lines)
 
     async def _dispatch(self, alerts: Sequence[FormattedAlert]) -> None:
         if not self._session:
@@ -410,13 +343,6 @@ class TelegramRateLimiter:
 
         self._chat_timestamps[chat_id].append(now)
         return True
-
-
-def _chunk_alerts(items: Sequence[Dict[str, Any]], size: int) -> Iterable[Sequence[Dict[str, Any]]]:
-    for index in range(0, len(items), size):
-        yield items[index : index + size]
-
-
 def create_app() -> web.Application:
     setup_logging()
     bridge = AlertBridge()
