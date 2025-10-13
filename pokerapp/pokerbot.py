@@ -123,6 +123,7 @@ class PokerBot:
         """Start the bot using webhook delivery."""
         if self._application is None:
             self._build_application()
+        self._ensure_event_loop()
         self._logger.info(
             "Starting webhook listener on %s:%s%s targeting %s",
             self._cfg.WEBHOOK_LISTEN,
@@ -153,6 +154,7 @@ class PokerBot:
         """Start the bot using long polling."""
         if self._application is None:
             self._build_application()
+        self._ensure_event_loop()
         self._logger.info(
             "Starting polling mode for development; webhook configuration will be ignored."
         )
@@ -176,6 +178,17 @@ class PokerBot:
                     loop.close()
             except Exception:
                 self._logger.exception("Failed to close statistics service after polling stop.")
+
+    @staticmethod
+    def _ensure_event_loop() -> asyncio.AbstractEventLoop:
+        """Ensure a current event loop is registered for PTB sync entry points."""
+
+        try:
+            return asyncio.get_event_loop()
+        except RuntimeError:
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            return loop
 
     def _handle_webhook_start_failure(self, exc: Exception) -> bool:
         """Handle failures when starting the webhook listener.
