@@ -1,0 +1,126 @@
+{
+  "dashboard": {
+    "title": "Fine-Grained Locks Performance",
+    "tags": ["poker", "locks", "performance"],
+    "timezone": "browser",
+    "panels": [
+      {
+        "id": 1,
+        "title": "Rollout Percentage",
+        "type": "gauge",
+        "targets": [
+          {
+            "expr": "poker_fine_grained_locks_rollout_percentage",
+            "legendFormat": "Rollout %"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "unit": "percent",
+            "min": 0,
+            "max": 100,
+            "thresholds": {
+              "mode": "absolute",
+              "steps": [
+                {"value": 0, "color": "red"},
+                {"value": 50, "color": "yellow"},
+                {"value": 100, "color": "green"}
+              ]
+            }
+          }
+        }
+      },
+      {
+        "id": 2,
+        "title": "Action Duration (p95)",
+        "type": "graph",
+        "targets": [
+          {
+            "expr": "histogram_quantile(0.95, poker_action_duration_seconds)",
+            "legendFormat": "Fine-Grained Locks"
+          },
+          {
+            "expr": "histogram_quantile(0.95, poker_action_duration_seconds{legacy=\"true\"})",
+            "legendFormat": "Legacy Locks"
+          }
+        ],
+        "yaxes": [
+          {"format": "s", "label": "Duration"}
+        ]
+      },
+      {
+        "id": 3,
+        "title": "Lock Wait Time",
+        "type": "graph",
+        "targets": [
+          {
+            "expr": "rate(poker_lock_wait_time_seconds_sum[5m]) / rate(poker_lock_wait_time_seconds_count[5m])",
+            "legendFormat": "{{lock_type}}"
+          }
+        ]
+      },
+      {
+        "id": 4,
+        "title": "Error Rate",
+        "type": "graph",
+        "targets": [
+          {
+            "expr": "rate(poker_action_errors_total[5m])",
+            "legendFormat": "Errors/sec"
+          }
+        ],
+        "alert": {
+          "conditions": [
+            {
+              "evaluator": {"params": [0.05], "type": "gt"},
+              "operator": {"type": "and"},
+              "query": {"params": ["A", "5m", "now"]},
+              "reducer": {"type": "avg"}
+            }
+          ],
+          "executionErrorState": "alerting",
+          "frequency": "1m",
+          "handler": 1,
+          "name": "High Error Rate Alert",
+          "noDataState": "no_data",
+          "notifications": [{"uid": "slack-alerts"}]
+        }
+      },
+      {
+        "id": 5,
+        "title": "Concurrent Actions",
+        "type": "graph",
+        "targets": [
+          {
+            "expr": "poker_concurrent_actions",
+            "legendFormat": "{{chat_id}}"
+          }
+        ]
+      },
+      {
+        "id": 6,
+        "title": "Lock Hierarchy Violations",
+        "type": "stat",
+        "targets": [
+          {
+            "expr": "increase(poker_lock_hierarchy_violations_total[1h])",
+            "legendFormat": "Violations"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "thresholds": {
+              "mode": "absolute",
+              "steps": [
+                {"value": 0, "color": "green"},
+                {"value": 1, "color": "red"}
+              ]
+            }
+          }
+        }
+      }
+    ],
+    "refresh": "10s",
+    "time": {"from": "now-1h", "to": "now"}
+  }
+}
