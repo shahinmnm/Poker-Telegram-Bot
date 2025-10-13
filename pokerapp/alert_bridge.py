@@ -125,7 +125,11 @@ class AlertBridge:
                 f"alert_bridge_alerts_failed_total {self._alerts_failed}",
             ]
         )
-        return web.Response(text=body + "\n", content_type="text/plain; version=0.0.4; charset=utf-8")
+        return web.Response(
+            text=body + "\n",
+            content_type="text/plain; version=0.0.4",
+            charset="utf-8",
+        )
 
     async def handle_alertmanager(self, request: web.Request) -> web.Response:
         payload = await request.json()

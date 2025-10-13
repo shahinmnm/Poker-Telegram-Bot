@@ -1,6 +1,6 @@
 {
   "dashboard": {
-    "title": "Fine-Grained Locks Rollout",
+    "title": "Fine-Grained Locks Performance",
     "tags": ["poker", "locks", "performance"],
     "timezone": "browser",
     "panels": [

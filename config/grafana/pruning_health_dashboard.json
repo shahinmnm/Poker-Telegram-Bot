@@ -1,6 +1,6 @@
 {
   "dashboard": {
-    "title": "Poker Bot - Pruning Subsystem Health",
+    "title": "Database Pruning Health",
     "tags": ["poker", "pruning", "v81"],
     "timezone": "browser",
     "panels": [
