@@ -8,7 +8,7 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, TYPE_CHECKING
 
-from sqlalchemy import delete, func, insert, select
+from sqlalchemy import delete, func, insert, select, text
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.ext.asyncio import (
     AsyncConnection,
@@ -410,6 +410,44 @@ class StatsService(BaseStatsService):
             flags=re.IGNORECASE,
         )
         return updated
+
+    async def _check_migration_presence(self, table_name: str) -> bool:
+        """Check if a specific table exists (migration already applied)."""
+
+        if not self._engine:
+            return False
+
+        try:
+            async with self._engine.begin() as conn:
+                backend = getattr(conn.dialect, "name", "").lower()
+
+                if backend == "sqlite":
+                    query = text(
+                        """
+                        SELECT COUNT(*)
+                        FROM sqlite_master
+                        WHERE type='table' AND name=:table_name
+                        """
+                    )
+                else:
+                    query = text(
+                        """
+                        SELECT EXISTS (
+                            SELECT FROM information_schema.tables
+                            WHERE table_name = :table_name
+                        )
+                        """
+                    )
+
+                result = await conn.execute(query, {"table_name": table_name})
+                return bool(result.scalar())
+        except Exception as exc:  # pragma: no cover - defensive logging
+            logger.warning(
+                "Migration presence check failed: %s",  # noqa: G003
+                exc,
+                extra={"event_type": "stats_schema_migration_check_failed"},
+            )
+            return False
 
     async def _run_migrations(self, conn: AsyncConnection) -> None:
         if not MIGRATIONS_DIR.exists():

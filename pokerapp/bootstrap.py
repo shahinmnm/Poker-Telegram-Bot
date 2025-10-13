@@ -126,16 +126,27 @@ async def _initialize_statistics_schema(
 
     async def _has_migrations_applied(conn: AsyncConnection) -> bool:
         try:
-            result = await conn.execute(
-                text(
+            backend = getattr(conn.dialect, "name", "").lower()
+
+            if backend == "sqlite":
+                query = text(
+                    """
+                    SELECT COUNT(*)
+                    FROM sqlite_master
+                    WHERE type='table' AND name=:table_name
+                    """
+                )
+            else:
+                query = text(
                     """
                     SELECT EXISTS (
                         SELECT FROM information_schema.tables
-                        WHERE table_name = 'game_sessions'
+                        WHERE table_name = :table_name
                     )
                     """
                 )
-            )
+
+            result = await conn.execute(query, {"table_name": "game_sessions"})
             return bool(result.scalar())
         except Exception as exc:  # pragma: no cover - defensive logging
             logger.warning(
