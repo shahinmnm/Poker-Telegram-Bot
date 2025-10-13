@@ -49,9 +49,7 @@ services:
       - "127.0.0.1:9099:9099"
     environment:
       - POKERBOT_TOKEN=${POKERBOT_TOKEN}
-      - CRITICAL_CHAT_ID=${CRITICAL_CHAT_ID}
-      - OPERATIONAL_CHAT_ID=${OPERATIONAL_CHAT_ID}
-      - DIGEST_CHAT_ID=${DIGEST_CHAT_ID}
+      - ADMIN_CHAT_ID=${ADMIN_CHAT_ID}
       - TELEGRAM_API_BASE=${TELEGRAM_API_BASE:-https://api.telegram.org}
       - ALERT_BRIDGE_PORT=9099
     healthcheck:
