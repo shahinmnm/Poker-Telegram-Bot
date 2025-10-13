@@ -1,0 +1,22 @@
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+alerting:
+  alertmanagers:
+    - static_configs:
+        - targets: ['alertmanager:9093']
+
+rule_files:
+  - /etc/prometheus/poker_security_alerts.yml
+
+scrape_configs:
+  - job_name: 'pokerbot'
+    metrics_path: /metrics
+    static_configs:
+      - targets: ['bot:8000']
+
+  - job_name: 'alert-bridge'
+    metrics_path: /metrics
+    static_configs:
+      - targets: ['alert-bridge:9099']
