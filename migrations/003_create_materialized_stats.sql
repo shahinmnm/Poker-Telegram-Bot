@@ -17,9 +17,6 @@
 -- Dependencies: Requires migrations 001 and 002
 -- Rollback: See scripts/rollback_003.sql
 -- =============================================================================
-
-BEGIN TRANSACTION;
-
 -- ============================================================================
 -- PART 1: Create materialized stats table
 -- ============================================================================
@@ -301,8 +298,6 @@ FROM
     player_stats
 WHERE 
     user_id = 12345;
-
-COMMIT;
 
 -- ============================================================================
 -- Expected Performance Improvements
