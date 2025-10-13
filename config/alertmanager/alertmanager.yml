@@ -1,0 +1,55 @@
+global:
+  resolve_timeout: 5m
+
+route:
+  receiver: alert-bridge-digest
+  group_by: ['alertname', 'component']
+  group_wait: 1m
+  group_interval: 30m
+  repeat_interval: 6h
+  routes:
+    - matchers:
+        - severity="critical"
+      receiver: alert-bridge-critical
+      group_wait: 10s
+      group_interval: 5m
+      repeat_interval: 30m
+    - matchers:
+        - severity="high"
+      receiver: alert-bridge-operational
+      group_wait: 1m
+      group_interval: 15m
+      repeat_interval: 2h
+    - matchers:
+        - severity="warning"
+      receiver: alert-bridge-operational
+      group_wait: 1m
+      group_interval: 15m
+      repeat_interval: 2h
+    - matchers:
+        - severity="info"
+      receiver: alert-bridge-digest
+      group_wait: 5m
+      group_interval: 6h
+      repeat_interval: 6h
+
+receivers:
+  - name: alert-bridge-critical
+    webhook_configs:
+      - url: http://alert-bridge:9099/webhook/alertmanager?channel=critical
+        send_resolved: true
+  - name: alert-bridge-operational
+    webhook_configs:
+      - url: http://alert-bridge:9099/webhook/alertmanager?channel=operational
+        send_resolved: true
+  - name: alert-bridge-digest
+    webhook_configs:
+      - url: http://alert-bridge:9099/webhook/alertmanager?channel=digest
+        send_resolved: true
+
+inhibit_rules:
+  - source_matchers:
+      - severity="critical"
+    target_matchers:
+      - severity=~"high|warning|info"
+    equal: ['alertname', 'component']
