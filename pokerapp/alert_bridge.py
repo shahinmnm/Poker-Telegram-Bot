@@ -3,8 +3,11 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
+import time
+from collections import defaultdict
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Dict, Iterable, List, Optional, Sequence
@@ -91,6 +94,7 @@ class AlertBridge:
         self._session: Optional[ClientSession] = None
         self._alerts_processed = 0
         self._alerts_failed = 0
+        self._rate_limiter = TelegramRateLimiter()
 
     async def startup(self, app: web.Application) -> None:
         timeout = ClientTimeout(total=10)
@@ -278,39 +282,134 @@ class AlertBridge:
     async def _dispatch(self, alerts: Sequence[FormattedAlert]) -> None:
         if not self._session:
             raise RuntimeError("Client session not initialised")
-        url = f"{self._api_base}/bot{self._bot_token}/sendMessage"
+
+        tasks = []
         for alert in alerts:
-            payload = {"chat_id": alert.chat_id, "text": alert.body, "parse_mode": "MarkdownV2", "disable_web_page_preview": True}
+            if not self._rate_limiter.check_limit(alert.chat_id):
+                LOGGER.warning(
+                    "Rate limit exceeded for chat",
+                    extra={"chat_id": alert.chat_id, "alert_name": alert.alert_name},
+                )
+                self._alerts_failed += 1
+                continue
+
             LOGGER.info(
                 "Forwarding alert to Telegram",
                 extra={"chat_id": alert.chat_id, "severity": alert.severity, "alert_name": alert.alert_name},
             )
+            tasks.append(self._dispatch_with_retry(alert))
+
+        if not tasks:
+            return
+
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        for result in results:
+            if isinstance(result, Exception):
+                self._alerts_failed += 1
+                LOGGER.error(
+                    "Exception while sending alert to Telegram",
+                    exc_info=(type(result), result, result.__traceback__),
+                )
+
+    async def _dispatch_with_retry(self, alert: FormattedAlert, max_retries: int = 3) -> bool:
+        if not self._session:
+            raise RuntimeError("Client session not initialised")
+
+        url = f"{self._api_base}/bot{self._bot_token}/sendMessage"
+        payload = {
+            "chat_id": alert.chat_id,
+            "text": alert.body,
+            "parse_mode": "MarkdownV2",
+            "disable_web_page_preview": True,
+        }
+
+        for attempt in range(max_retries):
             try:
                 async with self._session.post(url, json=payload) as response:
                     text = await response.text()
+
+                    if response.status == 429:
+                        retry_after = int(response.headers.get("Retry-After", "60"))
+                        LOGGER.warning(
+                            "Telegram rate limit hit, retrying",
+                            extra={"retry_after": retry_after, "attempt": attempt + 1, "chat_id": alert.chat_id},
+                        )
+                        await asyncio.sleep(retry_after)
+                        continue
+
+                    if 500 <= response.status < 600 and attempt < max_retries - 1:
+                        backoff = 2**attempt
+                        LOGGER.warning(
+                            "Telegram server error, retrying",
+                            extra={"status": response.status, "backoff": backoff, "attempt": attempt + 1},
+                        )
+                        await asyncio.sleep(backoff)
+                        continue
+
                     if response.status >= 400:
                         self._alerts_failed += 1
                         LOGGER.error(
-                            "Telegram delivery failed",
+                            "Telegram delivery failed permanently",
                             extra={
                                 "chat_id": alert.chat_id,
                                 "status": response.status,
-                                "body": text,
+                                "body": text[:200],
                                 "alert_name": alert.alert_name,
                             },
                         )
-                    else:
-                        self._alerts_processed += 1
-                        LOGGER.info(
-                            "Telegram delivery succeeded",
-                            extra={"chat_id": alert.chat_id, "alert_name": alert.alert_name},
-                        )
+                        return False
+
+                    self._alerts_processed += 1
+                    LOGGER.info(
+                        "Telegram delivery succeeded",
+                        extra={"chat_id": alert.chat_id, "alert_name": alert.alert_name},
+                    )
+                    return True
+
+            except asyncio.TimeoutError:
+                if attempt < max_retries - 1:
+                    backoff = 2**attempt
+                    LOGGER.warning(
+                        "Telegram timeout, retrying",
+                        extra={"attempt": attempt + 1, "backoff": backoff, "chat_id": alert.chat_id},
+                    )
+                    await asyncio.sleep(backoff)
+                    continue
+                self._alerts_failed += 1
+                LOGGER.error("Telegram timeout after max retries", extra={"chat_id": alert.chat_id})
+                return False
+
             except Exception as exc:  # pragma: no cover - network failure
                 self._alerts_failed += 1
                 LOGGER.exception(
                     "Exception while sending alert to Telegram",
                     extra={"chat_id": alert.chat_id, "alert_name": alert.alert_name, "error": repr(exc)},
                 )
+                return False
+
+        return False
+
+
+class TelegramRateLimiter:
+    """Enforce per-chat rate limits to prevent Telegram API bans."""
+
+    def __init__(self, max_per_chat: int = 20, window: int = 60) -> None:
+        self.max_per_chat = max_per_chat
+        self.window = window
+        self._chat_timestamps: Dict[str, List[float]] = defaultdict(list)
+
+    def check_limit(self, chat_id: str) -> bool:
+        """Return True if request is allowed, False if rate limited."""
+
+        now = time.time()
+        timestamps = self._chat_timestamps[chat_id]
+        self._chat_timestamps[chat_id] = [ts for ts in timestamps if now - ts < self.window]
+
+        if len(self._chat_timestamps[chat_id]) >= self.max_per_chat:
+            return False
+
+        self._chat_timestamps[chat_id].append(now)
+        return True
 
 
 def _chunk_alerts(items: Sequence[Dict[str, Any]], size: int) -> Iterable[Sequence[Dict[str, Any]]]:

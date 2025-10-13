@@ -45,7 +45,7 @@ DIGEST_CHAT_ID=<digest chat id>
 
 Ensure the following entries exist in `.env` or your secret manager:
 
-- `POKERBOT_TOKEN=7056950431:AAEdhI7zdzwCQjYCVTEYYG8VNQvU9j9DntQ`
+- `POKERBOT_TOKEN=<YOUR_BOT_TOKEN_FROM_BOTFATHER>`
 - `CRITICAL_CHAT_ID=<critical group id>`
 - `OPERATIONAL_CHAT_ID=<ops group id>`
 - `DIGEST_CHAT_ID=<digest group id>`

@@ -1,0 +1,29 @@
+{
+  "dashboard": {
+    "title": "Alert Bridge Health",
+    "panels": [
+      {
+        "title": "Alert Delivery Rate",
+        "targets": [
+          {
+            "expr": "rate(alert_bridge_alerts_processed_total[5m])",
+            "legendFormat": "Delivered"
+          },
+          {
+            "expr": "rate(alert_bridge_alerts_failed_total[5m])",
+            "legendFormat": "Failed"
+          }
+        ]
+      },
+      {
+        "title": "Telegram API Latency",
+        "targets": [
+          {
+            "expr": "histogram_quantile(0.95, rate(alert_bridge_telegram_request_duration_seconds_bucket[5m]))",
+            "legendFormat": "p95 latency"
+          }
+        ]
+      }
+    ]
+  }
+}
