@@ -459,8 +459,11 @@ class StatsService(BaseStatsService):
             except OSError as exc:
                 logger.warning("Unable to read migration %s: %s", path, exc)
                 continue
-            if backend == "sqlite" and path.name != "001_create_statistics_tables.sql":
-                logger.debug("Skipping migration %s for SQLite backend", path.name)
+            # Skip PostgreSQL-specific migrations (002) on SQLite
+            if backend == "sqlite" and path.name == "002_add_performance_indexes.sql":
+                logger.debug(
+                    "Skipping PostgreSQL-specific migration %s for SQLite", path.name
+                )
                 continue
             statements = self._split_sql_statements(sql)
             if not statements:
