@@ -483,6 +483,8 @@ class StatsService(BaseStatsService):
                     "Skipping PostgreSQL-specific migration %s for SQLite", path.name
                 )
                 continue
+            if backend == "sqlite" and path.name == "003_create_materialized_stats.sql":
+                await self._prepare_sqlite_for_materialized_stats(conn)
             statements = self._split_sql_statements(sql)
             if not statements:
                 continue
@@ -517,6 +519,50 @@ class StatsService(BaseStatsService):
                         "Failed to apply migration statement from %s", path.name
                     )
                     raise
+
+    async def _prepare_sqlite_for_materialized_stats(self, conn: AsyncConnection) -> None:
+        """Ensure the SQLite schema can accept the materialized stats migration."""
+
+        try:
+            result = await conn.exec_driver_sql("PRAGMA table_info(player_stats)")
+        except OperationalError:
+            return
+
+        existing_columns = {row[1] for row in result}
+        if not existing_columns:
+            return
+
+        required_columns = {
+            "total_hands": "ALTER TABLE player_stats ADD COLUMN total_hands INTEGER NOT NULL DEFAULT 0",
+            "hands_won": "ALTER TABLE player_stats ADD COLUMN hands_won INTEGER NOT NULL DEFAULT 0",
+            "hands_lost": "ALTER TABLE player_stats ADD COLUMN hands_lost INTEGER NOT NULL DEFAULT 0",
+            "total_winnings": "ALTER TABLE player_stats ADD COLUMN total_winnings INTEGER NOT NULL DEFAULT 0",
+            "total_losses": "ALTER TABLE player_stats ADD COLUMN total_losses INTEGER NOT NULL DEFAULT 0",
+            "net_profit": "ALTER TABLE player_stats ADD COLUMN net_profit INTEGER NOT NULL DEFAULT 0",
+            "biggest_pot": "ALTER TABLE player_stats ADD COLUMN biggest_pot INTEGER NOT NULL DEFAULT 0",
+            "win_rate": "ALTER TABLE player_stats ADD COLUMN win_rate REAL NOT NULL DEFAULT 0.0",
+            "avg_pot_size": "ALTER TABLE player_stats ADD COLUMN avg_pot_size REAL NOT NULL DEFAULT 0.0",
+            "first_played_at": "ALTER TABLE player_stats ADD COLUMN first_played_at TEXT",
+            "last_played_at": "ALTER TABLE player_stats ADD COLUMN last_played_at TEXT",
+            "updated_at": "ALTER TABLE player_stats ADD COLUMN updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP",
+        }
+
+        missing = [
+            statement
+            for column, statement in required_columns.items()
+            if column not in existing_columns
+        ]
+
+        if not missing:
+            return
+
+        logger.info(
+            "Extending existing player_stats table for materialized stats migration",
+            extra={"event_type": "stats_schema_player_stats_extend"},
+        )
+
+        for statement in missing:
+            await conn.exec_driver_sql(statement)
 
     async def ensure_ready(self) -> None:
         if not self._enabled:
