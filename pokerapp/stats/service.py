@@ -378,11 +378,29 @@ class StatsService(BaseStatsService):
     def _split_sql_statements(sql: str) -> List[str]:
         statements: List[str] = []
         buffer: List[str] = []
+        inside_trigger = False
         for line in sql.splitlines():
             stripped = line.strip()
             if not stripped or stripped.startswith("--"):
                 continue
+
+            upper = stripped.upper()
+            if upper.startswith("CREATE TRIGGER"):
+                inside_trigger = True
+
             buffer.append(line)
+
+            if inside_trigger:
+                if upper in {"END", "END;"}:
+                    statement = "\n".join(buffer).strip()
+                    buffer.clear()
+                    inside_trigger = False
+                    if statement.endswith(";"):
+                        statement = statement[:-1].rstrip()
+                    if statement:
+                        statements.append(statement)
+                continue
+
             if stripped.endswith(";"):
                 statement = "\n".join(buffer).strip()
                 buffer.clear()
