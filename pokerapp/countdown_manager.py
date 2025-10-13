@@ -1195,7 +1195,17 @@ class SmartCountdownManager:
         timer_info = self._countdown_timer_info.setdefault(state.chat_id, {})
         min_interval = 1.0
         last_edit = timer_info.get("last_edit")
-        if isinstance(last_edit, (int, float)):
+
+        # Skip throttling when rendering the final "0 seconds" update so the
+        # countdown completion callback can execute immediately. The previous
+        # implementation always slept until the one-second window elapsed, which
+        # introduced a perceptible delay before :meth:`start_game` was invoked.
+        should_throttle = (
+            isinstance(last_edit, (int, float))
+            and max(0, int(state.remaining_seconds)) > 0
+        )
+
+        if should_throttle:
             elapsed = time.monotonic() - last_edit
             if elapsed < min_interval:
                 await asyncio.sleep(min_interval - elapsed)
