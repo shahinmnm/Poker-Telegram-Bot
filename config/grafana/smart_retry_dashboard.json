@@ -1,6 +1,6 @@
 {
   "dashboard": {
-    "title": "Poker Bot - Smart Lock Retry Monitoring",
+    "title": "Smart Lock Retry System",
     "panels": [
       {
         "title": "Lock Queue Depths",

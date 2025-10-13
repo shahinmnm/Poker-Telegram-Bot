@@ -1,6 +1,6 @@
 {
   "dashboard": {
-    "title": "Alert Bridge Health",
+    "title": "Alerting System Health",
     "panels": [
       {
         "title": "Alert Delivery Rate",
