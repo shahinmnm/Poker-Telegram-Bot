@@ -6,6 +6,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     zlib1g-dev \
     gcc \
     g++ \
+    sqlite3 \
     && rm -rf /var/lib/apt/lists/*
 
 COPY requirements.txt makefile ./
