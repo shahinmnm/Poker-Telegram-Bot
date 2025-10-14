@@ -150,7 +150,8 @@ class GameStartView:
                         "message_id": message_id,
                     },
                 )
-                return message_id
+                self._clear_cached_message(game)
+                return None
 
             except TelegramError as exc:
                 self._logger.warning(
@@ -162,7 +163,8 @@ class GameStartView:
                         "message_id": message_id,
                     },
                 )
-                return message_id
+                self._clear_cached_message(game)
+                return None
 
             except Exception as exc:
                 self._logger.error(
@@ -174,7 +176,8 @@ class GameStartView:
                     },
                     exc_info=True,
                 )
-                return message_id
+                self._clear_cached_message(game)
+                return None
 
             if message_id is not None:
                 try:
@@ -188,6 +191,17 @@ class GameStartView:
 
             self._last_update[chat_id] = time.monotonic()
             return message_id
+
+    @staticmethod
+    def _clear_cached_message(game: Game) -> None:
+        if hasattr(game, "ready_message_main_id"):
+            game.ready_message_main_id = None
+        if hasattr(game, "ready_message_main_text"):
+            game.ready_message_main_text = None
+        if hasattr(game, "ready_message_game_id"):
+            game.ready_message_game_id = None
+        if hasattr(game, "ready_message_stage"):
+            game.ready_message_stage = None
 
     async def _get_lock(self, chat_id: int) -> asyncio.Lock:
         async with self._locks_guard:
