@@ -1,31 +1,50 @@
 {
-  "dashboard": {
-    "uid": "alerting-health",
-    "title": "Alerting System Health",
-    "tags": ["poker", "alerting", "monitoring"],
-    "panels": [
-      {
-        "title": "Alert Delivery Rate",
-        "targets": [
-          {
-            "expr": "rate(alert_bridge_alerts_processed_total[5m])",
-            "legendFormat": "Delivered"
-          },
-          {
-            "expr": "rate(alert_bridge_alerts_failed_total[5m])",
-            "legendFormat": "Failed"
-          }
-        ]
-      },
-      {
-        "title": "Telegram API Latency",
-        "targets": [
-          {
-            "expr": "histogram_quantile(0.95, rate(alert_bridge_telegram_request_duration_seconds_bucket[5m]))",
-            "legendFormat": "p95 latency"
-          }
-        ]
-      }
-    ]
-  }
+  "uid": "alerting-health",
+  "title": "Alerting System Health",
+  "tags": ["poker", "alerting", "monitoring"],
+  "timezone": "browser",
+  "schemaVersion": 16,
+  "version": 0,
+  "refresh": "30s",
+  "panels": [
+    {
+      "id": 1,
+      "title": "Alert Delivery Rate",
+      "type": "graph",
+      "gridPos": {"x": 0, "y": 0, "w": 12, "h": 8},
+      "targets": [
+        {
+          "expr": "rate(alert_bridge_alerts_processed_total[5m])",
+          "legendFormat": "Delivered",
+          "refId": "A"
+        },
+        {
+          "expr": "rate(alert_bridge_alerts_failed_total[5m])",
+          "legendFormat": "Failed",
+          "refId": "B"
+        }
+      ],
+      "yaxes": [
+        {"format": "ops", "label": "Alerts/sec"},
+        {"format": "short"}
+      ]
+    },
+    {
+      "id": 2,
+      "title": "Telegram API Latency",
+      "type": "graph",
+      "gridPos": {"x": 12, "y": 0, "w": 12, "h": 8},
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.95, rate(alert_bridge_telegram_request_duration_seconds_bucket[5m]))",
+          "legendFormat": "p95 latency",
+          "refId": "A"
+        }
+      ],
+      "yaxes": [
+        {"format": "s", "label": "Latency"},
+        {"format": "short"}
+      ]
+    }
+  ]
 }

@@ -1,5 +1,14 @@
 ## [Unreleased]
 
+### Fixed
+- **Grafana Dashboard Provisioning**: Fixed "Dashboard title cannot be empty" errors
+  - Added stable UIDs to all 4 dashboards (alerting-health, smart-retry-health, fine-grained-locks, pruning-health)
+  - Added descriptive titles for proper dashboard identification
+  - Added monitoring tags for categorization
+  - Ensures dashboards provision correctly on Grafana startup
+- Created verification script `scripts/verify_grafana_provisioning.sh` to validate dashboard configuration
+
+
 ### Added - Phase 2: Materialized Statistics Layer
 
 #### Database Optimizations
