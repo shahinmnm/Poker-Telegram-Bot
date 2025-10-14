@@ -1,6 +1,6 @@
 {
   "dashboard": {
-    "title": "Smart Lock Retry System",
+    "title": "Smart Retry System Health",
     "panels": [
       {
         "title": "Lock Queue Depths",
