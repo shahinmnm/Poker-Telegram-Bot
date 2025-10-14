@@ -34,10 +34,17 @@ class DummyTableManager:
     async def load_game(self, chat_id: int):
         return self._game, None
 
-    async def save_game(self, chat_id: int, game: Game) -> None:
+    async def save_game(
+        self,
+        chat_id: int,
+        game: Game,
+        *,
+        increment_version: bool = True,
+    ) -> None:
         self._game = game
         self.save_count += 1
-        self._version += 1
+        if increment_version:
+            self._version += 1
 
     async def load_game_with_version(self, chat_id: int):
         return self._game, self._version

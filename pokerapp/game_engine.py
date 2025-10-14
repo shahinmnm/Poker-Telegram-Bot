@@ -3702,6 +3702,7 @@ class GameEngine:
         )
 
         game_to_save = None
+        incremented_in_lock = False
         async with lock_manager.stage_lock(chat_id):
             get_version = getattr(table_manager, "get_game_version", None)
             reload_required = True
@@ -3750,7 +3751,7 @@ class GameEngine:
                     version_key = table_manager._version_key(chat_id)
                     new_version = await table_manager._redis.incr(version_key)
                     setattr(game, "_version", new_version)
-                    incremented_inside_lock = True
+                    incremented_in_lock = True
                     self._logger.debug(
                         "Version incremented inside lock",
                         extra={"chat_id": chat_id, "new_version": new_version},
@@ -3764,22 +3765,14 @@ class GameEngine:
 
         # Save OUTSIDE lock (I/O no longer blocks other operations)
         if game_to_save is not None and hasattr(table_manager, "save_game"):
-            save_game_kwargs = {}
-            if incremented_inside_lock:
-                try:
-                    parameters = inspect.signature(table_manager.save_game).parameters
-                except (TypeError, ValueError):
-                    parameters = {}
-
-                if "increment_version" in parameters:
-                    save_game_kwargs["increment_version"] = False
-                else:
-                    self._logger.debug(
-                        "save_game does not support increment_version flag",
-                        extra={"chat_id": chat_id, "manager": type(table_manager).__name__},
-                    )
-
-            await table_manager.save_game(chat_id, game_to_save, **save_game_kwargs)
+            save_kwargs = {}
+            if incremented_in_lock:
+                save_kwargs["increment_version"] = False  # Already incremented inside lock
+            await table_manager.save_game(
+                chat_id,
+                game_to_save,
+                **save_kwargs,
+            )
 
         if snapshot is not None:
             await self._execute_deferred_stage_tasks(snapshot)
