@@ -411,7 +411,7 @@ class PokerBot:
         expected_secret = settings.secret_token or ""
         registered_secret = getattr(webhook_info, "secret_token", None)
         if expected_secret and not registered_secret:
-            self._logger.info(
+            self._logger.debug(
                 "Webhook secret token not returned by Telegram; configured secret not verifiable."
             )
         elif expected_secret and registered_secret == expected_secret:
