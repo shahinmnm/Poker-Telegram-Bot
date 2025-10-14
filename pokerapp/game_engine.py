@@ -459,6 +459,7 @@ class GameEngine:
         self._countdown_contexts: Dict[int, ContextTypes.DEFAULT_TYPE] = {}
         self._smart_countdown_manager: Optional[SmartCountdownManager] = None
         self._smart_countdown_start_task: Optional[asyncio.Task[None]] = None
+        self._save_game_signature_cache: Dict[int, bool] = {}
 
         bot_instance = getattr(view, "_bot", None)
         if bot_instance is not None:
@@ -3762,11 +3763,16 @@ class GameEngine:
 
         # Save OUTSIDE lock (I/O no longer blocks other operations)
         if game_to_save is not None and hasattr(table_manager, "save_game"):
-            await table_manager.save_game(
-                chat_id,
-                game_to_save,
-                increment_version=False,  # Already incremented inside lock
-            )
+            save_game_method = getattr(table_manager, "save_game")
+            if callable(save_game_method):
+                if self._supports_increment_version(save_game_method):
+                    await save_game_method(
+                        chat_id,
+                        game_to_save,
+                        increment_version=False,  # Already incremented inside lock
+                    )
+                else:
+                    await save_game_method(chat_id, game_to_save)
 
         if snapshot is not None:
             await self._execute_deferred_stage_tasks(snapshot)
@@ -3848,6 +3854,24 @@ class GameEngine:
         cards = getattr(game, "community_cards", ())
         formatted_cards = " ".join(str(card) for card in cards)
         return f"💰 Pot: {pot}\n🎴 Stage: {stage}\n{formatted_cards}".strip()
+
+    def _supports_increment_version(self, save_game_method: Callable[..., Any]) -> bool:
+        method_id = id(save_game_method)
+        if method_id in self._save_game_signature_cache:
+            return self._save_game_signature_cache[method_id]
+
+        try:
+            parameters = inspect.signature(save_game_method).parameters
+        except (TypeError, ValueError):
+            parameters = {}
+
+        supports_increment = "increment_version" in parameters or any(
+            parameter.kind is inspect.Parameter.VAR_KEYWORD
+            for parameter in parameters.values()
+        )
+
+        self._save_game_signature_cache[method_id] = supports_increment
+        return supports_increment
 
     def _create_send_message_task(
         self,
