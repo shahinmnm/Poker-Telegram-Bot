@@ -133,20 +133,20 @@ async def _initialize_statistics_schema(
                     """
                     SELECT COUNT(*) > 0
                     FROM sqlite_master
-                    WHERE type='table' AND name=:table_name
+                    WHERE type='table' AND name='game_sessions'
                     """
                 )
             else:
                 query = text(
                     """
                     SELECT EXISTS (
-                        SELECT 1 FROM information_schema.tables
-                        WHERE table_name = :table_name
+                        SELECT 1 FROM sqlite_master
+                        WHERE type='table' AND name='game_sessions'
                     )
                     """
                 )
 
-            result = await conn.execute(query, {"table_name": "game_sessions"})
+            result = await conn.execute(query)
             return bool(result.scalar())
         except Exception as exc:  # pragma: no cover - defensive logging
             logger.warning(
