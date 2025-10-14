@@ -3653,8 +3653,32 @@ class GameEngine:
         if lock_manager is None or table_manager is None:
             return False
 
-        game_data = await table_manager.load_game(chat_id)
-        game = game_data[0] if isinstance(game_data, tuple) else game_data
+        game_version: Optional[int] = None
+        load_with_version = getattr(table_manager, "load_game_with_version", None)
+        if callable(load_with_version):
+            game_data = await load_with_version(chat_id)
+        else:
+            game_data = await table_manager.load_game(chat_id)
+
+        if isinstance(game_data, tuple):
+            game = game_data[0]
+            if len(game_data) > 1 and isinstance(game_data[1], int):
+                game_version = game_data[1]
+        else:
+            game = game_data
+
+        if game_version is None:
+            get_version = getattr(table_manager, "get_game_version", None)
+            if callable(get_version):
+                try:
+                    game_version = await get_version(chat_id)
+                except Exception:
+                    self._logger.exception(
+                        "Failed to fetch game version during stage snapshot",
+                        extra={"chat_id": chat_id},
+                    )
+                    game_version = 0
+
         if not game or getattr(game, "stage", None) == "complete":
             return False
 
@@ -3679,13 +3703,38 @@ class GameEngine:
 
         game_to_save = None
         async with lock_manager.stage_lock(chat_id):
-            # Reload the game inside the lock to avoid overwriting concurrent updates
-            game_data_fresh = await table_manager.load_game(chat_id)
-            game = (
-                game_data_fresh[0]
-                if isinstance(game_data_fresh, tuple)
-                else game_data_fresh
-            )
+            get_version = getattr(table_manager, "get_game_version", None)
+            reload_required = True
+            current_version: Optional[int] = None
+
+            if callable(get_version):
+                try:
+                    current_version = await get_version(chat_id)
+                except Exception:
+                    self._logger.exception(
+                        "Failed to read current game version inside stage lock",
+                        extra={"chat_id": chat_id},
+                    )
+                else:
+                    reload_required = (
+                        game_version is None or current_version != game_version
+                    )
+
+            if reload_required:
+                game_data_fresh = await table_manager.load_game(chat_id)
+                game = (
+                    game_data_fresh[0]
+                    if isinstance(game_data_fresh, tuple)
+                    else game_data_fresh
+                )
+                if isinstance(game_data_fresh, tuple) and len(game_data_fresh) > 1:
+                    maybe_version = game_data_fresh[1]
+                    if isinstance(maybe_version, int):
+                        game_version = maybe_version
+                    elif current_version is not None:
+                        game_version = current_version
+                elif current_version is not None:
+                    game_version = current_version
 
             if not game or getattr(game, "stage", None) == "complete":
                 return False

@@ -259,6 +259,27 @@ class TableManager:
 
         return game, validation_result
 
+    async def get_game_version(self, chat_id: ChatId) -> int:
+        """Return the optimistic locking version for the given chat."""
+
+        version_key = self._version_key(chat_id)
+        version_raw = await self._redis.get(version_key)
+
+        if version_raw is None:
+            await self._redis.set(version_key, 0)
+            return 0
+
+        if isinstance(version_raw, bytes):
+            version_str = version_raw.decode("utf-8", "ignore")
+        else:
+            version_str = str(version_raw)
+
+        try:
+            return int(version_str)
+        except (TypeError, ValueError):
+            await self._redis.set(version_key, 0)
+            return 0
+
     async def load_game_with_version(
         self, chat_id: ChatId, *, validate: bool = True
     ) -> Tuple[Optional[Game], int]:
