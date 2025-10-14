@@ -3744,11 +3744,13 @@ class GameEngine:
 
             # Atomically increment the version before releasing the lock
             new_version = None
+            incremented_inside_lock = False
             if hasattr(table_manager, "_redis") and hasattr(table_manager, "_version_key"):
                 try:
                     version_key = table_manager._version_key(chat_id)
                     new_version = await table_manager._redis.incr(version_key)
                     setattr(game, "_version", new_version)
+                    incremented_inside_lock = True
                     self._logger.debug(
                         "Version incremented inside lock",
                         extra={"chat_id": chat_id, "new_version": new_version},
@@ -3762,11 +3764,22 @@ class GameEngine:
 
         # Save OUTSIDE lock (I/O no longer blocks other operations)
         if game_to_save is not None and hasattr(table_manager, "save_game"):
-            await table_manager.save_game(
-                chat_id,
-                game_to_save,
-                increment_version=False,  # Already incremented inside lock
-            )
+            save_game_kwargs = {}
+            if incremented_inside_lock:
+                try:
+                    parameters = inspect.signature(table_manager.save_game).parameters
+                except (TypeError, ValueError):
+                    parameters = {}
+
+                if "increment_version" in parameters:
+                    save_game_kwargs["increment_version"] = False
+                else:
+                    self._logger.debug(
+                        "save_game does not support increment_version flag",
+                        extra={"chat_id": chat_id, "manager": type(table_manager).__name__},
+                    )
+
+            await table_manager.save_game(chat_id, game_to_save, **save_game_kwargs)
 
         if snapshot is not None:
             await self._execute_deferred_stage_tasks(snapshot)
