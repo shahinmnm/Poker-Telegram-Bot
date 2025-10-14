@@ -3762,7 +3762,11 @@ class GameEngine:
 
         # Save OUTSIDE lock (I/O no longer blocks other operations)
         if game_to_save is not None and hasattr(table_manager, "save_game"):
-            await table_manager.save_game(chat_id, game_to_save)
+            await table_manager.save_game(
+                chat_id,
+                game_to_save,
+                increment_version=False,
+            )
 
         if snapshot is not None:
             await self._execute_deferred_stage_tasks(snapshot)
