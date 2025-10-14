@@ -392,7 +392,7 @@ class TableManager:
         chat_id: ChatId,
         game: Game,
         *,
-        increment_version: bool = True,
+        increment_version: bool = False,
     ) -> None:
         """Save game state and optionally increment version."""
 
