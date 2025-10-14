@@ -3678,6 +3678,17 @@ class GameEngine:
         )
 
         async with lock_manager.stage_lock(chat_id):
+            # Reload the game inside the lock to avoid overwriting concurrent updates
+            game_data_fresh = await table_manager.load_game(chat_id)
+            game = (
+                game_data_fresh[0]
+                if isinstance(game_data_fresh, tuple)
+                else game_data_fresh
+            )
+
+            if not game or getattr(game, "stage", None) == "complete":
+                return False
+
             setattr(game, "stage", next_stage)
             if hasattr(table_manager, "save_game"):
                 await table_manager.save_game(chat_id, game)
