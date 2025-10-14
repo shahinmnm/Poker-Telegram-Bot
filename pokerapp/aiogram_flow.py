@@ -1583,7 +1583,7 @@ async def _handle_action_callback(
     token_manager = _resolve_token_manager(game_engine)
     request_metrics = getattr(game_engine, "request_metrics", None)
     if token_manager and token and nonce and timestamp is not None:
-        is_valid, error_message = token_manager.validate_token(
+        is_valid, error_message = await token_manager.validate_token(
             game_id=chat_id,
             user_id=user_id,
             token=token,

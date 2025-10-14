@@ -102,7 +102,9 @@ class CallbackTokenManager:
         self.token_ttl = token_ttl
         self.request_metrics = request_metrics
 
-    def generate_token(self, game_id: int, user_id: int, *, action: str) -> Tuple[str, str, int]:
+    async def generate_token(
+        self, game_id: int, user_id: int, *, action: str
+    ) -> Tuple[str, str, int]:
         """Generate a unique secure token for a player's action.
 
         Args:
@@ -132,14 +134,14 @@ class CallbackTokenManager:
             "action": action,
         }
 
-        self.redis.setex(redis_key, self.token_ttl, json.dumps(token_data))
+        await self.redis.setex(redis_key, self.token_ttl, json.dumps(token_data))
 
         if self.request_metrics is not None:
             self.request_metrics.record_token_generation(action=action)
 
         return token, nonce, timestamp
 
-    def validate_token(
+    async def validate_token(
         self,
         game_id: int,
         user_id: int,
@@ -183,7 +185,7 @@ class CallbackTokenManager:
             return False, "Token timestamp is in the future (clock skew?)"
 
         redis_key = f"action_token:{game_id}:{user_id}:{nonce}"
-        stored_data_bytes = self.redis.get(redis_key)
+        stored_data_bytes = await self.redis.get(redis_key)
 
         if not stored_data_bytes:
             duration = time.time() - start_time
@@ -232,7 +234,7 @@ class CallbackTokenManager:
         stored_data["used"] = True
         stored_data["used_at"] = current_time
 
-        self.redis.setex(redis_key, self.token_ttl, json.dumps(stored_data))
+        await self.redis.setex(redis_key, self.token_ttl, json.dumps(stored_data))
         duration = time.time() - start_time
         if self.request_metrics is not None:
             self.request_metrics.record_token_validation(
@@ -243,16 +245,16 @@ class CallbackTokenManager:
 
         return True, ""
 
-    def invalidate_all_tokens(self, game_id: int) -> int:
+    async def invalidate_all_tokens(self, game_id: int) -> int:
         """Invalidate all tokens for a specific game."""
 
         pattern = f"action_token:{game_id}:*"
-        keys = list(self.redis.keys(pattern) or [])
+        keys = list(await self.redis.keys(pattern) or [])
 
         if not keys:
             return 0
 
-        deleted = self.redis.delete(*keys)
+        deleted = await self.redis.delete(*keys)
         return int(deleted or 0)
 
 
@@ -335,7 +337,7 @@ def validate_action_token(
             await query.answer("❌ خطا در شناسایی کاربر.", show_alert=True)
             return
 
-        is_valid, error_message = token_manager.validate_token(
+        is_valid, error_message = await token_manager.validate_token(
             game_id=chat_id,
             user_id=user_id,
             token=token,
@@ -5069,7 +5071,7 @@ class PokerBotViewer:
                 board_line=board_line,
             )
 
-    def _create_action_buttons(
+    async def _create_action_buttons(
         self,
         game: Game,
         player: Player,
@@ -5079,11 +5081,11 @@ class PokerBotViewer:
     ) -> InlineKeyboardMarkup:
         """Create inline action buttons, embedding secure tokens when available."""
 
-        def make_callback(action_name: str, legacy_value: str) -> str:
+        async def make_callback(action_name: str, legacy_value: str) -> str:
             if self.token_manager is None:
                 return f"action:{legacy_value}"
 
-            token, nonce, timestamp = self.token_manager.generate_token(
+            token, nonce, timestamp = await self.token_manager.generate_token(
                 game_id=getattr(game, "chat_id", 0),
                 user_id=getattr(player, "user_id", 0),
                 action=action_name,
@@ -5095,15 +5097,19 @@ class PokerBotViewer:
             [
                 InlineKeyboardButton(
                     text=PlayerAction.FOLD.value,
-                    callback_data=make_callback("fold", PlayerAction.FOLD.value),
+                    callback_data=await make_callback(
+                        "fold", PlayerAction.FOLD.value
+                    ),
                 ),
                 InlineKeyboardButton(
                     text=PlayerAction.ALL_IN.value,
-                    callback_data=make_callback("allin", PlayerAction.ALL_IN.value),
+                    callback_data=await make_callback(
+                        "allin", PlayerAction.ALL_IN.value
+                    ),
                 ),
                 InlineKeyboardButton(
                     text=call_text,
-                    callback_data=make_callback(
+                    callback_data=await make_callback(
                         "call" if call_action == PlayerAction.CALL else "check",
                         call_action.value,
                     ),
@@ -5112,19 +5118,19 @@ class PokerBotViewer:
             [
                 InlineKeyboardButton(
                     text=str(PlayerAction.SMALL.value),
-                    callback_data=make_callback(
+                    callback_data=await make_callback(
                         "raise-10", str(PlayerAction.SMALL.value)
                     ),
                 ),
                 InlineKeyboardButton(
                     text=str(PlayerAction.NORMAL.value),
-                    callback_data=make_callback(
+                    callback_data=await make_callback(
                         "raise-25", str(PlayerAction.NORMAL.value)
                     ),
                 ),
                 InlineKeyboardButton(
                     text=str(PlayerAction.BIG.value),
-                    callback_data=make_callback(
+                    callback_data=await make_callback(
                         "raise-50", str(PlayerAction.BIG.value)
                     ),
                 ),
@@ -5142,7 +5148,7 @@ class PokerBotViewer:
         """Return an inline keyboard for the active player's actions."""
 
         if self.token_manager is not None:
-            return self._create_action_buttons(
+            return await self._create_action_buttons(
                 game,
                 player,
                 call_text=call_text,
@@ -5161,7 +5167,7 @@ class PokerBotViewer:
                 )
                 return cached
 
-            markup = self._create_action_buttons(
+            markup = await self._create_action_buttons(
                 game,
                 player,
                 call_text=call_text,
