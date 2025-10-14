@@ -311,7 +311,13 @@ class GameStartView:
                         },
                         exc_info=True,
                     )
-                    self._mark_message_stale(game, chat_id)
+                    if allow_create or message_id is None:
+                        # Only clear the cached anchor when we can create a
+                        # replacement message. For transient network failures
+                        # we must keep the existing message ID so callers that
+                        # disallow creation (like the countdown manager) can
+                        # retry editing once the connection recovers.
+                        self._mark_message_stale(game, chat_id)
                     return None
 
                 except TelegramError as exc:
@@ -327,7 +333,11 @@ class GameStartView:
                         },
                         exc_info=True,
                     )
-                    self._mark_message_stale(game, chat_id)
+                    if allow_create or message_id is None:
+                        # See comment above: retain the existing message ID
+                        # when callers expect to edit in-place after transient
+                        # Telegram API failures.
+                        self._mark_message_stale(game, chat_id)
                     return None
 
                 except Exception as exc:  # pragma: no cover - defensive coding
