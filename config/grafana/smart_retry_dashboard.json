@@ -1,6 +1,8 @@
 {
   "dashboard": {
+    "uid": "smart-retry-health",
     "title": "Smart Retry System Health",
+    "tags": ["poker", "performance", "retry"],
     "panels": [
       {
         "title": "Lock Queue Depths",

@@ -79,6 +79,9 @@
 - None at this time.
 
 ### Fixed
+- Alert Bridge `/metrics` endpoint returning `500` error due to charset in `content_type`
+- Grafana dashboard provisioning failures caused by empty title fields
+- All monitoring dashboards now have explicit, descriptive titles
 - Countdown timer stability (eliminated time jumps, freezing, resumption)
 - Telegram API rate limiting (1 req/sec throttling per message)
 - Race conditions in concurrent countdown start/cancel

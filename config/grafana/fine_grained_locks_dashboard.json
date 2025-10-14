@@ -1,7 +1,8 @@
 {
   "dashboard": {
+    "uid": "fine-grained-locks",
     "title": "Fine-Grained Locks Performance",
-    "tags": ["poker", "locks", "performance"],
+    "tags": ["poker", "performance", "locks"],
     "timezone": "browser",
     "panels": [
       {
