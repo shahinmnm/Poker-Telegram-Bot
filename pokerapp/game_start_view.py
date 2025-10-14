@@ -17,12 +17,52 @@ from typing import Any, Dict, List, Optional, Sequence
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.constants import ParseMode
-from telegram.error import BadRequest, TelegramError
+from telegram.error import (
+    BadRequest,
+    NetworkError,
+    RetryAfter,
+    TelegramError,
+    TimedOut,
+)
 
 from pokerapp.entities import Game, GameState, Player, MAX_PLAYERS
 from pokerapp.utils.locale_utils import to_persian_digits
 from pokerapp.utils.messaging_service import MessagingService
 from pokerapp.utils.request_metrics import RequestCategory
+
+
+try:  # pragma: no cover - prometheus_client optional
+    from prometheus_client import Counter
+except Exception:  # pragma: no cover - dependency optional in tests
+    Counter = None  # type: ignore[assignment]
+
+
+class _NoopCounter:  # pragma: no cover - simple fallback helper
+    def inc(self, amount: float = 1.0) -> None:
+        return None
+
+    def labels(self, **_: object) -> "_NoopCounter":
+        return self
+
+
+if Counter is not None:  # pragma: no branch - initialise metrics when available
+    _EDIT_SUCCESS_COUNTER = Counter(
+        "poker_game_start_view_edit_success",
+        "Successful updates to the game start anchor message.",
+    )
+    _EDIT_FAILURE_COUNTER = Counter(
+        "poker_game_start_view_edit_failures",
+        "Failed attempts to update the game start anchor message.",
+        ("reason",),
+    )
+    _RATE_LIMIT_COUNTER = Counter(
+        "poker_game_start_view_rate_limited",
+        "Occurrences of rate limiting whilst updating the game start message.",
+    )
+else:  # pragma: no cover - prometheus_client missing in environment
+    _EDIT_SUCCESS_COUNTER = _NoopCounter()
+    _EDIT_FAILURE_COUNTER = _NoopCounter()
+    _RATE_LIMIT_COUNTER = _NoopCounter()
 
 
 _LOGGER = logging.getLogger(__name__)
@@ -63,6 +103,9 @@ class GameStartView:
     """Render and deliver the unified pre-hand message."""
 
     _MIN_UPDATE_INTERVAL = 1.0
+    _MAX_TIMEOUT_RETRIES = 3
+    _INITIAL_TIMEOUT_BACKOFF = 1.0
+    _MAX_TIMEOUT_BACKOFF = 8.0
 
     def __init__(
         self,
@@ -75,6 +118,7 @@ class GameStartView:
         self._locks: dict[int, asyncio.Lock] = {}
         self._locks_guard = asyncio.Lock()
         self._last_update: dict[int, float] = {}
+        self._anchor_message_id: dict[int, Optional[int]] = {}
 
     async def update_message(
         self,
@@ -96,6 +140,10 @@ class GameStartView:
             await self._respect_rate_limit(chat_id)
 
             message_id = getattr(game, "ready_message_main_id", None)
+            if message_id is None:
+                cached_anchor = self._anchor_message_id.get(chat_id)
+                if cached_anchor is not None:
+                    message_id = cached_anchor
             text, markup = self._render_text(game, countdown=countdown, stage=stage)
             if text is None:
                 return message_id
@@ -113,81 +161,190 @@ class GameStartView:
                 )
                 return None
 
-            try:
-                if message_id is None:
-                    result = await self._messenger.send_message(
-                        chat_id=chat_id,
-                        text=text,
-                        parse_mode=parse_mode,
-                        reply_markup=markup,
-                        disable_web_page_preview=True,
-                        disable_notification=True,
-                        request_category=RequestCategory.START_GAME,
-                        context=context,
-                    )
-                    message_id = self._resolve_message_id(result)
-                else:
-                    edit_result = await self._messenger.edit_message_text(
-                        chat_id=chat_id,
-                        message_id=int(message_id),
-                        text=text,
-                        reply_markup=markup,
-                        parse_mode=parse_mode,
-                        request_category=RequestCategory.START_GAME,
-                        context=context,
-                        current_game_id=getattr(game, "id", None),
-                    )
-                    resolved = self._resolve_message_id(edit_result)
-                    if resolved is not None:
-                        message_id = resolved
-
-            except BadRequest as exc:
-                self._logger.warning(
-                    "Telegram rejected message update (bad request)",
-                    extra={
-                        "chat_id": chat_id,
-                        "error": str(exc),
-                        "operation": "send" if message_id is None else "edit",
-                        "message_id": message_id,
-                    },
-                )
-                return message_id
-
-            except TelegramError as exc:
-                self._logger.warning(
-                    "Telegram API error during message update",
-                    extra={
-                        "chat_id": chat_id,
-                        "error": str(exc),
-                        "operation": "send" if message_id is None else "edit",
-                        "message_id": message_id,
-                    },
-                )
-                return message_id
-
-            except Exception as exc:
-                self._logger.error(
-                    "Unexpected error during message update",
-                    extra={
-                        "chat_id": chat_id,
-                        "error": str(exc),
-                        "operation": "send" if message_id is None else "edit",
-                    },
-                    exc_info=True,
-                )
-                return message_id
-
-            if message_id is not None:
+            timeout_attempts = 0
+            backoff = self._INITIAL_TIMEOUT_BACKOFF
+            while True:
+                operation = "send" if message_id is None else "edit"
                 try:
-                    normalized_id = int(message_id)
-                except (TypeError, ValueError):
-                    normalized_id = message_id
-                game.ready_message_main_id = normalized_id
-                game.ready_message_main_text = text
-                game.ready_message_game_id = getattr(game, "id", None)
-                game.ready_message_stage = game.state
+                    if message_id is None:
+                        result = await self._messenger.send_message(
+                            chat_id=chat_id,
+                            text=text,
+                            parse_mode=parse_mode,
+                            reply_markup=markup,
+                            disable_web_page_preview=True,
+                            disable_notification=True,
+                            request_category=RequestCategory.START_GAME,
+                            context=context,
+                        )
+                        message_id = self._resolve_message_id(result)
+                    else:
+                        edit_result = await self._messenger.edit_message_text(
+                            chat_id=chat_id,
+                            message_id=int(message_id),
+                            text=text,
+                            reply_markup=markup,
+                            parse_mode=parse_mode,
+                            request_category=RequestCategory.START_GAME,
+                            context=context,
+                            current_game_id=getattr(game, "id", None),
+                        )
+                        resolved = self._resolve_message_id(edit_result)
+                        if resolved is not None:
+                            message_id = resolved
 
-            self._last_update[chat_id] = time.monotonic()
+                    if message_id is not None:
+                        try:
+                            normalized_id = int(message_id)
+                        except (TypeError, ValueError):
+                            normalized_id = message_id
+                    else:
+                        normalized_id = None
+
+                    game.ready_message_main_id = normalized_id
+                    game.ready_message_main_text = text
+                    game.ready_message_game_id = getattr(game, "id", None)
+                    game.ready_message_stage = game.state
+                    self._anchor_message_id[chat_id] = (
+                        normalized_id if isinstance(normalized_id, int) else None
+                    )
+                    self._last_update[chat_id] = time.monotonic()
+                    _EDIT_SUCCESS_COUNTER.inc()
+                    return message_id
+
+                except RetryAfter as exc:
+                    _RATE_LIMIT_COUNTER.inc()
+                    delay = getattr(exc, "retry_after", None)
+                    if delay is None:
+                        delay = getattr(exc, "value", 1)  # type: ignore[attr-defined]
+                    try:
+                        delay_float = max(0.0, float(delay))
+                    except (TypeError, ValueError):
+                        delay_float = 1.0
+                    self._logger.warning(
+                        "Rate limited while updating start message; retrying",
+                        extra={
+                            "chat_id": chat_id,
+                            "message_id": message_id,
+                            "error_type": "retry_after",
+                            "operation": operation,
+                            "retry_after": delay_float,
+                        },
+                    )
+                    await asyncio.sleep(delay_float)
+                    continue
+
+                except TimedOut as exc:
+                    timeout_attempts += 1
+                    if timeout_attempts >= self._MAX_TIMEOUT_RETRIES:
+                        _EDIT_FAILURE_COUNTER.labels(reason="timed_out").inc()
+                        self._logger.error(
+                            "Timed out updating start message; giving up",
+                            extra={
+                                "chat_id": chat_id,
+                                "message_id": message_id,
+                                "error_type": "timed_out",
+                                "operation": operation,
+                                "attempts": timeout_attempts,
+                            },
+                            exc_info=True,
+                        )
+                        self._mark_message_stale(game, chat_id)
+                        return None
+
+                    delay = min(backoff, self._MAX_TIMEOUT_BACKOFF)
+                    backoff = min(backoff * 2, self._MAX_TIMEOUT_BACKOFF)
+                    self._logger.warning(
+                        "Timed out updating start message; retrying",
+                        extra={
+                            "chat_id": chat_id,
+                            "message_id": message_id,
+                            "error_type": "timed_out",
+                            "operation": operation,
+                            "attempts": timeout_attempts,
+                            "retry_delay": delay,
+                        },
+                        exc_info=True,
+                    )
+                    await asyncio.sleep(delay)
+                    continue
+
+                except BadRequest as exc:
+                    reason = self._classify_bad_request(exc)
+                    _EDIT_FAILURE_COUNTER.labels(reason=reason).inc()
+                    error_message = str(exc)
+                    if reason == "message_not_modified":
+                        self._logger.debug(
+                            "Start message unchanged during edit",
+                            extra={
+                                "chat_id": chat_id,
+                                "message_id": message_id,
+                                "error_type": reason,
+                                "operation": operation,
+                            },
+                        )
+                        return message_id
+
+                    self._logger.warning(
+                        "Telegram rejected message update",
+                        extra={
+                            "chat_id": chat_id,
+                            "message_id": message_id,
+                            "error_type": reason,
+                            "operation": operation,
+                            "error": error_message,
+                        },
+                    )
+                    self._mark_message_stale(game, chat_id)
+                    return None
+
+                except NetworkError as exc:
+                    _EDIT_FAILURE_COUNTER.labels(reason="network_error").inc()
+                    self._logger.warning(
+                        "Network error updating start message",
+                        extra={
+                            "chat_id": chat_id,
+                            "message_id": message_id,
+                            "error_type": "network_error",
+                            "operation": operation,
+                            "error": str(exc),
+                        },
+                        exc_info=True,
+                    )
+                    self._mark_message_stale(game, chat_id)
+                    return None
+
+                except TelegramError as exc:
+                    _EDIT_FAILURE_COUNTER.labels(reason="telegram_error").inc()
+                    self._logger.warning(
+                        "Telegram API error during message update",
+                        extra={
+                            "chat_id": chat_id,
+                            "message_id": message_id,
+                            "error_type": "telegram_error",
+                            "operation": operation,
+                            "error": str(exc),
+                        },
+                        exc_info=True,
+                    )
+                    self._mark_message_stale(game, chat_id)
+                    return None
+
+                except Exception as exc:  # pragma: no cover - defensive coding
+                    _EDIT_FAILURE_COUNTER.labels(reason="unexpected").inc()
+                    self._logger.error(
+                        "Unexpected error during message update",
+                        extra={
+                            "chat_id": chat_id,
+                            "message_id": message_id,
+                            "error_type": "unexpected",
+                            "operation": operation,
+                            "error": str(exc),
+                        },
+                        exc_info=True,
+                    )
+                    self._mark_message_stale(game, chat_id)
+                    return None
             return message_id
 
     async def _get_lock(self, chat_id: int) -> asyncio.Lock:
@@ -219,6 +376,26 @@ class GameStartView:
             return int(result)  # type: ignore[arg-type]
         except (TypeError, ValueError):
             return None
+
+    @staticmethod
+    def _classify_bad_request(exc: BadRequest) -> str:
+        message = str(getattr(exc, "message", "") or str(exc)).lower()
+        if "message is not modified" in message:
+            return "message_not_modified"
+        if "message to edit not found" in message:
+            return "message_to_edit_not_found"
+        return "bad_request"
+
+    def _mark_message_stale(self, game: Game, chat_id: int) -> None:
+        self._anchor_message_id[chat_id] = None
+        if hasattr(game, "ready_message_main_id"):
+            game.ready_message_main_id = None
+        if hasattr(game, "ready_message_main_text"):
+            game.ready_message_main_text = None
+        if hasattr(game, "ready_message_game_id"):
+            game.ready_message_game_id = None
+        if hasattr(game, "ready_message_stage"):
+            game.ready_message_stage = None
 
     @staticmethod
     def _safe_int(value: object, default: int = 0) -> int:
