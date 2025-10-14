@@ -3741,11 +3741,31 @@ class GameEngine:
 
             # Only mutate in-memory state inside lock
             setattr(game, "stage", next_stage)
+
+            if game_version is not None:
+                try:
+                    game_version += 1
+                except TypeError:
+                    game_version = None
+                else:
+                    setattr(game, "_version", game_version)
             game_to_save = game  # Capture reference for post-lock save
 
         # Save OUTSIDE lock (I/O no longer blocks other operations)
         if game_to_save is not None and hasattr(table_manager, "save_game"):
             await table_manager.save_game(chat_id, game_to_save)
+
+        if game_to_save is not None:
+            version_to_set = getattr(game_to_save, "_version", None)
+            if version_to_set is not None and hasattr(table_manager, "_redis"):
+                try:
+                    version_key = table_manager._version_key(chat_id)
+                    await table_manager._redis.set(version_key, version_to_set)
+                except Exception:
+                    self._logger.exception(
+                        "Failed to persist game version after stage progression",
+                        extra={"chat_id": chat_id, "version": version_to_set},
+                    )
 
         if snapshot is not None:
             await self._execute_deferred_stage_tasks(snapshot)
