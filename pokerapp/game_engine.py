@@ -469,6 +469,7 @@ class GameEngine:
                     bot=bot_instance,
                     redis_client=redis_client,
                     logger=countdown_logger or logger,
+                    start_view=getattr(view, "game_start_view", None),
                 )
                 try:
                     loop = asyncio.get_running_loop()
@@ -737,6 +738,7 @@ class GameEngine:
                 on_complete=on_countdown_complete,
                 message_id=anchor_message_id,
                 player_roster=ready_roster,
+                game=game,
             )
         except Exception:
             self._logger.warning(

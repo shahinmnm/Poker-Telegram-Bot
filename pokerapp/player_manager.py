@@ -354,6 +354,13 @@ class PlayerManager:
         if not stale_prompt and (game.state != GameState.INITIAL or ready_message_id):
             return
 
+        start_view = getattr(self._view, "game_start_view", None)
+        if start_view is not None:
+            await start_view.update_message(game=game, allow_create=True)
+            if self._table_manager is not None:
+                await self._table_manager.save_game(chat_id, game)
+            return
+
         markup = InlineKeyboardMarkup(
             [[InlineKeyboardButton(text="نشستن سر میز", callback_data="join_game")]]
         )
