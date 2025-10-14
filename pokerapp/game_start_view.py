@@ -37,7 +37,7 @@ class PlayerRosterEntry:
     display_name: str
 
 
-@dataclass(slots=True)
+@dataclass(frozen=True)
 class CountdownSnapshot:
     """Snapshot of countdown state used for rendering updates."""
 
@@ -49,7 +49,7 @@ class CountdownSnapshot:
     player_roster: tuple[PlayerRosterEntry, ...] = field(default_factory=tuple)
 
 
-@dataclass(slots=True)
+@dataclass(frozen=True)
 class StageSnapshot:
     """Game stage information used when the countdown finishes."""
 
@@ -221,7 +221,7 @@ class GameStartView:
 
     @staticmethod
     def _safe_int(value: object, default: int = 0) -> int:
-        """Safely coerce ``value`` to ``int`` with a fallback."""
+        """Safely coerce value to int with fallback."""
 
         if value is None:
             return default
@@ -252,14 +252,14 @@ class GameStartView:
         ]
         roster = self._normalize_roster(ready_players)
         return CountdownSnapshot(
-            chat_id=self._safe_int(getattr(game, "chat_id", None), 0),
+            chat_id=self._safe_int(getattr(game, "chat_id", None)),
             remaining_seconds=0,
             total_seconds=max(
                 1,
                 self._safe_int(getattr(game, "countdown_total", None), 30),
             ),
             player_count=len(roster),
-            pot_size=self._safe_int(getattr(game, "pot", None), 0),
+            pot_size=self._safe_int(getattr(game, "pot", None)),
             player_roster=roster,
         )
 
@@ -270,24 +270,24 @@ class GameStartView:
         total = max(1, int(snapshot.total_seconds))
         progress_bar = self._render_progress_bar(remaining, total)
 
-        remaining_fa = to_persian_digits(remaining)
+        remaining_fa = self._escape_markdown_v2(to_persian_digits(remaining))
+        ready_fa = self._escape_markdown_v2(to_persian_digits(snapshot.player_count))
+        max_players_fa = self._escape_markdown_v2(to_persian_digits(MAX_PLAYERS))
+        pot_fa = self._escape_markdown_v2(to_persian_digits(snapshot.pot_size))
 
         header = "🚀 بازی در آستانه شروع"
         if remaining > 0:
             header = f"🚀 شروع بازی ({remaining_fa}s)"
+        header = self._escape_markdown_v2(header)
 
         countdown_lines = [
-            self._escape_markdown_v2(header),
+            header,
             "",
             f"{progress_bar} {remaining_fa} ثانیه مانده",
             "",
         ]
 
         countdown_lines.extend(self._build_player_list_section(snapshot))
-
-        ready_fa = to_persian_digits(snapshot.player_count)
-        max_players_fa = to_persian_digits(MAX_PLAYERS)
-        pot_fa = to_persian_digits(snapshot.pot_size)
 
         countdown_lines.extend(
             [
@@ -317,7 +317,7 @@ class GameStartView:
             return "🎮 بازی شروع شد"
 
         seat_number = (player.seat_index or 0) + 1
-        seat_fa = to_persian_digits(seat_number)
+        seat_fa = self._escape_markdown_v2(to_persian_digits(seat_number))
         display_name = (
             getattr(player, "display_name", None)
             or getattr(player, "full_name", None)
@@ -325,11 +325,7 @@ class GameStartView:
             or str(getattr(player, "user_id", "?"))
         )
         safe_name = self._escape_markdown_v2(str(display_name))
-        user_id = getattr(player, "user_id", 0)
-        try:
-            user_id = int(user_id)
-        except (TypeError, ValueError):
-            user_id = 0
+        user_id = self._safe_int(getattr(player, "user_id", None))
         player_name = f"[{safe_name}](tg://user?id={user_id})"
 
         stage_labels = {
@@ -344,27 +340,35 @@ class GameStartView:
         if not board_cards:
             board_text = "—"
         else:
-            board_text = " ".join(self._escape_markdown_v2(str(card)) for card in board_cards)
+            board_text = " ".join(
+                self._escape_markdown_v2(str(card)) for card in board_cards
+            )
 
-        pot = to_persian_digits(int(getattr(game, "pot", 0)))
+        pot = self._escape_markdown_v2(
+            to_persian_digits(self._safe_int(getattr(game, "pot", None)))
+        )
         stack_value = getattr(player, "money", None)
         if stack_value is None:
             player_stack = getattr(player, "wallet", None)
             stack_value = getattr(player_stack, "cached_value", None)
             if stack_value is None:
                 stack_value = getattr(player_stack, "_value", None)
-        if stack_value is None:
-            stack_value = 0
-        stack_fa = to_persian_digits(int(stack_value or 0))
+        stack_fa = self._escape_markdown_v2(
+            to_persian_digits(self._safe_int(stack_value))
+        )
 
-        round_rate = to_persian_digits(int(getattr(player, "round_rate", 0)))
-        max_round = to_persian_digits(int(getattr(game, "max_round_rate", 0)))
+        round_rate = self._escape_markdown_v2(
+            to_persian_digits(self._safe_int(getattr(player, "round_rate", None)))
+        )
+        max_round = self._escape_markdown_v2(
+            to_persian_digits(self._safe_int(getattr(game, "max_round_rate", None)))
+        )
 
         lines = [
             f"🎯 نوبت: {player_name} (صندلی {seat_fa})",
             f"🎰 مرحله بازی: {self._escape_markdown_v2(stage_name)}",
             "",
-            f"🃏 کارت‌های میز: {self._escape_markdown_v2(board_text)}",
+            f"🃏 کارت‌های میز: {board_text}",
             f"💰 پات فعلی: {pot}$",
             f"💵 موجودی شما: {stack_fa}$",
             f"🎲 شرط فعلی شما: {round_rate}$",
@@ -382,6 +386,11 @@ class GameStartView:
         return "\n".join(lines)
 
     def _render_progress_bar(self, remaining: int, total: int) -> str:
+        """Render a text-based progress bar.
+
+        Uses Unicode block chars (█ and ░) which are safe for MarkdownV2.
+        """
+
         width = 20
         total = max(total, 1)
         remaining = max(0, min(remaining, total))
@@ -398,7 +407,7 @@ class GameStartView:
             return lines
 
         for index, entry in enumerate(roster, start=1):
-            index_fa = to_persian_digits(index)
+            index_fa = self._escape_markdown_v2(to_persian_digits(index))
             if entry.seat_index is None:
                 seat_label = "صندلی نامشخص"
             else:
