@@ -6,9 +6,29 @@
 -- Safe to run multiple times (idempotent)
 -- ============================================================================
 
--- Ensure buy-in tracking column exists for aggregation
+-- ===========================================================================
+-- PRE-FLIGHT CHECKS
+-- ===========================================================================
+
+-- Log the SQLite version so operators can confirm the runtime environment.
+SELECT sqlite_version();
+
+BEGIN;
+
+-- Ensure legacy schemas have the columns required by this migration.
+ALTER TABLE hands_players
+    ADD COLUMN IF NOT EXISTS amount_won INTEGER NOT NULL DEFAULT 0;
+
 ALTER TABLE hands_players
     ADD COLUMN IF NOT EXISTS buyin_amount INTEGER NOT NULL DEFAULT 0;
+
+ALTER TABLE hands
+    ADD COLUMN IF NOT EXISTS completed_at TEXT;
+
+-- PostgreSQL equivalents (execute manually when running against Postgres):
+-- ALTER TABLE hands_players ADD COLUMN IF NOT EXISTS amount_won INTEGER DEFAULT 0;
+-- ALTER TABLE hands_players ADD COLUMN IF NOT EXISTS buyin_amount INTEGER DEFAULT 0;
+-- ALTER TABLE hands ADD COLUMN IF NOT EXISTS completed_at TIMESTAMP;
 
 -- ============================================================================
 -- PART 1: MATERIALIZED STATISTICS TABLE
@@ -271,3 +291,5 @@ SELECT
     (SELECT COUNT(*) FROM player_stats) AS player_count,
     (SELECT COUNT(*) FROM sqlite_master WHERE type='trigger' AND name LIKE 'trg_%stats%') AS trigger_count,
     (SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND tbl_name='player_stats') AS index_count;
+
+COMMIT;
