@@ -3745,6 +3745,7 @@ class GameEngine:
 
             # Atomically increment the version before releasing the lock
             new_version = None
+            incremented_inside_lock = False
             if hasattr(table_manager, "_redis") and hasattr(table_manager, "_version_key"):
                 try:
                     version_key = table_manager._version_key(chat_id)
