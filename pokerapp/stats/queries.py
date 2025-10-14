@@ -85,7 +85,7 @@ class PlayerStatsQuery:
         start = perf_counter()
         cursor = self.conn.execute(
             """
-            SELECT 
+            SELECT
                 user_id, username, total_hands, hands_won, hands_lost,
                 total_winnings, total_buyins, biggest_win, biggest_loss,
                 current_streak, best_streak, worst_streak, last_played_at
@@ -129,7 +129,7 @@ class PlayerStatsQuery:
         start = perf_counter()
         cursor = self.conn.execute(
             f"""
-            SELECT 
+            SELECT
                 user_id, username, total_hands, hands_won, hands_lost,
                 total_winnings, total_buyins, biggest_win, biggest_loss,
                 current_streak, best_streak, worst_streak, last_played_at
@@ -169,7 +169,7 @@ class PlayerStatsQuery:
         start = perf_counter()
         cursor = self.conn.execute(
             """
-            SELECT 
+            SELECT
                 user_id, username, total_hands, hands_won, hands_lost,
                 total_winnings, total_buyins, biggest_win, biggest_loss,
                 current_streak, best_streak, worst_streak, last_played_at
@@ -200,7 +200,7 @@ class PlayerStatsQuery:
         start = perf_counter()
         cursor = self.conn.execute(
             """
-            SELECT 
+            SELECT
                 COUNT(*) AS total_players,
                 SUM(total_hands) AS total_hands_played,
                 SUM(total_winnings) AS total_winnings,
