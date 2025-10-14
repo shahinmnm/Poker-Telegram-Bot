@@ -8,6 +8,10 @@ import logging
 from typing import Any, AsyncIterator, Optional
 
 
+class LockOwnershipError(RuntimeError):
+    """Raised when a non-owner task attempts to release the lock."""
+
+
 class ReentrantAsyncLock:
     """A task-aware re-entrant lock for asyncio."""
 
@@ -32,36 +36,68 @@ class ReentrantAsyncLock:
         self._count = 1
 
     def release(self) -> None:
-        """Release the lock.
+        """Release the lock, enforcing task ownership."""
 
-        This implementation relaxes the strict task ownership check so that the
-        lock can be released even when the current task is not the owner or when
-        no task context is available (for example, callbacks scheduled with
-        ``loop.call_soon``). In such cases a warning is logged and the
-        re-entrancy depth is decremented until the underlying lock can be
-        safely released. This prevents crashes or leaked locks when background
-        callbacks or schedulers manage the release lifecycle.
-        """
+        logger = logging.getLogger(__name__)
+
         try:
             current = asyncio.current_task()
-            current_task_id = id(current) if current is not None else None
-        except RuntimeError:
-            current = None
-            current_task_id = None
+        except RuntimeError as exc:  # pragma: no cover - no running event loop
+            logger.error(
+                "Re-entrant lock release attempted without an active asyncio task",
+                extra={
+                    "owner_task_id": self._owner_id,
+                    "release_task_id": None,
+                    "lock_depth": self._count,
+                },
+            )
+            raise LockOwnershipError("Re-entrant lock release requires an active asyncio task") from exc
 
         if current is None:
-            logging.getLogger(__name__).warning(
-                "Re-entrant lock release invoked without an active asyncio task; forcing release"
+            logger.error(
+                "Re-entrant lock release attempted without an active asyncio task",
+                extra={
+                    "owner_task_id": self._owner_id,
+                    "release_task_id": None,
+                    "lock_depth": self._count,
+                },
             )
-            self._decrement_depth_and_maybe_release()
-            return
+            raise LockOwnershipError("Re-entrant lock release requires an active asyncio task")
 
-        if current_task_id is not None and self._owner_id != current_task_id:
-            logging.getLogger(__name__).warning(
-                "Non-owner task attempted to release re-entrant lock; releasing anyway"
+        current_task_id = id(current)
+
+        if self._owner_id != current_task_id:
+            logger.error(
+                "Non-owner task attempted to release re-entrant lock",
+                extra={
+                    "owner_task_id": self._owner_id,
+                    "release_task_id": current_task_id,
+                    "lock_depth": self._count,
+                },
             )
-            self._decrement_depth_and_maybe_release()
-            return
+            raise LockOwnershipError(
+                "Re-entrant lock can only be released by the owning task"
+            )
+
+        if self._count <= 0:
+            logger.error(
+                "Re-entrant lock release requested but lock is not held",
+                extra={
+                    "owner_task_id": self._owner_id,
+                    "release_task_id": current_task_id,
+                    "lock_depth": self._count,
+                },
+            )
+            raise RuntimeError("Cannot release an un-acquired re-entrant lock")
+
+        logger.debug(
+            "Releasing re-entrant lock",
+            extra={
+                "owner_task_id": self._owner_id,
+                "release_task_id": current_task_id,
+                "lock_depth": self._count,
+            },
+        )
 
         self._decrement_depth_and_maybe_release()
 
