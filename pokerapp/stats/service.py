@@ -499,8 +499,8 @@ class StatsService(BaseStatsService):
                     query = text(
                         """
                         SELECT EXISTS (
-                            SELECT 1 FROM information_schema.tables
-                            WHERE table_name = :table_name
+                            SELECT 1 FROM sqlite_master
+                            WHERE type='table' AND name=:table_name
                         )
                         """
                     )
