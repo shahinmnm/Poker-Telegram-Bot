@@ -3782,17 +3782,6 @@ class GameEngine:
                             "table_manager_class": type(table_manager).__name__,
                         },
                     )
-                    if not version_incremented_in_lock and hasattr(table_manager, "_redis") and hasattr(table_manager, "_version_key"):
-                        try:
-                            version_key = table_manager._version_key(chat_id)
-                            new_version = await table_manager._redis.incr(version_key)
-                            setattr(game_to_save, "_version", new_version)
-                            version_incremented_in_lock = True
-                        except Exception:
-                            self._logger.exception(
-                                "Failed to increment version in fallback path",
-                                extra={"chat_id": chat_id},
-                            )
                     await save_game_method(chat_id, game_to_save)
 
         if snapshot is not None:
