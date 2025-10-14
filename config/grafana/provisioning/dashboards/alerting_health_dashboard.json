@@ -1,50 +1,73 @@
 {
-  "uid": "alerting-health",
-  "title": "Alerting System Health",
-  "tags": ["poker-bot", "monitoring"],
-  "timezone": "utc",
+  "uid": "poker-alerting-health",
+  "title": "Poker Bot - Alerting Pipeline Health",
+  "tags": ["poker", "alerting", "phase1.5"],
+  "timezone": "browser",
   "schemaVersion": 16,
   "version": 1,
-  "refresh": "30s",
   "panels": [
     {
       "id": 1,
       "title": "Alert Delivery Rate",
       "type": "graph",
-      "gridPos": {"x": 0, "y": 0, "w": 12, "h": 8},
       "targets": [
         {
           "expr": "rate(alert_bridge_alerts_processed_total[5m])",
-          "legendFormat": "Delivered",
-          "refId": "A"
+          "legendFormat": "Processed/sec"
         },
         {
           "expr": "rate(alert_bridge_alerts_failed_total[5m])",
-          "legendFormat": "Failed",
-          "refId": "B"
+          "legendFormat": "Failed/sec"
         }
-      ],
-      "yaxes": [
-        {"format": "ops", "label": "Alerts/sec"},
-        {"format": "short"}
       ]
     },
     {
       "id": 2,
-      "title": "Telegram API Latency",
-      "type": "graph",
-      "gridPos": {"x": 12, "y": 0, "w": 12, "h": 8},
+      "title": "Telegram API Success Rate",
+      "type": "stat",
       "targets": [
         {
-          "expr": "histogram_quantile(0.95, rate(alert_bridge_telegram_request_duration_seconds_bucket[5m]))",
-          "legendFormat": "p95 latency",
-          "refId": "A"
+          "expr": "sum(rate(alert_bridge_alerts_processed_total[5m])) / (sum(rate(alert_bridge_alerts_processed_total[5m])) + sum(rate(alert_bridge_alerts_failed_total[5m])))",
+          "legendFormat": "Success Rate"
         }
       ],
-      "yaxes": [
-        {"format": "s", "label": "Latency"},
-        {"format": "short"}
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {"value": 0, "color": "red"},
+              {"value": 0.95, "color": "yellow"},
+              {"value": 0.99, "color": "green"}
+            ]
+          }
+        }
+      }
+    },
+    {
+      "id": 3,
+      "title": "Alert Severity Distribution",
+      "type": "piechart",
+      "targets": [
+        {
+          "expr": "sum by (severity) (increase(alert_bridge_alerts_processed_total[1h]))",
+          "legendFormat": "{{severity}}"
+        }
+      ]
+    },
+    {
+      "id": 4,
+      "title": "Alertmanager Firing Alerts",
+      "type": "graph",
+      "targets": [
+        {
+          "expr": "ALERTS{alertstate=\"firing\"}",
+          "legendFormat": "{{alertname}}"
+        }
       ]
     }
-  ]
+  ],
+  "refresh": "30s",
+  "time": {"from": "now-3h", "to": "now"}
 }

@@ -82,6 +82,66 @@ fi
 
 echo
 
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+echo "5. Grafana Dashboard Structure Validation"
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+echo
+
+DASHBOARD_ERRORS=0
+
+for dashboard in alerting_health fine_grained_locks pruning_health smart_retry; do
+  DASH_FILE="/etc/grafana/provisioning/dashboards/${dashboard}_dashboard.json"
+  
+  echo "📊 Checking ${dashboard}_dashboard.json..."
+  
+  # Check if file exists in container
+  if ! docker-compose exec -T grafana test -f "$DASH_FILE" 2>/dev/null; then
+    echo "   ❌ File not found in container!"
+    DASHBOARD_ERRORS=$((DASHBOARD_ERRORS + 1))
+    continue
+  fi
+  
+  # Validate JSON structure
+  TITLE=$(docker-compose exec -T grafana cat "$DASH_FILE" | jq -r '.title' 2>/dev/null)
+  UID=$(docker-compose exec -T grafana cat "$DASH_FILE" | jq -r '.uid' 2>/dev/null)
+  NESTED_TITLE=$(docker-compose exec -T grafana cat "$DASH_FILE" | jq -r '.dashboard.title // empty' 2>/dev/null)
+  
+  if [ "$TITLE" = "null" ] || [ -z "$TITLE" ]; then
+    echo "   ❌ Missing top-level title!"
+    DASHBOARD_ERRORS=$((DASHBOARD_ERRORS + 1))
+  else
+    echo "   ✅ Title: $TITLE"
+  fi
+  
+  if [ "$UID" = "null" ] || [ -z "$UID" ]; then
+    echo "   ❌ Missing UID!"
+    DASHBOARD_ERRORS=$((DASHBOARD_ERRORS + 1))
+  else
+    echo "   ✅ UID: $UID"
+  fi
+  
+  if [ -n "$NESTED_TITLE" ]; then
+    echo "   ⚠️  WARNING: Nested .dashboard object detected!"
+    DASHBOARD_ERRORS=$((DASHBOARD_ERRORS + 1))
+  fi
+  
+  echo
+done
+
+if [ $DASHBOARD_ERRORS -gt 0 ]; then
+  echo "❌ Found $DASHBOARD_ERRORS dashboard structure error(s)"
+  echo
+  echo "🔧 Recommended fix:"
+  echo "   1. Stop containers: docker-compose down"
+  echo "   2. Prune volumes: docker volume prune -f"
+  echo "   3. Verify JSON files are correctly unwrapped (no .dashboard nesting)"
+  echo "   4. Restart: docker-compose up -d"
+else
+  echo "✅ All dashboards have correct structure"
+fi
+
+echo
+
 echo "$banner_line"
 echo "║                    VERIFICATION COMPLETE                    ║"
 echo "$banner_footer"

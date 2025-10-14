@@ -1,63 +1,78 @@
 {
-  "uid": "smart-retry-health",
-  "title": "Smart Retry System Health",
-  "tags": ["poker-bot", "monitoring"],
-  "timezone": "utc",
+  "uid": "poker-smart-retry",
+  "title": "Poker Bot - Smart Retry Mechanism",
+  "tags": ["poker", "retry", "phase5"],
+  "timezone": "browser",
   "schemaVersion": 16,
   "version": 1,
-  "refresh": "30s",
   "panels": [
     {
       "id": 1,
-      "title": "Retry Success Rate",
+      "title": "Retry Distribution by Attempt",
       "type": "graph",
-      "gridPos": {"x": 0, "y": 0, "w": 12, "h": 8},
       "targets": [
         {
-          "expr": "rate(poker_retry_success_total[5m]) / (rate(poker_retry_success_total[5m]) + rate(poker_retry_exhausted_total[5m]))",
-          "legendFormat": "Success Rate",
-          "refId": "A"
+          "expr": "sum by (attempt) (rate(poker_retry_attempts_total[5m]))",
+          "legendFormat": "Attempt {{attempt}}"
         }
-      ],
-      "yaxes": [
-        {"format": "percentunit", "max": 1, "min": 0},
-        {"format": "short"}
       ]
     },
     {
       "id": 2,
-      "title": "Lock Contention Rate",
-      "type": "graph",
-      "gridPos": {"x": 12, "y": 0, "w": 12, "h": 8},
+      "title": "Retry Success Rate",
+      "type": "stat",
       "targets": [
         {
-          "expr": "rate(poker_lock_contention_total[5m])",
-          "legendFormat": "Contentions/sec",
-          "refId": "A"
+          "expr": "(sum(rate(poker_retry_success_total[5m])) / sum(rate(poker_retry_attempts_total[5m]))) * 100",
+          "legendFormat": "Success %"
         }
       ],
-      "yaxes": [
-        {"format": "ops"},
-        {"format": "short"}
-      ]
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {"value": 0, "color": "red"},
+              {"value": 80, "color": "yellow"},
+              {"value": 95, "color": "green"}
+            ]
+          }
+        }
+      }
     },
     {
       "id": 3,
-      "title": "Retry Attempts Distribution",
+      "title": "Backoff Duration (ms)",
       "type": "graph",
-      "gridPos": {"x": 0, "y": 8, "w": 24, "h": 8},
       "targets": [
         {
-          "expr": "histogram_quantile(0.95, rate(poker_retry_attempts_bucket[5m]))",
-          "legendFormat": "p95 attempts",
-          "refId": "A"
+          "expr": "histogram_quantile(0.99, poker_retry_backoff_duration_ms_bucket)",
+          "legendFormat": "p99"
         },
         {
-          "expr": "histogram_quantile(0.50, rate(poker_retry_attempts_bucket[5m]))",
-          "legendFormat": "p50 attempts",
-          "refId": "B"
+          "expr": "histogram_quantile(0.50, poker_retry_backoff_duration_ms_bucket)",
+          "legendFormat": "p50"
         }
       ]
+    },
+    {
+      "id": 4,
+      "title": "Circuit Breaker State",
+      "type": "stat",
+      "targets": [
+        {
+          "expr": "poker_circuit_breaker_state",
+          "legendFormat": "{{state}}"
+        }
+      ],
+      "valueMaps": [
+        {"value": "0", "text": "Closed"},
+        {"value": "1", "text": "Open"},
+        {"value": "2", "text": "Half-Open"}
+      ]
     }
-  ]
+  ],
+  "refresh": "10s",
+  "time": {"from": "now-1h", "to": "now"}
 }
