@@ -113,6 +113,97 @@ def _make_service_logger(
     )
 
 
+async def _has_migrations_applied(
+    conn: AsyncConnection, logger: ContextLoggerAdapter
+) -> bool:
+    backend = getattr(conn.dialect, "name", "").lower()
+    backend = backend.split("+")[0] if backend else backend
+
+    metadata_queries = {
+        "postgresql": text(
+            """
+            SELECT EXISTS (
+                SELECT 1
+                FROM information_schema.tables
+                WHERE table_schema = current_schema()
+                  AND table_name = 'game_sessions'
+            )
+            """
+        ),
+        "postgres": text(
+            """
+            SELECT EXISTS (
+                SELECT 1
+                FROM information_schema.tables
+                WHERE table_schema = current_schema()
+                  AND table_name = 'game_sessions'
+            )
+            """
+        ),
+        "mysql": text(
+            """
+            SELECT EXISTS (
+                SELECT 1
+                FROM information_schema.tables
+                WHERE table_schema = DATABASE()
+                  AND table_name = 'game_sessions'
+            )
+            """
+        ),
+        "mariadb": text(
+            """
+            SELECT EXISTS (
+                SELECT 1
+                FROM information_schema.tables
+                WHERE table_schema = DATABASE()
+                  AND table_name = 'game_sessions'
+            )
+            """
+        ),
+    }
+
+    if backend == "sqlite":
+        metadata_query = text(
+            """
+            SELECT COUNT(*) > 0
+            FROM sqlite_master
+            WHERE type='table' AND name='game_sessions'
+            """
+        )
+    else:
+        metadata_query = metadata_queries.get(backend)
+
+    if metadata_query is not None:
+        try:
+            result = await conn.execute(metadata_query)
+            return bool(result.scalar())
+        except Exception as exc:  # pragma: no cover - defensive logging
+            logger.warning(
+                "Migration presence check failed for %s backend: %s",  # noqa: G003
+                backend or "unknown",
+                exc,
+                extra={"event_type": "stats_schema_migration_check_failed"},
+            )
+    else:
+        logger.debug(
+            "No metadata query configured for %s backend; falling back to inspector",
+            backend or "unknown",
+        )
+
+    try:
+        return await conn.run_sync(
+            lambda sync_conn: inspect(sync_conn).has_table("game_sessions")
+        )
+    except Exception as exc:  # pragma: no cover - defensive logging
+        logger.warning(
+            "Migration presence inspector fallback failed for %s backend: %s",  # noqa: G003
+            backend or "unknown",
+            exc,
+            extra={"event_type": "stats_schema_migration_check_failed"},
+        )
+        return False
+
+
 async def _initialize_statistics_schema(
     database_url: str, *, echo: bool, logger: ContextLoggerAdapter
 ) -> None:
@@ -123,38 +214,6 @@ async def _initialize_statistics_schema(
         echo=echo,
         pool_pre_ping=True,
     )
-
-    async def _has_migrations_applied(conn: AsyncConnection) -> bool:
-        try:
-            backend = getattr(conn.dialect, "name", "").lower()
-
-            if backend == "sqlite":
-                query = text(
-                    """
-                    SELECT COUNT(*) > 0
-                    FROM sqlite_master
-                    WHERE type='table' AND name='game_sessions'
-                    """
-                )
-            else:
-                query = text(
-                    """
-                    SELECT EXISTS (
-                        SELECT 1 FROM sqlite_master
-                        WHERE type='table' AND name='game_sessions'
-                    )
-                    """
-                )
-
-            result = await conn.execute(query)
-            return bool(result.scalar())
-        except Exception as exc:  # pragma: no cover - defensive logging
-            logger.warning(
-                "Migration presence check failed: %s",  # noqa: G003
-                exc,
-                extra={"event_type": "stats_schema_migration_check_failed"},
-            )
-            return False
 
     try:
         async with engine.begin() as conn:
@@ -171,7 +230,7 @@ async def _initialize_statistics_schema(
                     return False
 
             has_table = await conn.run_sync(_has_player_stats_table)
-            has_migrations = await _has_migrations_applied(conn)
+            has_migrations = await _has_migrations_applied(conn, logger)
 
             if not has_table and has_migrations:
                 logger.error(
