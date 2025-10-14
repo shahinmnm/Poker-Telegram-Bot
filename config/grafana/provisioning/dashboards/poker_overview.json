@@ -1,107 +1,108 @@
 {
-  "dashboard": {
-    "title": "Poker Bot Overview",
-    "tags": ["poker", "overview"],
-    "timezone": "browser",
-    "refresh": "30s",
-    "time": {"from": "now-6h", "to": "now"},
-    "panels": [
-      {
-        "id": 1,
-        "type": "stat",
-        "title": "Active Poker Actions",
-        "targets": [
-          {
-            "expr": "poker_concurrent_actions",
-            "legendFormat": "Active Actions"
-          }
-        ],
-        "fieldConfig": {
-          "defaults": {
-            "unit": "short",
-            "thresholds": {
-              "mode": "absolute",
-              "steps": [
-                {"value": 0, "color": "green"},
-                {"value": 20, "color": "yellow"},
-                {"value": 40, "color": "red"}
-              ]
-            }
-          }
+  "uid": "poker-overview",
+  "title": "Poker Bot Overview",
+  "tags": ["poker-bot", "monitoring"],
+  "timezone": "utc",
+  "schemaVersion": 16,
+  "version": 1,
+  "refresh": "30s",
+  "time": {"from": "now-6h", "to": "now"},
+  "panels": [
+    {
+      "id": 1,
+      "type": "stat",
+      "title": "Active Poker Actions",
+      "targets": [
+        {
+          "expr": "poker_concurrent_actions",
+          "legendFormat": "Active Actions"
         }
-      },
-      {
-        "id": 2,
-        "type": "stat",
-        "title": "Action Error Rate (5m)",
-        "targets": [
-          {
-            "expr": "rate(poker_action_errors_total[5m])",
-            "legendFormat": "Errors/second"
-          }
-        ],
-        "fieldConfig": {
-          "defaults": {
-            "unit": "ops",
-            "thresholds": {
-              "mode": "absolute",
-              "steps": [
-                {"value": 0, "color": "green"},
-                {"value": 0.1, "color": "yellow"},
-                {"value": 0.5, "color": "red"}
-              ]
-            }
-          }
-        }
-      },
-      {
-        "id": 3,
-        "type": "stat",
-        "title": "Lock Retry Success (5m)",
-        "targets": [
-          {
-            "expr": "rate(poker_lock_retry_success_total[5m]) / rate(poker_lock_retry_attempts_total[5m]) * 100",
-            "legendFormat": "Success %"
-          }
-        ],
-        "fieldConfig": {
-          "defaults": {
-            "unit": "percent",
-            "thresholds": {
-              "mode": "absolute",
-              "steps": [
-                {"value": 0, "color": "red"},
-                {"value": 80, "color": "yellow"},
-                {"value": 95, "color": "green"}
-              ]
-            }
-          }
-        }
-      },
-      {
-        "id": 4,
-        "type": "timeseries",
-        "title": "Action Duration p95",
-        "targets": [
-          {
-            "expr": "histogram_quantile(0.95, sum(rate(poker_action_duration_seconds_bucket[5m])) by (le))",
-            "legendFormat": "p95"
-          }
-        ],
-        "fieldConfig": {
-          "defaults": {
-            "unit": "s",
-            "thresholds": {
-              "mode": "absolute",
-              "steps": [
-                {"value": 0, "color": "green"},
-                {"value": 1, "color": "yellow"},
-                {"value": 2, "color": "red"}
-              ]
-            }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {"value": 0, "color": "green"},
+              {"value": 20, "color": "yellow"},
+              {"value": 40, "color": "red"}
+            ]
           }
         }
       }
-    ]
-  }
+    },
+    {
+      "id": 2,
+      "type": "stat",
+      "title": "Action Error Rate (5m)",
+      "targets": [
+        {
+          "expr": "rate(poker_action_errors_total[5m])",
+          "legendFormat": "Errors/second"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {"value": 0, "color": "green"},
+              {"value": 0.1, "color": "yellow"},
+              {"value": 0.5, "color": "red"}
+            ]
+          }
+        }
+      }
+    },
+    {
+      "id": 3,
+      "type": "stat",
+      "title": "Lock Retry Success (5m)",
+      "targets": [
+        {
+          "expr": "rate(poker_lock_retry_success_total[5m]) / rate(poker_lock_retry_attempts_total[5m]) * 100",
+          "legendFormat": "Success %"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {"value": 0, "color": "red"},
+              {"value": 80, "color": "yellow"},
+              {"value": 95, "color": "green"}
+            ]
+          }
+        }
+      }
+    },
+    {
+      "id": 4,
+      "type": "timeseries",
+      "title": "Action Duration p95",
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.95, sum(rate(poker_action_duration_seconds_bucket[5m])) by (le))",
+          "legendFormat": "p95"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {"value": 0, "color": "green"},
+              {"value": 1, "color": "yellow"},
+              {"value": 2, "color": "red"}
+            ]
+          }
+        }
+      }
+    }
+  ]
 }

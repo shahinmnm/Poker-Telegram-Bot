@@ -1,6 +1,9 @@
 ## [Unreleased]
 
 ### Fixed
+- **Grafana Provisioning**: Fixed conflicting volume mounts in docker-compose.yml that prevented dashboard loading
+- **Dashboard Structure**: Unwrapped `.dashboard` objects and added required `uid` fields to all dashboards
+- **Directory Organization**: Moved dashboards to correct provisioning path with proper `dashboards.yaml` config
 - **Grafana Dashboard Provisioning**: Fixed "Dashboard title cannot be empty" errors
   - Added stable UIDs to all 4 dashboards (alerting-health, smart-retry-health, fine-grained-locks, pruning-health)
   - Added descriptive titles for proper dashboard identification

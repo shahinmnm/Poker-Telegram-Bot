@@ -1,51 +1,63 @@
 {
-  "dashboard": {
-    "title": "Smart Lock Retry System",
-    "panels": [
-      {
-        "title": "Lock Queue Depths",
-        "type": "graph",
-        "targets": [
-          {
-            "expr": "poker_lock_queue_depth_total",
-            "legendFormat": "{{lock_type}} Queue Depth"
-          }
-        ]
-      },
-      {
-        "title": "Retry Success Rate",
-        "type": "stat",
-        "targets": [
-          {
-            "expr": "rate(poker_lock_retry_success_total[5m]) / rate(poker_lock_retry_attempts_total[5m]) * 100",
-            "legendFormat": "Success Rate %"
-          }
-        ]
-      },
-      {
-        "title": "Lock Wait Times",
-        "type": "heatmap",
-        "targets": [
-          {
-            "expr": "poker_lock_wait_time_seconds_bucket",
-            "legendFormat": "{{lock_type}}"
-          }
-        ]
-      },
-      {
-        "title": "Queue Estimation Accuracy",
-        "type": "graph",
-        "targets": [
-          {
-            "expr": "poker_lock_estimated_queue_wait_seconds_bucket",
-            "legendFormat": "Estimated Wait"
-          },
-          {
-            "expr": "poker_lock_wait_time_seconds_bucket",
-            "legendFormat": "Actual Wait"
-          }
-        ]
-      }
-    ]
-  }
+  "uid": "smart-retry-health",
+  "title": "Smart Retry System Health",
+  "tags": ["poker-bot", "monitoring"],
+  "timezone": "utc",
+  "schemaVersion": 16,
+  "version": 1,
+  "refresh": "30s",
+  "panels": [
+    {
+      "id": 1,
+      "title": "Retry Success Rate",
+      "type": "graph",
+      "gridPos": {"x": 0, "y": 0, "w": 12, "h": 8},
+      "targets": [
+        {
+          "expr": "rate(poker_retry_success_total[5m]) / (rate(poker_retry_success_total[5m]) + rate(poker_retry_exhausted_total[5m]))",
+          "legendFormat": "Success Rate",
+          "refId": "A"
+        }
+      ],
+      "yaxes": [
+        {"format": "percentunit", "max": 1, "min": 0},
+        {"format": "short"}
+      ]
+    },
+    {
+      "id": 2,
+      "title": "Lock Contention Rate",
+      "type": "graph",
+      "gridPos": {"x": 12, "y": 0, "w": 12, "h": 8},
+      "targets": [
+        {
+          "expr": "rate(poker_lock_contention_total[5m])",
+          "legendFormat": "Contentions/sec",
+          "refId": "A"
+        }
+      ],
+      "yaxes": [
+        {"format": "ops"},
+        {"format": "short"}
+      ]
+    },
+    {
+      "id": 3,
+      "title": "Retry Attempts Distribution",
+      "type": "graph",
+      "gridPos": {"x": 0, "y": 8, "w": 24, "h": 8},
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.95, rate(poker_retry_attempts_bucket[5m]))",
+          "legendFormat": "p95 attempts",
+          "refId": "A"
+        },
+        {
+          "expr": "histogram_quantile(0.50, rate(poker_retry_attempts_bucket[5m]))",
+          "legendFormat": "p50 attempts",
+          "refId": "B"
+        }
+      ]
+    }
+  ]
 }
