@@ -848,21 +848,6 @@ class PokerBotViewer:
                     )
             raise
 
-    async def send_player_list(self, chat_id: ChatId, game: Game) -> None:
-        """DEPRECATED: Player list lives inside the unified countdown message."""
-
-        ready_users = getattr(game, "ready_users", set()) if game is not None else set()
-        logger.warning(
-            "send_player_list() is deprecated; countdown updates include roster",
-            extra={
-                "chat_id": chat_id,
-                "ready_count": len(ready_users) if ready_users else 0,
-                "event_type": "deprecated_send_player_list",
-            },
-        )
-
-        return None
-
     @classmethod
     def _format_card_symbol(cls, card_value: Any) -> str:
         text = str(card_value)
@@ -1141,12 +1126,6 @@ class PokerBotViewer:
             },
         )
         self._clear_countdown_transition_pending(chat_id)
-
-    def _mark_countdown_transition_pending(self, normalized_chat: int) -> None:
-        if normalized_chat == 0:
-            return
-        with self._countdown_transition_lock:
-            self._countdown_transition_pending.add(normalized_chat)
 
     def _clear_countdown_transition_pending(self, chat_id: ChatId) -> None:
         normalized_chat = self._safe_int(chat_id)
