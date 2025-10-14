@@ -1,10 +1,10 @@
 {
   "uid": "pruning-health",
   "title": "Database Pruning Health",
-  "tags": ["poker", "database", "maintenance"],
-  "timezone": "browser",
+  "tags": ["poker-bot", "monitoring"],
+  "timezone": "utc",
   "schemaVersion": 16,
-  "version": 0,
+  "version": 1,
   "refresh": "30s",
   "panels": [
     {
