@@ -387,17 +387,52 @@ class TableManager:
         )
         return True
 
-    async def save_game(self, chat_id: ChatId, game: Game) -> None:
+    async def save_game(
+        self,
+        chat_id: ChatId,
+        game: Game,
+        *,
+        increment_version: bool = True,
+    ) -> None:
+        """Save game state and optionally increment version."""
+
+        async def _increment_version_counter() -> None:
+            if not (increment_version and self._redis):
+                return
+
+            try:
+                version_key = self._version_key(chat_id)
+                new_version = await self._redis.incr(version_key)
+
+                if hasattr(game, "_version"):
+                    setattr(game, "_version", new_version)
+
+                self._logger.debug(
+                    "Version incremented after save",
+                    extra={
+                        "chat_id": chat_id,
+                        "new_version": new_version,
+                        "operation": "save_game",
+                    },
+                )
+            except Exception:
+                self._logger.exception(
+                    "Failed to increment version after save",
+                    extra={"chat_id": chat_id},
+                )
+
         lock_manager = self._lock_manager
         if lock_manager is None:
             self._tables[chat_id] = game
             await self._save(chat_id, game)
+            await _increment_version_counter()
             return
 
         lock_chat_id = self._lock_chat_id(chat_id)
         async with lock_manager.table_write_lock(lock_chat_id):
             self._tables[chat_id] = game
             await self._save(chat_id, game)
+            await _increment_version_counter()
 
     async def delete_game(self, chat_id: ChatId) -> None:
         """Remove the persisted game snapshot and cache for ``chat_id``."""
