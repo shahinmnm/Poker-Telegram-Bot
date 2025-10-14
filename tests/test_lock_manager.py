@@ -25,7 +25,7 @@ async def test_lock_manager_acquire_when_free() -> None:
     key = "stage:1"
     acquired = await manager.acquire(key, timeout=0.5)
     assert acquired
-    manager.release(key)
+    await manager.release(key)
 
 
 @pytest.mark.asyncio
@@ -53,7 +53,7 @@ async def test_lock_manager_retries_before_acquire() -> None:
     try:
         acquired = await manager.acquire(key, timeout=0.5)
         assert acquired
-        manager.release(key)
+        await manager.release(key)
         await hold_task
 
         assert any(
@@ -208,21 +208,27 @@ async def test_lock_manager_release_from_loop_callback() -> None:
     release_future: asyncio.Future[None] = loop.create_future()
 
     def _release_from_callback() -> None:
-        try:
-            manager.release(key)
-        except Exception as exc:  # pragma: no cover - defensive
-            if not release_future.done():
-                release_future.set_exception(exc)
-        else:
-            if not release_future.done():
-                release_future.set_result(None)
+        async def _release_async() -> None:
+            try:
+                await manager.release(key)
+            except Exception as exc:  # pragma: no cover - defensive
+                if not release_future.done():
+                    release_future.set_result(exc)
+            else:
+                if not release_future.done():
+                    release_future.set_result(None)
+
+        asyncio.create_task(_release_async())
 
     loop.call_soon(_release_from_callback)
-    await release_future
+    callback_result = await release_future
+    assert isinstance(callback_result, RuntimeError)
+
+    await manager.release(key)
 
     reacquired = await manager.acquire(key, timeout=0.5)
     assert reacquired
-    manager.release(key)
+    await manager.release(key)
 
 
 def test_lock_manager_empty_snapshot_logs_debug() -> None:
@@ -286,7 +292,7 @@ async def test_lock_manager_allows_increasing_lock_order() -> None:
         try:
             assert acquired is True
         finally:
-            manager.release("chat:increasing")
+            await manager.release("chat:increasing")
 
 
 @pytest.mark.asyncio
@@ -320,7 +326,7 @@ async def test_detect_deadlock_cycle_detection() -> None:
                     level=5,
                 )
                 if acquired:
-                    manager.release("wallet:cycle")
+                    await manager.release("wallet:cycle")
             except asyncio.CancelledError:
                 raise
 
@@ -341,7 +347,7 @@ async def test_detect_deadlock_cycle_detection() -> None:
                     level=5,
                 )
                 if acquired:
-                    manager.release("stage:cycle")
+                    await manager.release("stage:cycle")
             except asyncio.CancelledError:
                 raise
 

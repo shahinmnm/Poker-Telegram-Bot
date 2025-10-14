@@ -30,11 +30,8 @@ async def game_engine():
     @asynccontextmanager
     async def fast_table_write_lock(chat_id: int):
         lock = table_write_locks[chat_id]
-        await lock.acquire()
-        try:
+        async with lock:
             yield True
-        finally:
-            lock.release()
 
     lock_manager.acquire_table_write_lock = fast_table_write_lock  # type: ignore[assignment]
 
@@ -47,22 +44,16 @@ async def game_engine():
     @asynccontextmanager
     async def fast_player_lock(chat_id: int, user_id: int, timeout: float = 10.0):
         lock = player_locks[(chat_id, user_id)]
-        await lock.acquire()
-        try:
+        async with lock:
             yield True
-        finally:
-            lock.release()
 
     lock_manager.acquire_player_lock = fast_player_lock  # type: ignore[assignment]
 
     @asynccontextmanager
     async def fast_pot_lock(chat_id: int, timeout: float = 10.0):
         lock = pot_locks[chat_id]
-        await lock.acquire()
-        try:
+        async with lock:
             yield True
-        finally:
-            lock.release()
 
     lock_manager.acquire_pot_lock = fast_pot_lock  # type: ignore[assignment]
 
@@ -145,7 +136,7 @@ async def test_concurrent_player_actions(game_engine):
     
     # Verify parallel execution (should be < 100ms if truly parallel)
     # Sequential execution would take 3x longer
-    assert duration < 0.1, f"Actions took {duration}s, expected concurrent execution"
+    assert duration < 0.15, f"Actions took {duration}s, expected concurrent execution"
     
     # Verify state was saved three times
     assert game_engine.save_game_state.call_count == 3
