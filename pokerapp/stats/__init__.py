@@ -1,5 +1,6 @@
 """Statistics service package for Poker Telegram bot."""
 
+from .queries import PlayerStatsQuery, PlayerStatsSnapshot
 from .service import (
     BaseStatsService,
     NullStatsService,
@@ -16,4 +17,6 @@ __all__ = [
     "PlayerIdentity",
     "PlayerStatisticsReport",
     "StatsService",
+    "PlayerStatsQuery",
+    "PlayerStatsSnapshot",
 ]

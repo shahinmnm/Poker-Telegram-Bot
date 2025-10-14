@@ -58,6 +58,7 @@ _WINNINGS_EMOJI = _chip_emoji("winnings", "💵")
 _AVERAGE_POT_EMOJI = _chip_emoji("average_pot", _chip_emoji("pot", "🏺"))
 
 MIGRATIONS_DIR = Path(__file__).resolve().parents[2] / "migrations"
+MIGRATIONS_TABLE = "stats_schema_migrations"
 
 
 @dataclass(slots=True)
@@ -391,7 +392,7 @@ class StatsService(BaseStatsService):
             buffer.append(line)
 
             if inside_trigger:
-                if upper in {"END", "END;"}:
+                if upper == "END;":
                     statement = "\n".join(buffer).strip()
                     buffer.clear()
                     inside_trigger = False
@@ -428,6 +429,53 @@ class StatsService(BaseStatsService):
             flags=re.IGNORECASE,
         )
         return updated
+
+    async def _ensure_migrations_table(self, conn: AsyncConnection) -> None:
+        """Ensure the migrations bookkeeping table exists."""
+
+        backend = getattr(conn.dialect, "name", "").lower()
+        if backend == "sqlite":
+            create_sql = (
+                f"CREATE TABLE IF NOT EXISTS {MIGRATIONS_TABLE} ("
+                "name TEXT PRIMARY KEY, "
+                "applied_at TEXT NOT NULL DEFAULT (datetime('now'))"
+                ")"
+            )
+        else:
+            create_sql = (
+                f"CREATE TABLE IF NOT EXISTS {MIGRATIONS_TABLE} ("
+                "name TEXT PRIMARY KEY, "
+                "applied_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP"
+                ")"
+            )
+        await conn.exec_driver_sql(create_sql)
+
+    async def _is_migration_applied(self, conn: AsyncConnection, name: str) -> bool:
+        """Return True when the named migration has already been executed."""
+
+        result = await conn.exec_driver_sql(
+            f"SELECT 1 FROM {MIGRATIONS_TABLE} WHERE name = :name LIMIT 1",
+            {"name": name},
+        )
+        return result.first() is not None
+
+    async def _mark_migration_applied(self, conn: AsyncConnection, name: str) -> None:
+        """Persist the migration execution record."""
+
+        backend = getattr(conn.dialect, "name", "").lower()
+        if backend == "sqlite":
+            insert_sql = (
+                f"INSERT INTO {MIGRATIONS_TABLE}(name, applied_at) "
+                "VALUES (:name, datetime('now')) "
+                "ON CONFLICT(name) DO UPDATE SET applied_at = EXCLUDED.applied_at"
+            )
+        else:
+            insert_sql = (
+                f"INSERT INTO {MIGRATIONS_TABLE}(name, applied_at) "
+                "VALUES (:name, CURRENT_TIMESTAMP) "
+                "ON CONFLICT (name) DO UPDATE SET applied_at = EXCLUDED.applied_at"
+            )
+        await conn.exec_driver_sql(insert_sql, {"name": name})
 
     async def _check_migration_presence(self, table_name: str) -> bool:
         """Check if a specific table exists (migration already applied)."""
@@ -471,6 +519,7 @@ class StatsService(BaseStatsService):
         if not MIGRATIONS_DIR.exists():
             return
         backend = getattr(conn.dialect, "name", "").lower()
+        await self._ensure_migrations_table(conn)
         for path in sorted(MIGRATIONS_DIR.glob("*.sql")):
             try:
                 sql = path.read_text(encoding="utf-8")
@@ -482,6 +531,16 @@ class StatsService(BaseStatsService):
                 logger.debug(
                     "Skipping PostgreSQL-specific migration %s for SQLite", path.name
                 )
+                continue
+            if path.name == "004_phase2_player_stats.sql":
+                logger.debug(
+                    "Skipping legacy migration %s (superseded by 003)",
+                    path.name,
+                )
+                await self._mark_migration_applied(conn, path.name)
+                continue
+            if await self._is_migration_applied(conn, path.name):
+                logger.debug("Migration %s already applied, skipping", path.name)
                 continue
             if backend == "sqlite" and path.name == "003_create_materialized_stats.sql":
                 await self._prepare_sqlite_for_materialized_stats(conn)
@@ -519,6 +578,12 @@ class StatsService(BaseStatsService):
                         "Failed to apply migration statement from %s", path.name
                     )
                     raise
+            await self._mark_migration_applied(conn, path.name)
+            logger.info(
+                "Migration %s completed successfully",
+                path.name,
+                extra={"event_type": "stats_migration_applied", "migration": path.name},
+            )
 
     async def _prepare_sqlite_for_materialized_stats(self, conn: AsyncConnection) -> None:
         """Ensure the SQLite schema can accept the materialized stats migration."""
