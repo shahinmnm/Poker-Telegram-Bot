@@ -124,7 +124,7 @@ _CANCELLATION_LOG_STACKTRACE = True  # Log stack traces for cancelled acquisitio
 _ENABLE_FAST_PATH = True                    # Skip validation for speed
 _FAST_PATH_SKIP_VALIDATION = True           # Safe for uncontended locks
 _FAST_PATH_MINIMAL_LOGGING = True           # Reduce overhead
-_FAST_PATH_TIMEOUT_THRESHOLD = 0.001        # 1ms - abort to slow path if exceeded
+FAST_PATH_TIMEOUT = 0.001                   # 1 millisecond
 
 # Performance optimization: Lock object pooling
 _LOCK_CLEANUP_BATCH_SIZE = 100              # Process locks in batches
@@ -2385,7 +2385,7 @@ class LockManager:
                 exit_stack = AsyncExitStack()
                 await asyncio.wait_for(
                     exit_stack.enter_async_context(lock),
-                    timeout=_FAST_PATH_TIMEOUT_THRESHOLD,
+                    timeout=FAST_PATH_TIMEOUT,
                 )
 
                 current_acquisitions = self._get_current_acquisitions()
