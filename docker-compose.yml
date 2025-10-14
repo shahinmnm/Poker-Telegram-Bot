@@ -93,7 +93,9 @@ services:
     volumes:
       - ./config/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
       - ./config/prometheus/poker_security_alerts.yml:/etc/prometheus/poker_security_alerts.yml:ro
-      - prometheus_data:/prometheus
+      - type: volume
+        source: prometheus_data
+        target: /prometheus
     command:
       - '--config.file=/etc/prometheus/prometheus.yml'
       - '--storage.tsdb.path=/prometheus'
