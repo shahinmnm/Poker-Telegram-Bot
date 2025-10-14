@@ -1217,20 +1217,6 @@ class SmartCountdownManager:
             )
             return
 
-        if self._start_view is not None:
-            game = self._active_games.get(state.chat_id)
-            if game is not None:
-                snapshot = self._to_snapshot(state)
-                await self._start_view.update_message(
-                    game=game,
-                    countdown=snapshot,
-                    allow_create=False,
-                )
-                timer_info = self._countdown_timer_info.setdefault(state.chat_id, {})
-                timer_info["last_edit"] = time.monotonic()
-                self._metrics['updates_sent'] += 1
-                return
-
         timer_info = self._countdown_timer_info.setdefault(state.chat_id, {})
         min_interval = 1.0
         last_edit = timer_info.get("last_edit")
@@ -1248,6 +1234,68 @@ class SmartCountdownManager:
             elapsed = time.monotonic() - last_edit
             if elapsed < min_interval:
                 await asyncio.sleep(min_interval - elapsed)
+
+        if self._start_view is not None:
+            game = self._active_games.get(state.chat_id)
+            if game is not None:
+                delays = (1.0, 2.0, 4.0)
+                last_error: Optional[Exception] = None
+                snapshot = self._to_snapshot(state)
+
+                for attempt, backoff in enumerate(delays, start=1):
+                    try:
+                        await self._start_view.update_message(
+                            game=game,
+                            countdown=snapshot,
+                            allow_create=False,
+                        )
+                        timer_info["last_edit"] = time.monotonic()
+                        self._metrics['updates_sent'] += 1
+                        return
+                    except BadRequest as exc:
+                        last_error = exc
+                        self.logger.warning(
+                            "BadRequest while updating start view countdown message",
+                            extra={
+                                'chat_id': state.chat_id,
+                                'message_id': message_id,
+                                'error': str(exc),
+                                'attempt': attempt,
+                                'event_type': 'start_view_countdown_update_bad_request',
+                            },
+                        )
+                    except TelegramError as exc:
+                        last_error = exc
+                        self.logger.warning(
+                            "TelegramError while updating start view countdown message",
+                            extra={
+                                'chat_id': state.chat_id,
+                                'message_id': message_id,
+                                'error': str(exc),
+                                'attempt': attempt,
+                                'event_type': 'start_view_countdown_update_retry',
+                            },
+                        )
+                    except Exception as exc:  # pragma: no cover - defensive logging
+                        last_error = exc
+                        self.logger.warning(
+                            f"Failed to update start view countdown message: {exc}",
+                            extra={
+                                'chat_id': state.chat_id,
+                                'event_type': 'start_view_countdown_update_failed_unexpected',
+                            },
+                        )
+                        break
+
+                    if attempt < len(delays):
+                        await asyncio.sleep(backoff)
+
+                await self._handle_countdown_edit_failure(
+                    state,
+                    message_id=message_id,
+                    error=last_error,
+                )
+                return
 
         delays = (1.0, 2.0, 4.0)
         last_error: Optional[Exception] = None
