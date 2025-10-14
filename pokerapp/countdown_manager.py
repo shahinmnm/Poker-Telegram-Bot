@@ -20,16 +20,12 @@ from telegram.constants import ParseMode
 from telegram.error import BadRequest, TelegramError
 
 from pokerapp.entities import MAX_PLAYERS
+from pokerapp.game_start_view import (
+    GameStartView,
+    CountdownSnapshot,
+    PlayerRosterEntry,
+)
 from pokerapp.utils.locale_utils import to_persian_digits
-
-
-@dataclass(frozen=True)
-class PlayerRosterEntry:
-    """Immutable snapshot of a player's lobby representation."""
-
-    user_id: int
-    seat_index: Optional[int]
-    display_name: str
 
 
 @dataclass
@@ -86,17 +82,20 @@ class SmartCountdownManager:
         bot,
         redis_client,
         logger,
+        start_view: Optional[GameStartView] = None,
         batching_mode: UpdateBatchingMode = UpdateBatchingMode.BALANCED
     ):
         self.bot = bot
         self.redis = redis_client
         self.logger = logger or logging.getLogger(__name__)
         self.batching_mode = batching_mode
+        self._start_view = start_view
 
         # State management
         self._active_countdowns: Dict[int, asyncio.Task] = {}
         self._countdown_states: Dict[int, CountdownState] = {}
         self._pending_updates: Dict[int, deque] = {}
+        self._active_games: Dict[int, Any] = {}
 
         # Message tracking
         self._countdown_messages: Dict[int, int] = {}  # chat_id → message_id
@@ -522,6 +521,7 @@ class SmartCountdownManager:
         on_complete: Optional[Callable] = None,
         message_id: Optional[int] = None,
         player_roster: Optional[Sequence[Any]] = None,
+        game: Optional[Any] = None,
     ) -> bool:
         """
         Start a smart countdown for a poker game
@@ -554,6 +554,8 @@ class SmartCountdownManager:
             )
 
         await self.cancel_countdown(chat_id)
+        if game is not None:
+            self._active_games[chat_id] = game
 
         normalized_roster = self._normalize_player_roster(player_roster)
 
@@ -574,9 +576,10 @@ class SmartCountdownManager:
         try:
             anchor_message_id: Optional[int] = message_id
             if anchor_message_id is None:
-                message = await self._send_countdown_message(initial_state)
-                anchor_message_id = message.message_id
-                self._countdown_messages[chat_id] = anchor_message_id
+                anchor_message_id = await self._send_countdown_message(
+                    initial_state,
+                    allow_create=True,
+                )
             else:
                 self._countdown_messages[chat_id] = anchor_message_id
                 await self._update_countdown_message(initial_state)
@@ -734,6 +737,7 @@ class SmartCountdownManager:
         self._pending_updates.pop(chat_id, None)
         self._countdown_messages.pop(chat_id, None)
         self._countdown_timer_info.pop(chat_id, None)
+        self._active_games.pop(chat_id, None)
 
     def is_countdown_active(self, chat_id: int) -> bool:
         """Return ``True`` when an unfinished countdown task exists for ``chat_id``."""
@@ -1159,22 +1163,43 @@ class SmartCountdownManager:
                 self.logger.error(f"Error in batch worker: {e}")
                 await asyncio.sleep(1)  # Prevent tight loop on error
 
-    async def _send_countdown_message(self, state: CountdownState):
-        """Send initial countdown message"""
+    async def _send_countdown_message(
+        self,
+        state: CountdownState,
+        *,
+        allow_create: bool = False,
+    ) -> Optional[int]:
+        """Send the initial countdown message via the unified start view."""
+
+        if self._start_view is not None:
+            game = self._active_games.get(state.chat_id)
+            if game is not None:
+                snapshot = self._to_snapshot(state)
+                message_id = await self._start_view.update_message(
+                    game=game,
+                    countdown=snapshot,
+                    allow_create=allow_create,
+                )
+                if message_id is not None:
+                    self._countdown_messages[state.chat_id] = int(message_id)
+                    timer_info = self._countdown_timer_info.setdefault(
+                        state.chat_id, {}
+                    )
+                    timer_info["last_edit"] = time.monotonic()
+                    self._metrics['updates_sent'] += 1
+                return message_id
+
         message = await self.bot.send_message(
             chat_id=state.chat_id,
             text=self._format_countdown_text(state),
-            parse_mode=ParseMode.MARKDOWN_V2
+            parse_mode=ParseMode.MARKDOWN_V2,
         )
 
-        # Cache anchor message id for future updates
         self._countdown_messages[state.chat_id] = message.message_id
-
         timer_info = self._countdown_timer_info.setdefault(state.chat_id, {})
         timer_info["last_edit"] = time.monotonic()
-
         self._metrics['updates_sent'] += 1
-        return message
+        return message.message_id
 
     async def _update_countdown_message(self, state: CountdownState):
         """Update existing countdown message"""
@@ -1191,6 +1216,20 @@ class SmartCountdownManager:
                 }
             )
             return
+
+        if self._start_view is not None:
+            game = self._active_games.get(state.chat_id)
+            if game is not None:
+                snapshot = self._to_snapshot(state)
+                await self._start_view.update_message(
+                    game=game,
+                    countdown=snapshot,
+                    allow_create=False,
+                )
+                timer_info = self._countdown_timer_info.setdefault(state.chat_id, {})
+                timer_info["last_edit"] = time.monotonic()
+                self._metrics['updates_sent'] += 1
+                return
 
         timer_info = self._countdown_timer_info.setdefault(state.chat_id, {})
         min_interval = 1.0
@@ -1288,7 +1327,7 @@ class SmartCountdownManager:
         )
 
         try:
-            message = await self._send_countdown_message(state)
+            new_id = await self._send_countdown_message(state, allow_create=True)
         except BadRequest as exc:
             self.logger.error(
                 "Failed to resend countdown message due to BadRequest",
@@ -1320,12 +1359,14 @@ class SmartCountdownManager:
                 },
             )
         else:
+            if new_id is not None:
+                self._countdown_messages[state.chat_id] = int(new_id)
             self.logger.info(
                 "Countdown message resent successfully",
                 extra={
                     'chat_id': state.chat_id,
                     'previous_message_id': message_id,
-                    'new_message_id': message.message_id,
+                    'new_message_id': new_id,
                     'event_type': 'countdown_resend_success',
                 },
             )
@@ -1336,6 +1377,17 @@ class SmartCountdownManager:
         if self._hybrid_enabled and self.state_messages:
             return self._format_hybrid_countdown_text(state)
         return self._format_legacy_countdown_text(state)
+
+    @staticmethod
+    def _to_snapshot(state: CountdownState) -> CountdownSnapshot:
+        return CountdownSnapshot(
+            chat_id=state.chat_id,
+            remaining_seconds=state.remaining_seconds,
+            total_seconds=state.total_seconds,
+            player_count=state.player_count,
+            pot_size=state.pot_size,
+            player_roster=state.player_roster,
+        )
 
     def _format_hybrid_countdown_text(self, state: CountdownState) -> str:
         """Render countdown text using hybrid milestone configuration."""

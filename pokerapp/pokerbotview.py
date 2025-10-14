@@ -72,6 +72,7 @@ from pokerapp.utils.messaging_service import MessagingService
 from pokerapp.utils.message_updates import safe_edit_message
 from pokerapp.utils.request_metrics import RequestCategory, RequestMetrics
 from pokerapp.translations import translate
+from pokerapp.game_start_view import GameStartView
 
 
 class CallbackTokenManager:
@@ -1110,6 +1111,11 @@ class PokerBotViewer:
             deleted_messages_lock=self._deleted_messages_lock,
             last_message_hash=self._last_message_hash,
             last_message_hash_lock=self._last_message_hash_lock,
+        )
+
+        self.game_start_view = GameStartView(
+            self._messenger,
+            logger=logger.getChild("game_start"),
         )
 
     async def _cancel_prestart_countdown(

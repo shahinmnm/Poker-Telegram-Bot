@@ -23,6 +23,7 @@ from pokerapp.entities import (
 from pokerapp.config import Config, get_game_constants
 from pokerapp.player_manager import PlayerManager
 from pokerapp.pokerbotview import PokerBotViewer
+from pokerapp.game_start_view import StageSnapshot
 from pokerapp.stats_reporter import StatsReporter
 from pokerapp.utils.request_metrics import RequestMetrics
 from pokerapp.lock_manager import LockManager
@@ -233,6 +234,20 @@ class MatchmakingService:
             chat_id=chat_id,
             current_player=current_player,
         )
+
+        start_view = getattr(self._view, "game_start_view", None)
+        if start_view is not None:
+            game.chat_id = chat_id
+            snapshot = StageSnapshot(
+                stage=game.state,
+                current_player=current_player,
+                recent_actions=tuple(game.last_actions[-5:]),
+            )
+            await start_view.update_message(
+                game=game,
+                stage=snapshot,
+                allow_create=True,
+            )
 
     async def collect_bets_for_pot(self, game: Game, chat_id: ChatId) -> None:
         """Reset per-player round bets using fine-grained locks."""
