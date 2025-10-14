@@ -1,5 +1,4 @@
-version: "3.9"
-
+# Compose file format version is now inferred automatically
 services:
   redis:
     image: "redis:7.0.2"
