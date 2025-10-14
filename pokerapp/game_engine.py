@@ -14,6 +14,7 @@ or a table is stopped. A more detailed, annotated diagram lives in
 from __future__ import annotations
 
 import asyncio
+import copy
 import inspect
 import datetime
 import json
@@ -3652,29 +3653,32 @@ class GameEngine:
         if lock_manager is None or table_manager is None:
             return False
 
+        game_data = await table_manager.load_game(chat_id)
+        game = game_data[0] if isinstance(game_data, tuple) else game_data
+        if not game or getattr(game, "stage", None) == "complete":
+            return False
+
+        old_message_ids = tuple(getattr(game, "message_ids", ()))
+        matchmaking = getattr(self, "_matchmaking", None)
+        if matchmaking is not None and hasattr(matchmaking, "deal_community_cards"):
+            await matchmaking.deal_community_cards(game)
+
+        current_stage = getattr(game, "stage", "")
+        next_stage = self._next_stage(current_stage)
+        snapshot_game = copy.deepcopy(game)
+        setattr(snapshot_game, "stage", next_stage)
+
+        snapshot = StageProgressSnapshot(
+            chat_id=chat_id,
+            pot=getattr(snapshot_game, "pot", 0),
+            stage=next_stage,
+            community_cards=tuple(getattr(snapshot_game, "community_cards", ())),
+            message_ids_to_delete=old_message_ids,
+            new_message_text=self._render_stage_message_snapshot(snapshot_game),
+        )
+
         async with lock_manager.stage_lock(chat_id):
-            game_data = await table_manager.load_game(chat_id)
-            game = game_data[0] if isinstance(game_data, tuple) else game_data
-            if not game or getattr(game, "stage", None) == "complete":
-                return False
-
-            old_message_ids = tuple(getattr(game, "message_ids", ()))
-            matchmaking = getattr(self, "_matchmaking", None)
-            if matchmaking is not None and hasattr(matchmaking, "deal_community_cards"):
-                await matchmaking.deal_community_cards(game)
-
-            next_stage = self._next_stage(getattr(game, "stage", ""))
             setattr(game, "stage", next_stage)
-
-            snapshot = StageProgressSnapshot(
-                chat_id=chat_id,
-                pot=getattr(game, "pot", 0),
-                stage=next_stage,
-                community_cards=tuple(getattr(game, "community_cards", ())),
-                message_ids_to_delete=old_message_ids,
-                new_message_text=self._render_stage_message_snapshot(game),
-            )
-
             if hasattr(table_manager, "save_game"):
                 await table_manager.save_game(chat_id, game)
 
