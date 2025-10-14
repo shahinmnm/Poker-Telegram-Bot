@@ -181,6 +181,17 @@ class GameStartView:
         except (TypeError, ValueError):
             return None
 
+    @staticmethod
+    def _safe_int(value: object, default: int = 0) -> int:
+        """Safely coerce ``value`` to ``int`` with a fallback."""
+
+        if value is None:
+            return default
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return default
+
     def _render_text(
         self,
         game: Game,
@@ -203,11 +214,14 @@ class GameStartView:
         ]
         roster = self._normalize_roster(ready_players)
         return CountdownSnapshot(
-            chat_id=int(getattr(game, "chat_id", 0)),
+            chat_id=self._safe_int(getattr(game, "chat_id", None), 0),
             remaining_seconds=0,
-            total_seconds=max(1, int(getattr(game, "countdown_total", 30) or 30)),
+            total_seconds=max(
+                1,
+                self._safe_int(getattr(game, "countdown_total", None), 30),
+            ),
             player_count=len(roster),
-            pot_size=int(getattr(game, "pot", 0)),
+            pot_size=self._safe_int(getattr(game, "pot", None), 0),
             player_roster=roster,
         )
 
