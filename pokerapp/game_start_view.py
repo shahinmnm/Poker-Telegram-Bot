@@ -17,6 +17,7 @@ from typing import Optional, Sequence
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.constants import ParseMode
+from telegram.error import BadRequest, TelegramError
 
 from pokerapp.entities import Game, GameState, Player, MAX_PLAYERS
 from pokerapp.utils.locale_utils import to_persian_digits
@@ -84,7 +85,7 @@ class GameStartView:
     ) -> Optional[int]:
         """Send or edit the single start message for ``game``."""
 
-        chat_id = int(getattr(game, "chat_id", 0))
+        chat_id = self._safe_int(getattr(game, "chat_id", None))
         if chat_id == 0:
             self._logger.debug("Skipping start message update; chat_id missing")
             return None
@@ -111,32 +112,69 @@ class GameStartView:
                 )
                 return None
 
-            if message_id is None:
-                result = await self._messenger.send_message(
-                    chat_id=chat_id,
-                    text=text,
-                    parse_mode=parse_mode,
-                    reply_markup=markup,
-                    disable_web_page_preview=True,
-                    disable_notification=True,
-                    request_category=RequestCategory.START_GAME,
-                    context=context,
+            try:
+                if message_id is None:
+                    result = await self._messenger.send_message(
+                        chat_id=chat_id,
+                        text=text,
+                        parse_mode=parse_mode,
+                        reply_markup=markup,
+                        disable_web_page_preview=True,
+                        disable_notification=True,
+                        request_category=RequestCategory.START_GAME,
+                        context=context,
+                    )
+                    message_id = self._resolve_message_id(result)
+                else:
+                    edit_result = await self._messenger.edit_message_text(
+                        chat_id=chat_id,
+                        message_id=int(message_id),
+                        text=text,
+                        reply_markup=markup,
+                        parse_mode=parse_mode,
+                        request_category=RequestCategory.START_GAME,
+                        context=context,
+                        current_game_id=getattr(game, "id", None),
+                    )
+                    resolved = self._resolve_message_id(edit_result)
+                    if resolved is not None:
+                        message_id = resolved
+
+            except BadRequest as exc:
+                self._logger.warning(
+                    "Telegram rejected message update (bad request)",
+                    extra={
+                        "chat_id": chat_id,
+                        "error": str(exc),
+                        "operation": "send" if message_id is None else "edit",
+                        "message_id": message_id,
+                    },
                 )
-                message_id = self._resolve_message_id(result)
-            else:
-                edit_result = await self._messenger.edit_message_text(
-                    chat_id=chat_id,
-                    message_id=int(message_id),
-                    text=text,
-                    reply_markup=markup,
-                    parse_mode=parse_mode,
-                    request_category=RequestCategory.START_GAME,
-                    context=context,
-                    current_game_id=getattr(game, "id", None),
+                return message_id
+
+            except TelegramError as exc:
+                self._logger.warning(
+                    "Telegram API error during message update",
+                    extra={
+                        "chat_id": chat_id,
+                        "error": str(exc),
+                        "operation": "send" if message_id is None else "edit",
+                        "message_id": message_id,
+                    },
                 )
-                resolved = self._resolve_message_id(edit_result)
-                if resolved is not None:
-                    message_id = resolved
+                return message_id
+
+            except Exception as exc:
+                self._logger.error(
+                    "Unexpected error during message update",
+                    extra={
+                        "chat_id": chat_id,
+                        "error": str(exc),
+                        "operation": "send" if message_id is None else "edit",
+                    },
+                    exc_info=True,
+                )
+                return message_id
 
             if message_id is not None:
                 try:
