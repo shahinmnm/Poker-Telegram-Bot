@@ -3762,11 +3762,44 @@ class GameEngine:
 
         # Save OUTSIDE lock (I/O no longer blocks other operations)
         if game_to_save is not None and hasattr(table_manager, "save_game"):
-            await table_manager.save_game(
-                chat_id,
-                game_to_save,
-                increment_version=False,
+            save_game = table_manager.save_game
+
+            try:
+                parameters = inspect.signature(save_game).parameters
+            except (TypeError, ValueError):
+                parameters = {}
+
+            supports_increment_kwarg = "increment_version" in parameters
+            accepts_kwargs = any(
+                parameter.kind is inspect.Parameter.VAR_KEYWORD
+                for parameter in parameters.values()
             )
+
+            if supports_increment_kwarg:
+                await save_game(
+                    chat_id,
+                    game_to_save,
+                    increment_version=False,
+                )
+            elif accepts_kwargs:
+                try:
+                    await save_game(
+                        chat_id,
+                        game_to_save,
+                        increment_version=False,
+                    )
+                except TypeError as exc:
+                    if "increment_version" not in str(exc):
+                        raise
+                    await save_game(
+                        chat_id,
+                        game_to_save,
+                    )
+            else:
+                await save_game(
+                    chat_id,
+                    game_to_save,
+                )
 
         if snapshot is not None:
             await self._execute_deferred_stage_tasks(snapshot)
