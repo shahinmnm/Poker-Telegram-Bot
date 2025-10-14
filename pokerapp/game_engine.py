@@ -3677,6 +3677,7 @@ class GameEngine:
             new_message_text=self._render_stage_message_snapshot(snapshot_game),
         )
 
+        game_to_save = None
         async with lock_manager.stage_lock(chat_id):
             # Reload the game inside the lock to avoid overwriting concurrent updates
             game_data_fresh = await table_manager.load_game(chat_id)
@@ -3689,9 +3690,13 @@ class GameEngine:
             if not game or getattr(game, "stage", None) == "complete":
                 return False
 
+            # Only mutate in-memory state inside lock
             setattr(game, "stage", next_stage)
-            if hasattr(table_manager, "save_game"):
-                await table_manager.save_game(chat_id, game)
+            game_to_save = game  # Capture reference for post-lock save
+
+        # Save OUTSIDE lock (I/O no longer blocks other operations)
+        if game_to_save is not None and hasattr(table_manager, "save_game"):
+            await table_manager.save_game(chat_id, game_to_save)
 
         if snapshot is not None:
             await self._execute_deferred_stage_tasks(snapshot)
