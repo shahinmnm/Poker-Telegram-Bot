@@ -791,6 +791,17 @@ class LockManager:
 
         self._redis = self._redis_pool
 
+        if isinstance(self._redis_pool, _InMemoryActionLockBackend):
+            backend_type = "in_memory"
+            if fallback_reason is None and redis_pool is not None:
+                fallback_reason = "redis_pool_in_memory"
+            if require_redis:
+                detail = fallback_reason or "redis_pool_in_memory"
+                raise ConfigurationError(
+                    "ACTION_LOCK_REQUIRE_REDIS is enabled but an in-memory backend was provided"
+                    f" (reason={detail})."
+                )
+
         log_extra: Dict[str, Any] = {
             "event_type": "action_lock_backend_selected",
             "backend_type": backend_type,
