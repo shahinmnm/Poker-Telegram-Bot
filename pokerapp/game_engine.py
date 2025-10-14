@@ -3772,6 +3772,14 @@ class GameEngine:
                         increment_version=False,  # Already incremented inside lock
                     )
                 else:
+                    self._logger.warning(
+                        "TableManager.save_game lacks increment_version parameter; "
+                        "using legacy signature (version management may be inconsistent)",
+                        extra={
+                            "chat_id": chat_id,
+                            "table_manager_class": type(table_manager).__name__,
+                        },
+                    )
                     await save_game_method(chat_id, game_to_save)
 
         if snapshot is not None:
