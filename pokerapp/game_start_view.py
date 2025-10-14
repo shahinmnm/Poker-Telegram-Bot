@@ -13,7 +13,7 @@ import asyncio
 import logging
 import time
 from dataclasses import dataclass, field
-from typing import Optional, Sequence
+from typing import Any, Dict, List, Optional, Sequence
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.constants import ParseMode
@@ -30,11 +30,12 @@ _LOGGER = logging.getLogger(__name__)
 
 @dataclass(frozen=True)
 class PlayerRosterEntry:
-    """Immutable representation of a lobby player."""
+    """Immutable representation of a lobby player for countdown messages."""
 
     user_id: int
     seat_index: Optional[int]
-    display_name: str
+    username: str
+    chips: int = 0
 
 
 @dataclass(frozen=True)
@@ -250,7 +251,47 @@ class GameStartView:
             for player in getattr(game, "players", [])
             if player and getattr(player, "user_id", None) in ready_users
         ]
-        roster = self._normalize_roster(ready_players)
+        raw_roster: list[dict[str, Any]] = []
+        for player in ready_players:
+            if player is None:
+                continue
+
+            user_id = getattr(player, "user_id", None)
+            chips_value = getattr(player, "money", None)
+            if chips_value is None:
+                wallet = getattr(player, "wallet", None)
+                chips_value = getattr(wallet, "cached_value", None)
+                if chips_value is None:
+                    chips_value = getattr(wallet, "value", None)
+                if chips_value is None:
+                    chips_value = getattr(wallet, "_value", None)
+
+            raw_roster.append(
+                {
+                    "user_id": user_id,
+                    "username": (
+                        getattr(player, "display_name", None)
+                        or getattr(player, "full_name", None)
+                        or getattr(player, "username", None)
+                        or getattr(player, "mention_markdown", None)
+                        or getattr(player, "mention", None)
+                        or str(user_id)
+                    ),
+                    "chips": chips_value,
+                    "seat_index": getattr(player, "seat_index", None),
+                }
+            )
+
+        normalized_roster = self._normalize_roster(raw_roster)
+        roster = tuple(
+            PlayerRosterEntry(
+                user_id=entry["user_id"],
+                seat_index=None if entry["seat_index"] < 0 else entry["seat_index"],
+                username=entry["username"],
+                chips=entry["chips"],
+            )
+            for entry in normalized_roster
+        )
         return CountdownSnapshot(
             chat_id=self._safe_int(getattr(game, "chat_id", None)),
             remaining_seconds=0,
@@ -413,60 +454,92 @@ class GameStartView:
             else:
                 seat_label = f"صندلی {to_persian_digits(entry.seat_index + 1)}"
             seat_label = self._escape_markdown_v2(seat_label)
-            display_name = self._escape_markdown_v2(entry.display_name)
-            link = f"[{display_name}](tg://user?id={entry.user_id})"
+            link = f"[{entry.username}](tg://user?id={entry.user_id})"
             lines.append(f"{index_fa}\\. \\({seat_label}\\) {link} 🟢")
 
         return lines
 
-    def _normalize_roster(
-        self, roster: Optional[Sequence[object]]
-    ) -> tuple[PlayerRosterEntry, ...]:
-        if not roster:
-            return ()
+    def _normalize_roster(self, roster: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """Sanitise raw roster entries into a Markdown-safe structure.
 
-        normalized: list[PlayerRosterEntry] = []
+        Parameters
+        ----------
+        roster:
+            Iterable of dictionaries describing players. Each dictionary may
+            contain arbitrary keys such as ``user_id``, ``username``, ``chips``
+            or ``seat_index`` gathered from different sources (database rows,
+            entity objects, etc.). The method tolerates missing keys and
+            gracefully skips malformed entries.
+
+        Returns
+        -------
+        list of dict
+            A list of dictionaries sorted by ``seat_index``. Every dictionary
+            is guaranteed to include the keys ``user_id`` (int), ``username``
+            (MarkdownV2 escaped string), ``chips`` (int) and ``seat_index``
+            (int; ``-1`` represents unknown seats).
+        """
+
+        if not roster:
+            return []
+
+        normalized: list[dict[str, Any]] = []
         seen: set[int] = set()
 
-        for item in roster:
-            if item is None:
-                continue
-            user_id = getattr(item, "user_id", None)
-            if user_id is None:
-                continue
-            try:
-                user_id_int = int(user_id)
-            except (TypeError, ValueError):
-                continue
-            if user_id_int in seen:
+        for raw_entry in roster:
+            if not isinstance(raw_entry, dict):
                 continue
 
-            seat_index = getattr(item, "seat_index", None)
-            if seat_index is not None:
-                try:
-                    seat_index = int(seat_index)
-                except (TypeError, ValueError):
-                    seat_index = None
+            user_id_value = raw_entry.get("user_id")
+            user_id = self._safe_int(user_id_value, default=0)
+            if user_id <= 0 or user_id in seen:
+                continue
 
-            display_name = (
-                getattr(item, "display_name", None)
-                or getattr(item, "mention_markdown", None)
-                or getattr(item, "full_name", None)
-                or getattr(item, "username", None)
-                or str(user_id_int)
+            seat_index_value = raw_entry.get("seat_index")
+            seat_index = self._safe_int(seat_index_value, default=-1)
+
+            raw_username = (
+                raw_entry.get("username")
+                or raw_entry.get("display_name")
+                or raw_entry.get("full_name")
+                or raw_entry.get("mention")
+                or raw_entry.get("mention_markdown")
+                or f"Player {user_id}"
             )
+            username = self._escape_markdown_v2(str(raw_username))
+
+            chips_source: Any = raw_entry.get("chips")
+            if chips_source is None:
+                chips_source = raw_entry.get("money")
+            if chips_source is None:
+                wallet = raw_entry.get("wallet")
+                if isinstance(wallet, dict):
+                    chips_source = (
+                        wallet.get("cached_value")
+                        or wallet.get("value")
+                        or wallet.get("_value")
+                    )
+                else:
+                    chips_source = getattr(wallet, "cached_value", None)
+                    if chips_source is None:
+                        chips_source = getattr(wallet, "value", None)
+                    if chips_source is None:
+                        chips_source = getattr(wallet, "_value", None)
+
+            chips = self._safe_int(chips_source, default=0)
 
             normalized.append(
-                PlayerRosterEntry(
-                    user_id=user_id_int,
-                    seat_index=seat_index,
-                    display_name=str(display_name),
-                )
+                {
+                    "user_id": user_id,
+                    "username": username,
+                    "chips": chips,
+                    "seat_index": seat_index,
+                }
             )
-            seen.add(user_id_int)
+            seen.add(user_id)
 
-        normalized.sort(key=lambda entry: (entry.seat_index is None, entry.seat_index))
-        return tuple(normalized)
+        normalized.sort(key=lambda entry: (entry["seat_index"] < 0, entry["seat_index"]))
+        return normalized
 
     @staticmethod
     def _escape_markdown_v2(text: str) -> str:
