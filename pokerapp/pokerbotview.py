@@ -2948,6 +2948,13 @@ class PokerBotViewer:
 
                 await asyncio.sleep(0.075)
 
+        await self.sync_player_private_keyboards(
+            game=game,
+            stage_name=stage_name,
+            community_cards=community_cards,
+            players=ordered_players,
+        )
+
     @staticmethod
     def _describe_player_role(game: Game, player: Player) -> str:
         seat_index = player.seat_index if player.seat_index is not None else -1
@@ -3790,6 +3797,8 @@ class PokerBotViewer:
 
         role_lock = await self._get_anchor_lock(chat_id, "role_anchor_lock")
 
+        players_for_sync: List[Player] = []
+
         async with role_lock:
             for player in list(getattr(game, "players", [])):
                 if player is None:
@@ -3859,6 +3868,7 @@ class PokerBotViewer:
                     indicator_line = f"\n\n{next_light} نوبت این بازیکن است."
 
                 display_text = base_text + indicator_line
+                players_for_sync.append(player)
                 markup_signature = self._serialize_markup(keyboard) or ""
                 payload_signature = self._reply_keyboard_signature(
                     text=display_text,
@@ -4110,6 +4120,13 @@ class PokerBotViewer:
                         self._anchor_registry.increment_edit(chat_id)
 
                 await asyncio.sleep(0.05)
+
+        await self.sync_player_private_keyboards(
+            game=game,
+            stage_name=stage_name,
+            community_cards=community_cards,
+            players=players_for_sync,
+        )
 
     async def clear_all_player_anchors(
         self, *, game: Optional[Game] = None
