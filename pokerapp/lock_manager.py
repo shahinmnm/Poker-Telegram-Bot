@@ -76,7 +76,7 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
 
 
 LOCK_LEVELS: Dict[str, int] = {
-    "engine_stage": 4,
+    "engine_stage": 3,
     "table_write": 3,
     "deck": 2,
     "betting": 2,
