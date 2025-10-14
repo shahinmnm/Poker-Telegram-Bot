@@ -7,6 +7,7 @@ import inspect
 import json
 import logging
 import math
+import os
 import random
 import time
 import traceback
@@ -32,6 +33,12 @@ from typing import (
 from weakref import WeakKeyDictionary
 
 import redis.asyncio as aioredis
+from redis import Redis as _SyncRedis
+from redis.exceptions import (  # type: ignore[attr-defined]
+    ConnectionError as _RedisConnectionError,
+    RedisError as _RedisError,
+    TimeoutError as _RedisTimeoutError,
+)
 
 try:  # pragma: no cover - dependency optional in some environments
     from prometheus_client import Counter, Histogram
@@ -143,6 +150,10 @@ class LockHierarchyViolation(LockOrderError):
 
 class LockAlreadyHeld(LockOrderError):
     """Raised when the current context attempts to reacquire the same lock."""
+
+
+class ConfigurationError(RuntimeError):
+    """Raised when lock manager configuration is invalid."""
 
 
 @dataclass
@@ -672,20 +683,133 @@ class LockManager:
             "engine": engine_defaults,
             "lock_queue_prefix": "lock:queue:",
         }
+
+        redis_host: Optional[str] = None
+        redis_port: Optional[int] = None
+        redis_password: Optional[str] = None
+        redis_db: Optional[int] = None
+        if config_instance is not None:
+            redis_host = getattr(config_instance, "REDIS_HOST", None)
+            redis_port = getattr(config_instance, "REDIS_PORT", None)
+            redis_password = getattr(config_instance, "REDIS_PASS", None)
+            redis_db = getattr(config_instance, "REDIS_DB", None)
+
+        if isinstance(redis_port, str):
+            try:
+                redis_port = int(redis_port)
+            except ValueError:
+                redis_port = None
+        if isinstance(redis_db, str):
+            try:
+                redis_db = int(redis_db)
+            except ValueError:
+                redis_db = None
+
+        if not redis_host:
+            redis_host = os.getenv("POKERBOT_REDIS_HOST", "localhost")
+        if not redis_host:
+            redis_host = "localhost"
+        if redis_port is None:
+            redis_port_env = os.getenv("POKERBOT_REDIS_PORT")
+            if redis_port_env is not None:
+                try:
+                    redis_port = int(redis_port_env)
+                except (TypeError, ValueError):
+                    redis_port = None
+        if redis_port is None:
+            redis_port = 6379
+
+        if redis_password is None:
+            redis_password = os.getenv("POKERBOT_REDIS_PASS", "")
+        if redis_db is None:
+            redis_db_env = os.getenv("POKERBOT_REDIS_DB")
+            if redis_db_env is not None:
+                try:
+                    redis_db = int(redis_db_env)
+                except (TypeError, ValueError):
+                    redis_db = None
+        if redis_db is None:
+            redis_db = 0
+
+        require_redis_env = os.getenv("ACTION_LOCK_REQUIRE_REDIS", "false")
+        require_redis = str(require_redis_env).strip().lower() in {"1", "true", "yes", "on"}
+
+        backend_type = "redis"
+        fallback_reason: Optional[str] = None
+
         if redis_pool is None:
+            backend_type = "in_memory"
+            redis_available = False
+            connection_error: Optional[BaseException] = None
+            if redis_host:
+                sync_client = _SyncRedis(
+                    host=redis_host,
+                    port=redis_port,
+                    password=redis_password or None,
+                    db=redis_db,
+                    socket_connect_timeout=2.0,
+                    socket_timeout=2.0,
+                )
+                try:
+                    redis_available = bool(sync_client.ping())
+                except (
+                    _RedisConnectionError,
+                    _RedisTimeoutError,
+                    _RedisError,
+                ) as exc:  # pragma: no cover - exercised in integration tests
+                    connection_error = exc
+                    redis_available = False
+                finally:
+                    try:
+                        sync_client.close()
+                    except Exception:  # pragma: no cover - best effort cleanup
+                        pass
+            else:
+                fallback_reason = "redis_configuration_missing"
+
+            if not redis_available and fallback_reason is None:
+                if connection_error is not None:
+                    fallback_reason = f"redis_unavailable:{connection_error.__class__.__name__}"
+                else:
+                    fallback_reason = "redis_unavailable:unknown"
+
+            if redis_available and fallback_reason is None:
+                fallback_reason = "redis_pool_not_provided"
+
+            if require_redis and (not redis_available):
+                detail = fallback_reason or "redis_unavailable"
+                raise ConfigurationError(
+                    "ACTION_LOCK_REQUIRE_REDIS is enabled but Redis is unavailable"
+                    f" (reason={detail})."
+                )
+
             self._redis_pool = _InMemoryActionLockBackend()
             self._redis_client = None
         else:
             self._redis_pool = redis_pool
             self._redis_client = redis_pool
+
         self._redis = self._redis_pool
-        if isinstance(self._redis_pool, _InMemoryActionLockBackend):
+
+        log_extra: Dict[str, Any] = {
+            "event_type": "action_lock_backend_selected",
+            "backend_type": backend_type,
+            "redis_host": redis_host,
+            "redis_port": redis_port,
+        }
+        if fallback_reason:
+            log_extra["fallback_reason"] = fallback_reason
+
+        if backend_type == "in_memory":
+            log_extra["backend_version"] = self._redis_pool._version
             self._logger.warning(
-                "[ACTION_LOCK] Using in-memory backend (single-instance only)",
-                extra={
-                    "event_type": "action_lock_backend_inmemory",
-                    "backend_version": self._redis_pool._version,
-                },
+                "[ACTION_LOCK] Falling back to in-memory backend",
+                extra=log_extra,
+            )
+        else:
+            self._logger.info(
+                "[ACTION_LOCK] Using Redis backend",
+                extra=log_extra,
             )
 
         action_settings: Mapping[str, Any] | None = None
