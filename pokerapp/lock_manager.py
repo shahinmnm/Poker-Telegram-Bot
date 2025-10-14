@@ -2142,18 +2142,40 @@ class LockManager:
         payload.setdefault("lock_key", key)
         payload.setdefault("lock_name", key)
         payload.setdefault("lock_level", level)
-        payload.setdefault(
-            "lock_level_display",
-            self._resolve_display_level(payload.get("lock_category"), level),
-        )
+        display_source = payload.get("lock_level_display")
+        if display_source is None:
+            display_source = 1
+        try:
+            display_value = int(display_source)
+        except (TypeError, ValueError):
+            display_value = 1
+        payload["lock_level_display"] = self._calculate_display_level(display_value)
         return payload
 
-    def _resolve_display_level(
-        self, category: Optional[str], level: int
+    def _calculate_display_level(self, internal_level: int) -> int:
+        """Convert internal lock level to display level.
+
+        Args:
+            internal_level: Internal re-entrance count (0-indexed in some implementations)
+
+        Returns:
+            Display level starting at 1 for user-facing logs
+        """
+
+        return max(1, internal_level)
+
+    def _display_level_from_context(
+        self, context: Mapping[str, Any], fallback: int
     ) -> int:
-        if category in {"stage", "engine_stage"}:
-            return 1
-        return level
+        """Extract a safe display level from a logging context."""
+
+        value = context.get("lock_level_display")
+        if isinstance(value, int):
+            return value
+        try:
+            return self._calculate_display_level(int(value))
+        except (TypeError, ValueError):
+            return self._calculate_display_level(fallback)
 
     def _is_descend_allowed(
         self, highest_category: Optional[str], new_category: Optional[str]
@@ -2352,13 +2374,17 @@ class LockManager:
         context_payload = self._build_context_payload(
             key, resolved_level, additional=context
         )
+        display_level = self._display_level_from_context(
+            context_payload, resolved_level
+        )
 
         if self._is_circuit_broken(key):
             bypass_extra = self._log_extra(
                 context_payload,
                 event_type="lock_circuit_bypass",
                 lock_key=key,
-                lock_level=resolved_level,
+                lock_level=display_level,
+                lock_hierarchy_level=resolved_level,
                 timeout_count=self._timeout_count.get(key, 0),
             )
             self._logger.error(
@@ -2375,7 +2401,9 @@ class LockManager:
 
             fast_path_context = {
                 "lock_key": key,
-                "lock_level": resolved_level,
+                "lock_level": display_level,
+                "lock_level_display": display_level,
+                "lock_hierarchy_level": resolved_level,
                 "chat_id": context.get("chat_id") if context else None,
             }
 
@@ -2391,6 +2419,9 @@ class LockManager:
                 current_acquisitions = self._get_current_acquisitions()
                 full_context = self._build_context_payload(
                     key, resolved_level, additional=context
+                )
+                full_display_level = self._display_level_from_context(
+                    full_context, resolved_level
                 )
 
                 try:
@@ -2413,6 +2444,8 @@ class LockManager:
                             full_context,
                             event_type="lock_fast_path_order_violation",
                             lock_key=key,
+                            lock_level=full_display_level,
+                            lock_hierarchy_level=resolved_level,
                         ),
                     )
                     raise order_err
@@ -2425,6 +2458,9 @@ class LockManager:
                 setattr(lock, "_acquired_by_callsite", call_site)
                 setattr(lock, "_acquired_by_function", call_function)
                 setattr(lock, "_acquired_by_task", self._describe_task(task))
+                if hasattr(lock, "_owner_id"):
+                    setattr(lock, "_owner", task)
+                    setattr(lock, "_owner_id", id(task))
 
                 self._record_acquired(key, resolved_level, full_context)
 
@@ -2448,7 +2484,8 @@ class LockManager:
                     full_context,
                     event_type="lock_acquired",
                     lock_key=key,
-                    lock_level=resolved_level,
+                    lock_level=full_display_level,
+                    lock_hierarchy_level=resolved_level,
                     attempts=1,
                     attempt_duration=elapsed_seconds,
                     call_site=call_site,
@@ -2517,7 +2554,8 @@ class LockManager:
             context_payload,
             event_type="lock_trace_acquire_start",
             lock_key=key,
-            lock_level=resolved_level,
+            lock_level=display_level,
+            lock_hierarchy_level=resolved_level,
             call_site=call_site,
             call_site_function=call_function,
             task=self._describe_task(task),
@@ -2536,6 +2574,9 @@ class LockManager:
         for existing in current_acquisitions:
             if existing.key == key:
                 existing.count += 1
+                reentrant_display = self._calculate_display_level(existing.count)
+                context_payload["lock_level_display"] = reentrant_display
+                existing.context["lock_level_display"] = reentrant_display
                 self._logger.debug(
                     "[LOCK_TRACE] RE-ENTRANT acquire key=%s count=%d from=%s (%s) task=%s",
                     key,
@@ -2547,7 +2588,8 @@ class LockManager:
                         context_payload,
                         event_type="lock_reentrant_acquire",
                         lock_key=key,
-                        lock_level=resolved_level,
+                        lock_level=reentrant_display,
+                        lock_hierarchy_level=resolved_level,
                         reentrant_count=existing.count,
                         call_site=call_site,
                         call_site_function=call_function,
@@ -2566,14 +2608,16 @@ class LockManager:
             context_payload,
             event_type="lock_acquiring",
             lock_key=key,
-            lock_level=resolved_level,
+            lock_level=display_level,
+            lock_hierarchy_level=resolved_level,
             acquisition_order=acquisition_order,
             call_site=call_site,
             call_site_function=call_function,
         )
         acquiring_extra.setdefault("lock_name", context_payload.get("lock_name", key))
         acquiring_extra.setdefault("chat_id", context_payload.get("chat_id"))
-        acquiring_extra.setdefault("lock_level", resolved_level)
+        acquiring_extra.setdefault("lock_level", display_level)
+        acquiring_extra.setdefault("lock_hierarchy_level", resolved_level)
         acquiring_extra["order"] = acquisition_order
         self._logger.info("Acquiring lock", extra=acquiring_extra)
 
@@ -2605,7 +2649,8 @@ class LockManager:
                             context_payload,
                             event_type="lock_timeout_budget_exhausted",
                             lock_key=key,
-                            lock_level=resolved_level,
+                            lock_level=display_level,
+                            lock_hierarchy_level=resolved_level,
                             attempt=attempt,
                             attempt_timings=attempt_timings,
                         ),
@@ -2626,7 +2671,8 @@ class LockManager:
                             context_payload,
                             event_type="lock_timeout_invalid",
                             lock_key=key,
-                            lock_level=resolved_level,
+                            lock_level=display_level,
+                            lock_hierarchy_level=resolved_level,
                             attempt=attempt,
                             calculated_timeout=attempt_timeout,
                         ),
@@ -2689,7 +2735,8 @@ class LockManager:
                                 context_payload,
                                 event_type="lock_timeout_warning",
                                 lock_key=key,
-                                lock_level=resolved_level,
+                                lock_level=display_level,
+                                lock_hierarchy_level=resolved_level,
                                 attempt=attempt + 1,
                                 attempt_duration=attempt_duration,
                                 attempt_timeout=attempt_timeout,
@@ -2701,6 +2748,9 @@ class LockManager:
                 setattr(lock, "_acquired_by_callsite", call_site)
                 setattr(lock, "_acquired_by_function", call_function)
                 setattr(lock, "_acquired_by_task", self._describe_task(task))
+                if hasattr(lock, "_owner_id"):
+                    setattr(lock, "_owner", task)
+                    setattr(lock, "_owner_id", id(task))
                 elapsed = loop.time() - attempt_start
                 self._record_acquired(key, resolved_level, context_payload)
                 if self._register_lock_stack(task, key, exit_stack):
@@ -2717,7 +2767,8 @@ class LockManager:
                     context_payload,
                     event_type="lock_trace_acquired",
                     lock_key=key,
-                    lock_level=resolved_level,
+                    lock_level=display_level,
+                    lock_hierarchy_level=resolved_level,
                     call_site=call_site,
                     call_site_function=call_function,
                     task=self._describe_task(task),
@@ -2744,7 +2795,8 @@ class LockManager:
                             context_payload,
                             event_type="lock_acquired",
                             lock_key=key,
-                            lock_level=resolved_level,
+                            lock_level=display_level,
+                            lock_hierarchy_level=resolved_level,
                             attempts=attempt + 1,
                             attempt_duration=elapsed,
                             call_site=call_site,
@@ -2762,7 +2814,8 @@ class LockManager:
                             context_payload,
                             event_type="lock_acquired",
                             lock_key=key,
-                            lock_level=resolved_level,
+                            lock_level=display_level,
+                            lock_hierarchy_level=resolved_level,
                             attempts=attempt + 1,
                             attempt_duration=elapsed,
                             call_site=call_site,
@@ -2795,7 +2848,8 @@ class LockManager:
                         minimum_level=effective_timeout_level,
                         extra={
                             "lock_key": key,
-                            "lock_level": resolved_level,
+                            "lock_level": display_level,
+                            "lock_hierarchy_level": resolved_level,
                             "chat_id": diagnostic_context.get("chat_id"),
                             "game_id": diagnostic_context.get("game_id"),
                             "attempt": attempt + 1,
@@ -2817,7 +2871,8 @@ class LockManager:
                             diagnostic_context,
                             event_type="lock_timeout",
                             lock_key=key,
-                            lock_level=resolved_level,
+                            lock_level=display_level,
+                            lock_hierarchy_level=resolved_level,
                             attempts=attempt + 1,
                             remaining_time=remaining,
                             held_by_tasks=diagnostics.get("held_by_tasks"),
@@ -2841,7 +2896,8 @@ class LockManager:
                                     context_payload,
                                     event_type="lock_backoff_skipped",
                                     lock_key=key,
-                                    lock_level=resolved_level,
+                                    lock_level=display_level,
+                                    lock_hierarchy_level=resolved_level,
                                     attempt=attempt + 1,
                                     backoff_delay=backoff_delay,
                                 ),
@@ -2857,7 +2913,8 @@ class LockManager:
                                     context_payload,
                                     event_type="lock_backoff",
                                     lock_key=key,
-                                    lock_level=resolved_level,
+                                    lock_level=display_level,
+                                    lock_hierarchy_level=resolved_level,
                                     attempt=attempt + 1,
                                     backoff_delay=backoff_delay,
                                 ),
@@ -2874,7 +2931,8 @@ class LockManager:
                                 context_payload,
                                 event_type="lock_backoff",
                                 lock_key=key,
-                                lock_level=resolved_level,
+                                lock_level=display_level,
+                                lock_hierarchy_level=resolved_level,
                                 attempt=attempt + 1,
                                 backoff_delay=backoff_delay,
                             ),
@@ -2895,7 +2953,8 @@ class LockManager:
                     context_payload,
                     event_type="lock_cancelled",
                     lock_key=key,
-                    lock_level=resolved_level,
+                    lock_level=display_level,
+                    lock_hierarchy_level=resolved_level,
                     attempts=attempt + 1,
                     lock_acquired=lock_acquired,
                     shutdown_initiated=self._shutdown_initiated,
@@ -2932,7 +2991,8 @@ class LockManager:
                             context_payload,
                             event_type="lock_cleanup_timeout",
                             lock_key=key,
-                            lock_level=resolved_level,
+                            lock_level=display_level,
+                            lock_hierarchy_level=resolved_level,
                             cleanup_timeout=_CANCELLATION_CLEANUP_TIMEOUT,
                         ),
                     )
@@ -2946,7 +3006,8 @@ class LockManager:
                             context_payload,
                             event_type="lock_cleanup_unexpected_error",
                             lock_key=key,
-                            lock_level=resolved_level,
+                            lock_level=display_level,
+                            lock_hierarchy_level=resolved_level,
                             error=str(cleanup_error),
                         ),
                     )
@@ -2968,7 +3029,8 @@ class LockManager:
                         context_payload,
                         event_type="lock_acquire_error",
                         lock_key=key,
-                        lock_level=resolved_level,
+                        lock_level=display_level,
+                        lock_hierarchy_level=resolved_level,
                         attempts=attempt + 1,
                     ),
                 )
@@ -2995,7 +3057,8 @@ class LockManager:
                                 context_payload,
                                 event_type="lock_release_error_after_acquire",
                                 lock_key=key,
-                                lock_level=resolved_level,
+                                lock_level=display_level,
+                                lock_hierarchy_level=resolved_level,
                                 attempts=attempt + 1,
                             ),
                         )
@@ -3008,8 +3071,11 @@ class LockManager:
         diagnostics = self._lock_diagnostics(key)
         failure_context = dict(context_payload)
         failure_context.update(diagnostics)
+        failure_display_level = self._display_level_from_context(
+            failure_context, resolved_level
+        )
         lock_identity = self._format_lock_identity(
-            key, resolved_level, failure_context
+            key, failure_display_level, failure_context
         )
         stage_parts = ["acquire_failure", key]
         chat_id = failure_context.get("chat_id")
@@ -3027,7 +3093,8 @@ class LockManager:
                 minimum_level=effective_failure_level,
                 extra={
                     "lock_key": key,
-                    "lock_level": resolved_level,
+                    "lock_level": failure_display_level,
+                    "lock_hierarchy_level": resolved_level,
                     "chat_id": failure_context.get("chat_id"),
                     "game_id": failure_context.get("game_id"),
                 },
@@ -3047,7 +3114,8 @@ class LockManager:
                     failure_context,
                     event_type="lock_failure",
                     lock_key=key,
-                    lock_level=resolved_level,
+                    lock_level=failure_display_level,
+                    lock_hierarchy_level=resolved_level,
                     attempts=attempts,
                     attempt_timings=attempt_timings,
                     held_by_tasks=diagnostics.get("held_by_tasks"),
@@ -3103,7 +3171,12 @@ class LockManager:
             )
             failure_snapshot_extra = dict(failure_context)
             failure_snapshot_extra.setdefault("lock_key", key)
-            failure_snapshot_extra.setdefault("lock_level", resolved_level)
+            failure_display_level = self._display_level_from_context(
+                failure_context, resolved_level
+            )
+            failure_context["lock_level_display"] = failure_display_level
+            failure_snapshot_extra.setdefault("lock_level", failure_display_level)
+            failure_snapshot_extra.setdefault("lock_hierarchy_level", resolved_level)
             if failure_log_level is not None:
                 effective_failure_level = max(failure_log_level, logging.WARNING)
                 self._log_lock_snapshot_on_timeout(
@@ -3125,7 +3198,8 @@ class LockManager:
                     "chat_id": failure_context.get("chat_id"),
                     "game_id": failure_context.get("game_id"),
                     "lock_key": key,
-                    "lock_level": failure_context.get("lock_level"),
+                    "lock_level": failure_display_level,
+                    "lock_hierarchy_level": resolved_level,
                 },
             )
             self._logger.warning(
@@ -3136,7 +3210,7 @@ class LockManager:
                     dict(failure_context),
                     event_type="lock_guard_timeout",
                     lock_key=key,
-                    lock_level=failure_context.get("lock_level"),
+                    lock_level=failure_display_level,
                 ),
             )
             raise TimeoutError(message)
@@ -3144,13 +3218,16 @@ class LockManager:
         guard_context = self._build_context_payload(
             key, resolved_level, additional=combined_context
         )
+        guard_display_level = self._display_level_from_context(
+            guard_context, resolved_level
+        )
         acquisition_order = self._get_current_levels()
         guard_log_context = dict(guard_context)
         guard_log_context["acquisition_order"] = acquisition_order
         self._logger.debug(
             "Guard acquired lock '%s' (level=%s) with order %s for chat %s%s",
             key,
-            resolved_level,
+            guard_display_level,
             acquisition_order,
             guard_context.get("chat_id"),
             self._format_context(guard_log_context),
@@ -3158,7 +3235,8 @@ class LockManager:
                 guard_log_context,
                 event_type="lock_guard_acquired",
                 lock_key=key,
-                lock_level=resolved_level,
+                lock_level=guard_display_level,
+                lock_hierarchy_level=resolved_level,
                 acquisition_order=acquisition_order,
             ),
         )
@@ -3239,11 +3317,15 @@ class LockManager:
             unknown_context = self._build_context_payload(
                 key, resolved_level, additional=base_context
             )
+            unknown_display = self._display_level_from_context(
+                unknown_context, resolved_level
+            )
             trace_unknown_extra = self._log_extra(
                 unknown_context,
                 event_type="lock_trace_release_unknown",
                 lock_key=key,
-                lock_level=resolved_level,
+                lock_level=unknown_display,
+                lock_hierarchy_level=resolved_level,
                 release_site=release_site,
                 release_function=release_function,
                 task=self._describe_task(task) if task else None,
@@ -3264,7 +3346,7 @@ class LockManager:
                     unknown_context,
                     event_type="lock_release_unknown",
                     lock_key=key,
-                    lock_level=unknown_context.get("lock_level"),
+                    lock_level=unknown_display,
                     release_function=release_function,
                 ),
             )
@@ -3284,6 +3366,9 @@ class LockManager:
         context_payload = self._build_context_payload(
             key, release_level, additional=base_context
         )
+        release_display_level = self._display_level_from_context(
+            context_payload, release_level
+        )
 
         release_context_override: Optional[Dict[str, Any]] = None
         release_index: Optional[int] = None
@@ -3297,6 +3382,9 @@ class LockManager:
                     raise RuntimeError(
                         "Lock release attempted without an active acquisition context"
                     )
+                reentrant_display = self._calculate_display_level(acq.count)
+                context_payload["lock_level_display"] = reentrant_display
+                acq.context["lock_level_display"] = reentrant_display
                 self._logger.debug(
                     "[LOCK_TRACE] RE-ENTRANT release key=%s count=%d (still held) from=%s (%s) task=%s",
                     key,
@@ -3308,7 +3396,8 @@ class LockManager:
                         context_payload,
                         event_type="lock_reentrant_release",
                         lock_key=key,
-                        lock_level=release_level,
+                        lock_level=reentrant_display,
+                        lock_hierarchy_level=release_level,
                         reentrant_count=acq.count,
                         call_site=release_site,
                         call_site_function=release_function,
@@ -3325,6 +3414,9 @@ class LockManager:
 
         if release_context_override is not None:
             context_payload = release_context_override
+            release_display_level = self._display_level_from_context(
+                context_payload, release_level
+            )
 
         acquire_key: Optional[Tuple[int, str]] = None
         holding_duration: Optional[float] = None
@@ -3350,7 +3442,8 @@ class LockManager:
             context_payload,
             event_type="lock_trace_release",
             lock_key=key,
-            lock_level=context_payload.get("lock_level"),
+            lock_level=release_display_level,
+            lock_hierarchy_level=release_level,
             release_site=release_site,
             release_function=release_function,
             acquired_from=acquired_by,
@@ -3378,7 +3471,8 @@ class LockManager:
                 context_payload,
                 event_type="lock_long_hold_release",
                 lock_key=key,
-                lock_level=context_payload.get("lock_level"),
+                lock_level=release_display_level,
+                lock_hierarchy_level=release_level,
                 holding_duration=holding_duration,
                 release_site=release_site,
                 release_function=release_function,
@@ -3398,7 +3492,8 @@ class LockManager:
                 context_payload,
                 event_type="lock_snapshot_long_hold",
                 lock_key=key,
-                lock_level=context_payload.get("lock_level"),
+                lock_level=release_display_level,
+                lock_hierarchy_level=release_level,
                 holding_duration=holding_duration,
                 release_site=release_site,
                 release_function=release_function,
@@ -3424,7 +3519,8 @@ class LockManager:
                     context_payload,
                     event_type="lock_release_error",
                     lock_key=key,
-                    lock_level=context_payload.get("lock_level"),
+                    lock_level=release_display_level,
+                    lock_hierarchy_level=release_level,
                     release_site=release_site,
                     release_function=release_function,
                 ),
@@ -3445,14 +3541,15 @@ class LockManager:
         self._logger.info(
             "%s released%s",
             self._format_lock_identity(
-                key, context_payload.get("lock_level", release_level), context_payload
+                key, release_display_level, context_payload
             ),
             self._format_context(context_payload),
             extra=self._log_extra(
                 context_payload,
                 event_type="lock_released",
                 lock_key=key,
-                lock_level=context_payload.get("lock_level"),
+                lock_level=release_display_level,
+                lock_hierarchy_level=release_level,
                 release_site=release_site,
                 release_function=release_function,
             ),
@@ -3735,6 +3832,7 @@ class LockManager:
         held_levels = [acq.level for acq in current_acquisitions]
         min_held_level = min(held_levels)
         max_held_level = max(held_levels)
+        display_level = self._display_level_from_context(context, new_level)
 
         highest_hierarchy_acq = max(
             hierarchy_acquisitions,
@@ -3852,7 +3950,8 @@ class LockManager:
                     context,
                     event_type="lock_order_violation",
                     lock_key=new_key,
-                    lock_level=new_level,
+                    lock_level=display_level,
+                    lock_hierarchy_level=new_level,
                     held_locks=held_locks,
                 ),
             )
@@ -3870,7 +3969,8 @@ class LockManager:
                     context,
                     event_type="lock_order_violation",
                     lock_key=new_key,
-                    lock_level=new_level,
+                    lock_level=display_level,
+                    lock_hierarchy_level=new_level,
                     held_locks=held_locks,
                 ),
             )
@@ -3892,7 +3992,8 @@ class LockManager:
                         context,
                         event_type="lock_order_same_level",
                         lock_key=new_key,
-                        lock_level=new_level,
+                        lock_level=display_level,
+                        lock_hierarchy_level=new_level,
                         held_keys_same_level=held_same_level,
                     ),
                 )
@@ -4672,6 +4773,10 @@ class LockManager:
         request_category: Any | None = None,
         **extra: Any,
     ) -> Dict[str, Any]:
+        lock_context = dict(context) if context else {}
+        if "lock_level_display" in lock_context:
+            lock_context["lock_level"] = lock_context["lock_level_display"]
+
         payload: Dict[str, Any] = {
             "game_id": context.get("game_id"),
             "chat_id": context.get("chat_id"),
@@ -4680,7 +4785,7 @@ class LockManager:
                 request_category if request_category is not None else context.get("request_category")
             ),
             "event_type": event_type,
-            "lock_context": dict(context) if context else {},
+            "lock_context": lock_context,
         }
         lock_name = context.get("lock_name") or context.get("lock_key")
         if lock_name is not None:

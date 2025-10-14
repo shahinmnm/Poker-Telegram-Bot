@@ -17,6 +17,16 @@ class _ListHandler(logging.Handler):
         self.records.append(record)
 
 
+def test_calculate_display_level() -> None:
+    logger = logging.getLogger("lock_manager_test_display")
+    manager = LockManager(logger=logger, default_timeout_seconds=1)
+
+    assert manager._calculate_display_level(0) == 1
+    assert manager._calculate_display_level(1) == 1
+    assert manager._calculate_display_level(5) == 5
+    assert manager._calculate_display_level(-3) == 1
+
+
 @pytest.mark.asyncio
 async def test_lock_manager_acquire_when_free() -> None:
     logger = logging.getLogger("lock_manager_test_free")
