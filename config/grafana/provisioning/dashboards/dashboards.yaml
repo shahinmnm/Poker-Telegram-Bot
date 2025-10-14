@@ -3,10 +3,10 @@ apiVersion: 1
 providers:
   - name: 'Poker Bot Dashboards'
     orgId: 1
-    folder: ''
+    folder: 'Poker Bot'
     type: file
     disableDeletion: false
-    updateIntervalSeconds: 10
+    updateIntervalSeconds: 30
     allowUiUpdates: true
     options:
       path: /etc/grafana/provisioning/dashboards

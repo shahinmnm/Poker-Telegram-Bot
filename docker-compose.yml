@@ -125,6 +125,7 @@ services:
       - GF_LOG_MODE=console
       - GF_LOG_LEVEL=info
     volumes:
+      # Provisioning directory includes dashboards and data sources; avoid overlapping mounts
       - grafana_data:/var/lib/grafana
       - ./config/grafana/provisioning:/etc/grafana/provisioning:ro
     depends_on:

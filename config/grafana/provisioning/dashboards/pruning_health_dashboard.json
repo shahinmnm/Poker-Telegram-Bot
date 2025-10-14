@@ -1,44 +1,34 @@
 {
-  "uid": "pruning-health",
-  "title": "Database Pruning Health",
-  "tags": ["poker-bot", "monitoring"],
-  "timezone": "utc",
+  "uid": "poker-pruning-health",
+  "title": "Poker Bot - Pruning Subsystem Health",
+  "tags": ["poker", "pruning", "v81"],
+  "timezone": "browser",
   "schemaVersion": 16,
   "version": 1,
-  "refresh": "30s",
   "panels": [
     {
       "id": 1,
       "title": "Pruning Operations Rate",
       "type": "graph",
-      "gridPos": {"x": 0, "y": 0, "w": 12, "h": 8},
       "targets": [
         {
           "expr": "rate(poker_prune_executions_total[5m])",
-          "legendFormat": "Prunes/sec",
-          "refId": "A"
+          "legendFormat": "Prunes/sec"
         }
-      ],
-      "yaxes": [
-        {"format": "ops"},
-        {"format": "short"}
       ]
     },
     {
       "id": 2,
       "title": "Stale User Count Distribution",
       "type": "graph",
-      "gridPos": {"x": 12, "y": 0, "w": 12, "h": 8},
       "targets": [
         {
-          "expr": "histogram_quantile(0.95, rate(poker_prune_stale_count_bucket[5m]))",
-          "legendFormat": "p95 stale users",
-          "refId": "A"
+          "expr": "histogram_quantile(0.95, poker_prune_stale_count_bucket)",
+          "legendFormat": "p95 stale users"
         },
         {
-          "expr": "histogram_quantile(0.50, rate(poker_prune_stale_count_bucket[5m]))",
-          "legendFormat": "p50 stale users",
-          "refId": "B"
+          "expr": "histogram_quantile(0.50, poker_prune_stale_count_bucket)",
+          "legendFormat": "p50 stale users"
         }
       ]
     },
@@ -46,12 +36,10 @@
       "id": 3,
       "title": "Pruning Duration (ms)",
       "type": "graph",
-      "gridPos": {"x": 0, "y": 8, "w": 12, "h": 8},
       "targets": [
         {
-          "expr": "histogram_quantile(0.99, rate(poker_prune_duration_ms_bucket[5m]))",
-          "legendFormat": "p99 latency",
-          "refId": "A"
+          "expr": "histogram_quantile(0.99, poker_prune_duration_ms_bucket)",
+          "legendFormat": "p99 latency"
         }
       ]
     },
@@ -59,38 +47,38 @@
       "id": 4,
       "title": "High Stale Rate Alerts",
       "type": "graph",
-      "gridPos": {"x": 12, "y": 8, "w": 12, "h": 8},
       "targets": [
         {
           "expr": "increase(poker_prune_high_stale_rate_total[1h])",
-          "legendFormat": "Games with >50% stale users",
-          "refId": "A"
+          "legendFormat": "Games with >50% stale users"
         }
       ],
       "alert": {
         "name": "High Stale User Rate",
         "conditions": [
           {
-            "evaluator": {"type": "gt", "params": [10]},
-            "query": {"params": ["A", "5m", "now"]},
-            "reducer": {"type": "avg"}
+            "evaluator": {
+              "type": "gt",
+              "params": [10]
+            },
+            "query": {
+              "params": ["A", "5m", "now"]
+            }
           }
         ],
         "frequency": "1m",
         "handler": 1,
-        "message": "Multiple games have >50% stale users. Investigate user retention issues."
+        "message": "Multiple games have >50% stale ready users. Investigate user retention issues."
       }
     },
     {
       "id": 5,
       "title": "Pruning Health Status",
       "type": "singlestat",
-      "gridPos": {"x": 0, "y": 16, "w": 24, "h": 4},
       "targets": [
         {
           "expr": "poker_pruning_health_status",
-          "legendFormat": "{{status}}",
-          "refId": "A"
+          "legendFormat": "{{status}}"
         }
       ],
       "valueMaps": [
@@ -99,5 +87,7 @@
         {"value": "2", "text": "Healthy"}
       ]
     }
-  ]
+  ],
+  "refresh": "30s",
+  "time": {"from": "now-6h", "to": "now"}
 }
