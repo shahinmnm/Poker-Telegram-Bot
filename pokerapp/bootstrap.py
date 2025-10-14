@@ -131,7 +131,7 @@ async def _initialize_statistics_schema(
             if backend == "sqlite":
                 query = text(
                     """
-                    SELECT COUNT(*)
+                    SELECT COUNT(*) > 0
                     FROM sqlite_master
                     WHERE type='table' AND name=:table_name
                     """
@@ -140,7 +140,7 @@ async def _initialize_statistics_schema(
                 query = text(
                     """
                     SELECT EXISTS (
-                        SELECT FROM information_schema.tables
+                        SELECT 1 FROM information_schema.tables
                         WHERE table_name = :table_name
                     )
                     """
