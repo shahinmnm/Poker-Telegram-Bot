@@ -3314,7 +3314,9 @@ class GameEngine:
                     if not is_locked:
                         continue
                     try:
-                        lock.release()
+                        await lock_manager._force_release_stacks(key)
+                        while getattr(lock, "_count", 0) > 0:
+                            await lock.__aexit__(None, None, None)
                         reset_extra = {
                             "chat_id": normalized_chat,
                             "lock_key": key,

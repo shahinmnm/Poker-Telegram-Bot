@@ -28,14 +28,13 @@ class _SnapshotLockManager:
     @asynccontextmanager
     async def stage_lock(self, chat_id: int):
         loop = asyncio.get_event_loop()
-        await self._lock.acquire()
-        start = loop.time()
-        try:
-            yield
-        finally:
-            end = loop.time()
-            self._lock.release()
-            self.hold_times.append(end - start)
+        async with self._lock:
+            start = loop.time()
+            try:
+                yield
+            finally:
+                end = loop.time()
+                self.hold_times.append(end - start)
 
 
 class _SnapshotTableManager:

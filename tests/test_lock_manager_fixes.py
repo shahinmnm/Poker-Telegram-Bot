@@ -38,7 +38,7 @@ async def test_batch_cleanup_complete():
     for i in range(250):
         acquired = await lm.acquire(f"cleanup:test:{i}", timeout=1)
         assert acquired
-        lm.release(f"cleanup:test:{i}")
+        await lm.release(f"cleanup:test:{i}")
         lock = await lm._get_lock(f"cleanup:test:{i}")
         setattr(lock, "_acquired_at_ts", time.time() - 200)
 
@@ -102,7 +102,7 @@ async def test_fast_path_deferred_validation(monkeypatch):
     elapsed_us = (time.time() - start) * 1_000_000
     assert elapsed_us < 200_000, f"Fast-path unexpectedly slow: {elapsed_us:.0f}μs"
 
-    lm.release(key)
+    await lm.release(key)
 
 
 @pytest.mark.asyncio
@@ -121,4 +121,4 @@ async def test_fast_path_validation_rollback():
     assert violating_lock._count == 0
     assert not violating_lock._lock.locked()
 
-    lm.release("chat:test")
+    await lm.release("chat:test")

@@ -12,7 +12,7 @@ import time
 import traceback
 import uuid
 import zlib
-from contextlib import asynccontextmanager
+from contextlib import AsyncExitStack, asynccontextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, field
 from typing import (
@@ -473,6 +473,7 @@ class LockManager:
             WeakKeyDictionary()
         )
         self._lock_acquire_times: Dict[Tuple[int, str], List[float]] = {}
+        self._lock_exit_stacks: Dict[Tuple[int, str], List[AsyncExitStack]] = {}
         self._default_lock_level = (
             (max(self.LOCK_LEVELS.values()) if self.LOCK_LEVELS else 0) + 10
         )
@@ -1974,7 +1975,7 @@ class LockManager:
 
             for key in reversed(acquired_keys):
                 try:
-                    self.release(key, context=context)
+                    await self.release(key, context=context)
                 except Exception as e:  # pragma: no cover
                     release_errors += 1
                     self._logger.error(
@@ -2378,9 +2379,13 @@ class LockManager:
                 "chat_id": context.get("chat_id") if context else None,
             }
 
+            stack_registered = False
+            exit_stack: Optional[AsyncExitStack] = None
             try:
+                exit_stack = AsyncExitStack()
                 await asyncio.wait_for(
-                    lock.acquire(), timeout=_FAST_PATH_TIMEOUT_THRESHOLD
+                    exit_stack.enter_async_context(lock),
+                    timeout=_FAST_PATH_TIMEOUT_THRESHOLD,
                 )
 
                 current_acquisitions = self._get_current_acquisitions()
@@ -2395,7 +2400,11 @@ class LockManager:
                         current_acquisitions, key, resolved_level, full_context
                     )
                 except LockOrderError as order_err:
-                    lock.release()
+                    if stack_registered:
+                        await self._release_lock_stack(task, key)
+                    elif exit_stack is not None:
+                        await exit_stack.aclose()
+                        exit_stack = None
                     self._logger.error(
                         "[FAST_PATH] Lock order violation on key=%s, released lock",
                         key,
@@ -2418,6 +2427,10 @@ class LockManager:
                 setattr(lock, "_acquired_by_task", self._describe_task(task))
 
                 self._record_acquired(key, resolved_level, full_context)
+
+                if self._register_lock_stack(task, key, exit_stack):
+                    stack_registered = True
+                    exit_stack = None
 
                 if task is not None:
                     acquire_key = (id(task), key)
@@ -2488,6 +2501,9 @@ class LockManager:
                         lock_key=key,
                     ),
                 )
+            finally:
+                if exit_stack is not None:
+                    await exit_stack.aclose()
 
             self._metrics["lock_slow_path"] = (
                 self._metrics.get("lock_slow_path", 0) + 1
@@ -2622,18 +2638,24 @@ class LockManager:
                 key, resolved_level, context_payload
             )
             lock_acquired = False
+            exit_stack: Optional[AsyncExitStack] = None
+            stack_registered = False
             try:
                 owner = getattr(lock, "_owner", None)
                 if owner is not None and owner is not task:
                     self._metrics["lock_contention"] += 1
 
+                exit_stack = AsyncExitStack()
                 if attempt_timeout is None:
-                    await lock.acquire()
+                    await exit_stack.enter_async_context(lock)
                 else:
                     # Monitor acquisition progress for early warning
                     acquisition_start = loop.time()
                     try:
-                        await asyncio.wait_for(lock.acquire(), timeout=attempt_timeout)
+                        await asyncio.wait_for(
+                            exit_stack.enter_async_context(lock),
+                            timeout=attempt_timeout,
+                        )
                     except asyncio.TimeoutError:
                         # Record failed attempt timing for diagnostics
                         attempt_duration = loop.time() - acquisition_start
@@ -2681,6 +2703,12 @@ class LockManager:
                 setattr(lock, "_acquired_by_task", self._describe_task(task))
                 elapsed = loop.time() - attempt_start
                 self._record_acquired(key, resolved_level, context_payload)
+                if self._register_lock_stack(task, key, exit_stack):
+                    stack_registered = True
+                    exit_stack = None
+                elif exit_stack is not None:
+                    await exit_stack.aclose()
+                    exit_stack = None
                 if task is not None:
                     acquire_key = (id(task), key)
                     acquire_times = self._lock_acquire_times.setdefault(acquire_key, [])
@@ -2922,6 +2950,12 @@ class LockManager:
                             error=str(cleanup_error),
                         ),
                     )
+                finally:
+                    if stack_registered:
+                        await self._release_lock_stack(task, key)
+                    elif exit_stack is not None and lock_acquired:
+                        await exit_stack.aclose()
+                        exit_stack = None
 
                 # Re-raise cancellation after cleanup
                 raise
@@ -2938,13 +2972,17 @@ class LockManager:
                         attempts=attempt + 1,
                     ),
                 )
-                if (
-                    lock_acquired
+                if stack_registered:
+                    await self._release_lock_stack(task, key)
+                elif (
+                    exit_stack is not None
+                    and lock_acquired
                     and getattr(lock, "_owner", None) is task
                     and lock.locked()
                 ):
                     try:
-                        lock.release()
+                        await exit_stack.aclose()
+                        exit_stack = None
                         self._logger.debug(
                             "Released lock %s after acquisition error", lock_identity
                         )
@@ -2964,6 +3002,8 @@ class LockManager:
                 raise
             finally:
                 self._unregister_waiting(task, key)
+                if exit_stack is not None and not stack_registered:
+                    await exit_stack.aclose()
 
         diagnostics = self._lock_diagnostics(key)
         failure_context = dict(context_payload)
@@ -3127,7 +3167,7 @@ class LockManager:
         finally:
             # Release must complete even if cancelled during critical section
             try:
-                self.release(key, context=combined_context)
+                await self.release(key, context=combined_context)
             except Exception as release_error:  # pragma: no cover - defensive
                 self._logger.error(
                     "[LOCK_GUARD] Failed to release lock in finally block for key=%s: %s",
@@ -3166,7 +3206,7 @@ class LockManager:
             failure_log_level=failure_log_level,
         )
 
-    def release(
+    async def release(
         self, key: str, context: Optional[Mapping[str, Any]] = None
     ) -> None:
         release_site, release_function = self._resolve_call_site()
@@ -3253,6 +3293,10 @@ class LockManager:
                 continue
             if acq.count > 1:
                 acq.count -= 1
+                if not await self._release_lock_stack(task, key):
+                    raise RuntimeError(
+                        "Lock release attempted without an active acquisition context"
+                    )
                 self._logger.debug(
                     "[LOCK_TRACE] RE-ENTRANT release key=%s count=%d (still held) from=%s (%s) task=%s",
                     key,
@@ -3370,9 +3414,8 @@ class LockManager:
                 context_suffix,
                 extra=snapshot_extra,
             )
-        try:
-            lock.release()
-        except RuntimeError:
+        released = await self._release_lock_stack(task, key)
+        if not released:
             self._logger.exception(
                 "Failed to release %s due to ownership mismatch%s",
                 self._format_lock_identity(key, release_level, context_payload),
@@ -3386,34 +3429,34 @@ class LockManager:
                     release_function=release_function,
                 ),
             )
-            raise
-        else:
-            if release_index is not None:
-                current_acquisitions.pop(release_index)
-                self._set_current_acquisitions(current_acquisitions)
-            if release_context_override is not None:
-                context_payload = release_context_override
-            if acquire_key is not None:
-                acquire_times = self._lock_acquire_times.get(acquire_key)
-                if acquire_times:
-                    acquire_times.pop()
-                    if not acquire_times:
-                        self._lock_acquire_times.pop(acquire_key, None)
-            self._logger.info(
-                "%s released%s",
-                self._format_lock_identity(
-                    key, context_payload.get("lock_level", release_level), context_payload
-                ),
-                self._format_context(context_payload),
-                extra=self._log_extra(
-                    context_payload,
-                    event_type="lock_released",
-                    lock_key=key,
-                    lock_level=context_payload.get("lock_level"),
-                    release_site=release_site,
-                    release_function=release_function,
-                ),
-            )
+            raise RuntimeError("Lock release attempted without ownership context")
+
+        if release_index is not None:
+            current_acquisitions.pop(release_index)
+            self._set_current_acquisitions(current_acquisitions)
+        if release_context_override is not None:
+            context_payload = release_context_override
+        if acquire_key is not None:
+            acquire_times = self._lock_acquire_times.get(acquire_key)
+            if acquire_times:
+                acquire_times.pop()
+                if not acquire_times:
+                    self._lock_acquire_times.pop(acquire_key, None)
+        self._logger.info(
+            "%s released%s",
+            self._format_lock_identity(
+                key, context_payload.get("lock_level", release_level), context_payload
+            ),
+            self._format_context(context_payload),
+            extra=self._log_extra(
+                context_payload,
+                event_type="lock_released",
+                lock_key=key,
+                lock_level=context_payload.get("lock_level"),
+                release_site=release_site,
+                release_function=release_function,
+            ),
+        )
 
     def detect_deadlock(self) -> Dict[str, Any]:
         """Return a snapshot of held and waiting locks and potential cycles."""
@@ -3440,10 +3483,14 @@ class LockManager:
             )
 
         dependency_graph: Dict[asyncio.Task[Any], Set[asyncio.Task[Any]]] = {}
+        holder_lookup: Dict[str, asyncio.Task[Any]] = {}
+        for holder_task, acquisitions in task_states:
+            for acq in acquisitions:
+                holder_lookup.setdefault(acq.key, holder_task)
         for task, wait in waiting_states:
             lock = self._locks.get(wait.key)
-            owner: Optional[asyncio.Task[Any]] = None
-            if lock is not None:
+            owner: Optional[asyncio.Task[Any]] = holder_lookup.get(wait.key)
+            if owner is None and lock is not None:
                 owner = getattr(lock, "_owner", None)
 
             waiting_entry = {
@@ -3611,7 +3658,7 @@ class LockManager:
         # Release lock if it was acquired
         if lock_acquired and getattr(lock, "_owner", None) is task and lock.locked():
             try:
-                lock.release()
+                await self._release_lock_stack(task, key)
                 self._logger.debug(
                     "[LOCK_CLEANUP] Released lock after cancellation: key=%s",
                     key,
@@ -3782,8 +3829,52 @@ class LockManager:
         max_held_level = max(held_levels)
 
         if new_level < max_held_level:
-            # Descending acquisitions are allowed with the hierarchy validation.
-            return
+            new_category = self._resolve_lock_category(new_key)
+            violating_holder: Optional[_LockAcquisition] = None
+            for acq in current_acquisitions:
+                if acq.level <= new_level:
+                    continue
+                held_category = self._resolve_lock_category(acq.key)
+                if not self._is_descend_allowed(held_category, new_category):
+                    violating_holder = acq
+                    break
+            if violating_holder is None:
+                return
+            held_locks = [acq.key for acq in current_acquisitions]
+            violation_msg = (
+                f"Lock order violation: attempting to acquire {new_key} "
+                f"(level {new_level}) after holding {violating_holder.key} "
+                f"(level {violating_holder.level}). Current locks: {held_locks}"
+            )
+            self._logger.error(
+                violation_msg,
+                extra=self._log_extra(
+                    context,
+                    event_type="lock_order_violation",
+                    lock_key=new_key,
+                    lock_level=new_level,
+                    held_locks=held_locks,
+                ),
+            )
+            raise LockOrderError(violation_msg)
+
+        if new_level > max_held_level:
+            held_locks = [acq.key for acq in current_acquisitions]
+            violation_msg = (
+                f"Lock order violation: attempting to acquire {new_key} "
+                f"(level {new_level}) while holding locks {held_locks}"
+            )
+            self._logger.error(
+                violation_msg,
+                extra=self._log_extra(
+                    context,
+                    event_type="lock_order_violation",
+                    lock_key=new_key,
+                    lock_level=new_level,
+                    held_locks=held_locks,
+                ),
+            )
+            raise LockOrderError(violation_msg)
 
         # Additional check: Warn if acquiring the same level (potential design smell)
         if new_level == max_held_level:
@@ -3821,6 +3912,50 @@ class LockManager:
             _LockAcquisition(key=key, level=level, context=dict(context), count=1)
         )
         self._set_current_acquisitions(acquisitions)
+
+    def _register_lock_stack(
+        self, task: Optional[asyncio.Task[Any]], key: str, stack: AsyncExitStack
+    ) -> bool:
+        if task is None:
+            return False
+        stack_key = (id(task), key)
+        stack_list = self._lock_exit_stacks.setdefault(stack_key, [])
+        stack_list.append(stack)
+        return True
+
+    async def _release_lock_stack(
+        self, task: Optional[asyncio.Task[Any]], key: str
+    ) -> bool:
+        if task is None:
+            return False
+        stack_key = (id(task), key)
+        stack_list = self._lock_exit_stacks.get(stack_key)
+        if not stack_list:
+            return False
+        stack = stack_list.pop()
+        try:
+            await stack.aclose()
+        finally:
+            if not stack_list:
+                self._lock_exit_stacks.pop(stack_key, None)
+        return True
+
+    async def _force_release_stacks(self, key: str) -> None:
+        targets = [
+            stack_key
+            for stack_key in list(self._lock_exit_stacks.keys())
+            if stack_key[1] == key
+        ]
+        for stack_key in targets:
+            stack_list = self._lock_exit_stacks.pop(stack_key, [])
+            while stack_list:
+                stack = stack_list.pop()
+                try:
+                    await stack.aclose()
+                except Exception:  # pragma: no cover - defensive
+                    self._logger.exception(
+                        "[LOCK_FORCE_RELEASE] Failed closing stack for key=%s", key
+                    )
 
     def _remove_acquisition_record(self, key: str) -> None:
         acquisitions = self._get_current_acquisitions()
