@@ -115,6 +115,8 @@ class AlertBridge:
         return web.json_response({"status": "ok"})
 
     async def metrics(self, _: web.Request) -> web.Response:
+        """Prometheus metrics endpoint for Alert Bridge health monitoring."""
+
         body = "\n".join(
             [
                 "# HELP alert_bridge_alerts_processed_total Alerts processed by the bridge",
@@ -128,7 +130,6 @@ class AlertBridge:
         return web.Response(
             text=body + "\n",
             content_type="text/plain; version=0.0.4",
-            charset="utf-8",
         )
 
     async def handle_alertmanager(self, request: web.Request) -> web.Response:

@@ -1,6 +1,8 @@
 {
   "dashboard": {
+    "uid": "alerting-health",
     "title": "Alerting System Health",
+    "tags": ["poker", "alerting", "monitoring"],
     "panels": [
       {
         "title": "Alert Delivery Rate",
