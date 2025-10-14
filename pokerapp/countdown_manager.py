@@ -197,10 +197,12 @@ class SmartCountdownManager:
                 or str(user_id_int)
             )
 
+            username = self._escape_markdown_v2(str(display_name))
+
             entry = PlayerRosterEntry(
                 user_id=user_id_int,
                 seat_index=seat_index,
-                display_name=str(display_name),
+                username=username,
             )
             normalized.append(entry)
             seen.add(user_id_int)
@@ -225,8 +227,7 @@ class SmartCountdownManager:
             else:
                 seat_label = f"صندلی {self._to_persian_digits(entry.seat_index + 1)}"
             seat_label = self._escape_markdown_v2(seat_label)
-            safe_name = self._escape_markdown_v2(entry.display_name)
-            player_link = f"[{safe_name}](tg://user?id={entry.user_id})"
+            player_link = f"[{entry.username}](tg://user?id={entry.user_id})"
 
             lines.append(
                 f"{index_fa}\\. \\({seat_label}\\) {player_link} 🟢"
