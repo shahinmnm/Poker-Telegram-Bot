@@ -44,7 +44,13 @@ class _SnapshotTableManager:
     async def load_game(self, chat_id: int):
         return self._game
 
-    async def save_game(self, chat_id: int, game: Any) -> None:
+    async def save_game(
+        self,
+        chat_id: int,
+        game: Any,
+        *,
+        increment_version: bool = True,
+    ) -> None:
         # Mark game complete after first save to block subsequent progressions
         if getattr(game, "stage", "") == "flop":
             game.stage = "complete"
