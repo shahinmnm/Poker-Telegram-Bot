@@ -121,9 +121,9 @@ class WinnerDetermination:
         grouped_counts, grouped_keys = self._group_hand_by_value(values)
 
         if is_straight and is_flush:
-            if values[0] == 14: # رویال فلاش
+            if values == [14, 13, 12, 11, 10]: # رویال فلاش
                 hand_type = HandsOfPoker.ROYAL_FLUSH
-            else: # استریت فلاش
+            else: # استریت فلاش (شامل حالت A-2-3-4-5)
                 hand_type = HandsOfPoker.STRAIGHT_FLUSH
             return self._calculate_score_value(original_values_for_score, hand_type), hand_type
 

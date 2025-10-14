@@ -5,7 +5,7 @@ import unittest
 from typing import Tuple
 
 from pokerapp.cards import Cards, Card
-from pokerapp.winnerdetermination import WinnerDetermination
+from pokerapp.winnerdetermination import HandsOfPoker, WinnerDetermination
 
 
 HANDS_FILE = "./tests/hands.txt"
@@ -43,6 +43,19 @@ class TestWinnerDetermination(unittest.TestCase):
             hands = TestWinnerDetermination._parse_hands(ln)
             best_type, _, best_cards = determinator.determine_best_hand(hands)
             self.assertListEqual(list(best_cards), list(hands[0]))
+
+    def test_wheel_straight_flush_not_royal(self):
+        determinator = WinnerDetermination()
+        wheel_cards = [Card("A♣"), Card("2♣"), Card("3♣"), Card("4♣"), Card("5♣")]
+        player_cards = wheel_cards[:2]
+        table_cards = wheel_cards[2:] + [Card("9♦"), Card("K♥")]
+
+        hand_type, score, best_cards = determinator.get_hand_value(player_cards, table_cards)
+
+        self.assertEqual(hand_type, HandsOfPoker.STRAIGHT_FLUSH)
+        self.assertNotEqual(hand_type, HandsOfPoker.ROYAL_FLUSH)
+        expected_best_cards = tuple(sorted(wheel_cards, key=lambda c: c.value, reverse=True))
+        self.assertEqual(best_cards, expected_best_cards)
 
 
 if __name__ == '__main__':
