@@ -178,6 +178,7 @@ def test_update_player_anchors_and_keyboards_highlights_active_player():
     viewer._update_message = AsyncMock(return_value=101)
     viewer.edit_message_reply_markup = AsyncMock(return_value=True)
     viewer.send_message_return_id = AsyncMock()
+    viewer.sync_player_private_keyboards = AsyncMock(return_value=None)
 
     game = Game()
     game.chat_id = -777
@@ -278,6 +279,10 @@ def test_update_player_anchors_and_keyboards_highlights_active_player():
     assert viewer._update_message.await_count == 1
     viewer.edit_message_reply_markup.assert_not_awaited()
     viewer.send_message_return_id.assert_not_awaited()
+    viewer.sync_player_private_keyboards.assert_awaited_once()
+    sync_kwargs = viewer.sync_player_private_keyboards.await_args.kwargs
+    assert sync_kwargs["game"] is game
+    assert sync_kwargs["stage_name"] == stage_name
 
     first_call = viewer._update_message.await_args_list[0]
 
@@ -536,6 +541,7 @@ def test_delete_message_allows_anchor_cleanup_after_hand():
 
 def test_send_player_role_anchors_attaches_group_keyboard():
     viewer = PokerBotViewer(bot=MagicMock())
+    viewer.sync_player_private_keyboards = AsyncMock(return_value=None)
 
     game = Game()
     game.chat_id = -555
@@ -553,6 +559,13 @@ def test_send_player_role_anchors_attaches_group_keyboard():
     viewer.send_message_return_id = AsyncMock(return_value=321)
 
     run(viewer.send_player_role_anchors(game=game, chat_id=game.chat_id))
+
+    viewer.sync_player_private_keyboards.assert_awaited_once()
+    sync_kwargs = viewer.sync_player_private_keyboards.await_args.kwargs
+    assert sync_kwargs["game"] is game
+    assert sync_kwargs["stage_name"] == game.state.name
+    assert sync_kwargs["players"] == [player]
+    assert sync_kwargs["community_cards"] == []
 
     viewer.send_message_return_id.assert_awaited_once()
     call_kwargs = viewer.send_message_return_id.await_args.kwargs
@@ -608,8 +621,8 @@ def test_update_message_resends_reply_keyboard_without_deleting_anchor(chat_id):
         current_stage='ROUND_FLOP',
     )
 
-    result = run(
-        viewer._update_message(
+    async def perform_update():
+        update_result = await viewer._update_message(
             chat_id=chat_id,
             message_id=555,
             text='به‌روزرسانی',
@@ -617,7 +630,10 @@ def test_update_message_resends_reply_keyboard_without_deleting_anchor(chat_id):
             force_send=True,
             request_category=RequestCategory.ANCHOR,
         )
-    )
+        await asyncio.sleep(0)
+        return update_result
+
+    result = run(perform_update())
 
     assert result == 777
     messenger.send_message.assert_awaited_once()
