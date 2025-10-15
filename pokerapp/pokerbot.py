@@ -381,6 +381,11 @@ class PokerBot:
                 self._webhook_verification_job,
                 when=1.0,
                 name="webhook-verification",
+                job_kwargs={
+                    "replace_existing": True,
+                    "misfire_grace_time": 30,
+                    "coalesce": True,
+                },
             )
         except Exception:
             self._logger.exception("Unable to schedule webhook verification job.")
