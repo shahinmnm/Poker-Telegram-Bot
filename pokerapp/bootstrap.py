@@ -221,37 +221,67 @@ async def _initialize_statistics_schema(
 
     try:
         async with engine.begin() as conn:
-            def _has_player_stats_table(sync_conn) -> bool:
+            async def _has_migration_table(conn: AsyncConnection) -> bool:
+                """Check if the _migration_history table exists."""
+
                 try:
-                    inspector = inspect(sync_conn)
-                    return inspector.has_table("player_stats")
+                    backend = getattr(conn.dialect, "name", "").lower()
+
+                    if backend == "sqlite":
+                        query = text(
+                            """
+                            SELECT COUNT(*) > 0
+                            FROM sqlite_master
+                            WHERE type='table' AND name='_migration_history'
+                            """
+                        )
+                    else:
+                        query = text(
+                            """
+                            SELECT EXISTS (
+                                SELECT 1 FROM information_schema.tables
+                                WHERE table_name='_migration_history'
+                            )
+                            """
+                        )
+
+                    result = await conn.execute(query)
+                    return bool(result.scalar())
                 except Exception as exc:  # pragma: no cover - defensive logging
                     logger.warning(
-                        "Table inspection failed: %s",  # noqa: G003
+                        "Migration table check failed: %s",  # noqa: G003
                         exc,
-                        extra={"event_type": "stats_schema_check_failed"},
+                        extra={
+                            "event_type": "stats_migration_table_check_failed"
+                        },
                     )
                     return False
 
-            has_table = await conn.run_sync(_has_player_stats_table)
-            has_migrations = await _has_migrations_applied(conn, logger)
+            async def _get_applied_migration_count(conn: AsyncConnection) -> int:
+                """Count applied migrations."""
 
-            if not has_table and has_migrations:
-                logger.error(
-                    "Migrations detected but player_stats table missing; aborting",
-                    extra={"event_type": "stats_schema_corruption_detected"},
-                )
-                raise RuntimeError("Statistics schema mismatch detected")
+                try:
+                    query = text("SELECT COUNT(*) FROM _migration_history")
+                    result = await conn.execute(query)
+                    return int(result.scalar() or 0)
+                except Exception:
+                    return 0
 
-            if has_table:
+            has_migration_table = await _has_migration_table(conn)
+
+            if has_migration_table:
+                applied_count = await _get_applied_migration_count(conn)
                 logger.info(
-                    "Statistics schema already exists",
-                    extra={"event_type": "stats_schema_verified"},
+                    "Statistics schema already initialized",
+                    extra={
+                        "event_type": "stats_schema_verified",
+                        "applied_migrations": applied_count,
+                    },
                 )
                 return
 
-            logger.warning(
-                "Statistics schema missing; creating tables via ORM metadata",
+            logger.info(
+                "Bootstrapping statistics schema",
                 extra={"event_type": "stats_schema_bootstrap_start"},
             )
             try:
@@ -264,11 +294,11 @@ async def _initialize_statistics_schema(
                     exc_info=True,
                 )
                 raise
-            else:
-                logger.info(
-                    "Statistics schema created successfully",
-                    extra={"event_type": "stats_schema_bootstrap_complete"},
-                )
+
+            logger.info(
+                "Statistics schema bootstrapped successfully",
+                extra={"event_type": "stats_schema_bootstrap_complete"},
+            )
     finally:
         await engine.dispose()
 
