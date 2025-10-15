@@ -666,46 +666,55 @@ class StatsService(BaseStatsService):
     async def _prepare_sqlite_for_materialized_stats(self, conn: AsyncConnection) -> None:
         """Ensure the SQLite schema can accept the materialized stats migration."""
 
-        try:
-            result = await conn.exec_driver_sql("PRAGMA table_info(player_stats)")
-        except OperationalError:
-            return
+        async def existing_columns_for(table: str) -> set[str]:
+            try:
+                result = await conn.exec_driver_sql(f"PRAGMA table_info({table})")
+            except OperationalError:
+                return set()
+            rows = result.fetchall()
+            return {row[1] for row in rows}
 
-        existing_columns = {row[1] for row in result}
-        if not existing_columns:
-            return
+        player_stats_columns = await existing_columns_for("player_stats")
+        if player_stats_columns:
+            required_columns = {
+                "total_hands": "ALTER TABLE player_stats ADD COLUMN total_hands INTEGER NOT NULL DEFAULT 0",
+                "hands_won": "ALTER TABLE player_stats ADD COLUMN hands_won INTEGER NOT NULL DEFAULT 0",
+                "hands_lost": "ALTER TABLE player_stats ADD COLUMN hands_lost INTEGER NOT NULL DEFAULT 0",
+                "total_winnings": "ALTER TABLE player_stats ADD COLUMN total_winnings INTEGER NOT NULL DEFAULT 0",
+                "total_buyins": "ALTER TABLE player_stats ADD COLUMN total_buyins INTEGER NOT NULL DEFAULT 0",
+                "biggest_win": "ALTER TABLE player_stats ADD COLUMN biggest_win INTEGER NOT NULL DEFAULT 0",
+                "biggest_loss": "ALTER TABLE player_stats ADD COLUMN biggest_loss INTEGER NOT NULL DEFAULT 0",
+                "current_streak": "ALTER TABLE player_stats ADD COLUMN current_streak INTEGER NOT NULL DEFAULT 0",
+                "best_streak": "ALTER TABLE player_stats ADD COLUMN best_streak INTEGER NOT NULL DEFAULT 0",
+                "worst_streak": "ALTER TABLE player_stats ADD COLUMN worst_streak INTEGER NOT NULL DEFAULT 0",
+                "last_played_at": "ALTER TABLE player_stats ADD COLUMN last_played_at TEXT",
+                "created_at": "ALTER TABLE player_stats ADD COLUMN created_at TEXT NOT NULL DEFAULT (datetime('now'))",
+                "updated_at": "ALTER TABLE player_stats ADD COLUMN updated_at TEXT NOT NULL DEFAULT (datetime('now'))",
+            }
 
-        required_columns = {
-            "total_hands": "ALTER TABLE player_stats ADD COLUMN total_hands INTEGER NOT NULL DEFAULT 0",
-            "hands_won": "ALTER TABLE player_stats ADD COLUMN hands_won INTEGER NOT NULL DEFAULT 0",
-            "hands_lost": "ALTER TABLE player_stats ADD COLUMN hands_lost INTEGER NOT NULL DEFAULT 0",
-            "total_winnings": "ALTER TABLE player_stats ADD COLUMN total_winnings INTEGER NOT NULL DEFAULT 0",
-            "total_losses": "ALTER TABLE player_stats ADD COLUMN total_losses INTEGER NOT NULL DEFAULT 0",
-            "net_profit": "ALTER TABLE player_stats ADD COLUMN net_profit INTEGER NOT NULL DEFAULT 0",
-            "biggest_pot": "ALTER TABLE player_stats ADD COLUMN biggest_pot INTEGER NOT NULL DEFAULT 0",
-            "win_rate": "ALTER TABLE player_stats ADD COLUMN win_rate REAL NOT NULL DEFAULT 0.0",
-            "avg_pot_size": "ALTER TABLE player_stats ADD COLUMN avg_pot_size REAL NOT NULL DEFAULT 0.0",
-            "first_played_at": "ALTER TABLE player_stats ADD COLUMN first_played_at TEXT",
-            "last_played_at": "ALTER TABLE player_stats ADD COLUMN last_played_at TEXT",
-            "updated_at": "ALTER TABLE player_stats ADD COLUMN updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP",
-        }
+            missing_player_stats = [
+                statement
+                for column, statement in required_columns.items()
+                if column not in player_stats_columns
+            ]
 
-        missing = [
-            statement
-            for column, statement in required_columns.items()
-            if column not in existing_columns
-        ]
+            if missing_player_stats:
+                logger.info(
+                    "Extending existing player_stats table for materialized stats migration",
+                    extra={"event_type": "stats_schema_player_stats_extend"},
+                )
+                for statement in missing_player_stats:
+                    await conn.exec_driver_sql(statement)
 
-        if not missing:
-            return
-
-        logger.info(
-            "Extending existing player_stats table for materialized stats migration",
-            extra={"event_type": "stats_schema_player_stats_extend"},
-        )
-
-        for statement in missing:
-            await conn.exec_driver_sql(statement)
+        hands_players_columns = await existing_columns_for("hands_players")
+        if hands_players_columns and "buyin_amount" not in hands_players_columns:
+            logger.info(
+                "Adding buyin_amount column to hands_players for materialized stats",
+                extra={"event_type": "stats_schema_hands_players_extend"},
+            )
+            await conn.exec_driver_sql(
+                "ALTER TABLE hands_players ADD COLUMN buyin_amount INTEGER NOT NULL DEFAULT 0"
+            )
 
     async def ensure_ready(self) -> None:
         if not self._enabled:
