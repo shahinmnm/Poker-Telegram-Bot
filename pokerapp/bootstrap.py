@@ -360,6 +360,7 @@ def build_services(cfg: Config, *, skip_stats_buffer: bool = False) -> Applicati
         table_manager=recovery_table_manager,
         logger=recovery_logger,
     )
+
     async def _run_recovery_with_cleanup() -> None:
         try:
             await recovery_service.run_startup_recovery()
