@@ -328,6 +328,7 @@ class StatsService(BaseStatsService):
     ) -> None:
         super().__init__(timezone_name=timezone_name)
         self._enabled = bool(database_url)
+        self._logger = logger
         self._engine: Optional[AsyncEngine] = None
         self._sessionmaker: Optional[async_sessionmaker[AsyncSession]] = None
         self._schema_lock = asyncio.Lock()
@@ -736,13 +737,7 @@ class StatsService(BaseStatsService):
             await self._engine.dispose()
 
     async def _ensure_schema(self) -> None:
-        """Ensure statistics schema exists and apply pending migrations.
-
-        NOTE: Uses ``engine.begin()`` to provide a transactional context for
-        :meth:`_run_migrations`, delegating commit/rollback to the outer
-        context manager so individual migrations don't need to manage
-        transactions directly.
-        """
+        """Ensure schema exists and apply migrations transactionally."""
 
         if not self._enabled or self._initialized:
             return
@@ -758,7 +753,7 @@ class StatsService(BaseStatsService):
                 async with self._engine.begin() as conn:
                     await self._run_migrations(conn)
             except Exception as exc:  # pragma: no cover - defensive logging
-                logger.error(
+                self._logger.error(
                     "Failed to run statistics migrations: %s",
                     exc,
                     extra={"event_type": "stats_migrations_failed"},
