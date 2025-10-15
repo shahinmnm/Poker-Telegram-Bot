@@ -342,8 +342,8 @@ def build_services(cfg: Config, *, skip_stats_buffer: bool = False) -> Applicati
     finally:
         try:
             try:
-                asyncio.get_running_loop()
-                asyncio.create_task(
+                loop = asyncio.get_running_loop()
+                loop.create_task(
                     recovery_redis.aclose(close_connection_pool=True)
                 )
                 recovery_logger.debug(
