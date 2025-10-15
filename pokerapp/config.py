@@ -4,6 +4,7 @@ import os
 from copy import deepcopy
 from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional, Tuple
+from ipaddress import ip_address
 from urllib.parse import urljoin, urlunsplit
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
@@ -877,7 +878,12 @@ class Config:
             return combined_url
 
         listen_host = getattr(self, "WEBHOOK_LISTEN", "").strip()
-        if listen_host and listen_host not in {"0.0.0.0", "::"} and self.WEBHOOK_PATH:
+        if (
+            listen_host
+            and listen_host not in {"0.0.0.0", "::"}
+            and self.WEBHOOK_PATH
+            and self._is_public_listen_host(listen_host)
+        ):
             scheme = "https" if self.WEBHOOK_PORT == 443 else "http"
             netloc_host = listen_host
             if ":" in netloc_host and not netloc_host.startswith("["):
@@ -896,6 +902,25 @@ class Config:
             return fallback_url
 
         return ""
+
+    @staticmethod
+    def _is_public_listen_host(listen_host: str) -> bool:
+        stripped_host = listen_host.strip()
+        if not stripped_host:
+            return False
+        if stripped_host.startswith("[") and stripped_host.endswith("]"):
+            stripped_host = stripped_host[1:-1]
+
+        lowered = stripped_host.lower()
+        if "localhost" in lowered:
+            return False
+
+        try:
+            address = ip_address(stripped_host)
+        except ValueError:
+            return True
+
+        return not (address.is_loopback or address.is_unspecified)
 
     @staticmethod
     def _normalise_lock_timeouts(
