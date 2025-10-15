@@ -463,19 +463,29 @@ class StatsService(BaseStatsService):
         """Persist the migration execution record."""
 
         backend = getattr(conn.dialect, "name", "").lower()
+        applied_at = dt.datetime.utcnow()
+        applied_value: Any
         if backend == "sqlite":
-            insert_sql = (
-                f"INSERT INTO {MIGRATIONS_TABLE}(name, applied_at) "
-                "VALUES (:name, datetime('now')) "
-                "ON CONFLICT(name) DO UPDATE SET applied_at = EXCLUDED.applied_at"
-            )
+            applied_value = applied_at.isoformat()
         else:
-            insert_sql = (
-                f"INSERT INTO {MIGRATIONS_TABLE}(name, applied_at) "
-                "VALUES (:name, CURRENT_TIMESTAMP) "
-                "ON CONFLICT (name) DO UPDATE SET applied_at = EXCLUDED.applied_at"
-            )
-        await conn.exec_driver_sql(insert_sql, {"name": name})
+            applied_value = applied_at
+
+        statement = text(
+            f"""
+            INSERT INTO {MIGRATIONS_TABLE} (name, applied_at)
+            VALUES (:name, :applied_at)
+            ON CONFLICT(name) DO UPDATE SET applied_at = excluded.applied_at
+            """
+        )
+        await conn.execute(statement, {"name": name, "applied_at": applied_value})
+
+    async def _get_applied_migrations(self, conn: AsyncConnection) -> set[str]:
+        """Return the set of migration file names that have already been applied."""
+
+        result = await conn.execute(
+            text(f"SELECT name FROM {MIGRATIONS_TABLE}")
+        )
+        return {row[0] for row in result}
 
     async def _check_migration_presence(self, table_name: str) -> bool:
         """Check if a specific table exists (migration already applied)."""
@@ -516,46 +526,92 @@ class StatsService(BaseStatsService):
             return False
 
     async def _run_migrations(self, conn: AsyncConnection) -> None:
-        if not MIGRATIONS_DIR.exists():
+        """Run pending SQL migrations with explicit transaction per statement."""
+
+        migration_dir = MIGRATIONS_DIR
+        if not migration_dir.exists():
+            logger.warning(
+                "Migration directory not found",
+                extra={"path": str(migration_dir)},
+            )
             return
+
         backend = getattr(conn.dialect, "name", "").lower()
         await self._ensure_migrations_table(conn)
-        for path in sorted(MIGRATIONS_DIR.glob("*.sql")):
-            try:
-                sql = path.read_text(encoding="utf-8")
-            except OSError as exc:
-                logger.warning("Unable to read migration %s: %s", path, exc)
-                continue
-            # Skip PostgreSQL-specific migrations (002) on SQLite
+        applied = await self._get_applied_migrations(conn)
+        pending = sorted(
+            [path for path in migration_dir.glob("*.sql") if path.name not in applied]
+        )
+
+        for path in pending:
             if backend == "sqlite" and path.name == "002_add_performance_indexes.sql":
                 logger.debug(
                     "Skipping PostgreSQL-specific migration %s for SQLite", path.name
                 )
                 continue
+
             if path.name == "004_phase2_player_stats.sql":
                 logger.debug(
                     "Skipping legacy migration %s (superseded by 003)",
                     path.name,
                 )
+                if not conn.in_transaction():
+                    await conn.begin()
                 await self._mark_migration_applied(conn, path.name)
+                await conn.commit()
                 continue
-            if await self._is_migration_applied(conn, path.name):
-                logger.debug("Migration %s already applied, skipping", path.name)
+
+            try:
+                sql_content = path.read_text(encoding="utf-8")
+            except OSError as exc:
+                logger.warning("Unable to read migration %s: %s", path, exc)
                 continue
+
             if backend == "sqlite" and path.name == "003_create_materialized_stats.sql":
+                if not conn.in_transaction():
+                    await conn.begin()
                 await self._prepare_sqlite_for_materialized_stats(conn)
-            statements = self._split_sql_statements(sql)
+
+            statements = [
+                stmt.strip()
+                for stmt in sql_content.split(";")
+                if stmt.strip() and not stmt.strip().startswith("--")
+            ]
+
             if not statements:
                 continue
-            logger.debug("Applying migration %s", path.name)
-            for statement in statements:
-                text = statement
+
+            logger.info("Applying migration: %s", path.name)
+
+            for raw_statement in statements:
+                statement = raw_statement
                 if backend == "sqlite":
-                    text = self._prepare_statement_for_sqlite(text)
-                if not text.strip():
+                    statement = self._prepare_statement_for_sqlite(statement)
+
+                statement_text = statement.strip()
+                if not statement_text:
                     continue
+
+                if statement_text.upper().startswith(("BEGIN", "COMMIT", "ROLLBACK")):
+                    logger.warning(
+                        "Skipping transaction control statement in %s",
+                        path.name,
+                        extra={"statement": statement_text[:50]},
+                    )
+                    continue
+
                 try:
-                    await conn.exec_driver_sql(text)
+                    if not conn.in_transaction():
+                        await conn.begin()
+
+                    try:
+                        async with conn.begin_nested():
+                            await conn.execute(text(statement))
+                    except OperationalError as transactional_error:
+                        if "cannot start a transaction" in str(transactional_error).lower():
+                            await conn.execute(text(statement))
+                        else:
+                            raise
                 except OperationalError as exc:
                     message = str(exc).lower()
                     if (
@@ -566,19 +622,28 @@ class StatsService(BaseStatsService):
                         logger.warning(
                             "Skipping migration statement from %s due to missing dependency: %s",
                             path.name,
-                            text,
+                            statement_text,
                         )
                         continue
+
                     logger.exception(
                         "Failed to apply migration statement from %s", path.name
                     )
+                    if conn.in_transaction():
+                        await conn.rollback()
                     raise
                 except Exception:
                     logger.exception(
                         "Failed to apply migration statement from %s", path.name
                     )
+                    if conn.in_transaction():
+                        await conn.rollback()
                     raise
+
+            if not conn.in_transaction():
+                await conn.begin()
             await self._mark_migration_applied(conn, path.name)
+            await conn.commit()
             logger.info(
                 "Migration %s completed successfully",
                 path.name,
