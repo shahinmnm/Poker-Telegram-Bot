@@ -370,6 +370,10 @@ def build_services(cfg: Config, *, skip_stats_buffer: bool = False) -> Applicati
     except Exception:
         recovery_logger.exception("Startup recovery failed")
     finally:
+        recovery_logger.debug(
+            "Starting Redis cleanup",
+            extra={"event_type": "recovery_redis_close_started"},
+        )
         try:
             asyncio.run(recovery_redis.close(close_connection_pool=True))
             recovery_logger.debug(
