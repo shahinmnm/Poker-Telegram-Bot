@@ -60,6 +60,14 @@ MIGRATIONS_DIR = Path(__file__).resolve().parents[2] / "migrations"
 MIGRATIONS_TABLE = "stats_schema_migrations"
 
 
+# Mapping of migration file names to the tables they require before execution.
+# The materialized stats migration depends on the core gameplay tables being
+# present so that the ALTER/INSERT/TRIGGER statements do not fail.
+MIGRATION_DEPENDENCIES: dict[str, tuple[str, ...]] = {
+    "003_create_materialized_stats.sql": ("hands_players", "hands", "users"),
+}
+
+
 @dataclass(slots=True)
 class PlayerIdentity:
     user_id: int
@@ -430,6 +438,60 @@ class StatsService(BaseStatsService):
         )
         return updated
 
+    async def _table_exists(self, conn: AsyncConnection, table_name: str) -> bool:
+        """Return ``True`` when the given table exists on the current backend."""
+
+        backend = getattr(conn.dialect, "name", "").lower()
+
+        if backend == "sqlite":
+            result = await conn.exec_driver_sql(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name=:name",
+                {"name": table_name},
+            )
+            return result.first() is not None
+
+        query = text(
+            """
+            SELECT 1
+            FROM information_schema.tables
+            WHERE LOWER(table_name) = LOWER(:table_name)
+              AND table_schema NOT IN ('pg_catalog', 'information_schema')
+            LIMIT 1
+            """
+        )
+        result = await conn.execute(query, {"table_name": table_name})
+        return result.first() is not None
+
+    async def _migration_dependencies_satisfied(
+        self, conn: AsyncConnection, migration_name: str
+    ) -> bool:
+        """Ensure required tables exist before executing a migration."""
+
+        required_tables = MIGRATION_DEPENDENCIES.get(migration_name)
+        if not required_tables:
+            return True
+
+        missing = [
+            table_name
+            for table_name in required_tables
+            if not await self._table_exists(conn, table_name)
+        ]
+
+        if missing:
+            self._logger.info(
+                "Deferring migration %s until tables exist: %s",
+                migration_name,
+                ", ".join(sorted(missing)),
+                extra={
+                    "event_type": "stats_migration_deferred",
+                    "migration": migration_name,
+                    "missing_tables": sorted(missing),
+                },
+            )
+            return False
+
+        return True
+
     async def _ensure_migrations_table(self, conn: AsyncConnection) -> None:
         """Ensure the migrations bookkeeping table exists."""
 
@@ -561,6 +623,9 @@ class StatsService(BaseStatsService):
                     )
                     await self._mark_migration_applied(conn, path.name)
                     # Transaction commits automatically via enclosing transaction
+                    continue
+
+                if not await self._migration_dependencies_satisfied(conn, path.name):
                     continue
 
                 try:
