@@ -371,21 +371,17 @@ def build_services(cfg: Config, *, skip_stats_buffer: bool = False) -> Applicati
         recovery_logger.exception("Startup recovery failed")
     finally:
         try:
-            try:
-                loop = asyncio.get_running_loop()
-                loop.create_task(
-                    recovery_redis.aclose(close_connection_pool=True)
-                )
-                recovery_logger.debug(
-                    "Scheduled async Redis cleanup",
-                    extra={"event_type": "recovery_redis_close_scheduled"},
-                )
-            except RuntimeError:
-                asyncio.run(recovery_redis.aclose(close_connection_pool=True))
-                recovery_logger.debug(
-                    "Completed sync Redis cleanup",
-                    extra={"event_type": "recovery_redis_close_completed"},
-                )
+            asyncio.run(recovery_redis.close(close_connection_pool=True))
+            recovery_logger.debug(
+                "Completed Redis cleanup",
+                extra={"event_type": "recovery_redis_close_completed"},
+            )
+        except AttributeError as exc:
+            recovery_logger.warning(
+                "Redis client does not support close operation: %s",
+                exc,
+                extra={"event_type": "recovery_redis_close_not_supported"},
+            )
         except Exception as exc:
             recovery_logger.warning(
                 f"Redis cleanup failed: {exc}",
@@ -396,7 +392,6 @@ def build_services(cfg: Config, *, skip_stats_buffer: bool = False) -> Applicati
             )
 
     kv_async = _create_redis_client(redis_client_kwargs)
-    redis_pool = kv_async
     logger.info(
         "Redis client initialized with lazy connection",
         extra={
@@ -408,8 +403,8 @@ def build_services(cfg: Config, *, skip_stats_buffer: bool = False) -> Applicati
     )
 
     smart_lock_manager = SmartLockManager(
-        logger=logger.logger.getChild("smart_lock_manager"),
-        redis_pool=redis_pool,
+        redis_pool=kv_async,
+        logger=_make_service_logger(logger, "lock_manager", "lock_manager"),
     )
 
     cache_logger = _make_service_logger(logger, "cache", "cache")
