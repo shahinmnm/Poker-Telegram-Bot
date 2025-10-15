@@ -4119,14 +4119,70 @@ class LockManager:
         max_held_level = max(held_levels)
         display_level = self._display_level_from_context(context, new_level)
 
+        requested_category = self._resolve_lock_category(new_key)
+
+        def _build_violation_payload() -> Dict[str, Any]:
+            try:
+                current_task = asyncio.current_task()
+            except RuntimeError:
+                current_task = None
+
+            task_id = (
+                self._describe_task(current_task)
+                if current_task is not None
+                else "unknown"
+            )
+
+            held_lock_details: List[Dict[str, Any]] = []
+            for acq in current_acquisitions:
+                held_category = self._resolve_lock_category(acq.key)
+                acquired_from: Optional[str] = None
+                context_callsite = acq.context.get("call_site")
+                if isinstance(context_callsite, str) and context_callsite:
+                    acquired_from = context_callsite
+                elif isinstance(acq.context.get("caller"), str):
+                    acquired_from = acq.context.get("caller")
+                if not acquired_from:
+                    lock_obj = self._locks.get(acq.key)
+                    if lock_obj is not None:
+                        callsite = getattr(lock_obj, "_acquired_by_callsite", None)
+                        function_name = getattr(lock_obj, "_acquired_by_function", None)
+                        if callsite and function_name:
+                            acquired_from = f"{callsite}#{function_name}"
+                        elif callsite:
+                            acquired_from = callsite
+                        elif function_name:
+                            acquired_from = str(function_name)
+                held_lock_details.append(
+                    {
+                        "key": acq.key,
+                        "level": acq.level,
+                        "hierarchy_name": held_category,
+                        "acquired_from": acquired_from or "unknown",
+                    }
+                )
+
+            stack_trace = "".join(traceback.format_stack())
+
+            return {
+                "violation_type": "lock_order_violation",
+                "requested_lock": {
+                    "key": new_key,
+                    "level": new_level,
+                    "hierarchy_name": requested_category,
+                },
+                "held_locks": held_lock_details,
+                "stack_trace": stack_trace,
+                "task_id": task_id,
+            }
+
         if new_level < max_held_level:
-            new_category = self._resolve_lock_category(new_key)
             violating_holder: Optional[_LockAcquisition] = None
             for acq in current_acquisitions:
                 if acq.level <= new_level:
                     continue
                 held_category = self._resolve_lock_category(acq.key)
-                if not self._is_descend_allowed(held_category, new_category):
+                if not self._is_descend_allowed(held_category, requested_category):
                     violating_holder = acq
                     break
             if violating_holder is None:
@@ -4137,8 +4193,10 @@ class LockManager:
                 f"(level {new_level}) after holding {violating_holder.key} "
                 f"(level {violating_holder.level}). Current locks: {held_locks}"
             )
+            violation_payload = _build_violation_payload()
+            violation_payload["message"] = violation_msg
             self._logger.error(
-                violation_msg,
+                json.dumps(violation_payload, ensure_ascii=False),
                 extra=self._log_extra(
                     context,
                     event_type="lock_order_violation",
@@ -4156,8 +4214,10 @@ class LockManager:
                 f"Lock order violation: attempting to acquire {new_key} "
                 f"(level {new_level}) while holding locks {held_locks}"
             )
+            violation_payload = _build_violation_payload()
+            violation_payload["message"] = violation_msg
             self._logger.error(
-                violation_msg,
+                json.dumps(violation_payload, ensure_ascii=False),
                 extra=self._log_extra(
                     context,
                     event_type="lock_order_violation",
