@@ -570,8 +570,9 @@ class StatsService(BaseStatsService):
                 continue
 
             if backend == "sqlite" and path.name == "003_create_materialized_stats.sql":
-                if not conn.in_transaction():
-                    await conn.begin()
+                # Let SQLite run the preparatory statements in autocommit mode so the
+                # schema adjustments persist even though migrations don't manage
+                # transactions on this backend.
                 await self._prepare_sqlite_for_materialized_stats(conn)
 
             statements = self._split_sql_statements(sql_content)
