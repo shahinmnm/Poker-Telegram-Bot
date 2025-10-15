@@ -537,121 +537,123 @@ class StatsService(BaseStatsService):
             return
 
         backend = getattr(conn.dialect, "name", "").lower()
-        await self._ensure_migrations_table(conn)
-        applied = await self._get_applied_migrations(conn)
-        pending = sorted(
-            [path for path in migration_dir.glob("*.sql") if path.name not in applied]
-        )
 
-        supports_nested_transactions = backend != "sqlite"
+        async with conn.begin():
+            await self._ensure_migrations_table(conn)
+            applied = await self._get_applied_migrations(conn)
+            pending = sorted(
+                [path for path in migration_dir.glob("*.sql") if path.name not in applied]
+            )
 
-        for path in pending:
-            if backend == "sqlite" and path.name == "002_add_performance_indexes.sql":
-                logger.debug(
-                    "Skipping PostgreSQL-specific migration %s for SQLite", path.name
-                )
-                continue
+            supports_nested_transactions = backend != "sqlite"
 
-            if path.name == "004_phase2_player_stats.sql":
-                logger.debug(
-                    "Skipping legacy migration %s (superseded by 003)",
-                    path.name,
-                )
-                await self._mark_migration_applied(conn, path.name)
-                # Transaction commits automatically via engine.begin() context manager
-                continue
-
-            try:
-                sql_content = path.read_text(encoding="utf-8")
-            except OSError as exc:
-                logger.warning("Unable to read migration %s: %s", path, exc)
-                continue
-
-            if backend == "sqlite" and path.name == "003_create_materialized_stats.sql":
-                # Perform SQLite-specific schema adjustments prior to running the
-                # materialized stats migration so the subsequent statements can
-                # succeed within the outer transaction.
-                await self._prepare_sqlite_for_materialized_stats(conn)
-
-            statements = self._split_sql_statements(sql_content)
-
-            if not statements:
-                continue
-
-            logger.info("Applying migration: %s", path.name)
-
-            for raw_statement in statements:
-                statement = raw_statement
-                if backend == "sqlite":
-                    statement = self._prepare_statement_for_sqlite(statement)
-
-                statement_text = statement.strip()
-                if not statement_text:
+            for path in pending:
+                if backend == "sqlite" and path.name == "002_add_performance_indexes.sql":
+                    logger.debug(
+                        "Skipping PostgreSQL-specific migration %s for SQLite", path.name
+                    )
                     continue
 
-                if statement_text.upper().startswith(("BEGIN", "COMMIT", "ROLLBACK")):
-                    logger.warning(
-                        "Skipping transaction control statement in %s",
+                if path.name == "004_phase2_player_stats.sql":
+                    logger.debug(
+                        "Skipping legacy migration %s (superseded by 003)",
                         path.name,
-                        extra={"statement": statement_text[:50]},
                     )
+                    await self._mark_migration_applied(conn, path.name)
+                    # Transaction commits automatically via enclosing transaction
                     continue
 
                 try:
-                    logger.debug(
-                        "Executing migration statement",
-                        extra={
-                            "event_type": "stats_migration_statement",
-                            "migration": path.name,
-                            "backend": backend,
-                            "preview": statement_text[:80],
-                        },
-                    )
-                    try:
-                        if supports_nested_transactions:
-                            async with conn.begin_nested():
-                                await conn.exec_driver_sql(statement)
-                        else:
-                            await conn.exec_driver_sql(statement)
-                    except OperationalError as transactional_error:
-                        if (
-                            supports_nested_transactions
-                            and "cannot start a transaction"
-                            in str(transactional_error).lower()
-                        ):
-                            await conn.exec_driver_sql(statement)
-                        else:
-                            raise
-                except OperationalError as exc:
-                    message = str(exc).lower()
-                    if (
-                        "no such table" in message
-                        or "no such column" in message
-                        or "has no column" in message
-                    ):
+                    sql_content = path.read_text(encoding="utf-8")
+                except OSError as exc:
+                    logger.warning("Unable to read migration %s: %s", path, exc)
+                    continue
+
+                if backend == "sqlite" and path.name == "003_create_materialized_stats.sql":
+                    # Perform SQLite-specific schema adjustments prior to running the
+                    # materialized stats migration so the subsequent statements can
+                    # succeed within the outer transaction.
+                    await self._prepare_sqlite_for_materialized_stats(conn)
+
+                statements = self._split_sql_statements(sql_content)
+
+                if not statements:
+                    continue
+
+                logger.info("Applying migration: %s", path.name)
+
+                for raw_statement in statements:
+                    statement = raw_statement
+                    if backend == "sqlite":
+                        statement = self._prepare_statement_for_sqlite(statement)
+
+                    statement_text = statement.strip()
+                    if not statement_text:
+                        continue
+
+                    if statement_text.upper().startswith(("BEGIN", "COMMIT", "ROLLBACK")):
                         logger.warning(
-                            "Skipping migration statement from %s due to missing dependency: %s",
+                            "Skipping transaction control statement in %s",
                             path.name,
-                            statement_text,
+                            extra={"statement": statement_text[:50]},
                         )
                         continue
 
-                    logger.exception(
-                        "Failed to apply migration statement from %s", path.name
-                    )
-                    raise
-                except Exception:
-                    logger.exception(
-                        "Failed to apply migration statement from %s", path.name
-                    )
-                    raise
+                    try:
+                        logger.debug(
+                            "Executing migration statement",
+                            extra={
+                                "event_type": "stats_migration_statement",
+                                "migration": path.name,
+                                "backend": backend,
+                                "preview": statement_text[:80],
+                            },
+                        )
+                        try:
+                            if supports_nested_transactions:
+                                async with conn.begin_nested():
+                                    await conn.exec_driver_sql(statement)
+                            else:
+                                await conn.exec_driver_sql(statement)
+                        except OperationalError as transactional_error:
+                            if (
+                                supports_nested_transactions
+                                and "cannot start a transaction"
+                                in str(transactional_error).lower()
+                            ):
+                                await conn.exec_driver_sql(statement)
+                            else:
+                                raise
+                    except OperationalError as exc:
+                        message = str(exc).lower()
+                        if (
+                            "no such table" in message
+                            or "no such column" in message
+                            or "has no column" in message
+                        ):
+                            logger.warning(
+                                "Skipping migration statement from %s due to missing dependency: %s",
+                                path.name,
+                                statement_text,
+                            )
+                            continue
 
-            await self._mark_migration_applied(conn, path.name)
-            logger.info(
-                "Migration %s completed successfully",
-                path.name,
-                extra={"event_type": "stats_migration_applied", "migration": path.name},
-            )
+                        logger.exception(
+                            "Failed to apply migration statement from %s", path.name
+                        )
+                        raise
+                    except Exception:
+                        logger.exception(
+                            "Failed to apply migration statement from %s", path.name
+                        )
+                        raise
+
+                await self._mark_migration_applied(conn, path.name)
+                logger.info(
+                    "Migration %s completed successfully",
+                    path.name,
+                    extra={"event_type": "stats_migration_applied", "migration": path.name},
+                )
 
     async def _prepare_sqlite_for_materialized_stats(self, conn: AsyncConnection) -> None:
         """Ensure the SQLite schema can accept the materialized stats migration."""
@@ -750,7 +752,7 @@ class StatsService(BaseStatsService):
                 return
 
             try:
-                async with self._engine.begin() as conn:
+                async with self._engine.connect() as conn:
                     await self._run_migrations(conn)
             except Exception as exc:  # pragma: no cover - defensive logging
                 self._logger.error(
