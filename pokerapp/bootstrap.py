@@ -408,7 +408,11 @@ def build_services(cfg: Config, *, skip_stats_buffer: bool = False) -> Applicati
 
     smart_lock_manager = SmartLockManager(
         redis_pool=kv_async,
-        logger=_make_service_logger(logger, "lock_manager", "lock_manager"),
+        logger=_make_service_logger(
+            logger,
+            "lock_manager",
+            "lock_manager",
+        ),
     )
 
     cache_logger = _make_service_logger(logger, "cache", "cache")
