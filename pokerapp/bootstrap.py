@@ -545,6 +545,7 @@ def build_services(cfg: Config, *, skip_stats_buffer: bool = False) -> Applicati
             last_message_hash_lock=last_message_hash_lock,
             table_manager=table_manager,
             retry_manager=retry_manager,
+            redis_ops=redis_ops,
         )
 
     def telegram_safeops_factory(*, view) -> TelegramSafeOps:

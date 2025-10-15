@@ -40,6 +40,7 @@ from cachetools import TTLCache
 
 from pokerapp.entities import GameState
 from pokerapp.utils.cache import MessagePayload, MessageStateCache
+from pokerapp.utils.redis_safeops import RedisSafeOps
 
 try:  # pragma: no cover - prometheus_client optional
     from prometheus_client import Counter
@@ -155,6 +156,8 @@ class MessagingService:
         exc for exc in (TelegramRetryAfter, PTBRetryAfter) if exc is not None
     )
 
+    _MESSAGE_SENT_TTL = 60 * 60 * 24
+
     def __init__(
         self,
         bot: Any,
@@ -169,6 +172,7 @@ class MessagingService:
         last_message_hash_lock: Optional[asyncio.Lock] = None,
         table_manager: Optional["TableManager"] = None,
         retry_manager: Optional["TelegramRetryManager"] = None,
+        redis_ops: Optional[RedisSafeOps] = None,
     ) -> None:
         self._bot = bot
         if logger_ is None:
@@ -202,6 +206,7 @@ class MessagingService:
         )
         self._retry_manager = retry_manager
         self._table_manager = table_manager
+        self._redis_ops = redis_ops
 
     @staticmethod
     def _coerce_context_value(value: Any) -> Any:
@@ -563,6 +568,104 @@ class MessagingService:
         self._send_history_per_chat[chat_key].append(timestamp)
         self._global_last_send_time = timestamp
 
+    @staticmethod
+    def _message_sent_key(chat_id: int, message_id: int) -> str:
+        return f"msg_sent:{int(chat_id)}:{int(message_id)}"
+
+    async def _record_message_sent(self, chat_id: int, message_id: int) -> None:
+        if self._redis_ops is None:
+            return
+        key = self._message_sent_key(chat_id, message_id)
+        timestamp = str(time.time())
+        try:
+            await self._redis_ops.safe_set(
+                key,
+                timestamp,
+                expire=self._MESSAGE_SENT_TTL,
+                log_extra={"chat_id": chat_id, "message_id": message_id, "event": "message_sent_record"},
+            )
+        except Exception:  # pragma: no cover - diagnostic path only
+            self._logger.debug(
+                "Failed to persist sent timestamp for chat %s message %s",
+                chat_id,
+                message_id,
+                exc_info=True,
+                extra={"chat_id": chat_id, "message_id": message_id, "redis_key": key},
+            )
+
+    async def _fetch_message_sent_time(self, chat_id: int, message_id: int) -> Optional[float]:
+        if self._redis_ops is None:
+            return None
+        key = self._message_sent_key(chat_id, message_id)
+        try:
+            payload = await self._redis_ops.safe_get(
+                key,
+                log_extra={"chat_id": chat_id, "message_id": message_id, "event": "message_sent_fetch"},
+            )
+        except Exception:  # pragma: no cover - diagnostic path only
+            self._logger.debug(
+                "Failed to fetch sent timestamp for chat %s message %s",
+                chat_id,
+                message_id,
+                exc_info=True,
+                extra={"chat_id": chat_id, "message_id": message_id, "redis_key": key},
+            )
+            return None
+        if not payload:
+            return None
+        if isinstance(payload, bytes):
+            try:
+                payload = payload.decode("utf-8")
+            except Exception:  # pragma: no cover - defensive decoding
+                return None
+        try:
+            return float(payload)
+        except (TypeError, ValueError):  # pragma: no cover - defensive parsing
+            self._logger.debug(
+                "Invalid sent timestamp payload for chat %s message %s",  # pragma: no cover - diagnostic
+                chat_id,
+                message_id,
+                extra={"chat_id": chat_id, "message_id": message_id, "raw_payload": payload},
+            )
+            return None
+
+    async def _clear_message_sent_record(self, chat_id: int, message_id: int) -> None:
+        if self._redis_ops is None:
+            return
+        key = self._message_sent_key(chat_id, message_id)
+        try:
+            await self._redis_ops.safe_delete(
+                key,
+                log_extra={"chat_id": chat_id, "message_id": message_id, "event": "message_sent_clear"},
+            )
+        except Exception:  # pragma: no cover - diagnostic path only
+            self._logger.debug(
+                "Failed to clear sent timestamp for chat %s message %s",
+                chat_id,
+                message_id,
+                exc_info=True,
+                extra={"chat_id": chat_id, "message_id": message_id, "redis_key": key},
+            )
+
+    async def _resolve_game_stage_name(self, chat_id: int) -> Optional[str]:
+        table_manager = getattr(self, "_table_manager", None)
+        if table_manager is None:
+            return None
+        try:
+            game = await table_manager.get_game(chat_id)
+        except Exception:  # pragma: no cover - diagnostic path only
+            self._logger.debug(
+                "Failed to resolve game stage for chat %s",
+                chat_id,
+                exc_info=True,
+                extra={"chat_id": chat_id},
+            )
+            return None
+        stage = getattr(game, "state", None)
+        if stage is None:
+            return None
+        return getattr(stage, "name", str(stage))
+
     async def _call_with_retry(
         self,
         *,
@@ -718,6 +821,7 @@ class MessagingService:
             message_id = getattr(result, "message_id", None)
             if message_id is not None:
                 content_hash = self._content_hash(text, reply_markup)
+                await self._record_message_sent(chat_id, message_id)
                 await self._remember_content(chat_id, message_id, content_hash)
                 if text is not None:
                     text_hash = hashlib.md5(text.encode("utf-8")).hexdigest()
@@ -805,6 +909,8 @@ class MessagingService:
             self._register_send_time(chat_id)
 
             message_id = getattr(result, "message_id", None)
+            if message_id is not None:
+                await self._record_message_sent(chat_id, message_id)
             self._log_api_call(
                 telegram_method,
                 context=self._merge_context(
@@ -1463,6 +1569,7 @@ class MessagingService:
         *,
         chat_id: int,
         message_id: int,
+        deletion_context: str = "unknown",
         request_category: RequestCategory = RequestCategory.DELETE,
         context: Optional[Mapping[str, Any]] = None,
         **params: Any,
@@ -1473,13 +1580,25 @@ class MessagingService:
             return False
 
         telegram_method = "deleteMessage"
+        stage_name = await self._resolve_game_stage_name(chat_id)
+        sent_timestamp = await self._fetch_message_sent_time(chat_id, message_id)
+        message_age: Optional[float] = None
+        if sent_timestamp is not None:
+            message_age = max(0.0, time.time() - sent_timestamp)
+        normalized_context = (deletion_context or "unknown").strip() or "unknown"
         base_context = self._merge_context(
             context,
             chat_id=chat_id,
             message_id=message_id,
             category=request_category,
             method=telegram_method,
+            deletion_context=normalized_context,
+            game_stage=stage_name,
+            message_age_seconds=message_age,
+            message_sent_tracked=sent_timestamp is not None,
         )
+
+        self._logger.info("Deletion attempt", extra=dict(base_context))
 
         await self._mark_message_deleted(message_id)
 
@@ -1515,6 +1634,7 @@ class MessagingService:
                     chat_id=chat_id,
                     message_id=message_id,
                 )
+
                 async def _perform_delete() -> Any:
                     return await self._bot.delete_message(
                         chat_id=chat_id,
@@ -1530,10 +1650,25 @@ class MessagingService:
                 else:
                     result = await _perform_delete()
                 deletion_successful = bool(result)
+                success_context = self._merge_context(
+                    base_context,
+                    deletion_status="success",
+                )
+                self._logger.debug("Deletion successful", extra=dict(success_context))
+            except Exception as exc:
+                failure_context = self._merge_context(
+                    base_context,
+                    deletion_status="failure",
+                    error=str(exc),
+                    error_type=type(exc).__name__,
+                )
+                self._logger.warning("Deletion failed", extra=dict(failure_context))
+                raise
             finally:
                 await self._forget_content(chat_id, message_id)
                 if deletion_successful:
                     await self._pop_last_text_hash(message_id)
+                    await self._clear_message_sent_record(chat_id, message_id)
                 else:
                     await self._unmark_message_deleted(message_id)
 
