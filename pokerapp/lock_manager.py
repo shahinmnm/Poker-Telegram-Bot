@@ -483,6 +483,7 @@ class LockManager:
         self._waiting_tasks: "WeakKeyDictionary[asyncio.Task[Any], _WaitingInfo]" = (
             WeakKeyDictionary()
         )
+        self._lock_owner_tasks: Dict[str, asyncio.Task[Any]] = {}
         self._lock_acquire_times: Dict[Tuple[int, str], List[float]] = {}
         self._lock_exit_stacks: Dict[Tuple[int, str], List[AsyncExitStack]] = {}
         self._default_lock_level = (
@@ -2582,9 +2583,7 @@ class LockManager:
                 setattr(lock, "_acquired_by_callsite", call_site)
                 setattr(lock, "_acquired_by_function", call_function)
                 setattr(lock, "_acquired_by_task", self._describe_task(task))
-                if hasattr(lock, "_owner_id"):
-                    setattr(lock, "_owner", task)
-                    setattr(lock, "_owner_id", id(task))
+                self._register_lock_owner(key, task, lock)
 
                 self._record_acquired(key, resolved_level, full_context)
 
@@ -2698,6 +2697,8 @@ class LockManager:
         for existing in current_acquisitions:
             if existing.key == key:
                 existing.count += 1
+                if task is not None:
+                    self._lock_owner_tasks.setdefault(key, task)
                 reentrant_display = self._calculate_display_level(existing.count)
                 context_payload["lock_level_display"] = reentrant_display
                 existing.context["lock_level_display"] = reentrant_display
@@ -2872,9 +2873,7 @@ class LockManager:
                 setattr(lock, "_acquired_by_callsite", call_site)
                 setattr(lock, "_acquired_by_function", call_function)
                 setattr(lock, "_acquired_by_task", self._describe_task(task))
-                if hasattr(lock, "_owner_id"):
-                    setattr(lock, "_owner", task)
-                    setattr(lock, "_owner_id", id(task))
+                self._register_lock_owner(key, task, lock)
                 elapsed = loop.time() - attempt_start
                 self._record_acquired(key, resolved_level, context_payload)
                 if self._register_lock_stack(task, key, exit_stack):
@@ -3542,10 +3541,72 @@ class LockManager:
                 context_payload, release_level
             )
 
+        owner_task = self._resolve_lock_owner_task(key, lock)
+        lock_owner_attr = getattr(lock, "_owner", None)
+        if owner_task is None and isinstance(lock_owner_attr, asyncio.Task):
+            owner_task = lock_owner_attr
+            self._lock_owner_tasks[key] = lock_owner_attr
+
+        previous_owner_task: Optional[asyncio.Task[Any]] = None
+        orphan_release = False
+        if task is not None and owner_task is not None and owner_task is not task:
+            previous_owner_task = owner_task
+            if owner_task.done():
+                orphan_release = True
+                orphan_extra = self._log_extra(
+                    context_payload,
+                    event_type="lock_orphaned_owner_reassignment",
+                    lock_key=key,
+                    lock_level=release_display_level,
+                    lock_hierarchy_level=release_level,
+                    previous_owner=self._describe_task(owner_task),
+                    new_owner=self._describe_task(task),
+                    release_site=release_site,
+                    release_function=release_function,
+                )
+                self._logger.warning(
+                    "[LOCK_TRACE] Reassigning orphaned lock key=%s from task=%s to task=%s",
+                    key,
+                    self._describe_task(owner_task),
+                    self._describe_task(task),
+                    extra=orphan_extra,
+                )
+                self._transfer_lock_state(
+                    key,
+                    from_task=owner_task,
+                    to_task=task,
+                    lock=lock,
+                )
+                owner_task = task
+            else:
+                mismatch_extra = self._log_extra(
+                    context_payload,
+                    event_type="lock_release_wrong_owner",
+                    lock_key=key,
+                    lock_level=release_display_level,
+                    lock_hierarchy_level=release_level,
+                    release_site=release_site,
+                    release_function=release_function,
+                    owner_task=self._describe_task(owner_task),
+                    release_task=self._describe_task(task),
+                )
+                self._logger.error(
+                    "[LOCK_TRACE] Release attempted by non-owner task for key=%s (owner=%s, release=%s)",
+                    key,
+                    self._describe_task(owner_task),
+                    self._describe_task(task),
+                    extra=mismatch_extra,
+                )
+                raise RuntimeError("Lock release attempted by non-owner task")
+
+        acquire_task_for_metrics: Optional[asyncio.Task[Any]] = task
+        if orphan_release and previous_owner_task is not None:
+            acquire_task_for_metrics = previous_owner_task
+
         acquire_key: Optional[Tuple[int, str]] = None
         holding_duration: Optional[float] = None
-        if task is not None:
-            acquire_key = (id(task), key)
+        if acquire_task_for_metrics is not None:
+            acquire_key = (id(acquire_task_for_metrics), key)
             acquire_times = self._lock_acquire_times.get(acquire_key)
             if acquire_times:
                 current_time = (
@@ -3633,8 +3694,13 @@ class LockManager:
                 context_suffix,
                 extra=snapshot_extra,
             )
-        released = await self._release_lock_stack(task, key)
-        if not released:
+        released_count = 0
+        if orphan_release:
+            released_count = await self._release_all_registered_stacks(task, key)
+        else:
+            if await self._release_lock_stack(task, key):
+                released_count = 1
+        if released_count == 0:
             self._logger.exception(
                 "Failed to release %s due to ownership mismatch%s",
                 self._format_lock_identity(key, release_level, context_payload),
@@ -3656,10 +3722,12 @@ class LockManager:
             self._set_current_acquisitions(current_acquisitions)
         if release_context_override is not None:
             context_payload = release_context_override
-        if acquire_key is not None:
+        self._cleanup_owner_state(key, task)
+        if acquire_key is not None and released_count > 0:
             acquire_times = self._lock_acquire_times.get(acquire_key)
             if acquire_times:
-                acquire_times.pop()
+                for _ in range(min(released_count, len(acquire_times))):
+                    acquire_times.pop()
                 if not acquire_times:
                     self._lock_acquire_times.pop(acquire_key, None)
         self._logger.info(
@@ -4217,6 +4285,102 @@ class LockManager:
         context: Dict[str, Any],
     ) -> None:
         self._waiting_tasks[task] = _WaitingInfo(key=key, level=level, context=dict(context))
+
+    def _register_lock_owner(
+        self,
+        key: str,
+        task: asyncio.Task[Any],
+        lock: Optional[ReentrantAsyncLock] = None,
+    ) -> None:
+        if lock is not None and hasattr(lock, "_owner_id"):
+            setattr(lock, "_owner", task)
+            setattr(lock, "_owner_id", id(task))
+            setattr(lock, "_acquired_by_task", self._describe_task(task))
+        self._lock_owner_tasks[key] = task
+
+    def _resolve_lock_owner_task(
+        self, key: str, lock: Optional[ReentrantAsyncLock]
+    ) -> Optional[asyncio.Task[Any]]:
+        owner = self._lock_owner_tasks.get(key)
+        if owner is not None:
+            return owner
+        if lock is not None:
+            lock_owner = getattr(lock, "_owner", None)
+            if isinstance(lock_owner, asyncio.Task):
+                self._lock_owner_tasks[key] = lock_owner
+                return lock_owner
+        return None
+
+    def _transfer_lock_state(
+        self,
+        key: str,
+        *,
+        from_task: Optional[asyncio.Task[Any]] = None,
+        to_task: Optional[asyncio.Task[Any]] = None,
+        lock: Optional[ReentrantAsyncLock] = None,
+    ) -> None:
+        stacks: List[AsyncExitStack] = []
+        if from_task is not None:
+            previous_key = (id(from_task), key)
+            stacks = self._lock_exit_stacks.pop(previous_key, [])
+            owner_state = self._task_lock_state.get(from_task)
+            if owner_state:
+                remaining = [record for record in owner_state if record.key != key]
+                if remaining:
+                    self._task_lock_state[from_task] = remaining
+                else:
+                    self._task_lock_state.pop(from_task, None)
+        if to_task is not None:
+            if lock is not None and hasattr(lock, "_owner_id"):
+                setattr(lock, "_owner", to_task)
+                setattr(lock, "_owner_id", id(to_task))
+                setattr(lock, "_acquired_by_task", self._describe_task(to_task))
+            destination_key = (id(to_task), key)
+            if stacks:
+                target_stack = self._lock_exit_stacks.setdefault(destination_key, [])
+                target_stack.extend(stacks)
+            self._lock_owner_tasks[key] = to_task
+        elif from_task is not None:
+            self._lock_owner_tasks.pop(key, None)
+
+    async def _release_all_registered_stacks(
+        self, task: Optional[asyncio.Task[Any]], key: str
+    ) -> int:
+        if task is None:
+            return 0
+        released_count = 0
+        while await self._release_lock_stack(task, key):
+            released_count += 1
+        return released_count
+
+    def _cleanup_owner_state(
+        self, key: str, task: Optional[asyncio.Task[Any]]
+    ) -> None:
+        if task is None:
+            self._lock_owner_tasks.pop(key, None)
+            return
+        owner = self._lock_owner_tasks.get(key)
+        if owner is None:
+            return
+        if owner is not task:
+            if owner.done():
+                stack_present = any(
+                    stack_key[1] == key and stacks
+                    for stack_key, stacks in self._lock_exit_stacks.items()
+                )
+                if not stack_present:
+                    self._lock_owner_tasks.pop(key, None)
+            return
+        acquisitions = self._task_lock_state.get(task)
+        if acquisitions:
+            for record in acquisitions:
+                if record.key == key:
+                    return
+        stack_key = (id(task), key)
+        stack_list = self._lock_exit_stacks.get(stack_key)
+        if stack_list:
+            return
+        self._lock_owner_tasks.pop(key, None)
 
     def _unregister_waiting(self, task: asyncio.Task[Any], key: str) -> None:
         info = self._waiting_tasks.get(task)
