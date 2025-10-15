@@ -344,14 +344,14 @@ def build_services(cfg: Config, *, skip_stats_buffer: bool = False) -> Applicati
             try:
                 asyncio.get_running_loop()
                 asyncio.create_task(
-                    recovery_redis.aclose(close_connection_pool=True)
+                    recovery_redis.close(close_connection_pool=True)
                 )
                 recovery_logger.debug(
                     "Scheduled async Redis cleanup",
                     extra={"event_type": "recovery_redis_close_scheduled"},
                 )
             except RuntimeError:
-                asyncio.run(recovery_redis.aclose(close_connection_pool=True))
+                asyncio.run(recovery_redis.close(close_connection_pool=True))
                 recovery_logger.debug(
                     "Completed sync Redis cleanup",
                     extra={"event_type": "recovery_redis_close_completed"},
