@@ -14,6 +14,7 @@ from sqlalchemy.ext.asyncio import (
     AsyncConnection,
     AsyncEngine,
     AsyncSession,
+    AsyncTransaction,
     async_sessionmaker,
     create_async_engine,
 )
@@ -543,22 +544,26 @@ class StatsService(BaseStatsService):
             [path for path in migration_dir.glob("*.sql") if path.name not in applied]
         )
 
-        for path in pending:
-            if backend == "sqlite" and path.name == "002_add_performance_indexes.sql":
-                logger.debug(
-                    "Skipping PostgreSQL-specific migration %s for SQLite", path.name
-                )
-                continue
+        owns_transaction = False
+        root_transaction: Optional[AsyncTransaction] = None
+        if not conn.in_transaction():
+            root_transaction = await conn.begin()
+            owns_transaction = True
 
-            if path.name == "004_phase2_player_stats.sql":
-                logger.debug(
-                    "Skipping legacy migration %s (superseded by 003)",
-                    path.name,
-                )
-                if not conn.in_transaction():
-                    await conn.begin()
+        try:
+            for path in pending:
+                if backend == "sqlite" and path.name == "002_add_performance_indexes.sql":
+                    logger.debug(
+                        "Skipping PostgreSQL-specific migration %s for SQLite", path.name
+                    )
+                    continue
+
+                if path.name == "004_phase2_player_stats.sql":
+                    logger.debug(
+                        "Skipping legacy migration %s (superseded by 003)",
+                        path.name,
+                    )
                 await self._mark_migration_applied(conn, path.name)
-                await conn.commit()
                 continue
 
             try:
@@ -568,15 +573,9 @@ class StatsService(BaseStatsService):
                 continue
 
             if backend == "sqlite" and path.name == "003_create_materialized_stats.sql":
-                if not conn.in_transaction():
-                    await conn.begin()
                 await self._prepare_sqlite_for_materialized_stats(conn)
 
-            statements = [
-                stmt.strip()
-                for stmt in sql_content.split(";")
-                if stmt.strip() and not stmt.strip().startswith("--")
-            ]
+            statements = self._split_sql_statements(sql_content)
 
             if not statements:
                 continue
@@ -601,9 +600,6 @@ class StatsService(BaseStatsService):
                     continue
 
                 try:
-                    if not conn.in_transaction():
-                        await conn.begin()
-
                     try:
                         async with conn.begin_nested():
                             await conn.execute(text(statement))
@@ -629,26 +625,34 @@ class StatsService(BaseStatsService):
                     logger.exception(
                         "Failed to apply migration statement from %s", path.name
                     )
-                    if conn.in_transaction():
+                    if owns_transaction:
+                        if root_transaction is not None and root_transaction.is_active:
+                            await root_transaction.rollback()
+                    elif conn.in_transaction():
                         await conn.rollback()
                     raise
                 except Exception:
                     logger.exception(
                         "Failed to apply migration statement from %s", path.name
                     )
-                    if conn.in_transaction():
+                    if owns_transaction:
+                        if root_transaction is not None and root_transaction.is_active:
+                            await root_transaction.rollback()
+                    elif conn.in_transaction():
                         await conn.rollback()
                     raise
 
-            if not conn.in_transaction():
-                await conn.begin()
             await self._mark_migration_applied(conn, path.name)
-            await conn.commit()
             logger.info(
                 "Migration %s completed successfully",
                 path.name,
                 extra={"event_type": "stats_migration_applied", "migration": path.name},
             )
+        finally:
+            if owns_transaction:
+                assert root_transaction is not None
+                if root_transaction.is_active:
+                    await root_transaction.commit()
 
     async def _prepare_sqlite_for_materialized_stats(self, conn: AsyncConnection) -> None:
         """Ensure the SQLite schema can accept the materialized stats migration."""
