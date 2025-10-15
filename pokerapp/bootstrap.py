@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from dataclasses import dataclass
-from typing import Any, Callable, Dict, Optional, Set
+from typing import Any, Callable, Dict, Optional, Set, TYPE_CHECKING
 
 import redis.asyncio as aioredis
 from sqlalchemy import inspect, text
@@ -32,6 +32,9 @@ from pokerapp.state_validator import GameStateValidator
 from pokerapp.recovery_service import RecoveryService
 from pokerapp.telegram_retry_manager import TelegramRetryManager
 from pokerapp.database_schema import Base as StatisticsBase
+
+if TYPE_CHECKING:
+    from pokerapp.lock_manager import LockManager as SmartLockManager
 
 
 def _build_redis_client_kwargs(cfg: Config) -> Dict[str, Any]:
@@ -79,6 +82,7 @@ class ApplicationServices:
     cache: MultiLayerCache
     db_client: Optional[OptimizedDatabaseClient]
     query_batcher: Optional[QueryBatcher]
+    smart_lock_manager: SmartLockManager
 
 
 def _build_stats_service(logger: ContextLoggerAdapter, cfg: Config) -> BaseStatsService:
@@ -301,6 +305,8 @@ def build_services(cfg: Config, *, skip_stats_buffer: bool = False) -> Applicati
     setup_logging(logging.INFO, debug_mode=cfg.DEBUG)
     logger = enforce_context(logging.getLogger("pokerbot"))
 
+    from pokerapp.lock_manager import LockManager as SmartLockManager
+
     init_translations("config/data/translations.json")
 
     redis_client_kwargs = _build_redis_client_kwargs(cfg)
@@ -345,6 +351,7 @@ def build_services(cfg: Config, *, skip_stats_buffer: bool = False) -> Applicati
             recovery_logger.exception("Failed to close recovery Redis client")
 
     kv_async = _create_redis_client(redis_client_kwargs)
+    redis_pool = kv_async
     logger.info(
         "Redis client initialized with lazy connection",
         extra={
@@ -353,6 +360,11 @@ def build_services(cfg: Config, *, skip_stats_buffer: bool = False) -> Applicati
             "port": cfg.REDIS_PORT,
             "health_check_interval": 30,
         },
+    )
+
+    smart_lock_manager = SmartLockManager(
+        logger=logger.logger.getChild("smart_lock_manager"),
+        redis_pool=redis_pool,
     )
 
     cache_logger = _make_service_logger(logger, "cache", "cache")
@@ -511,5 +523,6 @@ def build_services(cfg: Config, *, skip_stats_buffer: bool = False) -> Applicati
         cache=cache,
         db_client=db_client,
         query_batcher=query_batcher,
+        smart_lock_manager=smart_lock_manager,
     )
 
