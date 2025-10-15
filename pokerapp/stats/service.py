@@ -21,7 +21,6 @@ from sqlalchemy.pool import StaticPool
 
 from pokerapp.config import DEFAULT_TIMEZONE_NAME, get_game_constants
 from pokerapp.database_schema import (
-    Base,
     GameParticipant,
     GameSession,
     PlayerHandHistory,
@@ -757,13 +756,12 @@ class StatsService(BaseStatsService):
 
             try:
                 async with self._engine.begin() as conn:
-                    await conn.run_sync(Base.metadata.create_all)
                     await self._run_migrations(conn)
             except Exception as exc:  # pragma: no cover - defensive logging
                 logger.error(
-                    "Failed to ensure statistics schema: %s",
+                    "Failed to run statistics migrations: %s",
                     exc,
-                    extra={"event_type": "stats_schema_ensure_failed"},
+                    extra={"event_type": "stats_migrations_failed"},
                     exc_info=True,
                 )
                 raise
