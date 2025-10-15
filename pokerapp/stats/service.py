@@ -543,6 +543,8 @@ class StatsService(BaseStatsService):
             [path for path in migration_dir.glob("*.sql") if path.name not in applied]
         )
 
+        manage_transactions = backend != "sqlite"
+
         for path in pending:
             if backend == "sqlite" and path.name == "002_add_performance_indexes.sql":
                 logger.debug(
@@ -572,11 +574,7 @@ class StatsService(BaseStatsService):
                     await conn.begin()
                 await self._prepare_sqlite_for_materialized_stats(conn)
 
-            statements = [
-                stmt.strip()
-                for stmt in sql_content.split(";")
-                if stmt.strip() and not stmt.strip().startswith("--")
-            ]
+            statements = self._split_sql_statements(sql_content)
 
             if not statements:
                 continue
@@ -601,15 +599,27 @@ class StatsService(BaseStatsService):
                     continue
 
                 try:
-                    if not conn.in_transaction():
+                    logger.debug(
+                        "Executing migration statement",
+                        extra={
+                            "event_type": "stats_migration_statement",
+                            "migration": path.name,
+                            "backend": backend,
+                            "preview": statement_text[:80],
+                        },
+                    )
+                    if manage_transactions and not conn.in_transaction():
                         await conn.begin()
 
                     try:
-                        async with conn.begin_nested():
-                            await conn.execute(text(statement))
+                        if manage_transactions:
+                            async with conn.begin_nested():
+                                await conn.exec_driver_sql(statement)
+                        else:
+                            await conn.exec_driver_sql(statement)
                     except OperationalError as transactional_error:
                         if "cannot start a transaction" in str(transactional_error).lower():
-                            await conn.execute(text(statement))
+                            await conn.exec_driver_sql(statement)
                         else:
                             raise
                 except OperationalError as exc:
@@ -629,21 +639,24 @@ class StatsService(BaseStatsService):
                     logger.exception(
                         "Failed to apply migration statement from %s", path.name
                     )
-                    if conn.in_transaction():
+                    if manage_transactions and conn.in_transaction():
                         await conn.rollback()
                     raise
                 except Exception:
                     logger.exception(
                         "Failed to apply migration statement from %s", path.name
                     )
-                    if conn.in_transaction():
+                    if manage_transactions and conn.in_transaction():
                         await conn.rollback()
                     raise
 
-            if not conn.in_transaction():
-                await conn.begin()
-            await self._mark_migration_applied(conn, path.name)
-            await conn.commit()
+            if manage_transactions:
+                if not conn.in_transaction():
+                    await conn.begin()
+                await self._mark_migration_applied(conn, path.name)
+                await conn.commit()
+            else:
+                await self._mark_migration_applied(conn, path.name)
             logger.info(
                 "Migration %s completed successfully",
                 path.name,
@@ -742,6 +755,8 @@ class StatsService(BaseStatsService):
             assert self._engine is not None
             async with self._engine.begin() as conn:
                 await conn.run_sync(Base.metadata.create_all)
+
+            async with self._engine.connect() as conn:
                 await self._run_migrations(conn)
             self._initialized = True
 
