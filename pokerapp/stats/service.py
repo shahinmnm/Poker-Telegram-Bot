@@ -526,7 +526,11 @@ class StatsService(BaseStatsService):
             return False
 
     async def _run_migrations(self, conn: AsyncConnection) -> None:
-        """Run pending SQL migrations with explicit transaction per statement."""
+        """Run pending SQL migrations with explicit transaction per statement.
+
+        NOTE: Transaction management is handled by the caller via engine.begin().
+        This function MUST NOT call conn.commit() or conn.rollback().
+        """
 
         migration_dir = MIGRATIONS_DIR
         if not migration_dir.exists():
@@ -560,7 +564,7 @@ class StatsService(BaseStatsService):
                 if not conn.in_transaction():
                     await conn.begin()
                 await self._mark_migration_applied(conn, path.name)
-                await conn.commit()
+                # Transaction commits automatically via engine.begin() context manager
                 continue
 
             try:
@@ -654,7 +658,7 @@ class StatsService(BaseStatsService):
                 if not conn.in_transaction():
                     await conn.begin()
                 await self._mark_migration_applied(conn, path.name)
-                await conn.commit()
+                # Transaction commits automatically via engine.begin() context manager
             else:
                 await self._mark_migration_applied(conn, path.name)
             logger.info(
