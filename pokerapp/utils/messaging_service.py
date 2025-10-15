@@ -1625,6 +1625,7 @@ class MessagingService:
             return False
 
         lock = await self._acquire_lock(chat_id, message_id)
+        suppression_handled = False
         async with lock:
             result: Any = False
             deletion_successful = False
@@ -1656,14 +1657,52 @@ class MessagingService:
                 )
                 self._logger.debug("Deletion successful", extra=dict(success_context))
             except Exception as exc:
+                exc_str = str(exc).lower()
                 failure_context = self._merge_context(
                     base_context,
                     deletion_status="failure",
                     error=str(exc),
                     error_type=type(exc).__name__,
                 )
-                self._logger.warning("Deletion failed", extra=dict(failure_context))
-                raise
+                if (
+                    message_age is not None
+                    and message_age < 5
+                    and normalized_context == "routine_cleanup"
+                ):
+                    self._logger.info(
+                        "Early deletion attempt - message may still be sending",
+                        extra=dict(
+                            base_context,
+                            exception=exc_str,
+                            handling="suppressed_early_deletion",
+                        ),
+                    )
+                    suppression_handled = True
+                elif message_age is not None and message_age > 300:
+                    if (
+                        "message to delete not found" in exc_str
+                        or "message can't be deleted" in exc_str
+                        or "message can’t be deleted" in exc_str
+                    ):
+                        self._logger.debug(
+                            "Stale message deletion attempt",
+                            extra=dict(
+                                base_context,
+                                exception=exc_str,
+                                handling="suppressed_stale_deletion",
+                            ),
+                        )
+                        suppression_handled = True
+                if not suppression_handled:
+                    self._logger.warning(
+                        "Deletion failed",
+                        extra=dict(
+                            failure_context,
+                            exception=exc_str,
+                            handling="genuine_failure",
+                        ),
+                    )
+                    raise
             finally:
                 await self._forget_content(chat_id, message_id)
                 if deletion_successful:
@@ -1702,6 +1741,8 @@ class MessagingService:
         )
 
         await self._clear_edit_failure(chat_id, message_id)
+        if suppression_handled:
+            return False
         return bool(result)
 
     async def last_edit_timestamp(
