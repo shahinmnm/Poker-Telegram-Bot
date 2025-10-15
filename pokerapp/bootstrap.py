@@ -341,14 +341,29 @@ def build_services(cfg: Config, *, skip_stats_buffer: bool = False) -> Applicati
         recovery_logger.exception("Startup recovery failed")
     finally:
         try:
-            asyncio.run(recovery_redis.close(close_connection_pool=True))
-        except RuntimeError:
+            try:
+                asyncio.get_running_loop()
+                asyncio.create_task(
+                    recovery_redis.aclose(close_connection_pool=True)
+                )
+                recovery_logger.debug(
+                    "Scheduled async Redis cleanup",
+                    extra={"event_type": "recovery_redis_close_scheduled"},
+                )
+            except RuntimeError:
+                asyncio.run(recovery_redis.aclose(close_connection_pool=True))
+                recovery_logger.debug(
+                    "Completed sync Redis cleanup",
+                    extra={"event_type": "recovery_redis_close_completed"},
+                )
+        except Exception as exc:
             recovery_logger.warning(
-                "Skipping recovery Redis close; event loop already running",
-                extra={"event_type": "recovery_redis_close_skipped"},
+                f"Redis cleanup failed: {exc}",
+                extra={
+                    "event_type": "recovery_redis_close_error",
+                    "error_type": type(exc).__name__,
+                },
             )
-        except Exception:
-            recovery_logger.exception("Failed to close recovery Redis client")
 
     kv_async = _create_redis_client(redis_client_kwargs)
     redis_pool = kv_async
