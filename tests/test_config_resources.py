@@ -1,6 +1,6 @@
 import json
 
-from pokerapp.config import GameConstants
+from pokerapp.config import Config, GameConstants
 
 
 def test_game_constants_loads_external_resources(tmp_path):
@@ -47,3 +47,25 @@ def test_game_constants_loads_external_resources(tmp_path):
     assert constants.redis_keys["engine"]["stage_lock_prefix"] == "custom:"
     assert constants.redis_keys["engine"]["stop_request"] == "custom_stop"
     assert constants.redis_keys["player_report"]["cache_prefix"] == "custom:player:"
+
+
+def test_config_derives_public_url_from_listen_and_port(monkeypatch):
+    env_vars = [
+        "POKERBOT_WEBHOOK_PUBLIC_URL",
+        "POKERBOT_WEBHOOK_DOMAIN",
+        "POKERBOT_WEBHOOK_PATH",
+        "POKERBOT_WEBHOOK_LISTEN",
+        "POKERBOT_WEBHOOK_PORT",
+    ]
+    for env_var in env_vars:
+        monkeypatch.delenv(env_var, raising=False)
+
+    monkeypatch.setenv("POKERBOT_WEBHOOK_LISTEN", "127.0.0.1")
+    monkeypatch.setenv("POKERBOT_WEBHOOK_PORT", "8080")
+
+    cfg = Config()
+
+    assert (
+        cfg.WEBHOOK_PUBLIC_URL
+        == "http://127.0.0.1:8080/telegram/webhook-poker2025"
+    )
