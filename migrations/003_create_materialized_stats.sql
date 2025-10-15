@@ -1,20 +1,9 @@
--- ============================================================================
--- PHASE 2: MATERIALIZED PLAYER STATISTICS
--- ============================================================================
--- Purpose: Pre-computed statistics table with automatic maintenance triggers
--- Target DB: SQLite 3.37+
--- Safe to run multiple times (idempotent)
--- ============================================================================
 
--- ===========================================================================
--- PRE-FLIGHT CHECKS
--- ===========================================================================
+-- Migration 003: Create materialized stats
+-- Transaction management is handled by SQLAlchemy migration runner
+-- Do NOT include BEGIN/COMMIT statements in this file
 
--- Log the SQLite version so operators can confirm the runtime environment.
-SELECT sqlite_version();
-
-BEGIN;
-
+-- Add missing columns with IF NOT EXISTS syntax
 -- Ensure legacy schemas have the columns required by this migration.
 ALTER TABLE hands_players
     ADD COLUMN IF NOT EXISTS amount_won INTEGER NOT NULL DEFAULT 0;
@@ -286,10 +275,8 @@ END;
 -- VERIFICATION QUERY (for deployment logs)
 -- ============================================================================
 
-SELECT 
+SELECT
     'Phase 2 Migration Complete' AS status,
     (SELECT COUNT(*) FROM player_stats) AS player_count,
     (SELECT COUNT(*) FROM sqlite_master WHERE type='trigger' AND name LIKE 'trg_%stats%') AS trigger_count,
     (SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND tbl_name='player_stats') AS index_count;
-
-COMMIT;
