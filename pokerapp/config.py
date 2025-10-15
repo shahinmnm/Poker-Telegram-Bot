@@ -4,7 +4,7 @@ import os
 from copy import deepcopy
 from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional, Tuple
-from urllib.parse import urljoin
+from urllib.parse import urljoin, urlunsplit
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import yaml
@@ -875,6 +875,25 @@ class Config:
                 self.WEBHOOK_PATH,
             )
             return combined_url
+
+        listen_host = getattr(self, "WEBHOOK_LISTEN", "").strip()
+        if listen_host and listen_host not in {"0.0.0.0", "::"} and self.WEBHOOK_PATH:
+            scheme = "https" if self.WEBHOOK_PORT == 443 else "http"
+            netloc_host = listen_host
+            if ":" in netloc_host and not netloc_host.startswith("["):
+                netloc_host = f"[{netloc_host}]"
+            if self.WEBHOOK_PORT in {80, 443}:
+                netloc = netloc_host
+            else:
+                netloc = f"{netloc_host}:{self.WEBHOOK_PORT}"
+
+            fallback_url = urlunsplit((scheme, netloc, self.WEBHOOK_PATH, "", ""))
+            logger.debug(
+                "Derived WEBHOOK_PUBLIC_URL from listen address and port using %s:%s",
+                self.WEBHOOK_LISTEN,
+                self.WEBHOOK_PORT,
+            )
+            return fallback_url
 
         return ""
 
