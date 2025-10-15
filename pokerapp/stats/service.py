@@ -526,7 +526,7 @@ class StatsService(BaseStatsService):
             return False
 
     async def _run_migrations(self, conn: AsyncConnection) -> None:
-        """Run pending SQL migrations with explicit transaction per statement."""
+        """Run pending SQL migrations within the caller-managed transaction."""
 
         migration_dir = MIGRATIONS_DIR
         if not migration_dir.exists():
@@ -543,7 +543,7 @@ class StatsService(BaseStatsService):
             [path for path in migration_dir.glob("*.sql") if path.name not in applied]
         )
 
-        manage_transactions = backend != "sqlite"
+        supports_nested_transactions = backend != "sqlite"
 
         for path in pending:
             if backend == "sqlite" and path.name == "002_add_performance_indexes.sql":
@@ -568,9 +568,9 @@ class StatsService(BaseStatsService):
                 continue
 
             if backend == "sqlite" and path.name == "003_create_materialized_stats.sql":
-                # Let SQLite run the preparatory statements in autocommit mode so the
-                # schema adjustments persist even though migrations don't manage
-                # transactions on this backend.
+                # Perform SQLite-specific schema adjustments prior to running the
+                # materialized stats migration so the subsequent statements can
+                # succeed within the outer transaction.
                 await self._prepare_sqlite_for_materialized_stats(conn)
 
             statements = self._split_sql_statements(sql_content)
@@ -607,17 +607,18 @@ class StatsService(BaseStatsService):
                             "preview": statement_text[:80],
                         },
                     )
-                    if manage_transactions and not conn.in_transaction():
-                        await conn.begin()
-
                     try:
-                        if manage_transactions:
+                        if supports_nested_transactions:
                             async with conn.begin_nested():
                                 await conn.exec_driver_sql(statement)
                         else:
                             await conn.exec_driver_sql(statement)
                     except OperationalError as transactional_error:
-                        if "cannot start a transaction" in str(transactional_error).lower():
+                        if (
+                            supports_nested_transactions
+                            and "cannot start a transaction"
+                            in str(transactional_error).lower()
+                        ):
                             await conn.exec_driver_sql(statement)
                         else:
                             raise
@@ -638,24 +639,14 @@ class StatsService(BaseStatsService):
                     logger.exception(
                         "Failed to apply migration statement from %s", path.name
                     )
-                    if manage_transactions and conn.in_transaction():
-                        await conn.rollback()
                     raise
                 except Exception:
                     logger.exception(
                         "Failed to apply migration statement from %s", path.name
                     )
-                    if manage_transactions and conn.in_transaction():
-                        await conn.rollback()
                     raise
 
-            if manage_transactions:
-                if not conn.in_transaction():
-                    await conn.begin()
-                await self._mark_migration_applied(conn, path.name)
-                await conn.commit()
-            else:
-                await self._mark_migration_applied(conn, path.name)
+            await self._mark_migration_applied(conn, path.name)
             logger.info(
                 "Migration %s completed successfully",
                 path.name,
@@ -746,17 +737,37 @@ class StatsService(BaseStatsService):
             await self._engine.dispose()
 
     async def _ensure_schema(self) -> None:
+        """Ensure statistics schema exists and apply pending migrations.
+
+        NOTE: Uses ``engine.begin()`` to provide a transactional context for
+        :meth:`_run_migrations`, delegating commit/rollback to the outer
+        context manager so individual migrations don't need to manage
+        transactions directly.
+        """
+
         if not self._enabled or self._initialized:
             return
+
         async with self._schema_lock:
             if self._initialized or not self._enabled:
                 return
-            assert self._engine is not None
-            async with self._engine.begin() as conn:
-                await conn.run_sync(Base.metadata.create_all)
 
-            async with self._engine.connect() as conn:
-                await self._run_migrations(conn)
+            if not self._engine:
+                return
+
+            try:
+                async with self._engine.begin() as conn:
+                    await conn.run_sync(Base.metadata.create_all)
+                    await self._run_migrations(conn)
+            except Exception as exc:  # pragma: no cover - defensive logging
+                logger.error(
+                    "Failed to ensure statistics schema: %s",
+                    exc,
+                    extra={"event_type": "stats_schema_ensure_failed"},
+                    exc_info=True,
+                )
+                raise
+
             self._initialized = True
 
     def _normalize_identity(self, identity: PlayerIdentity) -> PlayerIdentity:
