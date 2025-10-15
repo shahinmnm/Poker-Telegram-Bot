@@ -371,6 +371,7 @@ class StatsService(BaseStatsService):
             return 0
         if isinstance(value, int):
             return value
+
         try:
             return int(value)
         except (TypeError, ValueError):
@@ -550,6 +551,8 @@ class StatsService(BaseStatsService):
             root_transaction = await conn.begin()
             owns_transaction = True
 
+        success = False
+
         try:
             for path in pending:
                 if backend == "sqlite" and path.name == "002_add_performance_indexes.sql":
@@ -648,11 +651,16 @@ class StatsService(BaseStatsService):
                 path.name,
                 extra={"event_type": "stats_migration_applied", "migration": path.name},
             )
+
+        success = True
         finally:
             if owns_transaction:
                 assert root_transaction is not None
-                if root_transaction.is_active:
-                    await root_transaction.commit()
+                if success:
+                    if root_transaction.is_active:
+                        await root_transaction.commit()
+                elif root_transaction.is_active:
+                    await root_transaction.rollback()
 
     async def _prepare_sqlite_for_materialized_stats(self, conn: AsyncConnection) -> None:
         """Ensure the SQLite schema can accept the materialized stats migration."""
