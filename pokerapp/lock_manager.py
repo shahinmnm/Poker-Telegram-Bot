@@ -4049,6 +4049,7 @@ class LockManager:
         # Check if any currently held lock has a higher level than the new lock
         held_levels = [acq.level for acq in current_acquisitions]
         max_held_level = max(held_levels)
+        display_level = self._display_level_from_context(context, new_level)
 
         if new_level < max_held_level:
             new_category = self._resolve_lock_category(new_key)
