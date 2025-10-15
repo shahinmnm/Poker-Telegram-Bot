@@ -360,40 +360,44 @@ def build_services(cfg: Config, *, skip_stats_buffer: bool = False) -> Applicati
         table_manager=recovery_table_manager,
         logger=recovery_logger,
     )
+    async def _run_recovery_with_cleanup() -> None:
+        try:
+            await recovery_service.run_startup_recovery()
+        except Exception:
+            recovery_logger.exception("Startup recovery failed")
+        finally:
+            recovery_logger.debug(
+                "Starting Redis cleanup",
+                extra={"event_type": "recovery_redis_close_started"},
+            )
+            try:
+                await recovery_redis.close(close_connection_pool=True)
+                recovery_logger.debug(
+                    "Completed Redis cleanup",
+                    extra={"event_type": "recovery_redis_close_completed"},
+                )
+            except AttributeError as exc:
+                recovery_logger.warning(
+                    "Redis client does not support close operation: %s",
+                    exc,
+                    extra={"event_type": "recovery_redis_close_not_supported"},
+                )
+            except Exception as exc:
+                recovery_logger.warning(
+                    f"Redis cleanup failed: {exc}",
+                    extra={
+                        "event_type": "recovery_redis_close_error",
+                        "error_type": type(exc).__name__,
+                    },
+                )
+
     try:
-        asyncio.run(recovery_service.run_startup_recovery())
+        asyncio.run(_run_recovery_with_cleanup())
     except RuntimeError:
         recovery_logger.warning(
             "Skipping startup recovery; event loop already running",
             extra={"event_type": "startup_recovery_skipped"},
         )
-    except Exception:
-        recovery_logger.exception("Startup recovery failed")
-    finally:
-        recovery_logger.debug(
-            "Starting Redis cleanup",
-            extra={"event_type": "recovery_redis_close_started"},
-        )
-        try:
-            asyncio.run(recovery_redis.close(close_connection_pool=True))
-            recovery_logger.debug(
-                "Completed Redis cleanup",
-                extra={"event_type": "recovery_redis_close_completed"},
-            )
-        except AttributeError as exc:
-            recovery_logger.warning(
-                "Redis client does not support close operation: %s",
-                exc,
-                extra={"event_type": "recovery_redis_close_not_supported"},
-            )
-        except Exception as exc:
-            recovery_logger.warning(
-                f"Redis cleanup failed: {exc}",
-                extra={
-                    "event_type": "recovery_redis_close_error",
-                    "error_type": type(exc).__name__,
-                },
-            )
 
     kv_async = _create_redis_client(redis_client_kwargs)
     logger.info(
