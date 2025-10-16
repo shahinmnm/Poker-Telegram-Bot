@@ -1,6 +1,7 @@
 from contextlib import asynccontextmanager
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
+import inspect
 
 import pytest
 
@@ -199,7 +200,7 @@ async def test_handle_post_start_notifications_sends_updates(matchmaking_setup):
     game.add_player(player, seat_index=0)
 
     context = SimpleNamespace(chat_data={})
-    await service._handle_post_start_notifications(
+    notification = await service._handle_post_start_notifications(
         context=context,
         game=game,
         chat_id=-400,
@@ -208,7 +209,9 @@ async def test_handle_post_start_notifications_sends_updates(matchmaking_setup):
 
     assert game.chat_id == -400
     matchmaking_setup.view.send_player_role_anchors.assert_awaited_once()
-    matchmaking_setup.send_turn_message.assert_awaited_once_with(game, player, -400)
+    matchmaking_setup.send_turn_message.assert_called_once_with(game, player, -400)
+    assert inspect.isawaitable(notification)
+    await notification
     assert context.chat_data["old_players"] == [player.user_id]
     assert game.last_actions[-1] == "بازی شروع شد"
 
