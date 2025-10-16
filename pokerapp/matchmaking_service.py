@@ -207,7 +207,7 @@ class MatchmakingService:
         game: Game,
         chat_id: ChatId,
         build_identity_from_player: Callable[[Player], object],
-    ) -> None:
+    ) -> Optional[Awaitable[None]]:
         await self._player_manager.cleanup_ready_prompt(game, chat_id)
 
         if not self._ensure_dealer_position(game):
@@ -228,7 +228,7 @@ class MatchmakingService:
 
         current_player = await self._post_blinds_and_prepare_players(game, chat_id)
 
-        await self._handle_post_start_notifications(
+        send_turn_coro = await self._handle_post_start_notifications(
             context=context,
             game=game,
             chat_id=chat_id,
@@ -248,6 +248,8 @@ class MatchmakingService:
                 stage=snapshot,
                 allow_create=True,
             )
+
+        return send_turn_coro
 
     async def collect_bets_for_pot(self, game: Game, chat_id: ChatId) -> None:
         """Reset per-player round bets using fine-grained locks."""
@@ -511,7 +513,7 @@ class MatchmakingService:
         game: Game,
         chat_id: ChatId,
         current_player: Optional[Player],
-    ) -> None:
+    ) -> Optional[Awaitable[None]]:
         game.chat_id = chat_id
 
         async with self._trace_lock_guard(
@@ -550,10 +552,13 @@ class MatchmakingService:
 
         self._record_game_start_action(game)
 
+        turn_notification: Optional[Awaitable[None]] = None
         if current_player:
-            await self._send_turn_message(game, current_player, chat_id)
+            turn_notification = self._send_turn_message(game, current_player, chat_id)
 
         context.chat_data[self._old_players_key] = [p.user_id for p in game.players]
+
+        return turn_notification
 
     def _record_game_start_action(self, game: Game) -> None:
         action_str = "بازی شروع شد"
