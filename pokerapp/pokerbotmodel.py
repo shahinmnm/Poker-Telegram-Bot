@@ -1927,14 +1927,10 @@ class PokerBotModel:
             )
             raise
 
-        async with self._chat_guard(
-            chat_id, event_stage_label="send_turn_message", game=game
-        ):
-            # The chat guard is used purely to serialize turn updates; the
-            # potentially slow Telegram call is executed after the guard is
-            # released to avoid holding the `chat:` lock while awaiting
-            # network I/O.
-            pass
+        # REMOVED: Redundant chat_guard that was causing lock order violations.
+        # The chat guard had an empty body (just 'pass') and provided no actual
+        # protection since the Telegram call happens outside the guard context.
+        # Message state updates are already protected by the stage lock below.
 
         turn_update: Optional[TurnMessageUpdate] = await self._view.update_turn_message(
             chat_id=chat_id,
