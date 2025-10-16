@@ -3111,7 +3111,19 @@ class GameEngine:
             raise
         else:
             if post_start_notification is not None:
-                await post_start_notification
+                try:
+                    await post_start_notification
+                except Exception:
+                    self._logger.exception(
+                        "Error sending post-start turn notification",
+                        extra=self._log_extra(
+                            stage="post_start_notification_error",
+                            chat_id=chat_id,
+                            game=game,
+                            event_type="post_start_notification_error",
+                            lock_key=lock_key,
+                        ),
+                    )
         finally:
             self._logger.info(
                 "Game start completed or failed, lock released for chat %s.",
