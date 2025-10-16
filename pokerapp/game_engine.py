@@ -3057,8 +3057,11 @@ class GameEngine:
         stage_label = "stage_lock:start_game"
         event_stage_label = "start_game"
 
+        post_start_notification: Optional[Awaitable[None]] = None
+
         async def _run_locked() -> None:
-            await self._matchmaking_service.start_game(
+            nonlocal post_start_notification
+            post_start_notification = await self._matchmaking_service.start_game(
                 context=context,
                 game=game,
                 chat_id=chat_id,
@@ -3106,6 +3109,9 @@ class GameEngine:
                 ),
             )
             raise
+        else:
+            if post_start_notification is not None:
+                await post_start_notification
         finally:
             self._logger.info(
                 "Game start completed or failed, lock released for chat %s.",
